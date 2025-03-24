@@ -5,7 +5,7 @@ import "./monkeypatch";
 
 import App from "./app";
 
-import "./index.scss";
+//import "./index.scss";
 
 const root = document.createElement("div");
 document.body.appendChild(root);
