@@ -3,6 +3,12 @@ Personal website dedicated to creative code, past work, etc.
 Development
 ===========
 
+Install [nvm](https://github.com/nvm-sh/nvm?tab=readme-ov-file#installing-and-updating). Run `rvm use` to download and activate the correct node version.
+
+Install global dependencies. `npm i -g yarn`.
+
+Install local dependencies. `yarn install`.
+
 Run `yarn start` to start webpack-dev-server.
 
 Deploying
