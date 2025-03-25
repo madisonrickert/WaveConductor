@@ -1,32 +1,17 @@
-Personal website dedicated to creative code, past work, etc.
-
 Development
 ===========
 
 Install [nvm](https://github.com/nvm-sh/nvm?tab=readme-ov-file#installing-and-updating). Run `rvm use` to download and activate the correct node version.
 
+Install [LeapMotion Gemini](https://leap2.ultraleap.com/downloads/leap-motion-controller/) for Leap Motion Controller 1.x.
+
 Install global dependencies. `npm i -g yarn`.
 
 Install local dependencies. `yarn install`.
 
-Run `yarn start` to start webpack-dev-server.
+Run `yarn start` to start Vite dev server.
 
 Deploying
 =========
 
-Pushes to master are set up to auto-deploy to a heroku host.
-
-Run `yarn prod` on an external server (e.g. Heroku). This will
-compile the ts into /public/app.js and run a local node express
-server which points public/ as a content base, hooking up
-index.html to find /app.js and /assets/ properly.
-
-Kiosk Mode
-==========
-
-Run `yarn kiosk` to start the server in kiosk mode, made for art
-installations. It does a few things:
-
-1. Runs CMU's OpenPose and reads realtime webcam data.
-2. Starts a websockets server which emits the pose information.
-3. (Windows only) Starts Google Chrome pointed at a specific URL, in Chrome Kiosk mode.
+`yarn build` creates a deployable production build.

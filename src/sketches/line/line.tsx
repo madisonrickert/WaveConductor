@@ -4,7 +4,6 @@ import { ShaderPass, RenderPass, EffectComposer } from "three-stdlib";
 import { AudioGroup } from "./types";
 
 import queryString from "query-string";
-import devlog from "../../common/devlog";
 import { GravityShader } from "../../common/gravityShader";
 import lazy from "../../common/lazy";
 import { computeStats, createParticle, createParticlePoints, IParticle, makeAttractor, ParticleSystem } from "../../common/particleSystem";
@@ -137,7 +136,6 @@ export class LineSketch extends ISketch {
         this.composer.addPass(this.gravityShaderPass);
 
         this.controller = initLeap(this);
-        devlog(this.controller);
     }
 
     public animate(_millisElapsed: number) {
