@@ -5,9 +5,9 @@ import Hero from "./hero";
 import { HistorySection } from "./history";
 import { ShrinkingHeader } from "./shrinkingHeader";
 
-import { FaEnvelope, FaFacebook, FaGithub, FaInstagram, FaLinkedin, FaPlay, FaTwitter } from "react-icons/fa";
+import { FaPlay } from "react-icons/fa";
 
-export class HomePage extends React.Component<RouteComponentProps<void>, {}> {
+export class HomePage extends React.Component<RouteComponentProps<void>, object> {
     public render() {
         return (
             <div className="homepage">

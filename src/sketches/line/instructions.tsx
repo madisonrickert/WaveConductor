@@ -7,7 +7,7 @@ export interface InstructionsState {
     globalFrame: number;
 }
 
-export class Instructions extends React.Component<{}, InstructionsState> {
+export class Instructions extends React.Component<object, InstructionsState> {
     state = {
         leapMotionControllerValid: false,
         globalFrame: 0,

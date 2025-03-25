@@ -7,7 +7,11 @@
         "allowJs": true,
         "sourceMap": true,
         "jsx": "react-jsx",
-        "esModuleInterop": true
+        "esModuleInterop": true,
+        "typeRoots": [
+            "./node_modules/@types",
+            "./src/custom-typings"
+        ]
     },
     "include": [
         "src"

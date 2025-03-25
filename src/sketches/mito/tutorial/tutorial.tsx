@@ -11,7 +11,7 @@ export interface TutorialProps {
     onFulfilled: () => void;
 }
 
-export abstract class Tutorial<P = {}, S = {}> extends React.PureComponent<P & TutorialProps, S> {
+export abstract class Tutorial<P = object, S = object> extends React.PureComponent<P & TutorialProps, S> {
     componentDidUpdate() {
         if (this.isFulfilled()) {
             this.props.onFulfilled();

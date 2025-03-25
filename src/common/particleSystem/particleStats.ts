@@ -1,4 +1,4 @@
-import { IParticle, ParticleSystem } from "./particleSystem";
+import { ParticleSystem } from "./particleSystem";
 
 export function computeStats(particleSystem: ParticleSystem) {
     const { particles } = particleSystem;

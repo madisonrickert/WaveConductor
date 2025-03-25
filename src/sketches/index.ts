@@ -1,5 +1,15 @@
-import getSketches from "../getSketches";
+import LineSketch from "./line";
+import FlameSketch from "./flame";
+import Dots from "./dots";
+import Cymatics from "./cymatics";
+import Mito from "./mito";
+import Waves from "./waves";
 
-const wipSketches = getSketches(require.context("./", true, /\.\/\w+$/));
-
-export default wipSketches;
+export default [
+    LineSketch,
+    FlameSketch,
+    Dots,
+    Cymatics,
+    Mito,
+    Waves
+];

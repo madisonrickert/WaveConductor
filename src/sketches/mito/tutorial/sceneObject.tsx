@@ -6,7 +6,7 @@ interface SceneObjectProps {
     parent: THREE.Object3D;
     // children?: SceneObject[];
 }
-export class SceneObject extends React.PureComponent<SceneObjectProps, {}> {
+export class SceneObject extends React.PureComponent<SceneObjectProps, object> {
     // render() {
     //     if (this.props.children) {
     //         return <>

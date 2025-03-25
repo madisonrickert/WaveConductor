@@ -1,6 +1,5 @@
 import * as THREE from "three";
 
-import lazy from "../../common/lazy";
 import { IParticle } from "./particleSystem";
 
 export function createParticlePoints(particles: IParticle[], material: THREE.PointsMaterial) {

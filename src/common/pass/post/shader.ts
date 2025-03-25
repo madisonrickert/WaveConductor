@@ -1,5 +1,5 @@
-const vertexShader = require("./vertex.glsl");
-const fragmentShader = require("./fragment.glsl");
+import vertexShader from "./vertex.glsl";
+import fragmentShader from "./fragment.glsl";
 
 export const PostShader = {
     uniforms: {

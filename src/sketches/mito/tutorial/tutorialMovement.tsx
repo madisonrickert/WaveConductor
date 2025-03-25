@@ -47,7 +47,7 @@ interface TutorialMovementKeyHintProps {
     parent: THREE.Object3D;
 }
 
-class TutorialMovementKeyHint extends React.PureComponent<TutorialMovementKeyHintProps, {}> {
+class TutorialMovementKeyHint extends React.PureComponent<TutorialMovementKeyHintProps, object> {
     private mesh: THREE.Mesh;
     constructor(props: TutorialMovementKeyHintProps) {
         super(props);

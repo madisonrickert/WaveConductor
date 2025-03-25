@@ -10,7 +10,6 @@ import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS } from "./ske
 
 const $window = $(window);
 const $body = $(document.body);
-const HAS_SOUND = true;
 
 export interface ISketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
     eventsOnBody?: boolean;
@@ -177,7 +176,7 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
                 // we are responsible for live-updating the global user volume.
                 const AudioContextConstructor: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
                 const audioContext = this.audioContext = new AudioContextConstructor() as SketchAudioContext;
-                (THREE.AudioContext as any).setContext(audioContext);
+                THREE.AudioContext.setContext(audioContext);
                 this.userVolume = audioContext.createGain();
                 this.userVolume.gain.setValueAtTime(0.8, 0);
                 this.userVolume.connect(audioContext.destination);

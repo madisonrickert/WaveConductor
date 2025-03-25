@@ -97,7 +97,7 @@ declare module 'three' {
 		scene: THREE.Scene;
 		scenes: Array<THREE.Scene>;
 		cameras: Array<THREE.Camera>;
-		asset: Object;
+		asset: object;
     }
 
     class GLTFLoader {

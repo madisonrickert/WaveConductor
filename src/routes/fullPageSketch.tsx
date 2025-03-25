@@ -1,12 +1,10 @@
 import classnames from "classnames";
 import queryString from "query-string";
 import React from "react";
-import { RouteComponentProps } from "react-router";
 import { Link } from "react-router-dom";
 
-import { ISketch, SketchAudioContext, SketchConstructor } from "../sketch";
+import { SketchConstructor } from "../sketch";
 import { SketchComponent } from "../sketchComponent";
-import { ShrinkingHeader } from "./shrinkingHeader";
 
 export interface ISketchRouteProps {
     sketchClass: SketchConstructor;
@@ -14,7 +12,7 @@ export interface ISketchRouteProps {
     isKiosk?: boolean;
 }
 
-export class FullPageSketch extends React.Component<ISketchRouteProps, {}> {
+export class FullPageSketch extends React.Component<ISketchRouteProps, object> {
     public render() {
         const { isKiosk } = this.props;
         const isPresentationMode = !!queryString.parse(location.search).presentationMode;
@@ -22,11 +20,6 @@ export class FullPageSketch extends React.Component<ISketchRouteProps, {}> {
         return (
             <div className={classes} ref={this.handleDivRef}>
                 { !isKiosk ? <Link className="back-button" to="/">&#10094;</Link> : null }
-                {/* <ShrinkingHeader
-                    alwaysShrunken
-                    darkTheme={this.props.sketch.darkTheme}
-                    onlyShowOnHover
-                /> */}
                 <SketchComponent sketchClass={this.props.sketchClass} />
             </div>
         );

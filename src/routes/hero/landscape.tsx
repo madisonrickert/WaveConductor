@@ -1,10 +1,7 @@
-import React from "react";
 import * as THREE from "three";
 import { EffectComposer, RenderPass } from "three-stdlib";
 
-import { AudioClip } from "../../audio";
 import { Noise } from "../../common/perlin";
-import { lerp } from "../../math";
 import { ISketch } from "../../sketch";
 
 const noise = new Noise();
@@ -172,7 +169,7 @@ class Landscape extends ISketch {
         this.composer = new EffectComposer(this.renderer);
 
         const renderPass = new RenderPass(this.scene, this.camera);
-        (renderPass as any).renderToScreen = true;
+        renderPass.renderToScreen = true;
         this.composer.addPass(renderPass);
 
         // const sao = new THREE.SAOPass(this.scene, this.camera, false, true);

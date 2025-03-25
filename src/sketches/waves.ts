@@ -119,7 +119,7 @@ class LineStrip {
         this.height = height;
 
         // delete old lines
-        this.object.remove.apply(this.object, this.object.children);
+        this.object.remove(...this.object.children);
 
         const diagLength = Math.sqrt(this.width * this.width + this.height * this.height) + 2 * this.gridSize;
         // create and add a Line mesh to the lines array

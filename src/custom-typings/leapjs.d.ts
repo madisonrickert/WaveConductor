@@ -1,5 +1,7 @@
 // most of this is taken from https://github.com/logotype/LeapMotionTS/blob/master/build/leapmotionts-2.2.4.d.ts
 declare module 'leapjs' {
+    import EventEmitter from "events";
+
     export function loop(cb: (frame: Frame) => void): Controller;
     /**
      * The EventDispatcher class provides strongly typed events.
@@ -7,9 +9,9 @@ declare module 'leapjs' {
     export class EventDispatcher {
         private listeners;
         constructor();
-        hasEventListener(type: string, listener: Function): boolean;
-        addEventListener(typeStr: string, listenerFunction: Function): void;
-        removeEventListener(typeStr: string, listenerFunction: Function): void;
+        hasEventListener(type: string, listener: (event: LeapEvent) => void): boolean;
+        addEventListener(typeStr: string, listenerFunction: (event: LeapEvent) => void): void;
+        removeEventListener(typeStr: string, listenerFunction: (event: LeapEvent) => void): void;
         dispatchEvent(event: LeapEvent): void;
     }
     /**
@@ -305,7 +307,7 @@ declare module 'leapjs' {
      * @author logotype
      *
      */
-    export class Controller extends EventDispatcher {
+    export class Controller extends EventEmitter {
         /**
          * @private
          * The Listener subclass instance.
@@ -420,6 +422,25 @@ declare module 'leapjs' {
          *
          */
         connected(): boolean;
+        connect(): void;
+        disconnect(allowReconnect?: boolean): void;
+        reconnect(): void;
+        streaming(): boolean;
+        enableGestures(enabled: boolean): void;
+        setBackground(state: boolean): this;
+        setOptimizeHMD(state: boolean): this;
+        use(pluginName: string, options?: object): this;
+        stopUsing(pluginName: string): this;
+        loop(callback: (frame: Frame) => void): this;
+        addStep(step: (frame: Frame) => void): void;
+        processFrame(frame: Frame): void;
+        processFinishedFrame(frame: Frame): void;
+        emitHandEvents(frame: Frame): void;
+        setupFrameEvents(opts: object): void;
+        setupConnectionEvents(): void;
+        checkOutOfDate(): void;
+        static plugin(pluginName: string, factory: (options?: object) => object): void;
+        static plugins(): string[];
     }
     /**
      * The InteractionBox class represents a box-shaped region completely within
@@ -949,6 +970,7 @@ declare module 'leapjs' {
          *
          */
         toString(): string;
+        translation(): Vector3;
     }
     /**
      * The Finger class represents a tracked finger.
@@ -1467,7 +1489,7 @@ declare module 'leapjs' {
          * @see Tool
          *
          */
-        tool(id: number): Tool;
+        tool(id: number): Pointable;
         /**
          * The Pointable object with the specified ID in this frame.
          *
@@ -1639,6 +1661,8 @@ declare module 'leapjs' {
          *
          */
         static invalid(): Frame;
+        dump(): string;
+        static Invalid: Frame;
     }
     /**
      * The Matrix struct represents a transformation matrix.
@@ -2423,4 +2447,17 @@ declare module 'leapjs' {
          */
         toString(): string;
     }
+    export class CircularBuffer<T> {
+        constructor(size: number);
+        get(index: number): T;
+        push(item: T): void;
+    }
+    export const plugin: (name: string, options: any) => void;
+    export const loopController: undefined | Controller;
+    export const version: {
+        full: string;
+        major: number;
+        minor: number;
+        dot: number;
+    };
 }

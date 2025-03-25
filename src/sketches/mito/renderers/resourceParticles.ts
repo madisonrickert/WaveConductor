@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, Color, Points, PointsMaterial, ShaderMaterial, Texture, DynamicDrawUsage } from "three";
+import { BufferAttribute, BufferGeometry, Color, Points, ShaderMaterial, Texture, DynamicDrawUsage } from "three";
 
 export class ResourceParticles extends Points {
     static BUFFER_SIZE = 100000;

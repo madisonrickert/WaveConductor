@@ -19,7 +19,7 @@ export interface TileHighlightProps {
     scene: THREE.Scene;
 }
 
-class TileHighlight extends React.PureComponent<TileHighlightProps, {}> {
+class TileHighlight extends React.PureComponent<TileHighlightProps, object> {
     private object = TILE_HIGHLIGHT().clone();
     constructor(props: TileHighlightProps) {
         super(props);

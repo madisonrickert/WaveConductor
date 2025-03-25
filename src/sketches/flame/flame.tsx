@@ -8,6 +8,7 @@ import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRo
 import { map } from "../../math";
 import { ISketch, SketchAudioContext } from "../../sketch";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
+import { Chord } from "./types";
 
 const quality = screen.width > 480 ? "high" : "low";
 let cDx = 0, cDy = 0;
@@ -131,7 +132,7 @@ let oscLow: OscillatorNode;
 let oscHigh: OscillatorNode;
 let oscHighGain: GainNode;
 let oscGain: GainNode;
-let chord: any;
+let chord: Chord;
 let filter: BiquadFilterNode;
 let compressor: DynamicsCompressorNode;
 
@@ -349,7 +350,7 @@ let audioHasChord = false;
 let oscLowGate = 0;
 let oscHighGate = 0;
 
-class FlameNameInput extends React.Component<{ onInput: (newName: string) => void }, {}> {
+class FlameNameInput extends React.Component<{ onInput: (newName: string) => void }, object> {
     public render() {
         return (
             <div className="flame-input">
@@ -445,7 +446,7 @@ export class FlameSketch extends ISketch {
         countVisitor: BoxCountVisitor,
     ) {
         const velocity = velocityVisitor.computeVelocity();
-        const variance = varianceVisitor.computeVariance();
+        // const variance = varianceVisitor.computeVariance();
         const [count, countDensity] = countVisitor.computeCountAndCountDensity();
 
         // density ranges from 1 to ~6 or 7 at the high end.
@@ -511,7 +512,7 @@ export class FlameSketch extends ISketch {
         noiseGainScale = map((hash2 * hash3 % 100) / 100, 0, 1, 0.5, 1);
         baseThirdBias = (hash2 % 4) / 4;
         baseFifthBias = (hash3 % 3) / 3;
-        chord.setIsMajor = hash2 % 2 === 0;
+        chord.setIsMajor(hash2 % 2 === 0);
 
         // basically boolean randoms; we don't want mod 2 cuz the hashes are related to each other at that small level
         audioHasNoise = (hash3 % 100) >= 50;

@@ -1,5 +1,3 @@
-import { Matrix3 } from "../../node_modules/@types/three";
-
 // copy-pasted from https://raw.githubusercontent.com/josephg/noisejs/master/perlin.js
 
 /*
@@ -112,8 +110,8 @@ export class Noise {
         let i = Math.floor(xin + s);
         let j = Math.floor(yin + s);
         const t = (i + j) * G2;
-        let x0 = xin - i + t; // The x,y distances from the cell origin, unskewed.
-        let y0 = yin - j + t;
+        const x0 = xin - i + t; // The x,y distances from the cell origin, unskewed.
+        const y0 = yin - j + t;
         // For the 2D case, the simplex shape is an equilateral triangle.
         // Determine which simplex we are in.
         let i1, j1; // Offsets for second (middle) corner of simplex in (i,j) coords
@@ -214,23 +212,23 @@ export class Noise {
         const y1 = y0 - j1 + G3;
         const z1 = z0 - k1 + G3;
 
-        let x2 = x0 - i2 + 2 * G3; // Offsets for third corner
-        let y2 = y0 - j2 + 2 * G3;
-        let z2 = z0 - k2 + 2 * G3;
+        const x2 = x0 - i2 + 2 * G3; // Offsets for third corner
+        const y2 = y0 - j2 + 2 * G3;
+        const z2 = z0 - k2 + 2 * G3;
 
-        let x3 = x0 - 1 + 3 * G3; // Offsets for fourth corner
-        let y3 = y0 - 1 + 3 * G3;
-        let z3 = z0 - 1 + 3 * G3;
+        const x3 = x0 - 1 + 3 * G3; // Offsets for fourth corner
+        const y3 = y0 - 1 + 3 * G3;
+        const z3 = z0 - 1 + 3 * G3;
 
         // Work out the hashed gradient indices of the four simplex corners
         i &= 255;
         j &= 255;
         k &= 255;
         const { gradP, perm } = this;
-        let gi0 = gradP[i + perm[j + perm[k]]];
-        let gi1 = gradP[i + i1 + perm[j + j1 + perm[k + k1]]];
-        let gi2 = gradP[i + i2 + perm[j + j2 + perm[k + k2]]];
-        let gi3 = gradP[i + 1 + perm[j + 1 + perm[k + 1]]];
+        const gi0 = gradP[i + perm[j + perm[k]]];
+        const gi1 = gradP[i + i1 + perm[j + j1 + perm[k + k1]]];
+        const gi2 = gradP[i + i2 + perm[j + j2 + perm[k + k2]]];
+        const gi3 = gradP[i + 1 + perm[j + 1 + perm[k + 1]]];
 
         // Calculate the contribution from the four corners
         let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
@@ -305,13 +303,13 @@ export class Noise {
 
         const { gradP, perm } = this;
         // Calculate noise contributions from each of the four corners
-        let n00 = gradP[X + perm[Y]].dot2(x, y);
-        let n01 = gradP[X + perm[Y + 1]].dot2(x, y - 1);
-        let n10 = gradP[X + 1 + perm[Y]].dot2(x - 1, y);
-        let n11 = gradP[X + 1 + perm[Y + 1]].dot2(x - 1, y - 1);
+        const n00 = gradP[X + perm[Y]].dot2(x, y);
+        const n01 = gradP[X + perm[Y + 1]].dot2(x, y - 1);
+        const n10 = gradP[X + 1 + perm[Y]].dot2(x - 1, y);
+        const n11 = gradP[X + 1 + perm[Y + 1]].dot2(x - 1, y - 1);
 
         // Compute the fade curve value for x
-        let u = this.fade(x);
+        const u = this.fade(x);
 
         // Interpolate the four results
         return this.lerp(
@@ -331,19 +329,19 @@ export class Noise {
         X = X & 255; Y = Y & 255; Z = Z & 255;
 
         // Calculate noise contributions from each of the eight corners
-        let n000 = gradP[X + perm[Y + perm[Z]]].dot3(x, y, z);
-        let n001 = gradP[X + perm[Y + perm[Z + 1]]].dot3(x, y, z - 1);
-        let n010 = gradP[X + perm[Y + 1 + perm[Z]]].dot3(x, y - 1, z);
-        let n011 = gradP[X + perm[Y + 1 + perm[Z + 1]]].dot3(x, y - 1, z - 1);
-        let n100 = gradP[X + 1 + perm[Y + perm[Z]]].dot3(x - 1, y, z);
-        let n101 = gradP[X + 1 + perm[Y + perm[Z + 1]]].dot3(x - 1, y, z - 1);
-        let n110 = gradP[X + 1 + perm[Y + 1 + perm[Z]]].dot3(x - 1, y - 1, z);
-        let n111 = gradP[X + 1 + perm[Y + 1 + perm[Z + 1]]].dot3(x - 1, y - 1, z - 1);
+        const n000 = gradP[X + perm[Y + perm[Z]]].dot3(x, y, z);
+        const n001 = gradP[X + perm[Y + perm[Z + 1]]].dot3(x, y, z - 1);
+        const n010 = gradP[X + perm[Y + 1 + perm[Z]]].dot3(x, y - 1, z);
+        const n011 = gradP[X + perm[Y + 1 + perm[Z + 1]]].dot3(x, y - 1, z - 1);
+        const n100 = gradP[X + 1 + perm[Y + perm[Z]]].dot3(x - 1, y, z);
+        const n101 = gradP[X + 1 + perm[Y + perm[Z + 1]]].dot3(x - 1, y, z - 1);
+        const n110 = gradP[X + 1 + perm[Y + 1 + perm[Z]]].dot3(x - 1, y - 1, z);
+        const n111 = gradP[X + 1 + perm[Y + 1 + perm[Z + 1]]].dot3(x - 1, y - 1, z - 1);
 
         // Compute the fade curve value for x, y, z
-        let u = this.fade(x);
-        let v = this.fade(y);
-        let w = this.fade(z);
+        const u = this.fade(x);
+        const v = this.fade(y);
+        const w = this.fade(z);
 
         // Interpolate
         return this.lerp(

@@ -316,57 +316,57 @@ export class Cell extends Tile implements HasEnergy {
         const neighborsAndSelf = [ ...neighbors, this ];
         // this.stepMetabolism();
         // if (this.metabolism.type === "eating") {
-        if (true) {
-            for (const tile of neighborsAndSelf) {
-                if (hasInventory(tile) && !(tile instanceof Fruit)) {
-                    if (this.energy < params.cellEnergyMax) {
-                        const wantedEnergy = params.cellEnergyMax - this.energy;
-                        const wantedSugar = Math.min(
-                            wantedEnergy / params.cellEnergyMax,
-                            tile.inventory.sugar,
-                        );
-                        tile.inventory.add(0, -wantedSugar);
-                        const gotEnergy = wantedSugar * params.cellEnergyMax;
-                        this.energy += gotEnergy;
-                        // if (gotEnergy > 0) {
-                        //     console.log(`got ${gotEnergy}, now at ${this.energy}`);
-                        // }
-                    } else {
-                        break; // we're all full, eat no more
-                    }
-                }
-            }
-            if (this.energy < params.cellEnergyMax) {
-                const energeticNeighbors = neighborsAndSelf.filter((t) => hasEnergy(t)) as any as HasEnergy[];
-                const averageEnergy = energeticNeighbors.reduce((energy, neighbor) => energy + neighbor.energy, 0) / energeticNeighbors.length;
-                for (const neighbor of energeticNeighbors) {
-                    if (this.energy < params.cellEnergyMax) {
-                        let energyTransfer = 0;
-                        // // take energy from neighbors who have more than you - this might be unstable w/o double buffering
-                        // const targetEnergy = averageEnergy;
-                        if (neighbor.energy > this.energy) {
-                            // energyTransfer = Math.floor((neighbor.energy - this.energy) / energeticNeighbors.length);
-                            energyTransfer = Math.floor((neighbor.energy - this.energy) * 0.25);
-                            // if (neighbor.energy - energyTransfer < this.energy + energyTransfer) {
-                            //     throw new Error("cell energy diffusion: result of transfer gives me more than target");
-                            // }
-                            if (neighbor.energy - energyTransfer < 0) {
-                                throw new Error("cell energy diffusion: taking more energy than available");
-                            }
-                            if (this.energy + energyTransfer > params.cellEnergyMax) {
-                                throw new Error("cell energy diffusion: taking more energy than i can carry");
-                            }
-                            // const boundedEnergy = Math.min(wantedEnergy, (neighbor.energy + this.energy) / 2);
-                            this.energy += energyTransfer;
-                            neighbor.energy -= energyTransfer;
-                            // console.log(`transfering ${-energyTransfer} from ${this.energy} to ${neighbor.energy}`);
-                        }
-                    } else {
-                        break; // we're all full, eat no more
-                    }
+        // if (true) {
+        for (const tile of neighborsAndSelf) {
+            if (hasInventory(tile) && !(tile instanceof Fruit)) {
+                if (this.energy < params.cellEnergyMax) {
+                    const wantedEnergy = params.cellEnergyMax - this.energy;
+                    const wantedSugar = Math.min(
+                        wantedEnergy / params.cellEnergyMax,
+                        tile.inventory.sugar,
+                    );
+                    tile.inventory.add(0, -wantedSugar);
+                    const gotEnergy = wantedSugar * params.cellEnergyMax;
+                    this.energy += gotEnergy;
+                    // if (gotEnergy > 0) {
+                    //     console.log(`got ${gotEnergy}, now at ${this.energy}`);
+                    // }
+                } else {
+                    break; // we're all full, eat no more
                 }
             }
         }
+        if (this.energy < params.cellEnergyMax) {
+            const energeticNeighbors = neighborsAndSelf.filter((t) => hasEnergy(t)) as any as HasEnergy[];
+            const averageEnergy = energeticNeighbors.reduce((energy, neighbor) => energy + neighbor.energy, 0) / energeticNeighbors.length;
+            for (const neighbor of energeticNeighbors) {
+                if (this.energy < params.cellEnergyMax) {
+                    let energyTransfer = 0;
+                    // // take energy from neighbors who have more than you - this might be unstable w/o double buffering
+                    // const targetEnergy = averageEnergy;
+                    if (neighbor.energy > this.energy) {
+                        // energyTransfer = Math.floor((neighbor.energy - this.energy) / energeticNeighbors.length);
+                        energyTransfer = Math.floor((neighbor.energy - this.energy) * 0.25);
+                        // if (neighbor.energy - energyTransfer < this.energy + energyTransfer) {
+                        //     throw new Error("cell energy diffusion: result of transfer gives me more than target");
+                        // }
+                        if (neighbor.energy - energyTransfer < 0) {
+                            throw new Error("cell energy diffusion: taking more energy than available");
+                        }
+                        if (this.energy + energyTransfer > params.cellEnergyMax) {
+                            throw new Error("cell energy diffusion: taking more energy than i can carry");
+                        }
+                        // const boundedEnergy = Math.min(wantedEnergy, (neighbor.energy + this.energy) / 2);
+                        this.energy += energyTransfer;
+                        neighbor.energy -= energyTransfer;
+                        // console.log(`transfering ${-energyTransfer} from ${this.energy} to ${neighbor.energy}`);
+                    }
+                } else {
+                    break; // we're all full, eat no more
+                }
+            }
+        }
+        // }
 
         // this.stepStress(tileNeighbors);
         this.stepDroop(tileNeighbors);

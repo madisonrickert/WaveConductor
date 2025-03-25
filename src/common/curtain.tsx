@@ -5,7 +5,7 @@ export interface CurtainState {
     closed?: boolean;
 }
 
-export class Curtain extends React.PureComponent<{}, CurtainState> {
+export class Curtain extends React.PureComponent<object, CurtainState> {
     state = {
         closed: false,
     };

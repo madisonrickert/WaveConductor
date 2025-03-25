@@ -3,7 +3,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import { Routes } from "./routes";
 
-class App extends React.PureComponent<{}, {}> {
+class App extends React.PureComponent<object, object> {
     static childContextTypes = {
         reactIconBase: true,
     }

@@ -5,7 +5,7 @@ import { params } from "../params";
 interface InstructionsProps {
     play: () => void;
 }
-export class Instructions extends React.PureComponent<InstructionsProps, {}> {
+export class Instructions extends React.PureComponent<InstructionsProps, object> {
     render() {
         return (<div className="mito-instructions">
             <div className="mito-instructions-container">
