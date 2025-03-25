@@ -41,7 +41,7 @@ export class LineSketch extends ISketch {
             this.moveFirstAttractor(touchX, touchY);
         },
 
-        touchend: (event: JQuery.Event) => {
+        touchend: (_event: JQuery.Event) => {
             this.disableFirstAttractor();
         },
 
