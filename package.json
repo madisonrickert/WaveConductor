@@ -84,6 +84,6 @@
     "worker-loader": "^1.1.0"
   },
   "devDependencies": {
-    "tslint": "^5.8.0"
+    "eslint": "^9.23.0"
   }
 }
