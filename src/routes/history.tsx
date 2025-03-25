@@ -32,15 +32,15 @@ export const History: React.FunctionComponent<{ name: string, children: React.Re
 
 const History2017 = () => (
     <History name="2017">
-        <p>
+        <div>
             <Title>Drawing with Gravitational Waves</Title>. Drawing With Gravitational Waves was a performance and improvisational
             science/music/art experience in Wallenberg Theatre at Stanford on November 17th, 2017, in collaboartion with painter and artist
             Pamela Davis Kivelson and classical improv violinist Lucy Liuxuan Zhang. I wrote phyics simulations in Processing inspired by gravitational
             waves and adopted a pure black/white visual style (the right half of the screen) to contrast with Pam's paintings on the left.
             We further processed Pam's paintings with different Processing sketches to intermix traditional art with digital work.
             <iframe className="figure-video" src="https://player.vimeo.com/video/243603441" height="393" frameBorder="0" allowFullScreen></iframe>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://hellochar.github.io/phone-theremin">Phone Theremin</Title>.
             Turn your phone into a musical instrument. Visit the website on mobile and simply rotate your phone to change the pitch and volume.
             Made at the <a href="http://topos.house/">Topos House</a> <a href="http://hypotext.co/antidisciplinarathon">Antidisciplinarathon</a>.
@@ -49,34 +49,34 @@ const History2017 = () => (
             audience member to be a musical source we dissolve the difference between performer and audience. Instead,
             everyone is simply performing for everyone else. The actual sound is a total cacophany of missed pitches, which is kind of the point -
             we're imperfect beings, looking for connection with one another.
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://hellochar.github.io/songinanhour">Song in an hour</Title>.
             To help my friends and I get over the hurdles of composing music. We put ourselves on a one
             hour timer to compose, write lyrics, and record a song of some sort in 60 minutes. The accompanying
             website helps provide inspiration and initial ideas by suggesting chord progressions, emotions,
             melodies, and lyric synonyms. We post our "finished" songs on <a href="https://soundcloud.com/user-961025728-756560287">Soundcloud</a>.
             Warning: most of them are, well, pretty bad, as you might expect. Be gentle :smile:.
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://soundcloud.com/xiaohan-zhang/sets/one-song-a-day">One song a day</Title>.
             A personal challenge to create a new musical composition every day. A personal test of perseverance,
             commitment, effective practice, and finishing things.
-        </p>
-        <p className="history-item-small">
+        </div>
+        <div className="history-item-small">
             <Title href="https://github.com/hellochar/7drl-2017">7drl2017.</Title> Experimental game. The main game mechanic is algebraic tree structure manipulation.
             Tree literals are called "crystals" and contain a Number (positive or negative) and a Flavor (red/green/blue). Flavors "beat"
             each other in a rock paper scissors fashion. In addition to literals, there are operators that can take one nodes and modify them,
             e.g. the modulator changes the color of the crystal into what the original color was strong against.
             You would play as a wizard that had a weapon, a shield, and an HP bar for each Flavor. Combat was a turn based approach where wizards could
             either attack, or swap nodes around.
-        </p>
+        </div>
     </History>
 );
 
 const History2016 = () => (
     <History name="2016">
-        <p>
+        <div>
             <Title>Glowcon 2016</Title>. Modified Gravity to take input from the Leap Motion sensor. Users could attract particles with their pointer finger.
             I spent some time finding just the right interaction here. Originally the finger z position controlled the intensity of the pull (starting with no pull)
             but I found users confused and unable to have direct control. Since the average person has no experience interacting with a Leap Motion controller I
@@ -88,8 +88,8 @@ const History2016 = () => (
                 <img src="/assets/images/history/gravity_leapmotion2.png" />
                 <img src="/assets/images/history/gravity_leapmotion3.png" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>20mission's going fourth party.</Title> Put web-vj out there for any party goers to experiment and play with.
             <Images>
                 <img src="https://scontent-sjc2-1.xx.fbcdn.net/v/t31.0-8/12976944_782102208966_8471501848337640168_o.jpg?oh=55df77b59446a79fb21860936a091a3e&oe=5A6DA062" />
@@ -100,12 +100,12 @@ const History2016 = () => (
                 <img src="https://scontent-sjc2-1.xx.fbcdn.net/v/t31.0-8/12719168_10153513277278733_409027285730465035_o.jpg?oh=90eb3d1932a6421f0767369d01509aa3&oe=5A75D617" />
                 <img src="https://scontent-sjc2-1.xx.fbcdn.net/v/t31.0-8/12909609_10153513188588733_1763786166874271113_o.jpg?oh=5ed0372dcdb087c47a607441f377d137&oe=5A6873BD" />
             </Images>
-        </p>
-        <p className="history-item-small">
+        </div>
+        <div className="history-item-small">
             <Title href="https://www.youtube.com/watch?v=Z8WhaCPIrzs">3D Web Fest 2016.</Title> Performed web-vj.
             <iframe className="figure-video" height="393" src="https://www.youtube.com/embed/Z8WhaCPIrzs?rel=0&amp;showinfo=0&amp;start=555" frameBorder="0" allowFullScreen></iframe>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://github.com/hellochar/ggj2016">ggj2016</Title>.
             An unfinished roguelike video game that used web technologies and free web assets as much as possible. <a
             href="https://5-71942994-gh.circle-artifacts.com/0/home/ubuntu/ggj2016/build/index.html">
@@ -123,18 +123,18 @@ const History2016 = () => (
                 <img src="/assets/images/history/ggj2016/2.png" />
                 <img src="/assets/images/history/ggj2016/3.png" />
             </Images>
-        </p>
+        </div>
     </History>
 );
 
 const History2015 = () => (
     <History name="2015">
-        <p className="history-item-small">
+        <div className="history-item-small">
             <Title href="https://globalgamejam.org/2015/games/adventures-bot-y">
                 GGJ2015 - Adventures of Boty.
             </Title> Simple platformer game.
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://www.facebook.com/events/306662996124584/">Sentience</Title>.
             Organizer, curator, and artist for Sentience 2015, an immersive multi-media art exhibit and 3d audio/video
             experience. Sentience was a one night event at Public Works SF
@@ -151,15 +151,15 @@ const History2015 = () => (
                 <img src="/assets/images/history/sentience/crew.jpg" />
             </Images>
             The crew. Love you guys.
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>OSC Bark Coefficient Emitter.</Title> Designed and implemented a Max/MSP Patch that
             computes the <a href="https://en.wikipedia.org/wiki/Bark_scale">bark coefficients</a> of an
             audio track, such as the live music being played during the Sentience show, and broadcasts <a href="https://en.wikipedia.org/wiki/Open_Sound_Control">
             OSC messages</a> through UDP on the local wifi network. Digital artists could then retrieve the coefficients and use it to drive parameters in their art
             pieces, allowing all the art in a venue to react in tandem to the music.
-        </p>
-        <p>
+        </div>
+        <div>
         <Title>False mirror with tunable parameters</Title>.
         Personal project for the Sentience show. A 40 inch TV is laid flat upon a six foot tall wooden sturcture and connected
         to a laptop running real time visuals inside. The wooden box has physical sliders and knobs placed on it
@@ -170,8 +170,8 @@ const History2015 = () => (
             <img src="/assets/images/history/falsemirror/2.jpg" />
             <img src="/assets/images/history/falsemirror/3.jpg" />
         </Images>
-        </p>
-        <p>
+        </div>
+        <div>
         <Title>(performing art)</Title>. Real time interactive art installation.
         Collaboration with Katherine Frazer. An XBOX Kinect maps body gestures into
         Cuts and Pastes on an ever evolving canvas that takes webcam input from the
@@ -185,12 +185,12 @@ const History2015 = () => (
             <img src="https://lh3.googleusercontent.com/BMl7yeyuWTxSG9xA6qIYDpx4qhmkYX1iUyrm89jVuJDz3EwMcQIh6smL0yUb5R8SxXifgf1OD-Za2YIrQWmZHj6lPhdxzVrf07yxTAA45__bl8N1qXG_k-xXPuPgPxp4J2DoZH5pyzymUniv_wXTHUnkbl47aXaZ7vhKYPBYeL9sm36sS5tkZ9sy9i_b_jm2gwXXkk-z_zlTSoUxIyShilHjZshbU7uEZvli7OC3HH9nKjfif3pHfFCVLm-dY88DmRNiF760hI3ctnTJVkXPXlzn7UXwaHlMCr47mPaGRbmkg7DxbscNjgoPei7H35Ftnc1C19XselFMkgUSdnqrkacU96vLvrl_4Hjs4tayjg5GX0oQF5ZncOO7TWmQAU_q2bj__kVJcok3B9YJewkXXx1HFmgJJpy3nPQnNJR501beO8fj6IX8k_zeFwV-222K7GjTo775-JjneaX1v_7LoT7erUabpImAV2va8eb7rNYhkJgz_gsOjiIjQ4klYKtiRyf0xCLEqhswMXqHFO4nOkQ9KWo6x91EpXECp380Z67ce8-F27zQqRHSp1o8nYbK5_OrCiBojamvbPBD-ywXpp9gKXIoWzu6ywAaW09xIA=w483-h858-no" />
             <img src="https://lh3.googleusercontent.com/wfYike9dpb5GV6SQzSrGXwDzqPHSgAyS7zyPU1ZU12STWvVN3YXpF9H4MLlKki2YxhNdzi4E5XYd2HNiQuyC10hLU3kObFgY_8GPBScmYECinTaGBSeSocKBoM_q4v39ieeEWdzBUZetGIBUmO3Z1p9tThUNJWYQZ8h-OI5w1q3z2VlAxfE0KKqNSn3ALUwRi5VoNn_cNHanGT4isiumHpPQVlDPoyc2G3sHa_xhby8sJ3sdPv59GmbC1Hkjlia04m2YjRx3plXUs4jMQLZNp9CRu2W5qCA3oN80W4MJfsjuP8CJ-9GvFBNQ7SJFbl2ohai1h6mEX86wwFXL6cdDAuFaPjciVx7RbPJujg_SExjZ1hC1tfzfeEeyF9ChHLAu1qM5CqKQQk3bsC1kD4kiBg2X6JaZgOtiytoAIw1NVvmeL4Uwy-MOvciCNRPD8GHuMrnhf76RZ7530noQ-e7BFc4ayAWq2_gpds4LvNH4g9yfCuXSv9W6z4kfwcU5RgdEA7DxMQn3V689uMXg0UcNMel8blaNkJEx55Op1iQp2UmZQ2cJhKuOPZSE6Log_BW0fR83X8lp3wgqk3-XO1IuWtY6NoQwMBPOjc2H_Tzqlw=w1525-h858-no" />
         </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>Gray Area Summer 2015 Immersive Instructor</Title>.
             Taught the first week of Gray Area's Immersive program (basics of programming and Processing).
-        </p>
-        <p>
+        </div>
+        <div>
         <Title href="http://grayarea.org/education/immersive/">Gray Area Spring 2015 Immersive TA</Title>.
         Ten week program teaching students from mostly non-technical backgrounds a variety
         of programming and creative code concepts. As a TA I was responsible for supporting the
@@ -201,8 +201,8 @@ const History2015 = () => (
                 <img key={0} src="https://lh3.googleusercontent.com/Q7doAntds2iA0yz-j40KqqYDdtoh2P_Mr0MzBFIDbuDdBJxD4hSmq8a2CG_cAb-8Gltnufv38Rz8vd51r_WT-p1CobtgWw03oMDqJoXyHAhFIt8c4K6Q5UAmpHw3ImpL-BKqZHGnaO6dVA_QqXtDDFsQVg_n8HZZzD4t8AQIkqaAaJeIeAVwi8NqmRGX5I8_TUKvdNytkxTRti7BtvBXpZZApZi9Gt-YMuHEGx6rfAgr1AFotzJAU6Sqhs2S0bC0p_6sUcURZ-JQoCT_zizThwin2yAUlFzhWp5GrS60G_N7dN6DyV7fjZodKXtPnRnDleIG5DTVq8oNd5Z0zbHo2afx8xg-sI4bUCabPj7ly0TlR8CSu97mO8Jo7L78KJZjAqc8Mkv1npO6M-y6FnVH7pV0iOYB6d1wmP459FdiKL6hYu9uDFqWgPvTxA19RsH8py90wVDQ273C-UD37fYV9L5As--sL1mLZ60A1rBxhfmSFfcGpVcBw8Wy8nCZH5t5YO5LZmSpvpfh1xtjtbRm-fHiwN6tVmqvoImmllQUtspsbRMOSEdbbdexkgLT81lZ9ar0_DTpSLvCdBjsxHMWel3wmB77EM1Pn0-0JDEEOw=w1632-h918-no" />,
             ]}
         </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>Natural Habitat.</Title> Natural Habitat explores the made up worlds we
             imagine for ourselves. A projected screen shows a 3D scene of horses running around
             a perpetually sunny field, idling their days by. The screen is placed adjacent to a
@@ -212,14 +212,14 @@ const History2015 = () => (
             <Images>
                 {[<img key={0} src="/assets/images/history/natural_habitat.png" />]}
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://github.com/hellochar/web-vj">web-vj</Title>.
             real-time vj tool running on the web. Reads MIDI data from the Novation Launch Control MIDI Controller
             and adjusts parameters of a real time 3D scene. Performed at the CCRMA Transitions 2015 concert.
             <iframe className="figure-video" height="393" src="https://www.youtube.com/embed/VhYl6zShcfI?start=4620&amp;rel=0&amp;showinfo=0" frameBorder="0" allowFullScreen></iframe>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://github.com/data-doge/projected-network">projected network (live video feedback).</Title>
             Experiments with live webcam video feedback - pointing a webcam at a wall upon which is being
             projected the webcam input.
@@ -243,8 +243,8 @@ const History2015 = () => (
                 <img src="/assets/images/history/projected-network/pulse/07647.png" />
                 <img src="/assets/images/history/projected-network/pulse/08117.png" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>Fractal Chamber (live video feedback).</Title> projector/webcam feedback, fed through openCV to
             do blob detection which is then overlaid on the original image at an positional offset (and also changes
             hues over time).
@@ -258,8 +258,8 @@ const History2015 = () => (
                 <img src="/assets/images/history/projected-network/frame00487.png" />
                 <img src="/assets/images/history/projected-network/frame00558.png" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>3D Web Fest 2015.</Title> Performed Gravity.
             <iframe className="figure-video" height="393" src="https://www.youtube.com/embed/D-FILGRGqXw?rel=0&amp;showinfo=0&amp;start=314" frameBorder="0" allowFullScreen></iframe>
             <Images>
@@ -275,13 +275,13 @@ const History2015 = () => (
                 <img src="/assets/images/history/3dwebfest2015/15.jpg" />
                 <img src="/assets/images/history/3dwebfest2015/16.jpg" />
             </Images>
-            </p>
+            </div>
     </History>
 );
 
 const History2014 = () => (
     <History name="2014">
-        <p>
+        <div>
             <Title href="https://globalgamejam.org/2014/games/cmyk">GGJ2014 - CYMK.</Title> Multiplayer
             real-time cooperative online puzzle game. Centered around the notion of
             different perceptions to the same problem, each player can only interact with objects
@@ -289,8 +289,8 @@ const History2014 = () => (
             <Images>
                 {[<img key={0} src="https://globalgamejam.org/sites/default/files/styles/game_sidebar__wide/public/game/featured_image/cmyk_screenshot.png?itok=URolMaCD&timestamp=1390780093" />]}
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>Multimedia Orchestra @Berkeley</Title>. Multimedia Orchestra @Berkeley was a student organization
             dedicated to giving students opportunities to learn and share interactive art, creative code, instrument making,
             Max/MSP, etc. We organized student shows of art installations, live visuals influenced by musicians' EEG signals,
@@ -304,15 +304,15 @@ const History2014 = () => (
                 <img src="/assets/images/history/multimediaorchestra/2.jpg" />
                 <img src="/assets/images/history/multimediaorchestra/4.jpg" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>EEG piece</Title>. Read input data from the emotive EEG on a guitarist performing live and use
             it to feed a 3D superformula piece. Made for the Multimedia Orchestra Spring 2014 show.
             <Images>
                 {[<img key={0} src="/assets/images/history/multimediaorchestra/eeg.png" />]}
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="https://github.com/hellochar/flappybird-ai">flappybird-ai</Title>. Simple "AI" program that plays flappy bird for you.
             It constantly takes screenshots of flappy bird running on an emulator on your computer, does extremely primitive object detection to
             build a model of the game, and then uses that model of the game to decide whether to "tap" the emulator screen or not.
@@ -320,8 +320,8 @@ const History2014 = () => (
                 <img src="https://raw.githubusercontent.com/hellochar/flappybird-ai/master/gameplay.gif" />
                 <img src="https://raw.githubusercontent.com/hellochar/flappybird-ai/master/highscore.png" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>vectorfield</Title>. Kinect body motions hook into a modified fluid dynamics simulation. Users could "push" energy around to each other,
             create swirls, and affect each other's energy.
             <Images>
@@ -329,8 +329,8 @@ const History2014 = () => (
                 <img src="/assets/images/history/vectorfield4.png" />
                 <img src="/assets/images/history/vectorfield6.png" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title>gravity 2013</Title>. Reworking gravity to do up to 500k particles using Scala's parallel collections. Additionally, use the Leap Motion controller
             to control both a attractor and a repeller.
             <Images>
@@ -340,8 +340,8 @@ const History2014 = () => (
                 <img src="/assets/images/history/gravity8.png" />
                 <img src="/assets/images/history/gravity9.png" />
             </Images>
-        </p>
-        <p>
+        </div>
+        <div>
         <Title>party-quest.</Title> Inspired by Twitch Plays Pokemon, Party-Quest is a real time
         multiplayer video game in which multiple players control the
         movements of a single character exploring a dungeon full of
@@ -368,18 +368,18 @@ const History2014 = () => (
         users have to avoid spikes, dodge moving enemies, step over floor buttons to activate doors,
         use wooden crates as shields, and navigate under icy conditions. Shown
         at Multimedia Orchestra's Spring 2014 show and Maker Faire 2014.
-        </p>
-        <p>
+        </div>
+        <div>
         <Title href="https://github.com/hellochar/growth">growth.</Title> Real-time VJ
         software connected to live performance on the Novation Launch Control.
         <Images>
             <img src="https://raw.githubusercontent.com/hellochar/growth/master/example1.gif" />
             <img src="https://raw.githubusercontent.com/hellochar/growth/master/example2.gif" />
         </Images>
-        </p>
-        <p>
+        </div>
+        <div>
             <Title href="http://p5wscala.wordpress.com">p5wscala</Title>. My college blog dedicated to my creative coding using Processing
             with the Scala programming language.
-        </p>
+        </div>
     </History>
 );

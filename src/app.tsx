@@ -1,28 +1,30 @@
 import React from "react";
 import { BrowserRouter } from "react-router-dom";
 
-import { Routes } from "./routes";
+import { AppRoutes } from "./appRoutes";
+
+// Create a context for reactIconBase
+const ReactIconBaseContext = React.createContext({
+    className: "fa-icon",
+    style: {
+        verticalAlign: "text-top",
+    },
+});
 
 class App extends React.PureComponent<object, object> {
-    static childContextTypes = {
-        reactIconBase: true,
-    }
-    getChildContext() {
-        return {
-            reactIconBase: {
-                className: "fa-icon",
-                style: {
-                    verticalAlign: "text-top",
-                },
-            },
-        };
-    }
     render() {
         return (
             <BrowserRouter>
-                <>
-                    <Routes />
-                </>
+                <ReactIconBaseContext.Provider
+                    value={{
+                        className: "fa-icon",
+                        style: {
+                            verticalAlign: "text-top",
+                        },
+                    }}
+                >
+                    <AppRoutes />
+                </ReactIconBaseContext.Provider>
             </BrowserRouter>
         );
     }

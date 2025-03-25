@@ -12,13 +12,13 @@ const Hero = () => (
             <SketchComponent sketchClass={Landscape} eventsOnBody={true} />
         </div>
         <div className="hero-content">
-            <p className="header-services">
+            <div className="header-services">
                 <nav className="header-nav">
                     <a href="#work">Work</a>
                     &middot;
                     <a href="#history">History</a>
                 </nav>
-            </p>
+            </div>
             <div className="contact-links">
                 <a href="mailto:hellocharlien@hotmail.com">
                     <FaEnvelope />

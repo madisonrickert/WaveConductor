@@ -1,5 +1,5 @@
 import React from "react";
-import { Route, Switch } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
 import { FullPageSketch } from "./routes/fullPageSketch";
 import { HomePage } from "./routes/homePage";
 
@@ -11,14 +11,14 @@ const sketchRoutes = sketches.map(sketchClass => {
         <Route
             key={path}
             path={path}
-            component={() => <FullPageSketch sketchClass={sketchClass} />}
+            element={<FullPageSketch sketchClass={sketchClass} />}
         />
     );
 });
 
-export const Routes = () => (
-    <Switch>
+export const AppRoutes = () => (
+    <Routes>
         {sketchRoutes}
-        <Route path="/" component={HomePage} />
-    </Switch>
+        <Route path="/" element={<HomePage />} />
+    </Routes>
 );
