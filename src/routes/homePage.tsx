@@ -1,24 +1,23 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
-import Hero from "./hero";
-import { ShrinkingHeader } from "./shrinkingHeader";
 import { FaPlay } from "react-icons/fa";
 
 export function HomePage() {
-    const location = useLocation();
+    const loc = useLocation();
 
     React.useEffect(() => {
-        const hash = location.hash;
+        const hash = loc.hash;
+        if (!hash) {
+            return;
+        }
         const element = document.getElementById(hash);
         if (element != null) {
             element.scrollIntoView();
         }
-    }, [location]);
+    }, [loc]);
 
     return (
         <div className="homepage">
-            <ShrinkingHeader />
-            <Hero />
             <main className="content">
                 <WorkSection />
             </main>
@@ -43,9 +42,6 @@ function WorkSection() {
 function Footer() {
     return (
         <footer className="page-footer">
-            <a href="#contact">
-                <div className="get-in-touch">Get in touch</div>
-            </a>
             <div className="copyright">
                 &copy; 2013 - present Xiaohan Zhang
             </div>
