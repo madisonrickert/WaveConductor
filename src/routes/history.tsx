@@ -1,38 +1,27 @@
-import * as classnames from "classnames";
-import * as React from "react";
-import LazyLoad from "react-lazyload";
+import classnames from "classnames";
+import React from "react";
 
 import { Images } from "../common/images";
 
 export const HistorySection = () => (
     <section className="content-section history" id="history">
         <h1>Big List of Stuff</h1>
-        <LazyLoad once>
-            <History2017 />
-        </LazyLoad>
-        <LazyLoad once>
-            <History2016 />
-        </LazyLoad>
-        <LazyLoad once>
-            <History2015 />
-        </LazyLoad>
-        <LazyLoad once>
-            <History2014 />
-        </LazyLoad>
+        <History2017 />
+        <History2016 />
+        <History2015 />
+        <History2014 />
     </section>
 );
 
-const Title: React.StatelessComponent<{href?: string}> = ({href, children}) => {
-    const titleElement = href == null
-        ? children
-        : <a href={href}>{children}</a>;
+const Title: React.FunctionComponent<{href?: string, children: React.ReactNode}> = ({href, children}) => {
+    const titleElement = href ? <a href={href}>{children}</a> : children;;
 
     return (
         <span className="history-item-title">{titleElement}</span>
     );
 };
 
-export const History: React.StatelessComponent<{ name: string }> = ({name, children}) => (
+export const History: React.FunctionComponent<{ name: string, children: React.ReactNode }> = ({name, children}) => (
     <section className="history-year">
         <h2>{name}</h2>
         <section>

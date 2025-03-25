@@ -1,5 +1,5 @@
-import * as classNames from "classnames";
-import * as React from "react";
+import classnames from "classnames";
+import React from "react";
 
 export interface CurtainState {
     closed?: boolean;
@@ -11,7 +11,7 @@ export class Curtain extends React.PureComponent<{}, CurtainState> {
     };
 
     render() {
-        const className = classNames("curtain", { closed: this.state.closed });
+        const className = classnames("curtain", { closed: this.state.closed });
         return <div className={className}></div>;
     }
 }

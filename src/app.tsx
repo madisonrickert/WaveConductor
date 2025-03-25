@@ -1,7 +1,6 @@
-import * as React from "react";
+import React from "react";
 import { BrowserRouter } from "react-router-dom";
 
-import { GATracker } from "./analytics";
 import { Routes } from "./routes";
 
 class App extends React.PureComponent<{}, {}> {
@@ -22,7 +21,6 @@ class App extends React.PureComponent<{}, {}> {
         return (
             <BrowserRouter>
                 <>
-                    <GATracker />
                     <Routes />
                 </>
             </BrowserRouter>

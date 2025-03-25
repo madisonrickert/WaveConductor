@@ -1,5 +1,4 @@
-import * as $ from "jquery";
-import { parse } from "query-string";
+import $ from "jquery";
 import * as THREE from "three";
 
 import { lerp, map } from "../math";
@@ -38,23 +37,24 @@ const HeightMap = {
     },
 };
 
-function permutedLine(ox: number, oy: number, nx: number, ny: number, geometryIn?: THREE.Geometry) {
+function permutedLine(ox: number, oy: number, nx: number, ny: number, geometryIn?: THREE.BufferGeometry) {
     const distance = Math.sqrt(Math.pow(ox - nx, 2) + Math.pow(oy - ny, 2));
     // about 11 units per line segment
     const steps = distance / LINE_SEGMENT_LENGTH;
-    let geometry: THREE.Geometry;
+    let geometry: THREE.BufferGeometry;
     if (geometryIn == null) {
-        geometry = new THREE.Geometry();
-        for ( let t = 0; t <= steps; t++) {
-            geometry.vertices.push(new THREE.Vector3());
-        }
+        geometry = new THREE.BufferGeometry();
+        const vertices = new Float32Array((steps + 1) * 3); // 3 components per vertex (x, y, z)
+        geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     } else {
         geometry = geometryIn;
     }
 
     function permutePoint(x: number, y: number, idx: number) {
         const grad = HeightMap.gradient(x, y);
-        geometry.vertices[idx].set(x + grad[0], y + grad[1], 0);
+        const position = geometry.getAttribute('position') as THREE.BufferAttribute;
+        position.setXYZ(idx, x + grad[0], y + grad[1], 0);
+        position.needsUpdate = true;
     }
 
     for ( let t = 0; t <= steps; t++) {
@@ -102,7 +102,7 @@ class LineStrip {
         // console.log(this.gridOffsetX, this.gridOffsetY);
         (this.object.children as PositionedLine[]).forEach((lineMesh) => {
             const { x, y, inlineOffsetX, inlineOffsetY } = lineMesh;
-            const geometry = lineMesh.geometry as THREE.Geometry;
+            const geometry = lineMesh.geometry as THREE.BufferGeometry;
             permutedLine(
                 x + this.gridOffsetX - inlineOffsetX,
                 y + this.gridOffsetY - inlineOffsetY,
@@ -110,7 +110,7 @@ class LineStrip {
                 y + this.gridOffsetY + inlineOffsetY,
                 geometry,
             );
-            geometry.verticesNeedUpdate = true;
+            geometry.attributes.position.needsUpdate = true;
         });
     }
 
@@ -132,13 +132,15 @@ class LineStrip {
                 x + inlineOffsetX,
                 y + inlineOffsetY,
             );
-            const lineMesh = new THREE.Line(geometry, lineMaterial) as PositionedLine;
-            lineMesh.frustumCulled = false;
+            const line = new THREE.Line(geometry, lineMaterial);
+            const lineMesh = Object.assign(line, {
+                x,
+                y,
+                inlineOffsetX,
+                inlineOffsetY,
+                frustumCulled: false,
+            }) as PositionedLine;
             this.object.add(lineMesh);
-            lineMesh.x = x;
-            lineMesh.y = y;
-            lineMesh.inlineOffsetX = inlineOffsetX;
-            lineMesh.inlineOffsetY = inlineOffsetY;
         };
 
         createAndAddLine(0, 0);
@@ -347,14 +349,14 @@ class Waves extends ISketch {
     }
 
     setVelocityFromMouseEvent(event: JQuery.Event) {
-        const mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-        const mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+        const mouseX = event.offsetX == null ? ((event as JQuery.MouseEventBase).originalEvent as MouseEvent).layerX : event.offsetX;
+        const mouseY = event.offsetY == null ? ((event as JQuery.MouseEventBase).originalEvent as MouseEvent).layerY : event.offsetY;
         this.setVelocityFromCanvasCoordinates(mouseX, mouseY);
     }
 
     setVelocityFromTouchEvent(event: JQuery.Event) {
         const canvasOffset = $(this.canvas).offset()!;
-        const touch = (event.originalEvent as TouchEvent).touches[0];
+        const touch = ((event as JQuery.TouchEventBase).originalEvent as TouchEvent).touches[0];
         const touchX = touch.pageX - canvasOffset.left;
         const touchY = touch.pageY - canvasOffset.top;
 

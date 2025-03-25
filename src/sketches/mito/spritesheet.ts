@@ -6,10 +6,15 @@ const spriteSize = 16; // 16x16 sprites
 const spriteSheetWidth = 1024;
 const spriteSheetHeight = 512;
 let spritesheetLoaded = false;
-const SPRITESHEET = lazy(() => new THREE.TextureLoader().load( '/assets/images/roguelikeSheet_transparent.png', (() => {
-    SPRITESHEET().dispatchEvent({type: "update"});
-    spritesheetLoaded = true;
-})));
+let spritesheetUpdateCallbacks: (() => void)[] = [];
+const SPRITESHEET = lazy(() => {
+    const texture = new THREE.TextureLoader().load('/assets/images/roguelikeSheet_transparent.png', () => {
+        spritesheetLoaded = true;
+        spritesheetUpdateCallbacks.forEach(callback => callback());
+        spritesheetUpdateCallbacks = []; // Clear callbacks after execution
+    });
+    return texture;
+});
 
 export const fruitTexture = new THREE.TextureLoader().load('/assets/images/fruit.png');
 
@@ -53,7 +58,7 @@ export function textureFromSpritesheet(x: number, y: number, backgroundColor = "
         if (spritesheetLoaded) {
             drawSpriteToCanvas();
         } else {
-            SPRITESHEET().addEventListener("update", () => {
+            spritesheetUpdateCallbacks.push(() => {
                 drawSpriteToCanvas();
             });
         }

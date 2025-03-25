@@ -117,15 +117,15 @@ export class CymaticsAudio {
     }
 
     setBlubVolume(v: number) {
-        this.blub.volume = THREE.Math.clamp(v * 0.7, 0, 1);
+        this.blub.volume = THREE.MathUtils.clamp(v * 0.7, 0, 1);
     }
 
     setBlubPlaybackRate(r: number) {
-        this.blub.playbackRate = THREE.Math.clamp(r, 0.5, 4);
+        this.blub.playbackRate = THREE.MathUtils.clamp(r, 0.5, 4);
     }
 
     setOscVolume(v: number) {
-        this.oscGain.gain.setTargetAtTime(THREE.Math.clamp(v * 0.75, 1e-10, 1), this.audio.currentTime + 0.016, 0.016 / 3);
+        this.oscGain.gain.setTargetAtTime(THREE.MathUtils.clamp(v * 0.75, 1e-10, 1), this.audio.currentTime + 0.016, 0.016 / 3);
     }
 
     setOscFrequencyScalar(freqScalar: number) {
@@ -138,7 +138,7 @@ export class CymaticsAudio {
         this.oscHigh4Second.frequency.setTargetAtTime(freq * freqScalar * Math.pow(2, 4 + 1 / 12) + 9, this.audio.currentTime + 0.016, 0.016 / 3);
         this.lfo.frequency.setTargetAtTime((freqScalar - 1) * 100 + 1e-10, this.audio.currentTime + 0.016, 0.016 / 3);
 
-        this.whiteNoiseGain.gain.setTargetAtTime(THREE.Math.clamp((freqScalar - 1.002) * 20, 0, 1), this.audio.currentTime + 0.016, 0.016 / 3);
+        this.whiteNoiseGain.gain.setTargetAtTime(THREE.MathUtils.clamp((freqScalar - 1.002) * 20, 0, 1), this.audio.currentTime + 0.016, 0.016 / 3);
         this.whiteNoiseFilter.frequency.setTargetAtTime(1500 * (1 + freqScalar * freqScalar), this.audio.currentTime + 0.016, 0.016 / 3);
     }
 }

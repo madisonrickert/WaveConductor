@@ -1,11 +1,10 @@
-import * as $ from "jquery";
-import * as React from "react";
+import $ from "jquery";
+import React from "react";
 import * as THREE from "three";
 
-import FaVolumeOff = require("react-icons/lib/fa/volume-off");
-import FaVolumeUp = require("react-icons/lib/fa/volume-up");
+import { FaVolumeUp, FaVolumeOff } from "react-icons/fa";
 
-import * as classnames from "classnames";
+import classnames from "classnames";
 import { Link } from "react-router-dom";
 import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS } from "./sketch";
 
@@ -15,7 +14,7 @@ const HAS_SOUND = true;
 
 export interface ISketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
     eventsOnBody?: boolean;
-    errorElement?: JSX.Element;
+    errorElement?: React.JSX.Element;
     sketchClass: SketchConstructor;
 }
 
@@ -192,7 +191,7 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
                 const sketch = new (this.props.sketchClass)(renderer, this.audioContext);
                 this.setState({status: { type: "success", sketch: sketch }});
             } catch (e) {
-                this.setState({ status: { type: "error", error: e }});
+                this.setState({ status: { type: "error", error: e instanceof Error ? e : new Error(String(e)) }});
                 console.error(e);
             }
         } else {

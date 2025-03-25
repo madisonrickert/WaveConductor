@@ -1,4 +1,4 @@
-import * as React from "react";
+import React from "react";
 import * as THREE from "three";
 import { Object3D, OrthographicCamera, Scene, Vector3 } from "three";
 import devlog from "../../common/devlog";
@@ -85,7 +85,7 @@ export class Mito extends ISketch {
             world={this.world}
         />
         <GameStack mito={this} state={this.gameState} />
-        <NewPlayerTutorial ref={(ref) => this.tutorialRef = ref } mito={this} />,
+        <NewPlayerTutorial ref={(ref) => { this.tutorialRef = ref; }} mito={this} />,
         {/* <ParamsGUI /> */}
         <Hover mito={this} />
         </>;
@@ -148,9 +148,9 @@ export class Mito extends ISketch {
             this.keyMap.delete(event.key!);
         },
         wheel: (event: JQuery.Event) => {
-            const e = event.originalEvent as WheelEvent;
+            const e = (event as JQuery.TriggeredEvent<WheelEvent>).originalEvent!;
             // on my mouse, one scroll is + or - 125
-            const delta = -(e.deltaX + e.deltaY) / 125 / 20;
+            const delta = -((e as WheelEvent).deltaX + (e as WheelEvent).deltaY) / 125 / 20;
             const currZoom = this.camera.zoom;
             const scalar = Math.pow(2, delta);
             // console.log(currZoom);
@@ -213,7 +213,7 @@ export class Mito extends ISketch {
 
     private expandingTileHighlight = (() => {
         const mesh = new THREE.Mesh(
-            new THREE.PlaneBufferGeometry(1, 1),
+            new THREE.PlaneGeometry(1, 1),
             new THREE.MeshBasicMaterial({
                 color: "white",
                 side: THREE.DoubleSide,
@@ -247,7 +247,7 @@ export class Mito extends ISketch {
         this.camera.position.y = this.world.player.pos.y;
 
         // const airBg = new THREE.Mesh(
-        //     new PlaneBufferGeometry(width, height),
+        //     new PlaneGeometry(width, height),
         //     materialMapping.get(Air)!.clone(),
         // );
         // airBg.position.x = width / 2 - 0.5;

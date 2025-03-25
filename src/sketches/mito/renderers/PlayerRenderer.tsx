@@ -1,4 +1,4 @@
-import { Color, DoubleSide, Mesh, MeshBasicMaterial, PlaneBufferGeometry, Scene } from "three";
+import { Color, DoubleSide, Mesh, MeshBasicMaterial, PlaneGeometry, Scene } from "three";
 
 import devlog from "../../../common/devlog";
 import { ActionMove } from "../action";
@@ -13,7 +13,7 @@ export class PlayerRenderer extends Renderer<Player> {
     public mesh: Mesh;
     constructor(target: Player, scene: Scene, mito: Mito) {
         super(target, scene, mito);
-        this.mesh = new Mesh(new PlaneBufferGeometry(1, 1),
+        this.mesh = new Mesh(new PlaneGeometry(1, 1),
             // new THREE.CircleBufferGeometry(0.5, 20),
             new MeshBasicMaterial({
                 transparent: true,

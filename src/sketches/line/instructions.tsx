@@ -1,5 +1,5 @@
-import * as classnames from "classnames";
-import * as React from "react";
+import classnames from "classnames";
+import React from "react";
 
 export interface InstructionsState {
     leapMotionControllerValid: boolean;
@@ -8,7 +8,6 @@ export interface InstructionsState {
 }
 
 export class Instructions extends React.Component<{}, InstructionsState> {
-    // tslint:disable-next-line:member-access
     state = {
         leapMotionControllerValid: false,
         globalFrame: 0,

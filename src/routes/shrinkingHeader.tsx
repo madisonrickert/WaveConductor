@@ -1,5 +1,4 @@
-import * as React from "react";
-import { Link, NavLink } from "react-router-dom";
+import React from "react";
 
 export interface IShrinkingHeaderProps {
     alwaysShrunken?: boolean;
@@ -44,22 +43,8 @@ export class ShrinkingHeader extends React.Component<IShrinkingHeaderProps, IShr
         return (
             <div className={containerClassName} style={{display: isHidden ? "none" : ""}}>
                 <header className={className}>
-                    <a className="header-name" href="/"><h1>Xiaohan Zhang</h1></a>
-                    <p className="header-services">
-                    Creative technologist with over 12 years experience building interactive exhibits, web experiences, teaching, and workshops.
-                    </p>
                     <nav className="header-nav">
-                        <a href="/resume.pdf">Resume</a>
-                        &middot;
                         <a href="#work">Work</a>
-                        &middot;
-                        {/* <a href="#installation">Installation</a>
-                        &middot; */}
-                        <a href="#about-me">About</a>
-                        &middot;
-                        <a href="#workshops">Teaching</a>
-                        &middot;
-                        <a href="#contact">Contact</a>
                         &middot;
                         <a href="#history">History</a>
                     </nav>

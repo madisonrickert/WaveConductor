@@ -1,5 +1,5 @@
-import * as classnames from "classnames";
-import * as React from "react";
+import classnames from "classnames";
+import React from "react";
 
 import { Constructor } from "../constructor";
 import { Cell, Fruit, Leaf, Root, Tissue, Transport } from "../game/tile";
@@ -112,7 +112,7 @@ export class HUD extends React.PureComponent<HUDProps> {
         return inventoryBar;
     }
     renderAllBuildButtons() {
-        const buttons: JSX.Element[] = [];
+        const buttons: React.JSX.Element[] = [];
         for (const key in BUILD_HOTKEYS) {
             if (key === "F") {
                 // put fruit last, handle specially
@@ -137,7 +137,7 @@ export class HUD extends React.PureComponent<HUDProps> {
         </div>);
     }
     public renderDPad() {
-        const els: JSX.Element[] = [];
+        const els: React.JSX.Element[] = [];
         for (const key of "qwea.dzsc".split("")) {
             els.push(this.renderButton(key, null, {
                 style: {},
@@ -160,7 +160,7 @@ export class HUD extends React.PureComponent<HUDProps> {
     }
     public renderUIState() {
         if (this.props.uiState.type === "expanding") {
-            const buttons: JSX.Element[] = [];
+            const buttons: React.JSX.Element[] = [];
             for (const key in BUILD_HOTKEYS) {
                 const cellType = BUILD_HOTKEYS[key];
                 if (cellType === Fruit && this.props.world.fruit != null) {

@@ -1,5 +1,5 @@
-import * as React from "react";
-import * as ReactDOM from "react-dom";
+import React from "react";
+import { createRoot } from "react-dom/client";
 
 import "./monkeypatch";
 
@@ -7,9 +7,9 @@ import App from "./app";
 
 //import "./index.scss";
 
-const root = document.createElement("div");
-document.body.appendChild(root);
-root.className = "root";
+const rootElement = document.createElement("div");
+document.body.appendChild(rootElement);
+rootElement.className = "root";
 
 const Error = () => (
     <div style={{width: "800px", fontFamily: "Arial, sans-serif", display: "inline-block", margin: "auto"}}>
@@ -19,17 +19,17 @@ const Error = () => (
 );
 
 try {
-    ReactDOM.render(<App />, root);
+    const root = createRoot(rootElement);
+    root.render(<App />);
     const element = document.getElementById("fallback");
     if (element != null) {
         element.remove();
     }
 } catch (e) {
-    ga("send", "exception", {
-        exDescription: e.message,
-        exFatal: true,
-    });
     console.error(e);
     const element = document.getElementById("fallback");
-    ReactDOM.render(<Error />, element);
+    if (element) {
+        const fallbackRoot = createRoot(element);
+        fallbackRoot.render(<Error />);
+    }
 }

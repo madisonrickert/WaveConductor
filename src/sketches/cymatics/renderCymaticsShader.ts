@@ -1,6 +1,6 @@
 import * as THREE from "three";
 
-export const RenderCymaticsShader: THREE.Shader = {
+export const RenderCymaticsShader = {
     uniforms: {
         cellStateResolution: { value: new THREE.Vector2() },
         cellStateVariable: { value: null },

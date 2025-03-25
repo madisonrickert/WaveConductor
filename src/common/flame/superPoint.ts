@@ -15,12 +15,22 @@ export class SuperPoint {
     constructor(
         public point: THREE.Vector3,
         public color: THREE.Color,
-        public rootGeometry: THREE.Geometry,
+        public rootGeometry: THREE.BufferGeometry,
         public branches: Branch[],
     ) {
         this.lastPoint.copy(point);
-        rootGeometry.vertices.push(point);
-        rootGeometry.colors.push(color);
+
+        const positionAttribute = rootGeometry.attributes.position as THREE.BufferAttribute;
+        const colorAttribute = rootGeometry.attributes.color as THREE.BufferAttribute;
+
+        const positionArray = positionAttribute.array as Float32Array;
+        const colorArray = colorAttribute.array as Float32Array;
+
+        positionArray.set([point.x, point.y, point.z], positionAttribute.count * 3);
+        colorArray.set([color.r, color.g, color.b], colorAttribute.count * 3);
+
+        positionAttribute.needsUpdate = true;
+        colorAttribute.needsUpdate = true;
     }
 
     public updateSubtree(depth: number, shouldLerp: boolean, ...visitors: UpdateVisitor[]) {
@@ -82,6 +92,6 @@ export class SuperPoint {
         // console.time("updateSubtree");
         this.updateSubtree(depth, shouldLerp, ...visitors);
         // console.timeEnd("updateSubtree");
-        this.rootGeometry.verticesNeedUpdate = true;
+        (this.rootGeometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     }
 }

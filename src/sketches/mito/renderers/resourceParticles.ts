@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, Color, Points, PointsMaterial, ShaderMaterial, Texture } from "three";
+import { BufferAttribute, BufferGeometry, Color, Points, PointsMaterial, ShaderMaterial, Texture, DynamicDrawUsage } from "three";
 
 export class ResourceParticles extends Points {
     static BUFFER_SIZE = 100000;
@@ -7,14 +7,14 @@ export class ResourceParticles extends Points {
         const geometry = new BufferGeometry();
         const positions = new Float32Array(ResourceParticles.BUFFER_SIZE * 3);
         const sizes = new Float32Array(ResourceParticles.BUFFER_SIZE);
-        geometry.addAttribute("position", new BufferAttribute(positions, 3).setDynamic(true));
-        geometry.addAttribute("size", new BufferAttribute(sizes, 1).setDynamic(true));
+        geometry.setAttribute("position", new BufferAttribute(positions, 3).setUsage(DynamicDrawUsage));
+        geometry.setAttribute("size", new BufferAttribute(sizes, 1).setUsage(DynamicDrawUsage));
         return geometry;
     }
     constructor(params: MaterialParams) {
         super(ResourceParticles.newGeometry(), new ResourceParticleMaterial(params));
-        this.material.depthTest = false;
-        this.material.needsUpdate = true;
+        (this.material as ShaderMaterial).depthTest = false;
+        (this.material as ShaderMaterial).needsUpdate = true;
         this.frustumCulled = false;
     }
     private index = 0;

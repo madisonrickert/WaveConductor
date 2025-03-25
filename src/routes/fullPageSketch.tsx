@@ -1,6 +1,6 @@
-import * as classnames from "classnames";
-import { parse } from "query-string";
-import * as React from "react";
+import classnames from "classnames";
+import queryString from "query-string";
+import React from "react";
 import { RouteComponentProps } from "react-router";
 import { Link } from "react-router-dom";
 
@@ -17,7 +17,7 @@ export interface ISketchRouteProps {
 export class FullPageSketch extends React.Component<ISketchRouteProps, {}> {
     public render() {
         const { isKiosk } = this.props;
-        const isPresentationMode = !!parse(location.search).presentationMode;
+        const isPresentationMode = !!queryString.parse(location.search).presentationMode;
         const classes = classnames("full-page-sketch", { "presentation-mode": isPresentationMode, "kiosk-mode": isKiosk });
         return (
             <div className={classes} ref={this.handleDivRef}>
@@ -40,18 +40,18 @@ export class FullPageSketch extends React.Component<ISketchRouteProps, {}> {
     }
 
     private requestFullscreen(ref: HTMLElement) {
-        if (ref.webkitRequestFullscreen) {
-            ref.webkitRequestFullscreen();
-        } else if (ref.mozRequestFullScreen) {
-            ref.mozRequestFullScreen();
+        if (ref.requestFullscreen) {
+            ref.requestFullscreen();
+        } else {
+            console.warn("Fullscreen API is not supported in this browser.");
         }
     }
 
     private exitFullscreen() {
-        if (document.webkitExitFullscreen) {
-            document.webkitExitFullscreen();
-        } else if (document.mozCancelFullScreen) {
-            document.mozCancelFullScreen();
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        } else {
+            console.warn("Fullscreen API is not supported in this browser.");
         }
     }
 }

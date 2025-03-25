@@ -1,9 +1,10 @@
-import * as classnames from "classnames";
+import classnames from "classnames";
 import { Controller } from "leapjs";
-import * as React from "react";
+import React from "react";
 import * as THREE from "three";
+import { ShaderPass, RenderPass, EffectComposer } from "three-stdlib";
 
-import { parse } from "query-string";
+import queryString from "query-string";
 import devlog from "../../common/devlog";
 import { GravityShader } from "../../common/gravityShader";
 import lazy from "../../common/lazy";
@@ -20,7 +21,7 @@ export class LineSketch extends ISketch {
         touchstart: (event: JQuery.Event) => {
             // prevent emulated mouse events from occuring
             event.preventDefault();
-            const touch = (event.originalEvent as TouchEvent).touches[0];
+            const touch = ((event as JQuery.TouchStartEvent).originalEvent as TouchEvent).touches[0];
             const touchX = touch.pageX;
             let touchY = touch.pageY;
             // offset the touchY by its radius so the attractor is above the thumb
@@ -32,7 +33,7 @@ export class LineSketch extends ISketch {
         },
 
         touchmove: (event: JQuery.Event) => {
-            const touch = (event.originalEvent as TouchEvent).touches[0];
+            const touch = ((event as JQuery.TouchMoveEvent).originalEvent as TouchEvent).touches[0];
             const touchX = touch.pageX;
             let touchY = touch.pageY;
             touchY -= 100;
@@ -48,15 +49,17 @@ export class LineSketch extends ISketch {
 
         mousedown: (event: JQuery.Event) => {
             if (event.which === 1) {
-                this.mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-                this.mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+                const mouseEvent = event as JQuery.Event & { originalEvent: MouseEvent };
+                this.mouseX = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
+                this.mouseY = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
                 this.enableFirstAttractor(this.mouseX, this.mouseY);
             }
         },
 
         mousemove: (event: JQuery.Event) => {
-            this.mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-            this.mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+            const mouseEvent = event as JQuery.Event & { originalEvent: MouseEvent };
+            this.mouseX = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
+            this.mouseY = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
             this.moveFirstAttractor(this.mouseX, this.mouseY);
         },
 
@@ -66,7 +69,7 @@ export class LineSketch extends ISketch {
             }
         },
     };
-    public elements = [<Instructions ref={(instructions) => this.instructionsEl = instructions} />];
+    public elements = [<Instructions ref={(instructions) => { this.instructionsEl = instructions; }} />];
     public instructionsEl: Instructions | null = null;
     public attractors = [
         makeAttractor(),
@@ -88,12 +91,12 @@ export class LineSketch extends ISketch {
     public mouseY = 0;
 
     public camera = new THREE.OrthographicCamera(0, 0, 0, 0, 1, 1000);
-    public gravityShaderPass = new THREE.ShaderPass(GravityShader);
+    public gravityShaderPass = new ShaderPass(GravityShader);
     public scene = new THREE.Scene();
 
     public points!: THREE.Points;
     public controller!: Controller;
-    public composer!: THREE.EffectComposer;
+    public composer!: EffectComposer;
 
     public ps!: ParticleSystem;
 
@@ -106,7 +109,7 @@ export class LineSketch extends ISketch {
             this.scene.add(attractor.mesh);
         });
 
-        const NUM_PARTICLES = Number(parse(location.search).p) ||
+        const NUM_PARTICLES = Number(queryString.parse(location.search).p) ||
             // cheap mobile detection
             (screen.width > 1024 ? 20000 : 5000);
         for (let i = 0; i < NUM_PARTICLES; i++) {
@@ -124,10 +127,10 @@ export class LineSketch extends ISketch {
         this.points = createParticlePoints(this.particles, material());
         this.scene.add(this.points);
 
-        this.composer = new THREE.EffectComposer(this.renderer);
-        this.composer.addPass(new THREE.RenderPass(this.scene, this.camera));
+        this.composer = new EffectComposer(this.renderer);
+        this.composer.addPass(new RenderPass(this.scene, this.camera));
         this.gravityShaderPass.uniforms.iResolution.value = new THREE.Vector2(this.canvas.width, this.canvas.height);
-        const gamma = parse(location.search).gamma;
+        const gamma = queryString.parse(location.search).gamma;
         if (gamma) {
             this.gravityShaderPass.uniforms.gamma.value = gamma;
         }
@@ -193,7 +196,7 @@ export class LineSketch extends ISketch {
         this.gravityShaderPass.uniforms.iMouseFactor.value = (1 / 15) / (groupedUpness + 1);
         // filter.uniforms['iMouse'].value = new THREE.Vector2(averageX, canvas.height - averageY);
 
-        (this.points.geometry as THREE.Geometry).verticesNeedUpdate = true;
+        (this.points.geometry as THREE.BufferGeometry).attributes.position.needsUpdate = true;
         this.composer.render();
         this.globalFrame++;
         if (this.instructionsEl != null) {

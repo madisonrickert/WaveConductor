@@ -1,7 +1,6 @@
 import { Matrix3 } from "../../node_modules/@types/three";
 
 // copy-pasted from https://raw.githubusercontent.com/josephg/noisejs/master/perlin.js
-// tslint:disable
 
 /*
  * A speed-improved perlin and simplex noise algorithms for 2D.

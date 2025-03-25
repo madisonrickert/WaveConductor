@@ -54,7 +54,7 @@ export class InventoryRenderer extends Renderer<Inventory> {
         InventoryRenderer.WaterParticles().endFrame();
         InventoryRenderer.SugarParticles().endFrame();
     }
-    // static geometry = new PlaneBufferGeometry(1, 1);
+    // static geometry = new PlaneGeometry(1, 1);
     // static waterMaterial = new MeshBasicMaterial({
     //     // map: textureFromSpritesheet(0, 1),
     //     transparent: true,

@@ -1,8 +1,10 @@
+/// <reference types="webpack-env" />
+
 import { ISketch, SketchConstructor } from "./sketch";
 
 export default function getSketches(context: __WebpackModuleApi.RequireContext) {
     const sketches: SketchConstructor[] = [];
-    context.keys().forEach((key) => {
+    context.keys().forEach((key: string) => {
         if (key === "./index") {
             return; // skip
         }

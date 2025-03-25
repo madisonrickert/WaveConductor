@@ -2,4 +2,3 @@
 
 import "./addEs6Shim";
 import "./monkeypatchMathRandom";
-import "./monkeypatchThree";

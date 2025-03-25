@@ -1,4 +1,5 @@
 import { Transform } from "./transforms";
+import * as THREE from "three";
 
 export interface Branch {
     color: THREE.Color;

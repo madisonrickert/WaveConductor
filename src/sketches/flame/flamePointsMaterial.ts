@@ -11,7 +11,7 @@ export class FlamePointsMaterial extends THREE.ShaderMaterial {
 
     constructor() {
         super({
-            vertexColors: THREE.VertexColors,
+            vertexColors: true,
             transparent: true,
             opacity: 0.2,
             blending: THREE.AdditiveBlending,

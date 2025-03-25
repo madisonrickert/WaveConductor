@@ -1,4 +1,5 @@
-import * as React from "react";
+import React from "react";
+import * as THREE from "three";
 
 import { Action } from "../action";
 import { ACTION_KEYMAP, MOVEMENT_KEYS } from "../keymap";
@@ -11,7 +12,7 @@ export default class TutorialMovement extends Tutorial {
         counter: 0,
     };
     render() {
-        const keyHints: JSX.Element[] = [];
+        const keyHints: React.JSX.Element[] = [];
         for (const [key] of MOVEMENT_KEY_MESHES) {
             const x = this.props.mito.world.player.pos.x;
             const y = this.props.mito.world.player.pos.y;

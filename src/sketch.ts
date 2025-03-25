@@ -1,4 +1,4 @@
-import * as React from "react";
+import React from "react";
 import * as THREE from "three";
 
 export const UI_EVENTS = {
@@ -24,7 +24,7 @@ export type UIEventReciever = {
 export abstract class ISketch {
     static id?: string;
 
-    public elements?: JSX.Element[];
+    public elements?: React.JSX.Element[];
     public events?: UIEventReciever;
     /**
      * milliseconds since sketch started running.

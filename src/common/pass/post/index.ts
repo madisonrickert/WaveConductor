@@ -1,8 +1,7 @@
-import * as THREE from "three";
-
+import { ShaderPass } from "three-stdlib";
 import { PostShader } from "./shader";
 
-export class PostPass extends THREE.ShaderPass {
+export class PostPass extends ShaderPass {
     constructor() {
         super(PostShader);
     }

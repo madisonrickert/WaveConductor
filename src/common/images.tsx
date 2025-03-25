@@ -1,5 +1,5 @@
-import * as classnames from "classnames";
-import * as React from "react";
+import classnames from "classnames";
+import React from "react";
 
 const NUM_IMAGES_PER_ROW = 5;
 

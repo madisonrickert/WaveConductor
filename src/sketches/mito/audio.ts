@@ -1,4 +1,4 @@
-import * as $ from "jquery";
+import $ from "jquery";
 import * as THREE from "three";
 
 import devlog from "../../common/devlog";
@@ -29,8 +29,8 @@ export let drums: Unit;
 export let footsteps: Unit;
 export let build: Unit;
 
-export let blopBuffer: THREE.AudioBuffer;
-export let suckWaterBuffer: THREE.AudioBuffer;
+export let blopBuffer: AudioBuffer;
+export let suckWaterBuffer: AudioBuffer;
 
 export function hookUpAudio(ctx: SketchAudioContext) {
     let numDone = 0;
@@ -69,7 +69,7 @@ export function hookUpAudio(ctx: SketchAudioContext) {
 
     loader.load(
         '/assets/audio/mito/Blop-Mark_DiAngelo-79054334.mp3',
-        (audioBuffer: THREE.AudioBuffer) => {
+        (audioBuffer: AudioBuffer) => {
             blopBuffer = audioBuffer;
         },
         (xhr: ProgressEvent) => {
@@ -81,7 +81,7 @@ export function hookUpAudio(ctx: SketchAudioContext) {
     );
     loader.load(
         '/assets/audio/mito/suckwater.wav',
-        (audioBuffer: THREE.AudioBuffer) => {
+        (audioBuffer: AudioBuffer) => {
             suckWaterBuffer = audioBuffer;
         },
         (xhr: ProgressEvent) => {

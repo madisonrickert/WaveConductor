@@ -1,4 +1,5 @@
-import * as React from "react";
+import React from "react";
+import * as THREE from "three";
 
 import Mito from "..";
 import { World } from "../game";

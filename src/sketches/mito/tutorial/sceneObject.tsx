@@ -1,4 +1,5 @@
-import * as React from "react";
+import React from "react";
+import * as THREE from "three";
 
 interface SceneObjectProps {
     object: THREE.Object3D;

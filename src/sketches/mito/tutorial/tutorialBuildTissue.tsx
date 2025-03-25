@@ -1,4 +1,4 @@
-import * as React from "react";
+import React from "react";
 
 import { Entity } from "..";
 import { Action } from "../action";
@@ -13,7 +13,7 @@ export class TutorialBuildTissue extends Tutorial {
         counter: 0,
     };
     render() {
-        const buildCandidateHighlights: JSX.Element[] = [];
+        const buildCandidateHighlights: React.JSX.Element[] = [];
         for (const candidate of findBuildCandidateTiles(this.props.mito.world)) {
             buildCandidateHighlights.push(
                 <TileHighlight
@@ -77,7 +77,7 @@ export class TutorialBuildRoot extends Tutorial {
         BUILD_HOTKEYS.r = Root;
     }
     render() {
-        const buildCandidateHighlights: JSX.Element[] = [];
+        const buildCandidateHighlights: React.JSX.Element[] = [];
         for (const candidate of findBuildCandidateTiles(this.props.mito.world, (t) => t instanceof Soil)) {
             buildCandidateHighlights.push(
                 <TileHighlight
@@ -120,7 +120,7 @@ export class TutorialBuildLeaf extends Tutorial {
         BUILD_HOTKEYS.f = Leaf;
     }
     render() {
-        const buildCandidateHighlights: JSX.Element[] = [];
+        const buildCandidateHighlights: React.JSX.Element[] = [];
         for (const candidate of findBuildCandidateTiles(this.props.mito.world, (t) => t instanceof Air)) {
             buildCandidateHighlights.push(
                 <TileHighlight

@@ -1,6 +1,7 @@
-import * as $ from "jquery";
-import { parse } from "query-string";
+import $ from "jquery";
+import queryString from "query-string";
 import * as THREE from "three";
+import { ShaderPass, EffectComposer, RenderPass } from "three-stdlib";
 
 import { ExplodeShader } from "../../common/explodeShader";
 import lazy from "../../common/lazy";
@@ -23,7 +24,7 @@ let mouseX: number, mouseY: number;
 function touchstart(event: JQuery.Event) {
     // prevent emulated mouse events from occuring
     event.preventDefault();
-    const touch = (event.originalEvent as TouchEvent).touches[0];
+    const touch = ((event as JQuery.TouchStartEvent).originalEvent as TouchEvent).touches[0];
     const touchX = touch.pageX;
     const touchY = touch.pageY;
     // offset the touchY by its radius so the attractor is above the thumb
@@ -34,7 +35,7 @@ function touchstart(event: JQuery.Event) {
 }
 
 function touchmove(event: JQuery.Event) {
-    const touch = (event.originalEvent as TouchEvent).touches[0];
+    const touch = ((event as JQuery.TouchMoveEvent).originalEvent as TouchEvent).touches[0];
     const touchX = touch.pageX;
     const touchY = touch.pageY;
     // touchY -= 100;
@@ -49,15 +50,15 @@ function touchend(event: JQuery.Event) {
 
 function mousedown(event: JQuery.Event) {
     if (event.which === 1) {
-        mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-        mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+        mouseX = event.offsetX == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerX : event.offsetX;
+        mouseY = event.offsetY == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerY : event.offsetY;
         createAttractor(mouseX, mouseY);
     }
 }
 
 function mousemove(event: JQuery.Event) {
-    mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-    mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+    mouseX = event.offsetX == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX : event.offsetX;
+    mouseY = event.offsetY == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY : event.offsetY;
     moveAttractor(mouseX, mouseY);
 }
 
@@ -97,10 +98,10 @@ class Dots extends ISketch {
         touchend,
     };
 
-    public shader = new THREE.ShaderPass(ExplodeShader);
+    public shader = new ShaderPass(ExplodeShader);
     public audioGroup: any;
     public camera!: THREE.OrthographicCamera;
-    public composer!: THREE.EffectComposer;
+    public composer!: EffectComposer;
     public pointCloud!: THREE.Points;
     public scene = new THREE.Scene();
     public ps!: ParticleSystem;
@@ -113,7 +114,7 @@ class Dots extends ISketch {
 
         const particles: IParticle[] = [];
         const EXTENT = 10;
-        const GRID_SIZE = parse(location.search).gridSize || 7;
+        const GRID_SIZE: number = Number(queryString.parse(location.search).gridSize) || 7;
         for (let x = -EXTENT * GRID_SIZE; x < this.canvas.width + EXTENT * GRID_SIZE; x += GRID_SIZE) {
             for (let y = -EXTENT * GRID_SIZE; y < this.canvas.height + EXTENT * GRID_SIZE; y += GRID_SIZE) {
                 particles.push(createParticle(x, y));
@@ -124,8 +125,8 @@ class Dots extends ISketch {
         this.pointCloud = createParticlePoints(particles, material());
         this.scene.add(this.pointCloud);
 
-        this.composer = new THREE.EffectComposer(this.renderer);
-        this.composer.addPass(new THREE.RenderPass(this.scene, this.camera));
+        this.composer = new EffectComposer(this.renderer);
+        this.composer.addPass(new RenderPass(this.scene, this.camera));
         this.shader.uniforms.iResolution.value = this.resolution;
         this.shader.renderToScreen = true;
         this.composer.addPass(this.shader);
@@ -142,7 +143,7 @@ class Dots extends ISketch {
 
         this.shader.uniforms.iMouse.value = new THREE.Vector2(mouseX / this.canvas.width, (this.canvas.height - mouseY) / this.canvas.height);
 
-        (this.pointCloud.geometry as THREE.Geometry).verticesNeedUpdate = true;
+        (this.pointCloud.geometry as THREE.BufferGeometry).attributes.position.needsUpdate = true;
         this.composer.render();
     }
 

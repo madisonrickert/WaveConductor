@@ -1,10 +1,6 @@
 const path = require('path');
-const BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
 const webpack = require('webpack');
-const merge = require('webpack-merge');
-// const ErrorOverlayPlugin = require('error-overlay-webpack-plugin')
-const FriendlyErrorsWebpackPlugin = require('friendly-errors-webpack-plugin');
-
+const { merge } = require('webpack-merge');
 
 const common = require('./webpack.common.js');
 
@@ -12,12 +8,9 @@ module.exports = merge(common, {
   mode: "development",
   devtool: 'inline-source-map',
   devServer: {
-    contentBase: path.join(__dirname, "public"),
-    disableHostCheck: true,
-    host: "0.0.0.0",
+    static: path.join(__dirname, "public"),
     hot: true,
     historyApiFallback: true,
-    useLocalIp: true,
   },
   optimization: {
     splitChunks: {
@@ -36,7 +29,6 @@ module.exports = merge(common, {
       {
         test: /\.scss$/,
         use: [
-          // MiniCssExtractPlugin.loader,
           "style-loader",
           { loader: 'css-loader', options: { importLoaders: 2 } },
           "postcss-loader",
@@ -47,10 +39,5 @@ module.exports = merge(common, {
   },
   plugins: [
     new webpack.HotModuleReplacementPlugin(),
-    // new ErrorOverlayPlugin(),
-    new FriendlyErrorsWebpackPlugin(),
-    // new BundleAnalyzerPlugin({
-    //   analyzerMode: 'static'
-    // }),
   ],
 });

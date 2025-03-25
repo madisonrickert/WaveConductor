@@ -67,11 +67,11 @@ function updateHandMesh(sketch: LineSketch, attractor: Attractor, hand: Leap.Han
     const handMesh = attractor.handMesh;
     hand.fingers.forEach((finger) => {
         if (handMesh["finger" + finger.type] == null) {
-            const fingerLine = new THREE.Line(new THREE.Geometry(), boneLineMaterial());
+            const fingerLine = new THREE.Line(new THREE.BufferGeometry(), boneLineMaterial());
             handMesh["finger" + finger.type] = fingerLine;
             handMesh.add(fingerLine);
         }
-        const fingerGeometry = handMesh["finger" + finger.type].geometry as THREE.Geometry;
+        const fingerGeometry = handMesh["finger" + finger.type].geometry as THREE.BufferGeometry;
         finger.bones.forEach((bone) => {
             // create sphere for every bone
             const id = finger.type + ',' + bone.type;
@@ -84,11 +84,9 @@ function updateHandMesh(sketch: LineSketch, attractor: Attractor, hand: Leap.Han
             handMesh[id].position.copy(position);
 
             // create a line for every finger
-            if (fingerGeometry.vertices[bone.type] == null) {
-                fingerGeometry.vertices.push(new THREE.Vector3());
-            }
-            fingerGeometry.vertices[bone.type].copy(position);
-            fingerGeometry.verticesNeedUpdate = true;
+            const positions = fingerGeometry.getAttribute('position') as THREE.Float32BufferAttribute || new THREE.Float32BufferAttribute(new Float32Array(bone.type * 3), 3);
+            positions.setXYZ(bone.type, position.x, position.y, position.z);
+            fingerGeometry.setAttribute('position', positions);
         });
     });
 }

@@ -1,4 +1,5 @@
 import { Attractor } from "./attractor";
+import * as THREE from "three";
 
 export interface IParticle {
     originalX: number;
@@ -7,7 +8,7 @@ export interface IParticle {
     y: number;
     dx: number;
     dy: number;
-    vertex: THREE.Vertex | null;
+    vertex: THREE.Vector3 | null;
 }
 
 export function createParticle(originalX: number, originalY: number): IParticle {

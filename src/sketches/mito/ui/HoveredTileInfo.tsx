@@ -1,4 +1,4 @@
-import * as React from "react";
+import React from "react";
 
 import { Constructor } from "../constructor";
 import { Air, Cell, Fountain, GrowingCell, hasEnergy, Leaf, Root, Tile } from "../game/tile";

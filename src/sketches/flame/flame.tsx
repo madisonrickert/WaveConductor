@@ -1,7 +1,7 @@
-// import * as OrbitControls from "imports-loader?THREE=three!exports-loader?THREE.OrbitControls!three-examples/controls/OrbitControls";
-import { parse } from "query-string";
-import * as React from "react";
+import queryString from "query-string";
+import React from "react";
 import * as THREE from "three";
+import { OrbitControls } from "three-stdlib";
 
 import { createWhiteNoise } from "../../audio/noise";
 import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, LengthVarianceTrackerVisitor, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "../../common/flame";
@@ -108,13 +108,13 @@ function stringHash(s: string) {
 
 let camera: THREE.PerspectiveCamera;
 let scene: THREE.Scene;
-let geometry: THREE.Geometry;
+let geometry: THREE.BufferGeometry;
 
 const material = new FlamePointsMaterial();
 
 let pointCloud: THREE.Points;
 const mousePosition = new THREE.Vector2(0, 0);
-let controls: THREE.OrbitControls;
+let controls: OrbitControls;
 
 let globalBranches: Branch[];
 let superPoint: SuperPoint;
@@ -122,7 +122,9 @@ let superPoint: SuperPoint;
 let cX = 0, cY = 0;
 const jumpiness = 3;
 
-const nameFromSearch = parse(location.search).name;
+const nameFromSearch: string = typeof queryString.parse(location.search).name === 'string' 
+    ? queryString.parse(location.search).name as string 
+    : "";
 
 let noiseGain: GainNode;
 let oscLow: OscillatorNode;
@@ -323,8 +325,8 @@ function computeDepth() {
 }
 
 function mousemove(event: JQuery.Event) {
-    const mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-    const mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+    const mouseX = event.offsetX == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX : event.offsetX;
+    const mouseY = event.offsetY == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY : event.offsetY;
 
     mousePosition.x = mouseX;
     mousePosition.y = mouseY;
@@ -388,12 +390,11 @@ export class FlameSketch extends ISketch {
         camera.position.z = 2;
         camera.position.y = 1;
         camera.lookAt(new THREE.Vector3());
-        controls = new THREE.OrbitControls(camera, this.renderer.domElement);
+        controls = new OrbitControls(camera, this.renderer.domElement);
         controls.autoRotate = true;
         controls.autoRotateSpeed = 1;
         controls.maxDistance = 8;
         controls.minDistance = 0.1;
-        controls.enableKeys = false;
         controls.enablePan = false;
 
         this.updateName(nameFromSearch);
@@ -410,8 +411,8 @@ export class FlameSketch extends ISketch {
 
         material.setFocalLength( cameraLength );
 
-        cDx = THREE.Math.mapLinear(mousePosition.x, 0, this.canvas.width, -1, 1);
-        cDy = THREE.Math.mapLinear(mousePosition.y, 0, this.canvas.width, -1, 1);
+        cDx = THREE.MathUtils.mapLinear(mousePosition.x, 0, this.canvas.width, -1, 1);
+        cDy = THREE.MathUtils.mapLinear(mousePosition.y, 0, this.canvas.width, -1, 1);
 
         controls.update();
         // console.time("render");
@@ -475,7 +476,7 @@ export class FlameSketch extends ISketch {
         // );
 
         if (audioHasChord) {
-            const baseOffset = THREE.Math.clamp(Math.floor(map(density, 1.0, 3, 0, 24)), 0, 48);
+            const baseOffset = THREE.MathUtils.clamp(Math.floor(map(density, 1.0, 3, 0, 24)), 0, 48);
             chord.setScaleDegree(baseOffset);
             // chord.setMinorBias(velocity * 2 + sigmoid(variance - 3) * 4);
             // chord.setFifthBias(countDensity / 5);
@@ -521,9 +522,9 @@ export class FlameSketch extends ISketch {
         cY = map(hashNorm, 0, 1, -2.5, 2.5);
         globalBranches = randomBranches(name);
 
-        geometry = new THREE.Geometry();
-        geometry.vertices = [];
-        geometry.colors = [];
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
         superPoint = new SuperPoint(
             new THREE.Vector3(0, 0, 0),
             new THREE.Color(0, 0, 0),

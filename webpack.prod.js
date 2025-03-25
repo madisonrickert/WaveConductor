@@ -1,7 +1,5 @@
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
-const path = require("path");
-const merge = require('webpack-merge');
-// const BundleBuddyWebpackPlugin = require("bundle-buddy-webpack-plugin");
+const { merge } = require('webpack-merge');
 
 const common = require('./webpack.common.js');
 
@@ -13,11 +11,10 @@ module.exports = merge(common, {
         test: /\.scss$/,
         use: [
           MiniCssExtractPlugin.loader,
-          // "style-loader",
           {
             loader: 'css-loader',
             options: {
-              minimize: true,
+              importLoaders: 2,
             }
           },
           'sass-loader'
@@ -27,11 +24,8 @@ module.exports = merge(common, {
   },
   plugins: [
     new MiniCssExtractPlugin({
-      // Options similar to the same options in webpackOptions.output
-      // both options are optional
-      filename: "[name].css",
-      chunkFilename: "[id].css"
+      filename: "[name].[contenthash].css",
+      chunkFilename: "[id].[contenthash].css"
     }),
-    // new BundleBuddyWebpackPlugin(),
   ]
 });

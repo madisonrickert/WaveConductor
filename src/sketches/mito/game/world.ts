@@ -326,7 +326,7 @@ export class World {
         // offset first rain event by 300 turns
         const isRaining = (this.time + this.environment.climate.turnsBetweenRainfall - 200) % this.environment.climate.turnsBetweenRainfall < this.environment.climate.rainDuration;
         if (isRaining) {
-            const x = THREE.Math.randInt(0, width - 1);
+            const x = THREE.MathUtils.randInt(0, width - 1);
             const t = this.tileAt(x, 0);
             if (t instanceof Air) {
                 t.inventory.add(this.environment.climate.waterPerDroplet, 0);

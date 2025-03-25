@@ -1,5 +1,6 @@
-import * as React from "react";
+import React from "react";
 import * as THREE from "three";
+import { EffectComposer, RenderPass } from "three-stdlib";
 
 import { AudioClip } from "../../audio";
 import { Noise } from "../../common/perlin";
@@ -11,7 +12,7 @@ noise.octaveNum = 3;
 
 class Ground {
     private geom = (() => {
-        // const geom = new THREE.PlaneBufferGeometry(1000, 1000, 100, 100);
+        // const geom = new THREE.PlaneGeometry(1000, 1000, 100, 100);
         // geom.rotateX(-Math.PI / 2);
 
         // const geom = new THREE.SphereBufferGeometry(50, 100, 100);
@@ -19,7 +20,7 @@ class Ground {
         // const geom = new THREE.CylinderBufferGeometry(50, 50, 500, 20, 100, true);
         // geom.rotateZ(-Math.PI / 2);
 
-        const geom = new THREE.PlaneBufferGeometry(1000, 1000, 100, 100);
+        const geom = new THREE.PlaneGeometry(1000, 1000, 100, 100);
 
         return geom;
     })();
@@ -41,7 +42,7 @@ class Ground {
 
     animate(timeElapsed: number, t: number) {
         const { positions } = this;
-        const heightScale = THREE.Math.mapLinear(THREE.Math.smootherstep(timeElapsed, 0, 6000), 0, 1, 0, 500);
+        const heightScale = THREE.MathUtils.mapLinear(THREE.MathUtils.smootherstep(timeElapsed, 0, 6000), 0, 1, 0, 500);
         // const heightScale = 12;
         for (let i = 0; i < positions.count; i++) {
             const x = positions.getX(i);
@@ -53,8 +54,8 @@ class Ground {
             // const yzVec = new THREE.Vector2(yNorm, zNorm);
             // yzVec.rotateAround(new THREE.Vector2(), t);
 
-            // const wantedLength = 25 + THREE.Math.mapLinear(noise.simplex3(x / 80, yNorm, zNorm), -1, 1, -heightScale, heightScale);
-            const wantedLength = -500 + THREE.Math.mapLinear(noise.simplex3(Math.floor(x / 80), Math.floor(y / 80), t), -1, 1, 0, heightScale);
+            // const wantedLength = 25 + THREE.MathUtils.mapLinear(noise.simplex3(x / 80, yNorm, zNorm), -1, 1, -heightScale, heightScale);
+            const wantedLength = -500 + THREE.MathUtils.mapLinear(noise.simplex3(Math.floor(x / 80), Math.floor(y / 80), t), -1, 1, 0, heightScale);
 
             // const wantedY = (noise.simplex3(x / 80, z / 80, t) + 0.5) * heightScale * this.landscape.getRockiness(x, z) - heightScale / 2;
             // positions.setY(i, wantedY);
@@ -72,15 +73,16 @@ class Ground {
 
 class WaterDrops {
     private geometry = (() => {
-        const geometry = new THREE.Geometry();
+        const geometry = new THREE.BufferGeometry();
+        const vertices = [];
         for (let i = 0; i < 1000; i++) {
-            const v = new THREE.Vector3(
-                THREE.Math.randFloat(-400, 400),
-                THREE.Math.randFloat(400, 800),
-                THREE.Math.randFloat(-400, 400),
+            vertices.push(
+                THREE.MathUtils.randFloat(-400, 400),
+                THREE.MathUtils.randFloat(400, 800),
+                THREE.MathUtils.randFloat(-400, 400),
             );
-            geometry.vertices.push(v);
         }
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
         return geometry;
     })();
 
@@ -98,17 +100,15 @@ class WaterDrops {
     }
 
     animate(timeElapsed: number) {
-        for (const vertex of this.geometry.vertices) {
-            vertex.y -= 2.5;
-            if (vertex.y < -60) {
-                vertex.y += 200;
-            }
-            vertex.x -= 0.3;
-            if (vertex.x < -400) {
-                vertex.x += 800;
-            }
+        const positions = this.geometry.getAttribute("position") as THREE.Float32BufferAttribute;
+        for (let i = 0; i < positions.count; i++) {
+            const y = positions.getY(i) - 2.5;
+            positions.setY(i, y < -60 ? y + 200 : y);
+
+            const x = positions.getX(i) - 0.3;
+            positions.setX(i, x < -400 ? x + 800 : x);
         }
-        this.geometry.verticesNeedUpdate = true;
+        positions.needsUpdate = true;
     }
 }
 
@@ -119,7 +119,7 @@ class Landscape extends ISketch {
         return (document.documentElement && document.documentElement.scrollTop) || document.body.scrollTop;
     }
     private handleTouch = (event: JQuery.Event) => {
-        const touch = (event.originalEvent as TouchEvent).touches[0];
+        const touch = ((event as JQuery.TouchEventBase).originalEvent as TouchEvent).touches[0];
         if (touch) {
             this.mouseX = touch.clientX || touch.screenX;
             this.mouseY = touch.clientY || touch.screenY;
@@ -127,8 +127,8 @@ class Landscape extends ISketch {
     };
     public events = {
         mousemove: (event: JQuery.Event) => {
-            this.mouseX = event.clientX || (event.originalEvent as MouseEvent).layerX;
-            this.mouseY = event.clientY || (event.originalEvent as MouseEvent).layerY;
+            this.mouseX = event.clientX || ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX;
+            this.mouseY = event.clientY || ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY;
         },
         touchmove: this.handleTouch,
         touchstart: this.handleTouch,
@@ -141,7 +141,7 @@ class Landscape extends ISketch {
     private camera!: THREE.PerspectiveCamera;
     private fog = new THREE.FogExp2(bgColor, 0.004);
     private water!: WaterDrops;
-    private composer!: THREE.EffectComposer;
+    private composer!: EffectComposer;
     init() {
         this.renderer.domElement.style.background = bgColor;
         this.renderer.setClearColor(bgColor);
@@ -169,9 +169,9 @@ class Landscape extends ISketch {
     // }
 
     private initComposer() {
-        this.composer = new THREE.EffectComposer(this.renderer);
+        this.composer = new EffectComposer(this.renderer);
 
-        const renderPass = new THREE.RenderPass(this.scene, this.camera);
+        const renderPass = new RenderPass(this.scene, this.camera);
         (renderPass as any).renderToScreen = true;
         this.composer.addPass(renderPass);
 
@@ -223,8 +223,8 @@ class Landscape extends ISketch {
     animate(millisElapsed: number) {
         const { camera } = this;
         const targetPos = new THREE.Vector3(
-            -23 + THREE.Math.mapLinear(this.mouseX, 0, this.canvas.width, -100, 100),
-            -1.8 + THREE.Math.mapLinear(this.mouseY, 0, this.canvas.height, 200, -40),
+            -23 + THREE.MathUtils.mapLinear(this.mouseX, 0, this.canvas.width, -100, 100),
+            -1.8 + THREE.MathUtils.mapLinear(this.mouseY, 0, this.canvas.height, 200, -40),
             148 + this.scrollTop / 100,
         );
         camera.position.lerp(targetPos, 0.5);
@@ -232,7 +232,7 @@ class Landscape extends ISketch {
         const targetT = this.scrollTop / 2000;
         this.t = this.t * 0.85 + targetT * 0.15;
         this.ground.animate(this.timeElapsed, this.t);
-        // this.fog.density = THREE.Math.mapLinear(THREE.Math.smoothstep(this.timeElapsed, 0, 10000), 0, 1, 0.1, 0.004);
+        // this.fog.density = THREE.MathUtils.mapLinear(THREE.MathUtils.smoothstep(this.timeElapsed, 0, 10000), 0, 1, 0.1, 0.004);
         // this.water.animate(this.timeElapsed);
         // this.renderer.render(this.scene, this.camera);
         this.composer.render();

@@ -1,4 +1,4 @@
-import * as React from "react";
+import React from "react";
 
 import Mito, { GameState } from "../index";
 import { Instructions } from "./Instructions";

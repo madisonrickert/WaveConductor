@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { EffectComposer, ShaderPass } from "three-stdlib";
 
 import GPUComputationRenderer, { GPUComputationRendererVariable } from "../../common/gpuComputationRenderer";
 import { map, mirroredRepeat } from "../../math";
@@ -26,14 +27,14 @@ export class Cymatics extends ISketch {
         touchstart: (event: JQuery.Event) => {
             // prevent emulated mouse events from occuring
             event.preventDefault();
-            const touch = (event.originalEvent as TouchEvent).touches[0];
+            const touch = ((event as JQuery.TouchStartEvent).originalEvent as TouchEvent).touches[0];
             const touchX = touch.pageX;
             const touchY = touch.pageY;
             this.startInteraction(touchX, touchY);
         },
 
         touchmove: (event: JQuery.Event) => {
-            const touch = (event.originalEvent as TouchEvent).touches[0];
+            const touch = ((event as JQuery.TouchMoveEvent).originalEvent as TouchEvent).touches[0];
             const touchX = touch.pageX;
             const touchY = touch.pageY;
             this.setMouse(touchX, touchY);
@@ -45,15 +46,15 @@ export class Cymatics extends ISketch {
 
         mousedown: (event: JQuery.Event) => {
             if (event.which === 1) {
-                const mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-                const mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+                const mouseX = event.offsetX == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerX : event.offsetX;
+                const mouseY = event.offsetY == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerY : event.offsetY;
                 this.startInteraction(mouseX, mouseY);
             }
         },
 
         mousemove: (event: JQuery.Event) => {
-            const mouseX = event.offsetX == null ? (event.originalEvent as MouseEvent).layerX : event.offsetX;
-            const mouseY = event.offsetY == null ? (event.originalEvent as MouseEvent).layerY : event.offsetY;
+            const mouseX = event.offsetX == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX : event.offsetX;
+            const mouseY = event.offsetY == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY : event.offsetY;
             this.setMouse(mouseX, mouseY);
         },
 
@@ -78,8 +79,8 @@ export class Cymatics extends ISketch {
     public computation!: GPUComputationRenderer;
 
     public cellStateVariable!: GPUComputationRendererVariable;
-    public renderCymaticsPass!: THREE.ShaderPass;
-    public composer!: THREE.EffectComposer;
+    public renderCymaticsPass!: ShaderPass;
+    public composer!: EffectComposer;
     public audio!: CymaticsAudio;
 
     public init() {
@@ -107,8 +108,8 @@ export class Cymatics extends ISketch {
             throw computationInitError;
         }
 
-        this.composer = new THREE.EffectComposer(this.renderer);
-        this.renderCymaticsPass = new THREE.ShaderPass(RenderCymaticsShader);
+        this.composer = new EffectComposer(this.renderer);
+        this.renderCymaticsPass = new ShaderPass(RenderCymaticsShader);
         this.renderCymaticsPass.renderToScreen = true;
         this.renderCymaticsPass.uniforms.resolution.value.set(this.canvas.width, this.canvas.height);
         this.renderCymaticsPass.uniforms.cellStateResolution.value.set(this.computation.sizeX, this.computation.sizeY);
@@ -167,17 +168,17 @@ export class Cymatics extends ISketch {
         const skewIntensity = Math.pow(Math.max(0, (this.numCycles - DEFAULT_NUM_CYCLES) / 2. - 0.5), 2);
 
         // grows louder as there's more growAmount, and also when it moves faster
-        const blubVolume = THREE.Math.clamp(Math.pow(THREE.Math.mapLinear(this.growAmount, GROW_AMOUNT_MIN, 1.0, 0.05, 1), 2), 0, 1) * 0.5
+        const blubVolume = THREE.MathUtils.clamp(Math.pow(THREE.MathUtils.mapLinear(this.growAmount, GROW_AMOUNT_MIN, 1.0, 0.05, 1), 2), 0, 1) * 0.5
                     + Math.abs(this.numCycles - DEFAULT_NUM_CYCLES) * 0.25
                     - skewIntensity
-                    + THREE.Math.mapLinear(centerSpeed, 0, 0.005, 0, 1) * THREE.Math.mapLinear(this.growAmount, GROW_AMOUNT_MIN, 1.0, 0.12, 1) * 0.4;
+                    + THREE.MathUtils.mapLinear(centerSpeed, 0, 0.005, 0, 1) * THREE.MathUtils.mapLinear(this.growAmount, GROW_AMOUNT_MIN, 1.0, 0.12, 1) * 0.4;
         this.audio.setBlubVolume(blubVolume);
         // play slowly when there's no movement, play faster when there's a lot of movement
-        const playbackRate = Math.pow(2, THREE.Math.mapLinear(centerSpeed, 0, 0.005, -0.25, 1.5)) + THREE.Math.mapLinear(this.numCycles, DEFAULT_NUM_CYCLES, 2, 0., 4.);
+        const playbackRate = Math.pow(2, THREE.MathUtils.mapLinear(centerSpeed, 0, 0.005, -0.25, 1.5)) + THREE.MathUtils.mapLinear(this.numCycles, DEFAULT_NUM_CYCLES, 2, 0., 4.);
         this.audio.setBlubPlaybackRate(playbackRate);
         // console.log("playback:", playbackRate.toFixed(2), "volume:", volume.toFixed(2));
 
-        this.audio.setOscVolume(THREE.Math.clamp(THREE.Math.smoothstep(this.numCycles, DEFAULT_NUM_CYCLES, DEFAULT_NUM_CYCLES * 1.1) * 0.5, 0, 1));
+        this.audio.setOscVolume(THREE.MathUtils.clamp(THREE.MathUtils.smoothstep(this.numCycles, DEFAULT_NUM_CYCLES, DEFAULT_NUM_CYCLES * 1.1) * 0.5, 0, 1));
         const cycles = (this.numCycles) / (1 + this.slowDownAmount * 3);
         const frequencyScalar = cycles / DEFAULT_NUM_CYCLES;
         this.audio.setOscFrequencyScalar(frequencyScalar);

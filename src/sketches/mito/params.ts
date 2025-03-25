@@ -30,22 +30,19 @@ type Params = typeof PARAMS_DEFAULT;
 export const params = { ...PARAMS_DEFAULT };
 
 if (location.hash.length > 0) {
-    const urlHashParams: object = JSON.parse(decodeURI(location.hash.substr(1)));
+    const urlHashParams = JSON.parse(decodeURI(location.hash.substr(1))) as Partial<Params>;
     Object.assign(params, urlHashParams);
 }
 
 export function updateParamsHash() {
-    const nonDefaultParams: Partial<Params> = {};
-    const keys = Object.keys(PARAMS_DEFAULT) as Array<keyof Params>;
-    for (const key of keys) {
-        if (params[key] !== PARAMS_DEFAULT[key]) {
-            nonDefaultParams[key] = params[key];
-        }
-    }
-    if (Object.keys(nonDefaultParams).length > 0) {
-        location.hash = encodeURI(JSON.stringify(nonDefaultParams));
-    } else {
-        location.hash = "";
-    }
+    const nonDefaultParams = Object.fromEntries(
+        Object.entries(params).filter(
+            ([key, value]) => value !== PARAMS_DEFAULT[key as keyof Params]
+        )
+    ) as Partial<Params>;
+
+    location.hash = Object.keys(nonDefaultParams).length > 0
+        ? encodeURI(JSON.stringify(nonDefaultParams))
+        : "";
 }
 updateParamsHash();

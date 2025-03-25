@@ -13,10 +13,6 @@ try {
 Write-Output "Waiting for 3 seconds..."
 Start-Sleep -Seconds 3
 
-# Set NODE_OPTIONS environment variable
-Write-Output "Setting NODE_OPTIONS to '--openssl-legacy-provider'..."
-$env:NODE_OPTIONS = "--openssl-legacy-provider"
-
 # Run 'yarn start' in a separate process (without waiting for it to return)
 Write-Output "Running 'yarn start'..."
 Start-Process "yarn" -ArgumentList "start"

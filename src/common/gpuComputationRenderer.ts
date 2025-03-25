@@ -95,8 +95,6 @@ import * as THREE from 'three';
  * gpuCompute.doRenderTarget( myFilter1, myRenderTarget );
  * gpuCompute.doRenderTarget( myFilter2, outputRenderTarget );
  *
- *
- *
  * @param {int} sizeX Computation problem size is always 2d: sizeX * sizeY elements.
  * @param {int} sizeY Computation problem size is always 2d: sizeX * sizeY elements.
  * @param {WebGLRenderer} renderer The renderer
@@ -142,7 +140,7 @@ export default class GPUComputationRenderer {
         this.renderer = renderer;
         this.camera.position.z = 1;
         this.passThruShader = this.createShaderMaterial( this.getPassThroughFragmentShader(), this.passThruUniforms );
-        this.mesh = new THREE.Mesh( new THREE.PlaneBufferGeometry( 2, 2 ), this.passThruShader );
+        this.mesh = new THREE.Mesh( new THREE.PlaneGeometry( 2, 2 ), this.passThruShader );
         this.scene.add( this.mesh );
     }
 
@@ -312,8 +310,8 @@ export default class GPUComputationRenderer {
         wrapS = wrapS || THREE.ClampToEdgeWrapping;
         wrapT = wrapT || THREE.ClampToEdgeWrapping;
 
-        minFilter = minFilter || THREE.NearestFilter;
-        magFilter = magFilter || THREE.NearestFilter;
+        minFilter = (minFilter || THREE.NearestFilter) as THREE.MinificationTextureFilter;
+        magFilter = (magFilter || THREE.NearestFilter) as THREE.MagnificationTextureFilter;
 
         const renderTarget = new THREE.WebGLRenderTarget( sizeXTexture, sizeYTexture, {
             wrapS: wrapS,
@@ -362,12 +360,11 @@ export default class GPUComputationRenderer {
 
     };
 
-    public doRenderTarget( material: THREE.MeshMaterialType, output: THREE.WebGLRenderTarget ) {
-
+    public doRenderTarget( material: THREE.ShaderMaterial, output: THREE.WebGLRenderTarget ) {
         this.mesh.material = material;
-        this.renderer.render( this.scene, this.camera, output );
+        this.renderer.setRenderTarget( output );
+        this.renderer.render( this.scene, this.camera );
         this.mesh.material = this.passThruShader;
-
     };
 
     // Shaders

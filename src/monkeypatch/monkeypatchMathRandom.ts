@@ -1,6 +1,12 @@
-import { parse } from "query-string";
+import queryString from "query-string";
 
-const mathRandomSeed: string | undefined = parse(location.search).randomSeed;
+const mathRandomSeed: string | undefined = (() => {
+    const seed = queryString.parse(location.search).randomSeed;
+    if (typeof seed === "string") {
+        return seed;
+    }
+    return undefined;
+})();
 
 if (mathRandomSeed != null) {
     // https://gist.github.com/blixt/f17b47c62508be59987b

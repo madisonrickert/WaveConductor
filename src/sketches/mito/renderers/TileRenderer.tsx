@@ -1,4 +1,4 @@
-import { ArrowHelper, Audio, BufferGeometry, Color, DoubleSide, Float32BufferAttribute, Line, LineBasicMaterial, Material, Mesh, MeshBasicMaterial, Object3D, PlaneBufferGeometry, Scene, Vector2, Vector3 } from "three";
+import { ArrowHelper, Audio, BufferGeometry, Color, DoubleSide, Float32BufferAttribute, Line, LineBasicMaterial, Material, Mesh, MeshBasicMaterial, Object3D, PlaneGeometry, Scene, Vector2, Vector3 } from "three";
 import lazy from "../../../common/lazy";
 import { map } from "../../../math/index";
 import { blopBuffer, suckWaterBuffer } from "../audio";
@@ -12,7 +12,7 @@ import { InventoryRenderer } from "./InventoryRenderer";
 import { Renderer } from "./Renderer";
 
 export class TileMesh extends Mesh {
-    static geometry = new PlaneBufferGeometry(1, 1);
+    static geometry = new PlaneGeometry(1, 1);
     constructor(public renderer: TileRenderer) {
         super(TileMesh.geometry, getMaterial(renderer.target) as MeshBasicMaterial);
     }
@@ -189,7 +189,7 @@ export class TileRenderer<T extends Tile = Tile> extends Renderer<T> {
     }
     static lineGeometry = (() => {
         const g = new BufferGeometry();
-        g.addAttribute('position', new Float32BufferAttribute([0, 0, 0, 0, 1, 0], 3));
+        g.setAttribute('position', new Float32BufferAttribute([0, 0, 0, 0, 1, 0], 3));
         return g;
     })();
     private makeLine(dir: Vector3, origin: Vector3, length: number, color: number) {
