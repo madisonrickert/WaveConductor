@@ -1,9 +1,7 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import Hero from "./hero";
-import { HistorySection } from "./history";
 import { ShrinkingHeader } from "./shrinkingHeader";
-
 import { FaPlay } from "react-icons/fa";
 
 export function HomePage() {
@@ -23,7 +21,6 @@ export function HomePage() {
             <Hero />
             <main className="content">
                 <WorkSection />
-                <HistorySection />
             </main>
             <Footer />
         </div>
