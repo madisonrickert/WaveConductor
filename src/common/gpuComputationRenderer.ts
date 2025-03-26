@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import WebGL from 'three/addons/capabilities/WebGL.js';
 
 // copied from https://github.com/mrdoob/three.js/blob/dev/examples/js/GPUComputationRenderer.js
 // copied from https://gist.github.com/murasaki-uma/ea652e3afb2e419f6f3eadbfac825628
@@ -174,7 +175,7 @@ export default class GPUComputationRenderer {
 
     public init() {
 
-        if ( ! this.renderer.extensions.get( "OES_texture_float" ) ) {
+        if ( ! WebGL.isWebGL2Available() && ! this.renderer.extensions.get( "OES_texture_float" ) ) {
 
             return "No OES_texture_float support for float textures.";
 
