@@ -11,7 +11,7 @@ import { triangleWaveApprox } from "../../common/math";
 import { ISketch } from "../../sketch";
 import { createAudioGroup } from "./audio";
 import { ScreenSaver } from "../../common/screenSaver/screenSaver";
-import { initLeap } from "./leapMotion";
+import { initLeap } from "./lineLeapController";
 
 export class LineSketch extends ISketch {
 
@@ -69,11 +69,11 @@ export class LineSketch extends ISketch {
     };
     public elements = [
         <ScreenSaver
-            ref={(screenSaver: ScreenSaver) => { this.screenSaverEl = screenSaver; }}
+            ref={(screenSaver: ScreenSaver) => { this.screenSaver = screenSaver; }}
             shouldShow={false} // Placeholder, will be updated dynamically
         />
     ];
-    public screenSaverEl: ScreenSaver | null = null;
+    public screenSaver: ScreenSaver | null = null;
     public attractors = [
         makeAttractor(),
         makeAttractor(),
@@ -205,15 +205,15 @@ export class LineSketch extends ISketch {
         (this.points.geometry as THREE.BufferGeometry).attributes.position.needsUpdate = true;
         this.composer.render();
         this.globalFrame++;
-        if (this.screenSaverEl != null) {
+        if (this.screenSaver != null) {
             const isLeapMotionControllerValid = this.controller.lastFrame.valid;
             const numSecondsToShowScreenSaver = 10;
             const shouldShow =
                 !(this.globalFrame - this.lastRenderedFrame < 60 * numSecondsToShowScreenSaver) &&
                 isLeapMotionControllerValid;
 
-            if (this.screenSaverEl) {
-                this.screenSaverEl.setState({ shouldShow }); // Dynamically update shouldShow
+            if (this.screenSaver) {
+                this.screenSaver.setState({ shouldShow }); // Dynamically update shouldShow
             }
         }
     }
