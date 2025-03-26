@@ -162,7 +162,7 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
         volumeEnabled: JSON.parse(window.localStorage.getItem("sketch-volumeEnabled") || "true"),
     };
 
-    // private renderer?: THREE.WebGLRenderer;
+    private renderer?: THREE.WebGLRenderer;
     private audioContext?: SketchAudioContext;
     private userVolume?: GainNode;
 
@@ -181,10 +181,12 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
                 audioContextGain.connect(this.userVolume);
                 document.addEventListener("visibilitychange", this.handleVisibilityChange);
 
-                const renderer = new THREE.WebGLRenderer({ alpha: true, preserveDrawingBuffer: true, antialias: true });
-                ref.appendChild(renderer.domElement);
+                if (!this.renderer) {
+                    this.renderer = new THREE.WebGLRenderer({ alpha: true, preserveDrawingBuffer: true, antialias: true });
+                    ref.appendChild(this.renderer.domElement);
+                }
 
-                const sketch = new (this.props.sketchClass)(renderer, this.audioContext);
+                const sketch = new (this.props.sketchClass)(this.renderer, this.audioContext);
                 this.setState({status: { type: "success", sketch: sketch }});
             } catch (e) {
                 this.setState({ status: { type: "error", error: e instanceof Error ? e : new Error(String(e)) }});
