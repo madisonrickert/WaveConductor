@@ -370,28 +370,23 @@ export default class GPUComputationRenderer {
 
     // Shaders
 
-    public  getPassThroughVertexShader() {
-
-        return	"void main()	{\n" +
-            "\n" +
-            "	gl_Position = vec4( position, 1.0 );\n" +
-            "\n" +
-            "}\n";
-
+    public getPassThroughVertexShader() {
+        return `
+            void main() {
+                gl_Position = vec4( position, 1.0 );
+            }
+        `;
     }
 
-    public  getPassThroughFragmentShader() {
+    public getPassThroughFragmentShader() {
+        return `
+            uniform sampler2D inputTexture;
 
-        return	"uniform sampler2D texture;\n" +
-            "\n" +
-            "void main() {\n" +
-            "\n" +
-            "	vec2 uv = gl_FragCoord.xy / resolution.xy;\n" +
-            "\n" +
-            "	gl_FragColor = texture2D( texture, uv );\n" +
-            "\n" +
-            "}\n";
-
+            void main() {
+                vec2 uv = gl_FragCoord.xy / resolution.xy;
+                gl_FragColor = texture2D( inputTexture, uv );
+            }
+        `;
     }
 
 }
