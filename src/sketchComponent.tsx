@@ -3,17 +3,14 @@ import React from "react";
 import * as THREE from "three";
 import "./sketchComponent.scss";
 
-import { FaVolumeUp, FaVolumeOff } from "react-icons/fa";
-
 import classnames from "classnames";
 import { Link } from "react-router-dom";
-import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS } from "./sketch";
+import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS, UIEventReciever } from "./sketch";
+import { VolumeButton } from "./volumeButton";
 
 const $window = $(window);
-const $body = $(document.body);
 
 export interface ISketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
-    eventsOnBody?: boolean;
     errorElement?: React.JSX.Element;
     sketchClass: SketchConstructor;
 }
@@ -34,14 +31,16 @@ export interface SketchLoading {
 
 export type SketchStatus = SketchSuccess | SketchError | SketchLoading;
 
-// Expects sketch to be setup but not init. SketchSuccessComponent is responsible for:
-//      firing resize events
-//      attaching ui event listeners
-//      keeping focus on the canvas
 interface SketchSuccessComponentProps {
     sketch: ISketch;
-    eventsOnBody?: boolean;
 }
+/**
+ * SketchSuccessComponent is responsible for:
+ * - running init code on sketch
+ * - firing resize events
+ * - attaching ui event listeners
+ * - keeping focus on the canvas
+ */
 class SketchSuccessComponent extends React.Component<SketchSuccessComponentProps, {frameCount: number}> {
     private frameId?: number;
     private lastTimestamp = 0;
@@ -54,23 +53,12 @@ class SketchSuccessComponent extends React.Component<SketchSuccessComponentProps
 
     componentDidMount() {
         this.updateRendererCanvasToMatchParent(this.props.sketch.renderer);
-        $window.resize(this.handleWindowResize);
+        $window.on('resize', this.handleWindowResize);
 
         // canvas setup
         const $canvas = $(this.props.sketch.renderer.domElement);
         $canvas.attr("tabindex", 1);
-        (Object.keys(UI_EVENTS) as Array<keyof typeof UI_EVENTS>).forEach((eventName) => {
-            if (this.props.sketch.events != null) {
-                const callback = this.props.sketch.events[eventName];
-                if (callback != null) {
-                    if (this.props.eventsOnBody) {
-                        $body.on(eventName, callback);
-                    } else {
-                        $canvas.on(eventName, callback);
-                    }
-                }
-            }
-        });
+        this.attachUIEvents($canvas);
         // prevent scrolling the viewport
         // $canvas.on("touchmove", (event) => {
         //     event.preventDefault();
@@ -107,16 +95,24 @@ class SketchSuccessComponent extends React.Component<SketchSuccessComponentProps
         $window.off("resize", this.handleWindowResize);
 
         const $canvas = $(this.props.sketch.canvas);
+        this.removeUIEvents($canvas);
+    }
+
+    private attachUIEvents($target: JQuery<HTMLElement>) {
+        const events = this.props.sketch.events as UIEventReciever;
+        Object.entries(events).forEach(([eventName, callback]) => {
+            if (callback) {
+                $target.on(eventName, callback);
+            }
+        });
+    }
+
+    private removeUIEvents($target: JQuery<HTMLElement>) {
+        const events = this.props.sketch.events as UIEventReciever;
         (Object.keys(UI_EVENTS) as Array<keyof typeof UI_EVENTS>).forEach((eventName) => {
-            if (this.props.sketch.events != null) {
-                const callback = this.props.sketch.events[eventName];
-                if (callback != null) {
-                    if (this.props.eventsOnBody) {
-                        $body.off(eventName, callback);
-                    } else {
-                        $canvas.off(eventName, callback);
-                    }
-                }
+            const callback = events[eventName];
+            if (callback != null) {
+                $target.off(eventName, callback);
             }
         });
     }
@@ -212,12 +208,15 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
             }
         }
 
-        const { sketchClass, eventsOnBody, ...containerProps } = this.props;
+        const { sketchClass, ...containerProps } = this.props;
         const className = classnames("sketch-component", this.state.status.type);
         return (
             <div {...containerProps} id={this.props.sketchClass.id} className={className} ref={this.handleContainerRef}>
                 {this.renderSketchOrStatus()}
-                {this.renderVolumeButton()}
+                <VolumeButton
+                    volumeEnabled={this.state.volumeEnabled}
+                    onClick={this.handleVolumeButtonClick}
+                />
             </div>
         );
     }
@@ -226,7 +225,7 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
         const { status } = this.state;
         if (status.type === "success") {
             // key on id to not destroy and re-create the component somehow
-            return <SketchSuccessComponent key={this.props.sketchClass.id} sketch={status.sketch} eventsOnBody={this.props.eventsOnBody} />;
+            return <SketchSuccessComponent key={this.props.sketchClass.id} sketch={status.sketch} />;
         } else if (status.type === "error") {
             const errorElement = this.props.errorElement || this.renderDefaultErrorElement(status.error.message);
             return errorElement;
@@ -242,15 +241,6 @@ export class SketchComponent extends React.Component<ISketchComponentProps, ISke
                 <pre>{message}</pre>
                 <p><Link className="back" to="/">Back</Link></p>
             </p>
-        );
-    }
-
-    private renderVolumeButton() {
-        const { volumeEnabled } = this.state;
-        return (
-            <button className="user-volume" onClick={this.handleVolumeButtonClick}>
-                { volumeEnabled ? <FaVolumeUp /> : <FaVolumeOff /> }
-            </button>
         );
     }
 
