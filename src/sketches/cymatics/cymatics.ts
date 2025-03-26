@@ -11,9 +11,24 @@ import COMPUTE_CELL_STATE from "./computeCellState.frag";
 
 let mousePressed = false;
 const mousePosition = new THREE.Vector2(0, 0);
-const lastMousePosition = new THREE.Vector2(0, 0);
+// const lastMousePosition = new THREE.Vector2(0, 0);
 
-const QUALITY = screen.width > 480 ? "high" : "low";
+enum Quality {
+    Low,
+    Medium,
+    High,
+}
+let QUALITY: Quality;
+switch (true) {
+    case screen.width > 960:
+        QUALITY = Quality.High;
+        break;
+    case screen.width > 480:
+        QUALITY = Quality.Medium;
+        break;
+    default:
+        QUALITY = Quality.Low;
+}
 
 // an integer makes perfect standing waves. the 0.002 means that the wave will oscillate very slightly per frame; 500 frames per oscillation period
 const DEFAULT_NUM_CYCLES = 1.002;
@@ -40,7 +55,7 @@ export class Cymatics extends ISketch {
             this.setMouse(touchX, touchY);
         },
 
-        touchend: (event: JQuery.Event) => {
+        touchend: (_event: JQuery.Event) => {
             mousePressed = false;
         },
 
@@ -58,7 +73,7 @@ export class Cymatics extends ISketch {
             this.setMouse(mouseX, mouseY);
         },
 
-        mouseup: (event: JQuery.Event) => {
+        mouseup: (_event: JQuery.Event) => {
             mousePressed = false;
         },
     };
@@ -86,11 +101,18 @@ export class Cymatics extends ISketch {
     public init() {
         this.renderer.setClearColor(0xfcfcfc);
         this.renderer.clear();
-        if (QUALITY === "high") {
-            this.computation = new GPUComputationRenderer(512, 512, this.renderer);
-        } else {
-            this.computation = new GPUComputationRenderer(256, 256, this.renderer);
+        switch(QUALITY) {
+            case Quality.High:
+                this.computation = new GPUComputationRenderer(1024, 1024, this.renderer);
+                break;
+            case Quality.Medium:
+                this.computation = new GPUComputationRenderer(512, 512, this.renderer);
+                break;
+            default:
+                this.computation = new GPUComputationRenderer(256, 256, this.renderer);
+                break;
         }
+
         const initialTexture = this.computation.createTexture();
         this.cellStateVariable = this.computation.addVariable("cellStateVariable", COMPUTE_CELL_STATE, initialTexture);
         // this.cellStateVariable.minFilter = THREE.NearestFilter;
@@ -127,7 +149,7 @@ export class Cymatics extends ISketch {
         this.cellStateVariable.material.uniforms.growAmount.value = t;
     }
 
-    public animate(dt: number) {
+    public animate(_dt: number) {
         if (mousePressed) {
             this.numCycles += .0003 + (this.numCycles - DEFAULT_NUM_CYCLES) * 0.0008;
             // numCycles *= 2;
@@ -183,7 +205,18 @@ export class Cymatics extends ISketch {
         const frequencyScalar = cycles / DEFAULT_NUM_CYCLES;
         this.audio.setOscFrequencyScalar(frequencyScalar);
 
-        const numIterations = QUALITY === "high" ? 40 : 20;
+        let numIterations;
+        switch(QUALITY) {
+            case Quality.High:
+                numIterations = 40;
+                break;
+            case Quality.Medium:
+                numIterations = 40;
+                break;
+            default:
+                numIterations = 20;
+                break;
+        }
         const wantedSimulationDt = cycles * Math.PI * 2 / numIterations;
         for (let i = 0; i < numIterations; i++) {
             this.cellStateVariable.material.uniforms.iGlobalTime.value = this.simulationTime;
