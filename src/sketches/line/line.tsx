@@ -99,7 +99,7 @@ export class LineSketch extends ISketch {
     public scene = new THREE.Scene();
 
     public points!: THREE.Points;
-    public controller!: Controller;
+    public leapController!: Controller;
     public composer!: EffectComposer;
 
     public ps!: ParticleSystem;
@@ -141,7 +141,7 @@ export class LineSketch extends ISketch {
         this.gravityShaderPass.renderToScreen = true;
         this.composer.addPass(this.gravityShaderPass);
 
-        this.controller = initLeap(this);
+        this.leapController = initLeap(this);
     }
 
     public animate(_millisElapsed: number) {
@@ -206,7 +206,7 @@ export class LineSketch extends ISketch {
         this.composer.render();
         this.globalFrame++;
         if (this.screenSaver != null) {
-            const isLeapMotionControllerValid = this.controller.lastFrame.valid;
+            const isLeapMotionControllerValid = this.leapController.lastFrame.valid;
             const numSecondsToShowScreenSaver = 10;
             const shouldShow =
                 !(this.globalFrame - this.lastRenderedFrame < 60 * numSecondsToShowScreenSaver) &&
