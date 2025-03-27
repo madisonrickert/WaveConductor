@@ -5,6 +5,8 @@ Install [nvm](https://github.com/nvm-sh/nvm?tab=readme-ov-file#installing-and-up
 
 Install Leap Motion Software (see below).
 
+In a command prompt, navigate to the project root folder (the same folder that contains package.json)
+
 Install global dependencies. `npm i -g yarn`.
 
 Install local dependencies. `yarn install`.
