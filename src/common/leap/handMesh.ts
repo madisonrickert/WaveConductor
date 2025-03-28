@@ -21,6 +21,7 @@ export class HandMesh extends THREE.Object3D {
 
     constructor() {
         super();
+        this.name = 'Hand';
     }
 
     private addFinger(fingerType: number): THREE.Line {
@@ -62,9 +63,9 @@ export class HandMesh extends THREE.Object3D {
 
     public update(canvas: HTMLCanvasElement, hand: Leap.Hand) {
         hand.fingers.forEach((finger) => {
-            const fingerLine = this.addFinger(finger.type);
+            this.addFinger(finger.type);
             finger.bones.forEach((bone) => {
-                const boneMesh = this.addBone(finger.type, bone.type);
+                this.addBone(finger.type, bone.type);
                 const position = mapLeapToThreePosition(canvas, bone.center());
                 this.updateBonePosition(finger.type, bone.type, position);
                 this.updateFingerGeometry(finger.type, bone.type, position);
