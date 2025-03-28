@@ -159,9 +159,11 @@ export class Cymatics extends ISketch {
     onLeapLoop(pinched: boolean): void {
         console.log("pinched:", pinched);
         if (pinched) {
-            mousePressed = true;
-            this.slowDownAmount += 1;
-            this.audio.triggerJitter();
+            if (mousePressed === false) {
+                mousePressed = true;
+                this.slowDownAmount += 1;
+                this.audio.triggerJitter();
+            }
         } else {
             mousePressed = false;
         }
