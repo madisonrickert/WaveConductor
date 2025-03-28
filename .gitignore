@@ -3,6 +3,7 @@ node_modules/
 ableton music
 
 Thumbs.db
+.DS_Store
 
 *.js.map
 *.css.map
