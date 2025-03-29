@@ -1,3 +1,3 @@
 @echo off
-:: Open a new Command Prompt and run the main script
-start powershell -NoExit -File "C:\Users\LoveTech\Downloads\hellochar.com-master\Hellochar.ps1"
+:: Open a new Command Prompt and run the main script using a relative path
+start powershell -NoExit -File "%~dp0Hellochar.ps1"
