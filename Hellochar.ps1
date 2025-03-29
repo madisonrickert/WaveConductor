@@ -7,8 +7,8 @@ Write-Output "Running application server..."
 $yarnPath = Join-Path $env:APPDATA "\npm\node_modules\yarn\bin\yarn.js"
 $yarnProcess = Start-Process "node" -ArgumentList $yarnPath, "preview" -NoNewWindow -PassThru
 
-Write-Output "Waiting for 5 seconds before opening the browser..."
-Start-Sleep -Seconds 5
+Write-Output "Waiting for 2 seconds before opening the browser..."
+Start-Sleep -Seconds 2
 
 Write-Output "Opening browser to http://localhost:4173/cymatics in full screen..."
 Start-Process "chrome.exe" -ArgumentList "--app=http://localhost:4173/cymatics", "--start-fullscreen", "--autoplay-policy=no-user-gesture-required"
