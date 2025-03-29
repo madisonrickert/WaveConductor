@@ -11,7 +11,7 @@ Write-Output "Waiting for 5 seconds before opening the browser..."
 Start-Sleep -Seconds 5
 
 Write-Output "Opening browser to http://localhost:4173/cymatics in full screen..."
-Start-Process "chrome.exe", "--app=http://localhost:4173/cymatics", "--start-fullscreen"
+Start-Process "chrome.exe" -ArgumentList "--app=http://localhost:4173/cymatics", "--start-fullscreen"
 
 # Wait for the user to close the terminal
 Write-Output "Script running. Close the terminal to stop 'yarn preview'."
