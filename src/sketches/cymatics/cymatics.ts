@@ -171,10 +171,14 @@ export class Cymatics extends ISketch {
                 mousePressed = false;
                 return;
             }
+
+            // For now, only one hand controls position
             const primaryHand = newHands[0];
-            const pinched = primaryHand && primaryHand.pinched;
             this.setMouse(primaryHand.position.x, primaryHand.position.y);
-            if (pinched) {
+
+            // Either hand can pinch or squeeze to trigger the effect
+            const isPinched = newHands.some((hand) => hand.pinched);
+            if (isPinched) {
                 if (!mousePressed) {
                     mousePressed = true;
                     this.slowDownAmount += 1;
