@@ -6,9 +6,9 @@
     "lint": "eslint --ext .js,.jsx,.ts,.tsx .",
     "lint:fix": "eslint --ext .js,.jsx,.ts,.tsx . --fix",
     "leap-websocket:macos": "bin/Ultraleap-Tracking-WS-macos-applesilicon",
-    "start": "vite",
+    "start": "vite --port 5173",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview --port 4173"
   },
   "main": "index.html",
   "dependencies": {
