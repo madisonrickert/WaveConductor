@@ -5,11 +5,10 @@ import { IParticle } from "./particleSystem";
 export function createParticlePoints(particles: IParticle[], material: THREE.PointsMaterial) {
     const geometry = new THREE.BufferGeometry();
     const vertices: number[] = [];
-    for (let i = 0; i < particles.length; i++) {
-        const particle = particles[i];
+    for (const particle of particles) {
         const vertex = new THREE.Vector3(particle.x, particle.y, 0);
+        particle.vertex = vertex;
         vertices.push(vertex.x, vertex.y, vertex.z);
-        particles[i].vertex = vertex;
     }
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
     const pointCloud = new THREE.Points(geometry, material);
