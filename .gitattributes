@@ -17,12 +17,15 @@
 *.woff2 binary
 *.ttf binary
 *.eot binary
+*.pkg binary
+*.exe binary
 
 # Normalize line endings for source code
 *.js text eol=lf
 *.jsx text eol=lf
 *.ts text eol=lf
 *.tsx text eol=lf
+*.mjs text eol=lf
 *.json text eol=lf
 *.html text eol=lf
 *.css text eol=lf
@@ -31,9 +34,6 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.xml text eol=lf
-*.sh text eol=lf
-*.bat text eol=crlf
-*.cmd text eol=crlf
 
 # Handle shell scripts properly on Linux/macOS
 *.sh text eol=lf
@@ -41,39 +41,18 @@
 # Handle batch scripts properly on Windows
 *.bat text eol=crlf
 *.cmd text eol=crlf
+*.ps1 text eol=crlf
 
 # Node.js specific
 *.env text eol=lf
 .npmrc text eol=lf
+.nvmrc text eol=lf
+.yarnrc text eol=lf
 *.lock text eol=lf
-package.json text eol=lf
-package-lock.json text eol=lf
-yarn.lock text eol=lf
-
-# Prevent CRLF normalization for binary or generated files
-*.exe binary
-*.dll binary
-*.so binary
-*.node binary
 
 # Exclude minified files from diff
 *.min.js -diff
 *.min.css -diff
 
-# Custom legacy fixes (if using older tooling)
-# Treat legacy config files as text
-*.conf text eol=lf
-*.ini text eol=lf
-
 # Editor config and tooling
 .editorconfig text eol=lf
-.eslintrc.json text eol=lf
-.prettierrc text eol=lf
-
-# Catch-all for script files
-*.ps1 text eol=crlf
-*.pl text eol=lf
-*.py text eol=lf
-
-# Optional: mark all files as safe for diff (you can disable this if you want more control)
-# * text=auto
