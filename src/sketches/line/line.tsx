@@ -1,10 +1,10 @@
 import { Controller } from "leapjs";
 import * as THREE from "three";
-import { ShaderPass, RenderPass, EffectComposer } from "three-stdlib";
+import { RenderPass, EffectComposer } from "three-stdlib";
 import { AudioGroup } from "./types";
 
 import queryString from "query-string";
-import { GravityShader } from "@/common/gravityShader";
+import { GravityShaderPass } from "@/common/shaders/gravity";
 import { computeStats, createParticle, createParticlePoints, IParticle, makeAttractor, ParticleSystem } from "@/common/particleSystem";
 import { triangleWaveApprox } from "@/common/math";
 import { ISketch } from "@/sketch";
@@ -95,7 +95,7 @@ export class LineSketch extends ISketch {
     public mouseY = 0;
 
     public camera = new THREE.OrthographicCamera(0, 0, 0, 0, 1, 1000);
-    public gravityShaderPass = new ShaderPass(GravityShader);
+    public gravityShaderPass = new GravityShaderPass();
     public scene = new THREE.Scene();
 
     public points!: THREE.Points;
