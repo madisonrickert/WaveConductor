@@ -9,6 +9,7 @@ import { computeStats, createParticle, createParticlePoints, IParticle, makeAttr
 import { triangleWaveApprox } from "@/common/math";
 import { ISketch } from "@/sketch";
 import { createAudioGroup } from "./audio";
+import { starMaterial } from "@/common/materials/starMaterial";
 import { ScreenSaver } from "@/common/screenSaver/screenSaver";
 import { initLeap } from "./lineLeapController";
 
@@ -127,7 +128,7 @@ export class LineSketch extends ISketch {
             this.particles,
             PARTICLE_SYSTEM_PARAMS,
         );
-        this.points = createParticlePoints(this.particles, material());
+        this.points = createParticlePoints(this.particles, starMaterial);
         this.scene.add(this.points);
 
         this.composer = new EffectComposer(this.renderer);
@@ -262,15 +263,3 @@ const PARTICLE_SYSTEM_PARAMS = {
     STATIONARY_CONSTANT: 0.0,
     constrainToBox: true,
 };
-
-const material = lazy(() => {
-    const starTexture = new THREE.TextureLoader().load("/assets/sketches/line/star.png");
-    starTexture.minFilter = THREE.NearestFilter;
-    return new THREE.PointsMaterial({
-        size: 13,
-        sizeAttenuation: false,
-        map: starTexture,
-        opacity: 0.25,
-        transparent: true,
-    });
-});

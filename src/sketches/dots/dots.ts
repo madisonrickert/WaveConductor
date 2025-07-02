@@ -4,10 +4,10 @@ import * as THREE from "three";
 import { ShaderPass, EffectComposer, RenderPass } from "three-stdlib";
 
 import { ExplodeShader } from "@/common/explodeShader";
-import lazy from "@/common/lazy";
 import { computeStats, createParticle, createParticlePoints, IParticle, makeAttractor, ParticleSystem, ParticleSystemParameters } from "@/common/particleSystem";
 import { ISketch } from "@/sketch";
 import { createAudioGroup } from "./audio";
+import { starMaterial } from "@/common/materials/starMaterial";
 
 const params: ParticleSystemParameters = {
     timeStep: 0.016 * 3,
@@ -122,7 +122,7 @@ class Dots extends ISketch {
         }
         this.ps = new ParticleSystem(this.canvas, particles, params);
 
-        this.pointCloud = createParticlePoints(particles, material());
+        this.pointCloud = createParticlePoints(particles, starMaterial);
         this.scene.add(this.pointCloud);
 
         this.composer = new EffectComposer(this.renderer);
@@ -156,17 +156,5 @@ class Dots extends ISketch {
         camera.updateProjectionMatrix();
     }
 }
-
-const material = lazy(() => {
-    const starTexture = new THREE.TextureLoader().load("/assets/sketches/line/star.png");
-    starTexture.minFilter = THREE.NearestFilter;
-    return new THREE.PointsMaterial({
-        size: 15,
-        sizeAttenuation: false,
-        map: starTexture,
-        opacity: 0.18,
-        transparent: true,
-    });
-});
 
 export default Dots;
