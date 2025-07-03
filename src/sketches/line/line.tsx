@@ -233,8 +233,6 @@ export class LineSketch extends ISketch {
         this.gravityShaderPass.uniforms.iResolution.value = new THREE.Vector2(width, height);
     }
 
-    // 3 orders of fft for triangle wave
-    // TODO move into math
     public setMousePosition(mx: number, my: number) {
         this.mouseX = mx;
         this.mouseY = my;
