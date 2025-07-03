@@ -21,7 +21,7 @@ const PARTICLE_SYSTEM_PARAMS = {
     constrainToBox: true,
 };
 
-export class LineSketch extends ISketch {
+export default class LineSketch extends ISketch {
     public events = {
         touchstart: (event: JQuery.Event) => {
             // Prevent emulated mouse events from occuring
@@ -246,21 +246,21 @@ export class LineSketch extends ISketch {
     }
 
     // --- Attractor Controls ---
-    public enableFirstAttractor(x: number, y: number) {
+    private enableFirstAttractor(x: number, y: number) {
         const attractor = this.attractors[0];
         attractor.x = x;
         attractor.y = y;
         attractor.power = 20;
     }
 
-    public moveFirstAttractor(x: number, y: number) {
+    private moveFirstAttractor(x: number, y: number) {
         const attractor = this.attractors[0];
         attractor.x = x;
         attractor.y = y;
         attractor.mesh.position.set(x, y, 0);
     }
 
-    public disableFirstAttractor() {
+    private disableFirstAttractor() {
         const attractor = this.attractors[0];
         attractor.power = 0;
     }

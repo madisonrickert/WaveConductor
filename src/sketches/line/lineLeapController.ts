@@ -1,20 +1,20 @@
 import * as Leap from "leapjs";
 import { mapLeapToThreePosition } from "@/common/leap/util";
 import { HandMesh } from "@/common/leap/handMesh";
-import { LineSketch } from "./line";
+import LineSketch from ".";
 
 export function initLeap(sketch: LineSketch): Leap.Controller {
 	const controller = Leap.loop((frame: Leap.Frame) => {
         if (frame.hands.length > 0) {
             sketch.lastRenderedFrame = sketch.globalFrame;
         }
-        sketch.attractors.forEach((attractor) => {
+        for(const attractor of sketch.attractors) {
             if (attractor.handMesh != null) {
                 attractor.handMesh.visible = false;
             }
             attractor.mesh.visible = false;
             attractor.power = 0;
-        });
+        }
         frame.hands.filter((hand) => hand.valid).forEach((hand, index) => {
             const position = hand.indexFinger.bones[3].center();
 
