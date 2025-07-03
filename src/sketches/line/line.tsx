@@ -173,8 +173,16 @@ export class LineSketch extends ISketch {
         }
 
         const nonzeroAttractors = this.attractors.filter((attractor) => attractor.power !== 0);
-
         this.ps.stepParticles(nonzeroAttractors);
+
+        // Update particle positions
+        const positionAttr = this.points.geometry.getAttribute('position');
+        for (let i = 0; i < this.particles.length; i++) {
+            const particle = this.particles[i];
+            positionAttr.setXY(i, particle.x, particle.y);
+        }
+        positionAttr.needsUpdate = true;
+
         const { /* averageX, averageY, */ groupedUpness, /* normalizedAverageVel, */ normalizedVarianceLength, flatRatio, normalizedEntropy } =
             computeStats(this.ps);
 
@@ -201,8 +209,7 @@ export class LineSketch extends ISketch {
         this.gravityShaderPass.uniforms.G.value = triangleWaveApprox(performance.now() / 5000) * (groupedUpness + 0.50) * 15000;
         this.gravityShaderPass.uniforms.iMouseFactor.value = (1 / 15) / (groupedUpness + 1);
         // filter.uniforms['iMouse'].value = new THREE.Vector2(averageX, canvas.height - averageY);
-
-        (this.points.geometry as THREE.BufferGeometry).attributes.position.needsUpdate = true;
+        
         this.composer.render();
         this.globalFrame++;
         if (this.screenSaver != null) {
