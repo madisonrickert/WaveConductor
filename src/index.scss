@@ -18,17 +18,18 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 a {
-    color: $dark-gray1;
+    color: $light-gray1;
     text-decoration: none;
-    transition: border-bottom .05s;
-
-    &:hover {
-        border-bottom: 3px solid $black;
-    }
+    transition: color 0.2s ease-in-out;
 
     &:active {
         position: relative;
         top: 1px;
+    }
+
+    &:hover {
+        text-decoration: none;
+        color: $white;
     }
 }
 
