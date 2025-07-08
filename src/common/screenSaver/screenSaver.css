@@ -20,7 +20,7 @@
     visibility: visible;
 }
 
-.screen-saver-video {
+.screen-saver .video {
     position: absolute;
     top: 0;
     left: 0;
@@ -29,4 +29,52 @@
     object-fit: cover;
     margin: 0;
     padding: 0;
+}
+
+.screen-saver .graphic {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    z-index: 1;
+    filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.8)) 
+            drop-shadow(0 0 40px rgba(255, 255, 255, 0.6)) 
+            drop-shadow(0 0 60px rgba(255, 255, 255, 0.4));
+}
+
+.screen-saver .statue {
+    top: 70%;
+    left: 50%;
+    max-width: 300px;
+    max-height: 400px;
+}
+
+.screen-saver .hand {
+    top: 30%;
+    left: 25%;
+    max-width: 200px;
+    height: auto;
+    animation: hand-drift 8s ease-in-out infinite;
+}
+
+.screen-saver .hand-right {
+    left: 75%;
+    transform: translate(-50%, -50%) scaleX(-1);
+    animation: hand-drift-right 8s ease-in-out infinite;
+}
+
+@keyframes hand-drift {
+    0%, 100% {
+        transform: translate(-50%, -50%) rotate(-5deg);
+    }
+    50% {
+        transform: translate(-20%, -55%) rotate(5deg);
+    }
+}
+
+@keyframes hand-drift-right {
+    0%, 100% {
+        transform: translate(-50%, -50%) scaleX(-1) rotate(-5deg);
+    }
+    50% {
+        transform: translate(-80%, -45%) scaleX(-1) rotate(5deg);
+    }
 }
