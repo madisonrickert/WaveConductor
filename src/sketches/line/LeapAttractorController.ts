@@ -53,7 +53,7 @@ export class LeapAttractorController {
 
         // Update only the attractors and meshes for valid hands
         validHands.forEach((hand, index) => {
-            const position = hand.indexFinger!.bones[3].center();
+            const position = hand.palmPosition;
             const { x, y } = mapLeapToThreePosition(this.sketch.canvas, position);
             if (index === 0) {
                 this.sketch.setGravityFocalPoint(x, y);
