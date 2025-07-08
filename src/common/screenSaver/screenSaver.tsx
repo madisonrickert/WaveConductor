@@ -2,8 +2,8 @@ import classnames from "classnames";
 import React from "react";
 
 import "./screenSaver.css";
-import screenSaverVideoMP4 from "./capture.mp4";
-import screenSaverVideoWEBM from "./capture.webm";
+import screenSaverVideoMP4 from "./screensaver_looped.mp4";
+import screenSaverVideoWEBM from "./screensaver_looped.webm";
 import statueSVG from "./statue.svg";
 import handSVG from "./hand.svg";
 
