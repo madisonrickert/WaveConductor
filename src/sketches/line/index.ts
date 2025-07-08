@@ -22,7 +22,7 @@ const PARTICLE_SYSTEM_PARAMS = {
 const MOUSE_ATTRACTOR_POWER_DECAY_SPEED = 0.9;
 const MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2;
 
-const SCREEN_SAVER_TIMEOUT_SECONDS = 10;
+const SCREEN_SAVER_TIMEOUT_SECONDS = 30;
 
 export default class LineSketch extends ISketch {
     public events = {

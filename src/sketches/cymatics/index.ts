@@ -39,7 +39,7 @@ const DEFAULT_NUM_CYCLES = 1.002;
 // const DEFAULT_NUM_CYCLES = 0.502;
 
 const GROW_AMOUNT_MIN = 0.0;
-const SCREEN_SAVER_TIMEOUT_SECONDS = 10;
+const SCREEN_SAVER_TIMEOUT_SECONDS = 30;
 
 export default class Cymatics extends ISketch {
     public slowDownAmount = 0;
