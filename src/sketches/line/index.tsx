@@ -166,7 +166,6 @@ export default class LineSketch extends ISketch {
 
         // Set up Leap Motion controller
         this.leapAttractorController = new LeapAttractorController(this);
-        this.leapAttractorController.attachToLeap();
     }
 
     public animate(_millisElapsed: number) {

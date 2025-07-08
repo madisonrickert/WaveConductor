@@ -8,7 +8,7 @@ import LineSketch from ".";
  * Wrapper for the Leap Motion controller inside of the line sketch.
  */
 export class LeapAttractorController {
-    public controller: Leap.Controller;
+    public controller = new Leap.Controller();
 
     /**
      * Pool containing all hand meshes.
@@ -20,7 +20,6 @@ export class LeapAttractorController {
      * Adds it to the handMeshesGroup if newly created.
      */
     private getHandMesh(index: number): HandMesh {
-        console.log("getHandMesh", index);
         while (this._handMeshesGroup.children.length <= index) {
             const handMesh = new HandMesh();
             handMesh.name = `HandMesh ${index}`;
@@ -31,16 +30,10 @@ export class LeapAttractorController {
     }
 
     constructor(public sketch: LineSketch) {
-        this.controller = new Leap.Controller().connect();
         this.sketch.scene.add(this._handMeshesGroup);
-    }
-
-    /**
-     * Attach the Leap Motion controller to the sketch.
-     * This will start listening for Leap Motion frames and handle them.
-     */
-    attachToLeap() {
-        this.controller.on('frame', this.handleFrame);
+        this.controller
+            .connect()
+            .on('frame', this.handleFrame);
     }
 
     /**
