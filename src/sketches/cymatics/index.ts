@@ -296,9 +296,5 @@ export default class Cymatics extends ISketch {
             .disconnect();
         this.composer.dispose();
         this.computation.dispose();
-        // this.renderCymaticsPass.dispose();
-
-        console.log(this.renderer.info);
-        console.log("Cymatics destroyed");
     }
 }
