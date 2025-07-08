@@ -124,7 +124,7 @@ export class CymaticsAudio {
     }
 
     setBlubVolume(v: number) {
-        this.blub.volume = THREE.MathUtils.clamp(v * 0.7, 0, 1);
+        this.blub.volume = THREE.MathUtils.clamp(v * 0.05, 0, 0.3);
     }
 
     setBlubPlaybackRate(r: number) {
