@@ -4,10 +4,10 @@ import { Link } from "react-router";
 import * as THREE from "three";
 import classnames from "classnames";
 
-import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS, UIEventReciever } from "./sketch";
-import { VolumeButton } from "./components/volumeButton";
-import { HandData, HandOverlay } from "./components/HandOverlay";
-import { ScreenSaver } from "./common/screenSaver/screenSaver";
+import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS, UIEventReciever } from "@/sketch";
+import { VolumeButton } from "@/components/volumeButton";
+import { HandData, HandOverlay } from "@/components/HandOverlay";
+import { ScreenSaver } from "@/components/screenSaver";
 
 import "./sketchComponent.scss";
 

@@ -9,9 +9,9 @@ interface OscillatorWithGain extends OscillatorNode {
 
 function makeAudioSrcs(fileName: string) {
     return [
-        `/assets/audio/cymatics/${fileName}.webm`,
-        `/assets/audio/cymatics/${fileName}.mp3`,
-        `/assets/audio/cymatics/${fileName}.wav`,
+        new URL(`./audio/${fileName}.webm`, import.meta.url).toString(),
+        new URL(`./audio/${fileName}.mp3`, import.meta.url).toString(),
+        new URL(`./audio/${fileName}.wav`, import.meta.url).toString(),
     ];
 }
 

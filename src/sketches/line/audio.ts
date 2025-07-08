@@ -1,6 +1,9 @@
 import { AudioClip } from "@/audio";
 import { SketchAudioContext } from "@/sketch";
 
+import audioBackgroundMp3 from "./audio/line_background.mp3";
+import audioBackgroundOgg from "./audio/line_background.ogg";
+
 export interface LineSketchAudioGroup {
     analyser: AnalyserNode;
     chordGain: GainNode;
@@ -20,8 +23,8 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
     const backgroundAudio = new AudioClip({
         context: ctx,
         srcs: [
-            "/assets/sketches/line/line_background.mp3",
-            "/assets/sketches/line/line_background.ogg",
+            audioBackgroundMp3,
+            audioBackgroundOgg,
         ],
         autoplay: true,
         loop: true,

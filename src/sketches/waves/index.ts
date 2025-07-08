@@ -157,8 +157,8 @@ class LineStrip {
 
 function createAudioGroup(audioContext: SketchAudioContext) {
     const backgroundAudio = $("<audio autoplay loop>")
-                            .append('<source src="/assets/sketches/waves/waves_background.mp3" type="audio/mp3">')
-                            .append('<source src="/assets/sketches/waves/waves_background.ogg" type="audio/ogg">') as JQuery<HTMLMediaElement>;
+        .append(`<source src="${new URL('./audio/waves_background.mp3', import.meta.url).toString()}" type="audio/mp3">`)
+        .append(`<source src="${new URL('./audio/waves_background.ogg', import.meta.url).toString()}" type="audio/ogg">`) as JQuery<HTMLMediaElement>;
 
     const sourceNode = audioContext.createMediaElementSource(backgroundAudio[0]);
     $("body").append(backgroundAudio);
@@ -268,7 +268,7 @@ class Waves extends ISketch {
             this.setVelocityFromTouchEvent(event);
         },
 
-        touchend: (event: JQuery.Event) => {
+        touchend: (_event: JQuery.Event) => {
             isTimeFast = false;
         },
     };

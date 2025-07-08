@@ -1,6 +1,6 @@
 import { Route, Routes } from "react-router";
 import { HomePage } from "./routes/homePage";
-import { SketchComponent } from "./sketchComponent";
+import { SketchComponent } from "./components/sketchComponent";
 import { useHotkeys } from 'react-hotkeys-hook';
 import { useNavigate } from "react-router";
 
