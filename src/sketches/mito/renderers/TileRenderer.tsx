@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import { ArrowHelper, Audio, BufferGeometry, Color, DoubleSide, Float32BufferAttribute, Line, LineBasicMaterial, Material, Mesh, MeshBasicMaterial, Object3D, PlaneGeometry, Scene, Vector2, Vector3 } from "three";
 import lazy from "@/common/lazy";
 import { map } from "@/common/math";

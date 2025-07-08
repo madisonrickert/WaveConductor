@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import { EventEmitter } from "events";
 import { Vector2 } from "three";
 import { Action, ActionBuild, ActionBuildTransport, ActionDeconstruct, ActionDrop, ActionMove, ActionMultiple } from "../action";

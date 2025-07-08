@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import { ArrowHelper, Object3D, Scene, Vector2, Vector3 } from "three";
 
 import Mito from "..";

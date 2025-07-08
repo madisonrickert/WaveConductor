@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import queryString from "query-string";
 import React from "react";
 import * as THREE from "three";

@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import { Color, DoubleSide, PointsMaterial, Scene, Vector2, Vector3 } from "three";
 
 import lazy from "@/common/lazy";

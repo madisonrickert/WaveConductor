@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import { Action, ActionMove } from "./action";
 import { Constructor } from "./constructor";
 import { DIRECTIONS } from "./directions";

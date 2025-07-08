@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 export interface Constructor<T> {
     new(...args: any[]): T;
     displayName: string;

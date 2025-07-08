@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import { Color, DoubleSide, Mesh, MeshBasicMaterial, PlaneGeometry, Scene } from "three";
 
 import devlog from "@/common/devlog";

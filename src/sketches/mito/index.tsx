@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import React from "react";
 import * as THREE from "three";
 import { Object3D, OrthographicCamera, Scene, Vector3 } from "three";

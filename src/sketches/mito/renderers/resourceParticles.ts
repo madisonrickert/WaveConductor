@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import { BufferAttribute, BufferGeometry, Color, Points, ShaderMaterial, Texture, DynamicDrawUsage } from "three";
 
 export class ResourceParticles extends Points {
