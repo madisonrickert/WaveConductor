@@ -6,11 +6,10 @@ import { computeStats, createParticle, createParticlePoints, IParticle, Particle
 import { Attractor } from "@/common/particleSystem/attractor";
 import { triangleWaveApprox } from "@/common/math";
 import { ISketch } from "@/sketch";
-import { createAudioGroup } from "./audio";
+import { createAudioGroup, LineSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
 import { ScreenSaver } from "@/common/screenSaver/screenSaver";
 import { LeapAttractorController } from "./LeapAttractorController";
-import { AudioGroup } from "./types";
 
 const PARTICLE_SYSTEM_PARAMS = {
     GRAVITY_CONSTANT: 280,
@@ -89,7 +88,7 @@ export default class LineSketch extends ISketch {
     public globalFrame = 0;
     public lastRenderedFrame = -Infinity;
 
-    public audioGroup!: AudioGroup;
+    public audioGroup!: LineSketchAudioGroup;
     public particles: IParticle[] = [];
 
     // Three.js & Rendering

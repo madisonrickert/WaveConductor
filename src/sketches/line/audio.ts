@@ -1,8 +1,22 @@
 import { AudioClip } from "@/audio";
 import { SketchAudioContext } from "@/sketch";
-import { AudioGroup } from "./types";
 
-export function createAudioGroup(ctx: SketchAudioContext): AudioGroup {
+export interface LineSketchAudioGroup {
+    analyser: AnalyserNode;
+    chordGain: GainNode;
+    sourceGain: GainNode;
+    sourceLfo: OscillatorNode;
+    lfoGain: GainNode;
+    filter: BiquadFilterNode;
+    filter2: BiquadFilterNode;
+    filterGain: GainNode;
+    setFrequency: (freq: number) => void;
+    setNoiseFrequency: (freq: number) => void;
+    setVolume: (volume: number) => void;
+    setBackgroundVolume: (volume: number) => void;
+}
+
+export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup {
     const backgroundAudio = new AudioClip({
         context: ctx,
         srcs: [
