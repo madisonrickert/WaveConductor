@@ -32,9 +32,8 @@ export default class LineSketch extends ISketch {
             // Offset the touchY by its radius so the attractor is above the thumb
             touchY -= 100;
 
-            this.mouseX = touchX;
-            this.mouseY = touchY;
-            this.enableFirstAttractor(touchX, touchY);
+            this.setGravityFocalPoint(touchX, touchY);
+            this.enableMouseAttractor(touchX, touchY);
         },
 
         touchmove: (event: JQuery.Event) => {
@@ -43,34 +42,35 @@ export default class LineSketch extends ISketch {
             let touchY = touch.pageY;
             touchY -= 100;
 
-            this.mouseX = touchX;
-            this.mouseY = touchY;
-            this.moveFirstAttractor(touchX, touchY);
+            this.setGravityFocalPoint(touchX, touchY);
+            this.moveMouseAttractor(touchX, touchY);
         },
 
         touchend: (_event: JQuery.Event) => {
-            this.disableFirstAttractor();
+            this.disableMouseAttractor();
         },
 
         mousedown: (event: JQuery.Event) => {
             if (event.which === 1) {
                 const mouseEvent = event as JQuery.Event & { originalEvent: MouseEvent };
-                this.mouseX = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
-                this.mouseY = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
-                this.enableFirstAttractor(this.mouseX, this.mouseY);
+                const x = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
+                const y = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
+                this.setGravityFocalPoint(x, y);
+                this.enableMouseAttractor(x, y);
             }
         },
 
         mousemove: (event: JQuery.Event) => {
             const mouseEvent = event as JQuery.Event & { originalEvent: MouseEvent };
-            this.mouseX = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
-            this.mouseY = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
-            this.moveFirstAttractor(this.mouseX, this.mouseY);
+            const x = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
+            const y = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
+            this.setGravityFocalPoint(x, y);
+            this.moveMouseAttractor(x, y);
         },
 
         mouseup: (event: JQuery.Event) => {
             if (event.which === 1) {
-                this.disableFirstAttractor();
+                this.disableMouseAttractor();
             }
         },
     };
@@ -89,14 +89,13 @@ export default class LineSketch extends ISketch {
     public audioGroup!: AudioGroup;
     public particles: IParticle[] = [];
 
-    // TODO move into core isketch
-    public mouseX = 0;
-    public mouseY = 0;
-
     // Three.js & Rendering
-    public attractors: Attractor[] = [];
+    public mouseAttractor: Attractor = new Attractor();
+    public leapAttractors: Attractor[] = [];
     public camera = new THREE.OrthographicCamera(0, 0, 0, 0, 1, 1000);
     public gravityShaderPass = new GravityShaderPass();
+    public gravityFocalX = 0;
+    public gravityFocalY = 0;
     public scene = new THREE.Scene();
     public points!: THREE.Points;
     public leapAttractorController!: LeapAttractorController;
@@ -104,18 +103,18 @@ export default class LineSketch extends ISketch {
     public ps!: ParticleSystem;
 
     /**
-     * Returns the attractor at the given index, creating it if necessary.
+     * Returns the Leap-managed attractor at the given index, creating it if necessary.
      * Adds its mesh to the scene if newly created.
      */
-    public getAttractor(index: number): Attractor {
-        while (this.attractors.length <= index) {
+    public getLeapAttractor(index: number): Attractor {
+        while (this.leapAttractors.length <= index) {
             const attractor = new Attractor();
-            this.attractors.push(attractor);
+            this.leapAttractors.push(attractor);
             if (this.scene) {
                 this.scene.add(attractor.ringMeshesGroup);
             }
         }
-        return this.attractors[index];
+        return this.leapAttractors[index];
     }
 
     public init() {
@@ -126,8 +125,8 @@ export default class LineSketch extends ISketch {
         this.resize(this.canvas.width, this.canvas.height);
         this.camera.position.z = 500;
 
-        // Ensure at least one attractor exists for mouse/touch
-        this.getAttractor(0);
+        // Add mouse attractor mesh to scene
+        this.scene.add(this.mouseAttractor.ringMeshesGroup);
 
         // Determine number of particles (query param or device type)
         const NUM_PARTICLES = Number(queryString.parse(location.search).p) ||
@@ -168,23 +167,27 @@ export default class LineSketch extends ISketch {
     }
 
     public animate(_millisElapsed: number) {
-        // Animate all attractors in the pool
-        for (const attractor of this.attractors) {
+        // Animate all attractors
+        this.mouseAttractor.animate(_millisElapsed);
+        for (const attractor of this.leapAttractors) {
             attractor.animate(_millisElapsed);
         }
 
-        // Update shader with first attractor position (mouse/touch)
-        const firstAttractor = this.getAttractor(0);
+        // Use the focal point set by setGravityFocalPoint
         this.gravityShaderPass.uniforms.iMouse.value.set(
-            firstAttractor.x,
-            this.renderer.domElement.height - firstAttractor.y
+            this.gravityFocalX,
+            this.renderer.domElement.height - this.gravityFocalY
         );
 
         // Step particles with all active attractors
-        const nonzeroAttractors = this.attractors.filter((attractor) => attractor.power !== 0);
-        this.ps.stepParticles(nonzeroAttractors);
+        const activeAttractors = [
+            ...(this.mouseAttractor.power !== 0 ? [this.mouseAttractor] : []),
+            ...this.leapAttractors.filter((attractor) => attractor.power !== 0)
+        ];
+        this.ps.stepParticles(activeAttractors);
 
         // Update particle positions in geometry
+        // @todo Move to ParticleSystem
         const positionAttr = this.points.geometry.getAttribute('position');
         for (let i = 0; i < this.particles.length; i++) {
             const particle = this.particles[i];
@@ -238,27 +241,24 @@ export default class LineSketch extends ISketch {
         this.gravityShaderPass.uniforms.iResolution.value = new THREE.Vector2(width, height);
     }
 
-    public setMousePosition(mx: number, my: number) {
-        this.mouseX = mx;
-        this.mouseY = my;
+    public setGravityFocalPoint(x: number, y: number) {
+        this.gravityFocalX = x;
+        this.gravityFocalY = y;
     }
 
     // --- Attractor Controls ---
-    private enableFirstAttractor(x: number, y: number) {
-        const attractor = this.getAttractor(0);
-        attractor.x = x;
-        attractor.y = y;
-        attractor.power = 20;
+    private enableMouseAttractor(x: number, y: number) {
+        this.mouseAttractor.x = x;
+        this.mouseAttractor.y = y;
+        this.mouseAttractor.power = 20;
     }
 
-    private moveFirstAttractor(x: number, y: number) {
-        const attractor = this.getAttractor(0);
-        attractor.x = x;
-        attractor.y = y;
+    private moveMouseAttractor(x: number, y: number) {
+        this.mouseAttractor.x = x;
+        this.mouseAttractor.y = y;
     }
 
-    private disableFirstAttractor() {
-        const attractor = this.getAttractor(0);
-        attractor.power = 0;
+    private disableMouseAttractor() {
+        this.mouseAttractor.power = 0;
     }
 }
