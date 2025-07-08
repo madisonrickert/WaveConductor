@@ -21,6 +21,9 @@ const PARTICLE_SYSTEM_PARAMS = {
     constrainToBox: true,
 };
 
+const MOUSE_ATTRACTOR_POWER_DECAY_SPEED = 0.9;
+const MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2;
+
 export default class LineSketch extends ISketch {
     public events = {
         touchstart: (event: JQuery.Event) => {
@@ -173,12 +176,6 @@ export default class LineSketch extends ISketch {
             attractor.animate(_millisElapsed);
         }
 
-        // Use the focal point set by setGravityFocalPoint
-        this.gravityShaderPass.uniforms.iMouse.value.set(
-            this.gravityFocalX,
-            this.renderer.domElement.height - this.gravityFocalY
-        );
-
         // Step particles with all active attractors
         const activeAttractors = [
             ...(this.mouseAttractor.power !== 0 ? [this.mouseAttractor] : []),
@@ -208,6 +205,10 @@ export default class LineSketch extends ISketch {
         this.gravityShaderPass.uniforms.iGlobalTime.value = performance.now() / 1000;
         this.gravityShaderPass.uniforms.G.value = triangleWaveApprox(performance.now() / 5000) * (groupedUpness + 0.50) * 15000;
         this.gravityShaderPass.uniforms.iMouseFactor.value = (1 / 15) / (groupedUpness + 1);
+        this.gravityShaderPass.uniforms.iMouse.value.set(
+            this.gravityFocalX,
+            this.renderer.domElement.height - this.gravityFocalY
+        );
 
         // --- Render ---
         this.composer.render();
@@ -222,6 +223,13 @@ export default class LineSketch extends ISketch {
                 isLeapMotionControllerValid;
 
             this.screenSaver.setState({ shouldShow }); // Dynamically update shouldShow
+        }
+
+        // --- Update attractor power
+        if (this.mouseAttractor.power > 0) {
+            this.mouseAttractor.power =
+                MOUSE_ATTRACTOR_POWER_DECAY_FLOOR +
+                (this.mouseAttractor.power - MOUSE_ATTRACTOR_POWER_DECAY_FLOOR) * MOUSE_ATTRACTOR_POWER_DECAY_SPEED;
         }
     }
 
@@ -241,7 +249,7 @@ export default class LineSketch extends ISketch {
     private enableMouseAttractor(x: number, y: number) {
         this.mouseAttractor.x = x;
         this.mouseAttractor.y = y;
-        this.mouseAttractor.power = 20;
+        this.mouseAttractor.power = 10;
     }
 
     private moveMouseAttractor(x: number, y: number) {

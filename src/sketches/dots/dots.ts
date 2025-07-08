@@ -19,6 +19,9 @@ const params: ParticleSystemParameters = {
     constrainToBox: false,
 };
 
+const ATTRACTOR_POWER_DECAY_SPEED = 0.9;
+const ATTRACTOR_POWER_DECAY_FLOOR = 2;
+
 const attractor = new Attractor();
 let mouseX: number, mouseY: number;
 
@@ -145,6 +148,12 @@ class Dots extends ISketch {
         this.shader.uniforms.iMouse.value = new THREE.Vector2(mouseX / this.canvas.width, (this.canvas.height - mouseY) / this.canvas.height);
 
         this.composer.render();
+
+        if (attractor.power > 0) {
+            attractor.power =
+                ATTRACTOR_POWER_DECAY_FLOOR +
+                (attractor.power - ATTRACTOR_POWER_DECAY_FLOOR) * ATTRACTOR_POWER_DECAY_SPEED;
+        }
     }
 
     public resize(width: number, height: number) {

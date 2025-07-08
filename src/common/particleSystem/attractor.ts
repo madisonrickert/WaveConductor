@@ -71,9 +71,5 @@ export class Attractor {
         // Scale the rings based on power
         const scale = Math.sqrt(this.power) / 5;
         this.ringMeshesGroup.scale.set(scale, scale, scale);
-
-        // @todo Move this logic to a model, let this class just be a view
-        // Smoothly tend towards power 2
-        this.power = this.power * 0.5 + 2 * 0.5;
     }
 }
