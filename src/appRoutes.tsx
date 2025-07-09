@@ -2,15 +2,15 @@ import { Route, Routes } from "react-router";
 import { HomePage } from "./routes/homePage";
 import { SketchComponent } from "./components/sketchComponent";
 import { useHotkeys } from 'react-hotkeys-hook';
-import { useNavigate } from "react-router";
+import { useThrottledNavigate } from "@/common/hooks/useThrottledNavigate";
 
 import { LineSketch, FlameSketch, Dots, Cymatics, Mito, Waves } from "./sketches";
 
 export const AppRoutes = () => {
-    const navigate = useNavigate();
+    const throttledNavigate = useThrottledNavigate(500);
 
-    useHotkeys('z', () => navigate('/line'));
-    useHotkeys('x', () => navigate('/cymatics'));
+    useHotkeys('z', () => throttledNavigate('/line'));
+    useHotkeys('x', () => throttledNavigate('/cymatics'));
 
     return (
         <Routes>

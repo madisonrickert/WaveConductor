@@ -268,7 +268,7 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
             oscillators.forEach(osc => {
                 try {
                     osc.stop();
-                } catch (e) {
+                } catch (_e) {
                     // Oscillator may already be stopped
                 }
             });
@@ -276,7 +276,7 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
             // Stop buffer source
             try {
                 noise.stop();
-            } catch (e) {
+            } catch (_e) {
                 // May already be stopped
             }
             
@@ -284,7 +284,7 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
             audioNodes.forEach(node => {
                 try {
                     node.disconnect();
-                } catch (e) {
+                } catch (_e) {
                     // Node may already be disconnected
                 }
             });

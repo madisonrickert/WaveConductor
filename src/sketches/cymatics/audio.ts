@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import debounce from "debounce";
+import { throttle } from "radash";
 
 import { AudioClip, createWhiteNoise } from "@/audio";
 import { SketchAudioContext } from "@/sketch";
@@ -98,10 +98,13 @@ export class CymaticsAudio {
 
         this.setOscFrequencyScalar(1);
 
-        this.debouncedTriggerJitter = debounce(() => {
-            this.kick.play();
-            this.risingBass.play();
-        }, 500);
+        this.debouncedTriggerJitter = throttle(
+            { interval: 500 },
+            () => {
+                this.kick.play();
+                this.risingBass.play();
+            }
+        );
     }
 
     private makeOsc(volume: number) {
@@ -166,7 +169,7 @@ export class CymaticsAudio {
                 osc.stop();
                 osc.disconnect();
                 osc.gain.disconnect();
-            } catch (e) {
+            } catch (_e) {
                 // Oscillator may already be stopped/disconnected
             }
         });
@@ -175,7 +178,7 @@ export class CymaticsAudio {
         try {
             this.whiteNoise.stop();
             this.whiteNoise.disconnect();
-        } catch (e) {
+        } catch (_e) {
             // May already be stopped
         }
 
@@ -190,7 +193,7 @@ export class CymaticsAudio {
         audioNodes.forEach(node => {
             try {
                 node.disconnect();
-            } catch (e) {
+            } catch (_e) {
                 // Node may already be disconnected
             }
         });
