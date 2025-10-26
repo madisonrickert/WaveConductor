@@ -247,6 +247,10 @@ export default class LineSketch extends ISketch {
         this.scene.clear();
         
         // Dispose of Three.js resources
+        for(const pass of this.composer.passes) {
+            pass.dispose();
+            this.composer.removePass(pass);
+        }
         this.composer.dispose();
         
         // Dispose point cloud geometry and material

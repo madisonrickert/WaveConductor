@@ -319,6 +319,10 @@ export default class Cymatics extends ISketch {
             .disconnect();
 
         // Clean up Three.js resources
+        for(const pass of this.composer.passes) {
+            pass.dispose();
+            this.composer.removePass(pass);
+        }
         this.composer.dispose();
         this.computation.dispose();
     }
