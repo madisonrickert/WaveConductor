@@ -12,15 +12,22 @@
 uniform float iGlobalTime;
 // uniform vec2 iMouse;
 uniform vec2 center;
-uniform float growAmount;
+uniform float activeRadius;
 
-#define FORCE_CONSTANT 0.25
+const float FORCE_MULTIPLIER = 0.25; 
+const float VELOCITY_DECAY_FACTOR = 0.99818;
+const float HEIGHT_DECAY_FACTOR = 0.9999;
+const float ACCUMULATED_HEIGHT_DECAY_FACTOR = 0.999;
 
-const vec2 uvOffset = (1. / resolution);
+const vec2 v_texelSize = (1. / resolution);
+const float f_texelSpacing = length(v_texelSize);
+const vec2 v_texelDiagUR = vec2(+v_texelSize.x, +v_texelSize.y);
+const vec2 v_texelDiagUL = vec2(-v_texelSize.x, +v_texelSize.y);
+const vec2 v_texelDiagLR = vec2(+v_texelSize.x, -v_texelSize.y);
+const vec2 v_texelDiagLL = vec2(-v_texelSize.x, -v_texelSize.y);
 
-
-float forceContribution(float height, vec2 uv) {
-    vec4 neighborState = texture2D(cellStateVariable, uv);
+float physicsForceContribution(float height, vec2 coord) {
+    vec4 neighborState = texture2D(cellStateVariable, coord);
     float neighborHeight = neighborState.x;
 
     return (neighborHeight - height);
@@ -28,47 +35,44 @@ float forceContribution(float height, vec2 uv) {
 
 void main() {
     vec2 v_uv = gl_FragCoord.xy / resolution;
+    
+    vec2 v_uvOffsetFromCenter = v_uv - center;
+    float uvOffsetFromCenterLength = length(v_uvOffsetFromCenter);
+
     vec4 cellState = texture2D(cellStateVariable, v_uv);
     float height = cellState.x;
     float velocity = cellState.y;
-    float accumulatedHeight = cellState.z;
+    float accumulatedHeight = cellState.z;  
 
-    float aliveAmount = clamp(growAmount + min(0.8, (iGlobalTime - 500.) / 500.) - length(v_uv - center), 0., 1.);
+    float aliveAmount = clamp(activeRadius + min(0.8, (iGlobalTime - 500.) / 500.) - uvOffsetFromCenterLength, 0., 1.);
+
+    // Exit early for inactive cells
+    if (aliveAmount < 1e-3 && abs(height) < 1e-4 && abs (velocity) < 1e-4) {
+        return;
+    }
 
     float force = 0.;
-    force += forceContribution(height, v_uv + vec2(-uvOffset.s, -uvOffset.t));
-    // force += forceContribution(height, v_uv + vec2(-uvOffset.s, 0.));
-    force += forceContribution(height, v_uv + vec2(-uvOffset.s, +uvOffset.t));
-    // force += forceContribution(height, v_uv + vec2(0., -uvOffset.t));
-    // force += forceContribution(height, v_uv + vec2(0., 0.));
-    // force += forceContribution(height, v_uv + vec2(0., +uvOffset.t));
-    force += forceContribution(height, v_uv + vec2(+uvOffset.s, -uvOffset.t));
-    // force += forceContribution(height, v_uv + vec2(+uvOffset.s, 0.));
-    force += forceContribution(height, v_uv + vec2(+uvOffset.s, +uvOffset.t));
-    force *= FORCE_CONSTANT;
-
-    // THIS SHIT MAKES IT GO CRAZY and leave a slime trail! looks really cool
-    // force *= aliveAmount;
+    force += physicsForceContribution(height, v_uv + v_texelDiagUR);
+    force += physicsForceContribution(height, v_uv + v_texelDiagUL);
+    force += physicsForceContribution(height, v_uv + v_texelDiagLR);
+    force += physicsForceContribution(height, v_uv + v_texelDiagLL);
+    force *= FORCE_MULTIPLIER;
 
     velocity += force;
-    // velocity *= 0.98718;
-    velocity *= 0.99818;
+    velocity *= VELOCITY_DECAY_FACTOR;
 
     height += velocity;
-    height *= 0.9999;
+    height *= HEIGHT_DECAY_FACTOR;
 
-    // vec2 center = vec2(0.5) + iMouse * 0.50 * vec2(2., 1.);
-    if (length(v_uv - center) < length(uvOffset) * 2.) {
-        float amount = clamp(1. / (1. + pow(length(v_uv - center) / length(uvOffset), 2.)), 0., 1.);
-    // if (length(v_uv - (iMouse + vec2(1.)) / 2.) < length(uvOffset) * 1.) {
-        // height = sin(iGlobalTime);
+    if (uvOffsetFromCenterLength < f_texelSpacing * 2.) {
+        float amount = clamp(1. / (1. + pow(uvOffsetFromCenterLength / f_texelSpacing, 2.)), 0., 1.);
         height = mix(height, 2. * sin(iGlobalTime), amount);
     }
 
     height *= aliveAmount;
     velocity *= aliveAmount;
 
-    accumulatedHeight *= 0.999;
+    accumulatedHeight *= ACCUMULATED_HEIGHT_DECAY_FACTOR;
     accumulatedHeight += height;
 
     vec4 newCellState = vec4(height, velocity, accumulatedHeight, cellState.w);
