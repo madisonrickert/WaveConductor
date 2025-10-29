@@ -9,6 +9,7 @@ export interface IParticle {
     dx: number;
     dy: number;
     vertex: THREE.Vector3 | null;
+    color: THREE.Vector4 | null;
 }
 
 export function createParticle(originalX: number, originalY: number): IParticle {
@@ -20,6 +21,7 @@ export function createParticle(originalX: number, originalY: number): IParticle 
         x: originalX,
         y: originalY,
         vertex: null!,
+        color: null!,
     };
 }
 
@@ -30,6 +32,7 @@ export interface ParticleSystemParameters {
     PULLING_DRAG_CONSTANT: number;
     INERTIAL_DRAG_CONSTANT: number;
     STATIONARY_CONSTANT: number; // = 0.01;
+    FADE_DURATION: number;
     constrainToBox: boolean;
 }
 
@@ -50,6 +53,8 @@ export class ParticleSystem {
         particle.x = particle.originalX;
         particle.y = particle.originalY;
         particle.dx = particle.dy = 0;
+        if (particle.color)
+            particle.color.w = 0;
     }
 
     stepParticles(nonzeroAttractors: Attractor[], pointCloud: THREE.Points) {
@@ -69,6 +74,10 @@ export class ParticleSystem {
         } = params;
 
         const pointsPositionAttribute = pointCloud.geometry.getAttribute('position');
+        const pointsColorAttribute = pointCloud.geometry.getAttribute('color');
+
+        let positionNeedsUpdate = false;
+        let colorNeedsUpdate = false;
 
         const hasAttractors = nonzeroAttractors.length > 0;
         const dragConstant = hasAttractors ? BAKED_PULLING_DRAG_CONSTANT : BAKED_INERTIAL_DRAG_CONSTANT;
@@ -118,8 +127,23 @@ export class ParticleSystem {
 
             // Update the position attribute for the points geometry
             pointsPositionAttribute.setXY(i, particle.x, particle.y);
+            positionNeedsUpdate = true;
+
+            // Update particle colors
+            if (particle.color) {
+                // Fade up alpha towards 1
+                let alpha = particle.color.w;
+                if (alpha < 1) {
+                    alpha = Math.min(1, alpha + timeStep / params.FADE_DURATION);
+                    particle.color.w = alpha;
+                }
+                pointsColorAttribute.setW(i, alpha);
+
+                colorNeedsUpdate = true;
+            }
         }
 
-        pointsPositionAttribute.needsUpdate = true;
+        pointsPositionAttribute.needsUpdate = positionNeedsUpdate;
+        pointsColorAttribute.needsUpdate = colorNeedsUpdate;
     }
 }

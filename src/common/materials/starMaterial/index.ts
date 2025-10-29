@@ -8,6 +8,7 @@ export const starMaterial = new THREE.PointsMaterial({
   size: 13,
   sizeAttenuation: false,
   map: starTexture,
-  opacity: 0.25,
+  opacity: 1,
   transparent: true,
+  vertexColors: true,
 });
