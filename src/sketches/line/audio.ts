@@ -29,7 +29,7 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
         ],
         autoplay: true,
         loop: true,
-        volume: 0.5,
+        volume: 1.0,
     });
 
     backgroundAudio.getNode().connect(ctx.gain);
