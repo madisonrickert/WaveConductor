@@ -122,9 +122,11 @@ export class Mito extends ISketch {
     }
 
     public events = {
-        contextmenu: (event: JQuery.Event) => {
+        contextmenu: (event: MouseEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
             if (this.uiState.type === "main") {
-                const tile = this.getTileAtScreenPosition(event.clientX!, event.clientY!);
+                const tile = this.getTileAtScreenPosition(event.clientX, event.clientY);
                 if (tile != null) {
                     this.world.player.setAction({
                         type: "deconstruct",
@@ -132,29 +134,27 @@ export class Mito extends ISketch {
                     });
                 }
             }
-            return false;
         },
-        mousemove: (event: JQuery.Event) => {
-            this.mouse.x = event.clientX!;
-            this.mouse.y = event.clientY!;
+        mousemove: (event: MouseEvent) => {
+            this.mouse.x = event.clientX;
+            this.mouse.y = event.clientY;
         },
-        click: (event: JQuery.Event) => {
+        click: (event: MouseEvent) => {
             // left-click
-            this.handleClick(event.clientX!, event.clientY!);
+            this.handleClick(event.clientX, event.clientY);
         },
-        keydown: (event: JQuery.Event) => {
+        keydown: (event: KeyboardEvent) => {
             this.firstActionTakenYet = true;
-            const key = event.key!;
+            const key = event.key;
             this.keyMap.add(key);
             this.tryAction(key);
         },
-        keyup: (event: JQuery.Event) => {
-            this.keyMap.delete(event.key!);
+        keyup: (event: KeyboardEvent) => {
+            this.keyMap.delete(event.key);
         },
-        wheel: (event: JQuery.Event) => {
-            const e = (event as JQuery.TriggeredEvent<WheelEvent>).originalEvent!;
+        wheel: (event: WheelEvent) => {
             // on my mouse, one scroll is + or - 125
-            const delta = -((e as WheelEvent).deltaX + (e as WheelEvent).deltaY) / 125 / 20;
+            const delta = -(event.deltaX + event.deltaY) / 125 / 20;
             const currZoom = this.camera.zoom;
             const scalar = Math.pow(2, delta);
             // console.log(currZoom);

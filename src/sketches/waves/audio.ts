@@ -1,5 +1,3 @@
-import $ from "jquery";
-
 import { SketchAudioContext } from "@/sketch";
 import { map } from "@/common/math";
 
@@ -27,12 +25,22 @@ export function createAudioGroup(
     }
 ): WavesSketchAudioGroup {
     const { HeightMap, isTimeFast } = opts;
-    const backgroundAudio = $("<audio autoplay loop>")
-        .append(`<source src="${wavesBackgroundAudioMP3}" type="audio/mp3">`)
-        .append(`<source src="${wavesBackgroundAudioOGG}" type="audio/ogg">`) as JQuery<HTMLMediaElement>;
+    const backgroundAudio = document.createElement("audio");
+    backgroundAudio.autoplay = true;
+    backgroundAudio.loop = true;
 
-    const sourceNode = audioContext.createMediaElementSource(backgroundAudio[0]);
-    $("body").append(backgroundAudio);
+    const backgroundAudioSourceMp3 = document.createElement("source");
+    backgroundAudioSourceMp3.src = wavesBackgroundAudioMP3;
+    backgroundAudioSourceMp3.type = "audio/mp3";
+    backgroundAudio.appendChild(backgroundAudioSourceMp3);
+
+    const backgroundAudioSourceOgg = document.createElement("source");
+    backgroundAudioSourceOgg.src = wavesBackgroundAudioOGG;
+    backgroundAudioSourceOgg.type = "audio/ogg";
+    backgroundAudio.appendChild(backgroundAudioSourceOgg);
+
+    const sourceNode = audioContext.createMediaElementSource(backgroundAudio);
+    document.body.appendChild(backgroundAudio);
 
     const backgroundAudioGain = audioContext.createGain();
     backgroundAudioGain.gain.setValueAtTime(0.0, 0);

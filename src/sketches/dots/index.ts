@@ -24,49 +24,63 @@ const ATTRACTOR_POWER_DECAY_FLOOR = 2;
 const attractor = new Attractor();
 let mouseX: number, mouseY: number;
 
-function touchstart(event: JQuery.Event) {
+function getRelativePoint(target: EventTarget | null, clientX: number, clientY: number) {
+    if (target instanceof HTMLElement) {
+        const rect = target.getBoundingClientRect();
+        return {
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+        };
+    }
+    return { x: clientX, y: clientY };
+}
+
+function touchstart(event: TouchEvent) {
     // prevent emulated mouse events from occuring
     event.preventDefault();
-    const touch = ((event as JQuery.TouchStartEvent).originalEvent as TouchEvent).touches[0];
-    const touchX = touch.pageX;
-    const touchY = touch.pageY;
-    // offset the touchY by its radius so the attractor is above the thumb
-    // touchY -= 100;
-    createAttractor(touchX, touchY);
-    mouseX = touchX;
-    mouseY = touchY;
+    const touch = event.touches[0];
+    if (!touch) {
+        return;
+    }
+    const { x, y } = getRelativePoint(event.currentTarget, touch.clientX, touch.clientY);
+    createAttractor(x, y);
+    mouseX = x;
+    mouseY = y;
 }
 
-function touchmove(event: JQuery.Event) {
-    const touch = ((event as JQuery.TouchMoveEvent).originalEvent as TouchEvent).touches[0];
-    const touchX = touch.pageX;
-    const touchY = touch.pageY;
-    // touchY -= 100;
-    moveAttractor(touchX, touchY);
-    mouseX = touchX;
-    mouseY = touchY;
+function touchmove(event: TouchEvent) {
+    const touch = event.touches[0];
+    if (!touch) {
+        return;
+    }
+    const { x, y } = getRelativePoint(event.currentTarget, touch.clientX, touch.clientY);
+    moveAttractor(x, y);
+    mouseX = x;
+    mouseY = y;
 }
 
-function touchend(_event: JQuery.Event) {
+function touchend(_event: TouchEvent) {
     removeAttractor();
 }
 
-function mousedown(event: JQuery.Event) {
-    if (event.which === 1) {
-        mouseX = event.offsetX == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerX : event.offsetX;
-        mouseY = event.offsetY == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerY : event.offsetY;
+function mousedown(event: MouseEvent) {
+    if (event.button === 0) {
+        const { x, y } = getRelativePoint(event.currentTarget, event.clientX, event.clientY);
+        mouseX = x;
+        mouseY = y;
         createAttractor(mouseX, mouseY);
     }
 }
 
-function mousemove(event: JQuery.Event) {
-    mouseX = event.offsetX == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX : event.offsetX;
-    mouseY = event.offsetY == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY : event.offsetY;
+function mousemove(event: MouseEvent) {
+    const { x, y } = getRelativePoint(event.currentTarget, event.clientX, event.clientY);
+    mouseX = x;
+    mouseY = y;
     moveAttractor(mouseX, mouseY);
 }
 
-function mouseup(event: JQuery.Event) {
-    if (event.which === 1) {
+function mouseup(event: MouseEvent) {
+    if (event.button === 0) {
         removeAttractor();
     }
 }

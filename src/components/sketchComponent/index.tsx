@@ -1,17 +1,19 @@
-import $ from "jquery";
 import React from "react";
 import { Link } from "react-router";
 import * as THREE from "three";
 import classnames from "classnames";
 
-import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS, UIEventReciever } from "@/sketch";
+import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS, UIEventName } from "@/sketch";
 import { VolumeButton } from "@/components/volumeButton";
 import { HandData, HandOverlay } from "@/components/HandOverlay";
 import { ScreenSaver } from "@/components/screenSaver";
 
 import "./sketchComponent.scss";
 
-const $window = $(window);
+const EVENT_LISTENER_OPTIONS: Partial<Record<UIEventName, AddEventListenerOptions>> = {
+    touchstart: { passive: false },
+    touchmove: { passive: false },
+};
 
 export interface ISketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
     errorElement?: React.JSX.Element;
@@ -56,12 +58,12 @@ class SketchSuccessComponent extends React.Component<SketchSuccessComponentProps
 
     componentDidMount() {
         this.updateRendererCanvasToMatchParent(this.props.sketch.renderer);
-        $window.on('resize', this.handleWindowResize);
+        window.addEventListener("resize", this.handleWindowResize);
 
         // canvas setup
-        const $canvas = $(this.props.sketch.renderer.domElement);
-        $canvas.attr("tabindex", 1);
-        this.attachUIEvents($canvas);
+        const canvas = this.props.sketch.renderer.domElement;
+        canvas.setAttribute("tabindex", "1");
+        this.attachUIEvents(canvas);
         // prevent scrolling the viewport
         // $canvas.on("touchmove", (event) => {
         //     event.preventDefault();
@@ -90,27 +92,37 @@ class SketchSuccessComponent extends React.Component<SketchSuccessComponentProps
             cancelAnimationFrame(this.frameId);
         }
         this.props.sketch.renderer.dispose();
-        $window.off("resize", this.handleWindowResize);
+        window.removeEventListener("resize", this.handleWindowResize);
 
-        const $canvas = $(this.props.sketch.canvas);
-        this.removeUIEvents($canvas);
+        const canvas = this.props.sketch.canvas;
+        this.removeUIEvents(canvas);
     }
 
-    private attachUIEvents($target: JQuery<HTMLElement>) {
-        const events = this.props.sketch.events as UIEventReciever;
-        Object.entries(events).forEach(([eventName, callback]) => {
+    private attachUIEvents(target: HTMLElement) {
+        const events = this.props.sketch.events;
+        if (!events) {
+            return;
+        }
+
+        (Object.entries(events) as Array<[UIEventName, EventListener]>).forEach(([eventName, callback]) => {
             if (callback) {
-                $target.on(eventName, callback);
+                const options = EVENT_LISTENER_OPTIONS[eventName];
+                target.addEventListener(eventName, callback, options);
             }
         });
     }
 
-    private removeUIEvents($target: JQuery<HTMLElement>) {
-        const events = this.props.sketch.events as UIEventReciever;
+    private removeUIEvents(target: HTMLElement) {
+        const events = this.props.sketch.events;
+        if (!events) {
+            return;
+        }
+
         (Object.keys(UI_EVENTS) as Array<keyof typeof UI_EVENTS>).forEach((eventName) => {
-            const callback = events[eventName];
+            const callback = events[eventName as UIEventName] as EventListener | undefined;
             if (callback != null) {
-                $target.off(eventName, callback);
+                const options = EVENT_LISTENER_OPTIONS[eventName as UIEventName];
+                target.removeEventListener(eventName, callback, options);
             }
         });
     }

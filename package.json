@@ -14,7 +14,6 @@
   "dependencies": {
     "classnames": "^2.5.1",
     "dat.gui": "^0.7.9",
-    "jquery": "^3.7.1",
     "leapjs": "^1.1.1",
     "normalize.css": "^8.0.1",
     "pathfinding": "^0.4.18",
@@ -32,7 +31,6 @@
   "devDependencies": {
     "@eslint/js": "^9.23.0",
     "@types/dat.gui": "^0.7.13",
-    "@types/jquery": "^3.5.32",
     "@types/node": "^24.0.10",
     "@types/pathfinding": "^0.1.0",
     "@types/react": "^19.0.12",

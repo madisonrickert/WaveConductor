@@ -1,4 +1,3 @@
-import $ from "jquery";
 import * as THREE from "three";
 
 import { lerp, map } from "@/common/math";
@@ -164,25 +163,25 @@ const lineMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0
 
 export default class Waves extends ISketch {
     public events = {
-        mousemove: (event: JQuery.Event) => {
+        mousemove: (event: MouseEvent) => {
             this.setVelocityFromMouseEvent(event);
         },
 
-        mousedown: (event: JQuery.Event) => {
-            if (event.which === 1) {
+        mousedown: (event: MouseEvent) => {
+            if (event.button === 0) {
                 isTimeFast = true;
                 this.setVelocityFromMouseEvent(event);
             }
         },
 
-        mouseup: (event: JQuery.Event) => {
-            if (event.which === 1) {
+        mouseup: (event: MouseEvent) => {
+            if (event.button === 0) {
                 isTimeFast = false;
                 this.setVelocityFromMouseEvent(event);
             }
         },
 
-        touchstart: (event: JQuery.Event) => {
+        touchstart: (event: TouchEvent) => {
             // prevent emulated mouse events from occuring
             event.preventDefault();
 
@@ -190,11 +189,11 @@ export default class Waves extends ISketch {
             this.setVelocityFromTouchEvent(event);
         },
 
-        touchmove: (event: JQuery.Event) => {
+        touchmove: (event: TouchEvent) => {
             this.setVelocityFromTouchEvent(event);
         },
 
-        touchend: (_event: JQuery.Event) => {
+        touchend: (_event: TouchEvent) => {
             isTimeFast = false;
         },
     };
@@ -277,19 +276,18 @@ export default class Waves extends ISketch {
         });
     }
 
-    setVelocityFromMouseEvent(event: JQuery.Event) {
-        const mouseX = event.offsetX == null ? ((event as JQuery.MouseEventBase).originalEvent as MouseEvent).layerX : event.offsetX;
-        const mouseY = event.offsetY == null ? ((event as JQuery.MouseEventBase).originalEvent as MouseEvent).layerY : event.offsetY;
-        this.setVelocityFromCanvasCoordinates(mouseX, mouseY);
+    setVelocityFromMouseEvent(event: MouseEvent) {
+        const { x, y } = this.getCanvasRelativeCoordinates(event.clientX, event.clientY);
+        this.setVelocityFromCanvasCoordinates(x, y);
     }
 
-    setVelocityFromTouchEvent(event: JQuery.Event) {
-        const canvasOffset = $(this.canvas).offset()!;
-        const touch = ((event as JQuery.TouchEventBase).originalEvent as TouchEvent).touches[0];
-        const touchX = touch.pageX - canvasOffset.left;
-        const touchY = touch.pageY - canvasOffset.top;
-
-        this.setVelocityFromCanvasCoordinates(touchX, touchY);
+    setVelocityFromTouchEvent(event: TouchEvent) {
+        const touch = event.touches[0];
+        if (!touch) {
+            return;
+        }
+        const { x, y } = this.getCanvasRelativeCoordinates(touch.clientX, touch.clientY);
+        this.setVelocityFromCanvasCoordinates(x, y);
     }
 
     setVelocityFromCanvasCoordinates(canvasX: number, canvasY: number) {
@@ -299,5 +297,13 @@ export default class Waves extends ISketch {
             lineStrip.dx = dx;
             lineStrip.dy = dy;
         });
+    }
+
+    private getCanvasRelativeCoordinates(clientX: number, clientY: number) {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+        };
     }
 }

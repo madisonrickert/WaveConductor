@@ -16,11 +16,15 @@ export const UI_EVENTS = {
     keydown: true,
     keypress: true,
     wheel: true,
-};
+} as const;
 
-export type UIEventReciever = {
-    [E in keyof typeof UI_EVENTS]?: JQuery.EventHandler<HTMLElement>;
-};
+export type UIEventName = keyof typeof UI_EVENTS;
+
+type UIEventMap = Pick<GlobalEventHandlersEventMap, UIEventName>;
+
+export type UIEventHandler<E extends UIEventName = UIEventName> = (event: UIEventMap[E]) => void;
+
+export type UIEventReciever = Partial<{ [E in UIEventName]: UIEventHandler<E> }>;
 
 export abstract class ISketch {
     static id?: string;

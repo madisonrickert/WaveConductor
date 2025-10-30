@@ -329,15 +329,25 @@ function computeDepth() {
     return depth;
 }
 
-function mousemove(event: JQuery.Event) {
-    const mouseX = event.offsetX == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX : event.offsetX;
-    const mouseY = event.offsetY == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY : event.offsetY;
-
-    mousePosition.x = mouseX;
-    mousePosition.y = mouseY;
+function getRelativePosition(event: MouseEvent) {
+    const target = event.currentTarget as HTMLElement | null;
+    if (target) {
+        const rect = target.getBoundingClientRect();
+        return {
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top,
+        };
+    }
+    return { x: event.clientX, y: event.clientY };
 }
 
-function mousedown(event: JQuery.Event) {
+function mousemove(event: MouseEvent) {
+    const { x, y } = getRelativePosition(event);
+    mousePosition.x = x;
+    mousePosition.y = y;
+}
+
+function mousedown(_event: MouseEvent) {
 }
 
 function dblclick() {

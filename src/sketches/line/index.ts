@@ -33,57 +33,59 @@ interface LineSketchParams {
 
 export default class LineSketch extends ISketch {
     public events = {
-        touchstart: (event: JQuery.Event) => {
+        touchstart: (event: TouchEvent) => {
             // Prevent emulated mouse events from occuring
             event.preventDefault();
-            const touch = ((event as JQuery.TouchStartEvent).originalEvent as TouchEvent).touches[0];
-            const touchX = touch.pageX;
-            let touchY = touch.pageY;
+            const touch = event.touches[0];
+            if (!touch) {
+                return;
+            }
+            const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
+            let touchY = y;
             // Offset the touchY by its radius so the attractor is above the thumb
             touchY -= 100;
 
-            this.setGravityFocalPoint(touchX, touchY);
-            this.enableMouseAttractor(touchX, touchY);
+            this.setGravityFocalPoint(x, touchY);
+            this.enableMouseAttractor(x, touchY);
             this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
         },
 
-        touchmove: (event: JQuery.Event) => {
-            const touch = ((event as JQuery.TouchMoveEvent).originalEvent as TouchEvent).touches[0];
-            const touchX = touch.pageX;
-            let touchY = touch.pageY;
+        touchmove: (event: TouchEvent) => {
+            const touch = event.touches[0];
+            if (!touch) {
+                return;
+            }
+            const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
+            let touchY = y;
             touchY -= 100;
 
-            this.setGravityFocalPoint(touchX, touchY);
-            this.moveMouseAttractor(touchX, touchY);
+            this.setGravityFocalPoint(x, touchY);
+            this.moveMouseAttractor(x, touchY);
             this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
         },
 
-        touchend: (_event: JQuery.Event) => {
+        touchend: (_event: TouchEvent) => {
             this.disableMouseAttractor();
         },
 
-        mousedown: (event: JQuery.Event) => {
-            if (event.which === 1) {
-                const mouseEvent = event as JQuery.Event & { originalEvent: MouseEvent };
-                const x = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
-                const y = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
+        mousedown: (event: MouseEvent) => {
+            if (event.button === 0) {
+                const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
                 this.setGravityFocalPoint(x, y);
                 this.enableMouseAttractor(x, y);
                 this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
             }
         },
 
-        mousemove: (event: JQuery.Event) => {
-            const mouseEvent = event as JQuery.Event & { originalEvent: MouseEvent };
-            const x = event.offsetX == null ? mouseEvent.originalEvent.layerX : event.offsetX;
-            const y = event.offsetY == null ? mouseEvent.originalEvent.layerY : event.offsetY;
+        mousemove: (event: MouseEvent) => {
+            const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
             this.setGravityFocalPoint(x, y);
             this.moveMouseAttractor(x, y);
             this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
         },
 
-        mouseup: (event: JQuery.Event) => {
-            if (event.which === 1) {
+        mouseup: (event: MouseEvent) => {
+            if (event.button === 0) {
                 this.disableMouseAttractor();
             }
         },
@@ -314,5 +316,13 @@ export default class LineSketch extends ISketch {
 
     private disableMouseAttractor() {
         this.mouseAttractor.power = 0;
+    }
+
+    private getRelativeCoordinates(clientX: number, clientY: number) {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+        };
     }
 }

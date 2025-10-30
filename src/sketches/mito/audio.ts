@@ -1,19 +1,31 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import $ from "jquery";
 import * as THREE from "three";
 
 import devlog from "@/common/devlog";
 import { SketchAudioContext } from "@/sketch";
 
 function makeNodeOfAudioAsset(ctx: SketchAudioContext, assetName: string): Unit {
-    const audio = (
-        $("<audio autoplay loop>")
-            .append(`<source src="/assets/audio/mito/${assetName}.ogg" type="audio/ogg">`)
-            .append(`<source src="/assets/audio/mito/${assetName}.mp3" type="audio/mp3">`)
-            .append(`<source src="/assets/audio/mito/${assetName}.wav" type="audio/wav">`) as JQuery<HTMLAudioElement>
-    )[0];
+    const audio = document.createElement("audio");
+    audio.autoplay = true;
+    audio.loop = true;
+
+    const sourceOgg = document.createElement("source");
+    sourceOgg.src = `/assets/audio/mito/${assetName}.ogg`;
+    sourceOgg.type = "audio/ogg";
+    audio.appendChild(sourceOgg);
+
+    const sourceMp3 = document.createElement("source");
+    sourceMp3.src = `/assets/audio/mito/${assetName}.mp3`;
+    sourceMp3.type = "audio/mp3";
+    audio.appendChild(sourceMp3);
+
+    const sourceWav = document.createElement("source");
+    sourceWav.src = `/assets/audio/mito/${assetName}.wav`;
+    sourceWav.type = "audio/wav";
+    audio.appendChild(sourceWav);
+
     const source = ctx.createMediaElementSource(audio);
     const gain = ctx.createGain();
     source.connect(gain);

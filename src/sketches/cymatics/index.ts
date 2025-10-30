@@ -61,45 +61,45 @@ export default class Cymatics extends ISketch {
     private isIdle: boolean = false;
     
     public events = {
-        touchstart: (event: JQuery.Event) => {
+        touchstart: (event: TouchEvent) => {
             // prevent emulated mouse events from occuring
             event.preventDefault();
-            const touch = ((event as JQuery.TouchStartEvent).originalEvent as TouchEvent).touches[0];
-            const touchX = touch.pageX;
-            const touchY = touch.pageY;
-            this.startInteraction(touchX, touchY);
+            const touch = event.touches[0];
+            if (touch) {
+                const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
+                this.startInteraction(x, y);
+            }
             this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
         },
 
-        touchmove: (event: JQuery.Event) => {
-            const touch = ((event as JQuery.TouchMoveEvent).originalEvent as TouchEvent).touches[0];
-            const touchX = touch.pageX;
-            const touchY = touch.pageY;
-            this.setMouse(touchX, touchY);
+        touchmove: (event: TouchEvent) => {
+            const touch = event.touches[0];
+            if (touch) {
+                const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
+                this.setMouse(x, y);
+            }
             this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
         },
 
-        touchend: (_event: JQuery.Event) => {
+        touchend: (_event: TouchEvent) => {
             mousePressed = false;
         },
 
-        mousedown: (event: JQuery.Event) => {
-            if (event.which === 1) {
-                const mouseX = event.offsetX == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerX : event.offsetX;
-                const mouseY = event.offsetY == null ? ((event as JQuery.MouseDownEvent).originalEvent as MouseEvent).layerY : event.offsetY;
-                this.startInteraction(mouseX, mouseY);
+        mousedown: (event: MouseEvent) => {
+            if (event.button === 0) {
+                const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
+                this.startInteraction(x, y);
                 this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
             }
         },
 
-        mousemove: (event: JQuery.Event) => {
-            const mouseX = event.offsetX == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerX : event.offsetX;
-            const mouseY = event.offsetY == null ? ((event as JQuery.MouseMoveEvent).originalEvent as MouseEvent).layerY : event.offsetY;
-            this.setMouse(mouseX, mouseY);
+        mousemove: (event: MouseEvent) => {
+            const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
+            this.setMouse(x, y);
             this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
         },
 
-        mouseup: (_event: JQuery.Event) => {
+        mouseup: (_event: MouseEvent) => {
             mousePressed = false;
         },
     };
@@ -138,6 +138,14 @@ export default class Cymatics extends ISketch {
 
     public set activeRadius(t: number) {
         this.cellStateVariable.material.uniforms.activeRadius.value = t;
+    }
+
+    private getRelativeCoordinates(clientX: number, clientY: number) {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+        };
     }
 
     public init() {
