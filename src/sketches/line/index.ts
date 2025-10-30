@@ -205,7 +205,10 @@ export default class LineSketch extends ISketch {
             normalizedEntropy
         } = computeStats(this.ps);
 
-        this.audioGroup.sourceLfo.frequency.setTargetAtTime(flatRatio, 0, 0.016);
+        const sourceLfoFreq = this.audioGroup.sourceLfo.frequency;
+        const currentAudioTime = this.audioContext.currentTime;
+        sourceLfoFreq.cancelScheduledValues(currentAudioTime);
+        sourceLfoFreq.setTargetAtTime(flatRatio, currentAudioTime, 0.016);
         if (normalizedEntropy !== 0) {
             this.audioGroup.setFrequency(222 / normalizedEntropy);
         }

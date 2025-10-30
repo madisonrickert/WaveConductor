@@ -247,17 +247,27 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
         filter2,
         filterGain,
         setFrequency(freq: number) {
+            filter.frequency.cancelScheduledValues(ctx.currentTime);
             filter.frequency.setTargetAtTime(freq, ctx.currentTime, 0.016);
+
+            filter2.frequency.cancelScheduledValues(ctx.currentTime);
             filter2.frequency.setTargetAtTime(freq, ctx.currentTime, 0.016);
+            
+            lfoGain.gain.cancelScheduledValues(ctx.currentTime);
             lfoGain.gain.setTargetAtTime(freq * .06, ctx.currentTime, 0.016);
         },
         setNoiseFrequency(freq: number) {
+            noiseFilter.frequency.cancelScheduledValues(ctx.currentTime);
             noiseFilter.frequency.setTargetAtTime(freq, ctx.currentTime, 0.016);
         },
         setVolume(volume: number) {
+            sourceGain.gain.cancelScheduledValues(ctx.currentTime);
             sourceGain.gain.setTargetAtTime(volume / 6, ctx.currentTime, 0.016);
+            noiseSourceGain.gain.cancelScheduledValues(ctx.currentTime);
             noiseSourceGain.gain.setTargetAtTime(volume * 0.05, ctx.currentTime, 0.016);
+            chordSource.gain.cancelScheduledValues(ctx.currentTime);
             chordSource.gain.setTargetAtTime(0.10, ctx.currentTime, 0.016);
+            chordHigh.gain.cancelScheduledValues(ctx.currentTime);
             chordHigh.gain.setTargetAtTime(volume / 30, ctx.currentTime, 0.016);
         },
         setBackgroundVolume(volume: number) {
