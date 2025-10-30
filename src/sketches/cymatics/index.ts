@@ -54,9 +54,7 @@ export default class Cymatics extends ISketch {
     public handData: HandData[] = [];
     
     // TODO move into core sketch
-    public globalFrame = 0;
-    public lastInteractionFrame = 0;
-
+    private lastInteractionTimestampMs: number = performance.now();
     /** Tracks whether the sim has been idle long enough to sleep */
     private isIdle: boolean = false;
     
@@ -69,7 +67,7 @@ export default class Cymatics extends ISketch {
                 const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
                 this.startInteraction(x, y);
             }
-            this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+            this.markInteraction(); // Reset screensaver timer
         },
 
         touchmove: (event: TouchEvent) => {
@@ -78,7 +76,7 @@ export default class Cymatics extends ISketch {
                 const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
                 this.setMouse(x, y);
             }
-            this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+            this.markInteraction(); // Reset screensaver timer
         },
 
         touchend: (_event: TouchEvent) => {
@@ -89,14 +87,14 @@ export default class Cymatics extends ISketch {
             if (event.button === 0) {
                 const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
                 this.startInteraction(x, y);
-                this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+                this.markInteraction(); // Reset screensaver timer
             }
         },
 
         mousemove: (event: MouseEvent) => {
             const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
             this.setMouse(x, y);
-            this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+            this.markInteraction(); // Reset screensaver timer
         },
 
         mouseup: (_event: MouseEvent) => {
@@ -109,6 +107,7 @@ export default class Cymatics extends ISketch {
         mousePressed = true;
         this.slowDownAmount += 1;
         this.audio.triggerJitter();
+        this.markInteraction();
     }
 
     setMouse(pixelX: number, pixelY: number) {
@@ -195,25 +194,26 @@ export default class Cymatics extends ISketch {
     }
 
     public animate(_dt: number) {
+        const currentTimeMs = performance.now();
+
         // Check for Leap Motion interaction and reset screensaver timer
         if (this.handData.length > 0) {
-            this.lastInteractionFrame = this.globalFrame;
+            this.markInteraction(currentTimeMs);
         }
 
         if (!this.isIdle) {
             this.animateSimulation();
         }
 
-        this.globalFrame++;
-
         // --- Sleep Logic ---
+        const secondsSinceInteraction = (currentTimeMs - this.lastInteractionTimestampMs) / 1000;
         this.isIdle =
-            this.globalFrame - this.lastInteractionFrame >= MINIMUM_SLEEP_TIMOUT_SECONDS * 60 &&
+            secondsSinceInteraction >= MINIMUM_SLEEP_TIMOUT_SECONDS &&
             this.activeRadius <= MINIMUM_ACTIVE_RADIUS + 1e-2;
 
         // --- Screen Saver Logic ---
         if (this.updateScreenSaverCallback) {
-            const showScreenSaver = this.globalFrame - this.lastInteractionFrame >= SCREEN_SAVER_TIMEOUT_SECONDS * 60;
+            const showScreenSaver = secondsSinceInteraction >= SCREEN_SAVER_TIMEOUT_SECONDS;
             this.updateScreenSaverCallback(showScreenSaver);
         }
     }
@@ -326,6 +326,8 @@ export default class Cymatics extends ISketch {
         } else {
             mousePressed = false;
         }
+
+        this.markInteraction();
     }
 
     private tmpScreenCoord = new THREE.Vector2();
@@ -387,5 +389,10 @@ export default class Cymatics extends ISketch {
         }
         this.composer.dispose();
         this.computation.dispose();
+    }
+
+    private markInteraction(timestampMs: number = performance.now()) {
+        this.lastInteractionTimestampMs = timestampMs;
+        this.isIdle = false;
     }
 }

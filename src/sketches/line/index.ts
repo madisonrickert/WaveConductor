@@ -47,7 +47,7 @@ export default class LineSketch extends ISketch {
 
             this.setGravityFocalPoint(x, touchY);
             this.enableMouseAttractor(x, touchY);
-            this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+            this.markInteraction(); // Reset screensaver timer
         },
 
         touchmove: (event: TouchEvent) => {
@@ -61,7 +61,7 @@ export default class LineSketch extends ISketch {
 
             this.setGravityFocalPoint(x, touchY);
             this.moveMouseAttractor(x, touchY);
-            this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+            this.markInteraction(); // Reset screensaver timer
         },
 
         touchend: (_event: TouchEvent) => {
@@ -73,7 +73,7 @@ export default class LineSketch extends ISketch {
                 const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
                 this.setGravityFocalPoint(x, y);
                 this.enableMouseAttractor(x, y);
-                this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+                this.markInteraction(); // Reset screensaver timer
             }
         },
 
@@ -81,7 +81,7 @@ export default class LineSketch extends ISketch {
             const { x, y } = this.getRelativeCoordinates(event.clientX, event.clientY);
             this.setGravityFocalPoint(x, y);
             this.moveMouseAttractor(x, y);
-            this.lastInteractionFrame = this.globalFrame; // Reset screensaver timer
+            this.markInteraction(); // Reset screensaver timer
         },
 
         mouseup: (event: MouseEvent) => {
@@ -92,9 +92,7 @@ export default class LineSketch extends ISketch {
     };
 
     // TODO move into core sketch
-    public globalFrame = 0;
-    public lastInteractionFrame = 0;
-
+    private lastInteractionTimestampMs: number = performance.now();
     private isIdle: boolean = false;
 
     public audioGroup!: LineSketchAudioGroup;
@@ -179,6 +177,8 @@ export default class LineSketch extends ISketch {
     }
 
     public animate(_millisElapsed: number) {
+        const currentTimeMs = performance.now();
+
         // Animate all attractors
         this.mouseAttractor.animate(_millisElapsed);
         for (const attractor of this.leapAttractors) {
@@ -187,11 +187,11 @@ export default class LineSketch extends ISketch {
 
         // Check for Leap Motion interaction and reset interaction timer
         if (this.leapAttractorController.hasActiveInteraction()) {
-            this.lastInteractionFrame = this.globalFrame;
+            this.markInteraction(currentTimeMs);
         }
 
         if (!this.isIdle) {
-            this.animateSimulation();
+            this.animateSimulation(currentTimeMs);
         }
 
         // --- Update attractor power ---
@@ -201,21 +201,18 @@ export default class LineSketch extends ISketch {
                 (this.mouseAttractor.power - MOUSE_ATTRACTOR_POWER_DECAY_FLOOR) * MOUSE_ATTRACTOR_POWER_DECAY_SPEED;
         }
 
-        this.globalFrame++;
-
         // --- Sleep logic ---
-        this.isIdle =
-            this.globalFrame - this.lastInteractionFrame >= MINIMUM_SLEEP_TIMEOUT_SECONDS * 60 &&
-            !this.hasActiveAttractors();
+        const secondsSinceInteraction = (currentTimeMs - this.lastInteractionTimestampMs) / 1000;
+        this.isIdle = secondsSinceInteraction >= MINIMUM_SLEEP_TIMEOUT_SECONDS && !this.hasActiveAttractors();
 
         // --- Screen Saver Logic ---
         if (this.updateScreenSaverCallback) {
-            const showScreenSaver = this.globalFrame - this.lastInteractionFrame >= SCREEN_SAVER_TIMEOUT_SECONDS * 60;
+            const showScreenSaver = secondsSinceInteraction >= SCREEN_SAVER_TIMEOUT_SECONDS;
             this.updateScreenSaverCallback(showScreenSaver);
         }
     }
 
-    private animateSimulation(): void {
+    private animateSimulation(now: number = performance.now()): void {
         // Step particles with all active attractors
         this.activeAttractors.length = 0; // clear without reallocating
         if (this.mouseAttractor.power !== 0) {
@@ -248,7 +245,6 @@ export default class LineSketch extends ISketch {
         this.audioGroup.setVolume(Math.max(groupedUpness - 0.05, 0) * 5.);
 
         // --- Shader Uniforms ---
-        const now = performance.now();
         this.gravityShaderPass.uniforms.iGlobalTime.value = now / 1000;
         this.gravityShaderPass.uniforms.G.value = triangleWaveApprox(now / 5000) * (groupedUpness + 0.50) * 15000;
         this.gravityShaderPass.uniforms.iMouseFactor.value = (1 / 15) / (groupedUpness + 1);
@@ -286,7 +282,7 @@ export default class LineSketch extends ISketch {
         }
         this.composer.dispose();
         
-        // Dispose point cloud geometry and material
+        // Dispose point cloud
         this.pointCloud.geometry.dispose();
     }
 
@@ -324,5 +320,10 @@ export default class LineSketch extends ISketch {
             x: clientX - rect.left,
             y: clientY - rect.top,
         };
+    }
+
+    private markInteraction(timestampMs: number = performance.now()) {
+        this.lastInteractionTimestampMs = timestampMs;
+        this.isIdle = false;
     }
 }
