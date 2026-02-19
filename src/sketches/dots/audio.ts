@@ -10,9 +10,13 @@ export interface DotSketchAudioGroup {
     filterGain: GainNode;
     setFrequency(freq: number): void;
     setVolume(volume: number): void;
+    dispose(): void;
 }
 
 export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAudioGroup {
+    // Track all oscillators for cleanup
+    const oscillators: OscillatorNode[] = [];
+
     // white noise
     const noise = createWhiteNoise(audioContext);
     const noiseGain = audioContext.createGain();
@@ -28,6 +32,7 @@ export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAud
         node.frequency.setValueAtTime(detuned(BASE_FREQUENCY / 2, 2), 0);
         node.type = "triangle";
         node.start(0);
+        oscillators.push(node);
 
         const gain = audioContext.createGain();
         gain.gain.setValueAtTime(0.3, 0);
@@ -40,6 +45,7 @@ export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAud
         node.frequency.setValueAtTime(BASE_FREQUENCY, 0);
         node.type = "triangle";
         node.start(0);
+        oscillators.push(node);
 
         const gain = audioContext.createGain();
         gain.gain.setValueAtTime(0.30, 0);
@@ -54,6 +60,7 @@ export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAud
     const lfo = audioContext.createOscillator();
     lfo.frequency.setValueAtTime(8.66, 0);
     lfo.start(0);
+    oscillators.push(lfo);
 
     const lfoGain = audioContext.createGain();
     lfoGain.gain.setValueAtTime(0, 0);
@@ -99,6 +106,38 @@ export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAud
         setVolume(volume: number) {
             sourceGain.gain.setValueAtTime(volume, 0);
             noiseGain.gain.setValueAtTime(volume * 0.05, 0);
+        },
+        dispose() {
+            // Stop all oscillators
+            oscillators.forEach(osc => {
+                try {
+                    osc.stop();
+                    osc.disconnect();
+                } catch (_e) {
+                    // Oscillator may already be stopped
+                }
+            });
+
+            // Stop noise buffer source
+            try {
+                noise.stop();
+                noise.disconnect();
+            } catch (_e) {
+                // May already be stopped
+            }
+
+            // Disconnect all audio nodes
+            const audioNodes = [
+                noiseGain, source1, source2, sourceGain,
+                lfoGain, filter, filter2, filterGain
+            ];
+            audioNodes.forEach(node => {
+                try {
+                    node.disconnect();
+                } catch (_e) {
+                    // Node may already be disconnected
+                }
+            });
         },
     };
 }

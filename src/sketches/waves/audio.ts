@@ -15,6 +15,7 @@ function getDarkness(frame: number) {
 
 export interface WavesSketchAudioGroup {
     biquadFilter: ScriptProcessorNode;
+    dispose(): void;
 }
 
 export function createAudioGroup(
@@ -97,5 +98,37 @@ export function createAudioGroup(
     biquadFilterGain.connect(audioContext.gain);
     return {
         biquadFilter,
+        dispose() {
+            // Stop and disconnect noise buffer source
+            try {
+                noise.stop();
+                noise.disconnect();
+            } catch (_e) {
+                // May already be stopped
+            }
+
+            // Disconnect script processor (deprecated but still needs cleanup)
+            try {
+                biquadFilter.disconnect();
+                // Clear the processor callback to prevent further processing
+                biquadFilter.onaudioprocess = null;
+            } catch (_e) {
+                // May already be disconnected
+            }
+
+            // Disconnect other audio nodes
+            const audioNodes = [sourceNode, backgroundAudioGain, biquadFilterGain];
+            audioNodes.forEach(node => {
+                try {
+                    node.disconnect();
+                } catch (_e) {
+                    // Node may already be disconnected
+                }
+            });
+
+            // Clean up DOM element - this was appended to document.body
+            backgroundAudio.pause();
+            backgroundAudio.remove();
+        },
     };
 }

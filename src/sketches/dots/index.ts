@@ -174,4 +174,13 @@ export default class Dots extends ISketch {
 
         camera.updateProjectionMatrix();
     }
+
+    public destroy() {
+        // Clean up audio resources
+        this.audioGroup.dispose();
+
+        // Clean up Three.js resources
+        this.pointCloud.geometry.dispose();
+        this.scene.remove(this.pointCloud);
+    }
 }

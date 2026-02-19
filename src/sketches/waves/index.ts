@@ -306,4 +306,24 @@ export default class Waves extends ISketch {
             y: clientY - rect.top,
         };
     }
+
+    public destroy() {
+        // Clean up audio resources (also removes the <audio> DOM element)
+        this.audioGroup.dispose();
+
+        // Clean up Three.js resources
+        lineStrips.forEach((lineStrip) => {
+            this.scene.remove(lineStrip.object);
+            // Dispose geometry for each line in the strip
+            lineStrip.object.children.forEach((child) => {
+                if (child instanceof THREE.Line) {
+                    child.geometry.dispose();
+                }
+            });
+        });
+
+        // Clear the module-level array for clean re-initialization
+        lineStrips.length = 0;
+        isTimeFast = false;
+    }
 }
