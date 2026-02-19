@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import classnames from "classnames";
 
-import { ISketch, SketchAudioContext, SketchConstructor, UI_EVENTS, UIEventName } from "@/sketch";
+import { ISketch, SketchConstructor, UI_EVENTS, UIEventName } from "@/sketch";
 import { VolumeButton } from "@/components/volumeButton";
 import { HandData, HandOverlay } from "@/components/HandOverlay";
 import { ScreenSaver } from "@/components/screenSaver";
 import { useSketchLifecycle } from "@/common/hooks/useSketchLifecycle";
 import { useSketchAnimationLoop } from "@/common/hooks/useSketchAnimationLoop";
 import { useSketchResize } from "@/common/hooks/useSketchResize";
+import { useAudioContext } from "@/common/useAudioContext";
 
 import "./sketchComponent.scss";
 
@@ -78,6 +79,9 @@ function SketchRenderer({ sketch }: { sketch: ISketch }) {
 }
 
 export function SketchComponent({ sketchClass, ...containerProps }: ISketchComponentProps) {
+    // Use the shared AudioContext from the provider
+    const { audioContext, setUserVolume } = useAudioContext();
+
     const [sketch, setSketch] = useState<ISketch | null>(null);
     const [volumeEnabled, setVolumeEnabled] = useState(() =>
         JSON.parse(window.localStorage.getItem("sketch-volumeEnabled") || "true")
@@ -86,27 +90,12 @@ export function SketchComponent({ sketchClass, ...containerProps }: ISketchCompo
     const [shouldShowScreenSaver, setShouldShowScreenSaver] = useState(false);
 
     const containerRef = useRef<HTMLDivElement | null>(null);
-    const audioContextRef = useRef<SketchAudioContext | null>(null);
-    const userVolumeRef = useRef<GainNode | null>(null);
+    const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
 
     // Initialize sketch when container mounts
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
-
-        // Create audio context and gain nodes
-        const audioContext = new AudioContext() as SketchAudioContext;
-        audioContextRef.current = audioContext;
-        THREE.AudioContext.setContext(audioContext);
-
-        const userVolume = audioContext.createGain();
-        userVolumeRef.current = userVolume;
-        userVolume.gain.value = 1;
-        userVolume.connect(audioContext.destination);
-
-        const audioContextGain = audioContext.createGain();
-        audioContext.gain = audioContextGain;
-        audioContextGain.connect(userVolume);
 
         // Create renderer
         const renderer = new THREE.WebGLRenderer({
@@ -114,9 +103,10 @@ export function SketchComponent({ sketchClass, ...containerProps }: ISketchCompo
             preserveDrawingBuffer: true,
             antialias: true
         });
+        rendererRef.current = renderer;
         container.appendChild(renderer.domElement);
 
-        // Create sketch instance
+        // Create sketch instance using the shared audioContext
         const sketchInstance = new sketchClass(renderer, audioContext);
         sketchInstance.updateScreenSaverCallback = setShouldShowScreenSaver;
         sketchInstance.updateHandDataCallback = setHandData;
@@ -130,46 +120,31 @@ export function SketchComponent({ sketchClass, ...containerProps }: ISketchCompo
             // Clean up Three.js resources
             renderer.domElement.remove();
             renderer.dispose();
+            rendererRef.current = null;
 
-            // Clean up audio
-            audioContext.close();
-            audioContextRef.current = null;
-            userVolumeRef.current = null;
+            // Note: We don't close the audioContext here - it's shared across sketches
+            // The sketch's destroy() method handles disconnecting its audio nodes
 
             queueMicrotask(() => setSketch(null));
         };
-    }, [sketchClass]);
+    }, [sketchClass, audioContext]);
 
-    // Sync volume changes to audio context
+    // Sync volume changes to the shared AudioContext
     useEffect(() => {
-        const audioContext = audioContextRef.current;
-        const userVolume = userVolumeRef.current;
-        if (!audioContext || !userVolume) return;
-
-        userVolume.gain.value = volumeEnabled ? 1 : 0;
-        if (volumeEnabled && audioContext.state === "suspended") {
-            audioContext.resume();
-        } else if (!volumeEnabled && audioContext.state === "running") {
-            audioContext.suspend();
-        }
-    }, [volumeEnabled]);
+        setUserVolume(volumeEnabled ? 1 : 0);
+    }, [volumeEnabled, setUserVolume]);
 
     // Handle visibility changes (pause audio when tab is hidden)
     useEffect(() => {
         const handleVisibilityChange = () => {
-            const audioContext = audioContextRef.current;
-            if (!audioContext) return;
-
-            if (document.hidden) {
-                audioContext.suspend();
-            } else if (volumeEnabled) {
-                audioContext.resume();
-            }
+            // When tab is hidden, suspend to save resources
+            // When visible again, only resume if user has volume enabled
+            setUserVolume(document.hidden ? 0 : (volumeEnabled ? 1 : 0));
         };
 
         document.addEventListener("visibilitychange", handleVisibilityChange);
         return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-    }, [volumeEnabled]);
+    }, [volumeEnabled, setUserVolume]);
 
     const handleVolumeButtonClick = () => {
         setVolumeEnabled((prev: boolean) => {
