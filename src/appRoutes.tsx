@@ -4,7 +4,7 @@ import { SketchComponent } from "./components/sketchComponent";
 import { useHotkeys } from 'react-hotkeys-hook';
 import { useThrottledNavigate } from "@/common/hooks/useThrottledNavigate";
 
-import { LineSketch, FlameSketch, Dots, Cymatics, Mito, Waves } from "./sketches";
+import { LineSketch, FlameSketch, Dots, Cymatics, Waves } from "./sketches";
 
 export const AppRoutes = () => {
     const throttledNavigate = useThrottledNavigate(500);
@@ -18,7 +18,6 @@ export const AppRoutes = () => {
             <Route path="/flame" element={<SketchComponent key="flame" sketchClass={FlameSketch} />} />
             <Route path="/dots" element={<SketchComponent key="dots" sketchClass={Dots} />} />
             <Route path="/cymatics" element={<SketchComponent key="cymatics" sketchClass={Cymatics} />} />
-            <Route path="/mito" element={<SketchComponent key="mito" sketchClass={Mito} />} />
             <Route path="/waves" element={<SketchComponent key="waves" sketchClass={Waves} />} />
             <Route path="/" element={<HomePage />} />
         </Routes>

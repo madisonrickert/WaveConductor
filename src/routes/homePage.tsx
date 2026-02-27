@@ -35,7 +35,6 @@ export function HomePage() {
                     {renderHighlight("Flame", "/assets/images/flame.jpg")}
                     {renderHighlight("Dots", "/assets/images/dots2.jpg")}
                     {renderHighlight("Waves", "/assets/images/waves2.jpg")}
-                    {renderHighlight("Mito", "/assets/images/mito_cover.png", 'https://hellochar.github.io/mito/#/')}
                 </section>
             </main>
             <footer className="page-footer">
