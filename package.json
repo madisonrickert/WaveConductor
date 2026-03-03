@@ -1,6 +1,17 @@
 {
   "name": "hellochar.com",
   "version": "3.0.0",
+  "author": {
+    "name": "Madison Rickert",
+    "email": "3495636+madisonrickert@users.noreply.github.com",
+    "url": "https://madisonrickert.com"
+  },
+  "contributors": [
+    {
+      "name": "Xiaohan Zhang"
+    }
+  ],
+  "description": "Interactive art gallery (Three.js/WebGL, Web Audio, Leap Motion)",
   "packageManager": "npm@10.9.2",
   "private": true,
   "scripts": {
