@@ -1,8 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 
-import "./monkeypatch";
-
 import App from "./app";
 import "normalize.css";
 import "./index.scss";
