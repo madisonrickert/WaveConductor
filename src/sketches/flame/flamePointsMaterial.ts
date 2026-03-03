@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import vertexShader from "./flamePoints.vert.frag";
 import fragmentShader from "./flamePoints.frag";
+import discUrl from "@/common/materials/starMaterial/disc.png";
 
 export class FlamePointsMaterial extends THREE.ShaderMaterial {
     public map: THREE.Texture;
@@ -34,7 +35,7 @@ export class FlamePointsMaterial extends THREE.ShaderMaterial {
 
         const loader = new THREE.ImageLoader(THREE.DefaultLoadingManager);
         loader.setCrossOrigin('Anonymous');
-        loader.load("/assets/sketches/disc.png", (image) => {
+        loader.load(discUrl, (image) => {
             texture.image = image;
             texture.format = THREE.RGBAFormat;
             texture.needsUpdate = true;

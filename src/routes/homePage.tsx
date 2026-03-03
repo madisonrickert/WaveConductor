@@ -2,6 +2,12 @@ import React from "react";
 import { Link } from "react-router";
 import { FaPlay } from "react-icons/fa";
 
+import cymaticsImg from "@/sketches/cymatics/screenshots/cymatics5_cropped.jpg";
+import lineImg from "@/sketches/line/screenshots/gravity4_cropped.jpg";
+import flameImg from "@/sketches/flame/screenshots/flame.jpg";
+import dotsImg from "@/sketches/dots/screenshots/dots2.jpg";
+import wavesImg from "@/sketches/waves/screenshots/waves2.jpg";
+
 import "./homePage.scss";
 
 export function HomePage() {
@@ -30,11 +36,11 @@ export function HomePage() {
         <div className="homepage">
             <main className="content">
                 <section className="content-section work work-grid" id="work">
-                    {renderHighlight("Cymatics", "/assets/images/cymatics5_cropped.jpg")}
-                    {renderHighlight("Line", "/assets/images/gravity4_cropped.jpg")}
-                    {renderHighlight("Flame", "/assets/images/flame.jpg")}
-                    {renderHighlight("Dots", "/assets/images/dots2.jpg")}
-                    {renderHighlight("Waves", "/assets/images/waves2.jpg")}
+                    {renderHighlight("Cymatics", cymaticsImg)}
+                    {renderHighlight("Line", lineImg)}
+                    {renderHighlight("Flame", flameImg)}
+                    {renderHighlight("Dots", dotsImg)}
+                    {renderHighlight("Waves", wavesImg)}
                     <div className="work-grid-item credits-block">
                         <div className="credits-content">
                             <h2>hellochar</h2>
