@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import { RenderPass, EffectComposer } from "three-stdlib";
-import queryString from "query-string";
 import { GravityShaderPass } from "@/common/shaders/gravity";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem/attractor";
 import { triangleWaveApprox } from "@/common/math";
+import { getQueryParams } from "@/common/queryParams";
 import { ISketch } from "@/sketch";
 import { createAudioGroup, LineSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
@@ -128,7 +128,7 @@ export default class LineSketch extends ISketch {
     }
 
     public init() {
-        const params: LineSketchParams = queryString.parse(location.search, {
+        const params: LineSketchParams = getQueryParams<LineSketchParams>({
             parseNumbers: true
         });
 
@@ -262,6 +262,7 @@ export default class LineSketch extends ISketch {
         this.camera.bottom = height;
         this.camera.updateProjectionMatrix();
         this.gravityShaderPass.uniforms.iResolution.value = new THREE.Vector2(width, height);
+        this.composer?.setSize(width, height);
     }
 
     public destroy(): void {

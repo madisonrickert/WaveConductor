@@ -14,15 +14,18 @@
   "description": "Interactive art gallery (Three.js/WebGL, Web Audio, Leap Motion)",
   "packageManager": "npm@10.9.2",
   "private": true,
+  "main": "dist-electron/main.js",
   "scripts": {
     "lint": "eslint --ext .js,.jsx,.ts,.tsx .",
     "lint:fix": "eslint --ext .js,.jsx,.ts,.tsx . --fix",
     "leap-websocket:macos": "bin/Ultraleap-Tracking-WS-macos-applesilicon",
     "start": "vite --port 5173",
     "build": "vite build",
-    "preview": "vite preview --port 4173"
+    "preview": "vite preview --port 4173",
+    "electron:dev": "ELECTRON=1 vite --port 5173",
+    "electron:build": "ELECTRON=1 vite build",
+    "electron:package": "electron-builder"
   },
-  "main": "index.html",
   "dependencies": {
     "classnames": "^2.5.1",
     "leapjs": "1.1.1",
@@ -45,6 +48,8 @@
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.180.0",
     "@vitejs/plugin-react": "^5.1.4",
+    "electron": "^40.6.1",
+    "electron-builder": "^26.8.1",
     "eslint": "^9.39.3",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.26",
@@ -52,8 +57,34 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
     "vite": "^7.3.1",
+    "vite-plugin-electron": "^0.29.0",
     "vite-plugin-eslint": "^1.8.1",
     "vite-plugin-glsl": "^1.5.5",
     "vite-plugin-node-polyfills": "^0.24.0"
+  },
+  "build": {
+    "appId": "com.hellochar.app",
+    "productName": "hellochar",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "bin/",
+        "to": "bin/",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.entertainment"
+    },
+    "win": {
+      "target": "portable"
+    }
   }
 }

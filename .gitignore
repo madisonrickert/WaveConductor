@@ -13,6 +13,8 @@ Thumbs.db
 yarn-error.log
 
 dist
+dist-electron/
+release/
 
 openpose-1.3.0-win64-gpu-binaries/
 

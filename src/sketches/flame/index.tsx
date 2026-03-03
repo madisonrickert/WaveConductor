@@ -1,4 +1,3 @@
-import queryString from "query-string";
 import React from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three-stdlib";
@@ -6,6 +5,7 @@ import { OrbitControls } from "three-stdlib";
 import { createWhiteNoise } from "@/audio/noise";
 import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, LengthVarianceTrackerVisitor, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "@/common/flame";
 import { map } from "@/common/math";
+import { getQueryParam, setQueryParams } from "@/common/queryParams";
 import { ISketch } from "@/sketch";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
 import { Chord } from "./types";
@@ -16,9 +16,7 @@ const quality = screen.width > 480 ? "high" : "low";
 const GEN_DIVISOR = 2147483648 - 1; // 2^31 - 1
 const MAX_POINTS = 200000;
 
-const nameFromSearch: string = typeof queryString.parse(location.search).name === 'string'
-    ? queryString.parse(location.search).name as string
-    : "";
+const nameFromSearch: string = getQueryParam("name");
 
 function randomBranches(
     name: string,
@@ -326,9 +324,7 @@ export default class FlameSketch extends ISketch {
 
     public updateName(name: string = "Han") {
         this.audioContext.gain.gain.setValueAtTime(0, 0);
-        const { origin, pathname } = window.location;
-        const newUrl = `${origin}${pathname}?name=${name}`;
-        window.history.replaceState({}, null!, newUrl);
+        setQueryParams({ name });
 
         const hash = stringHash(name);
         const hashNorm = (hash % 1024) / 1024;

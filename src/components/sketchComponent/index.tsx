@@ -103,6 +103,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: ISketchCompo
             preserveDrawingBuffer: true,
             antialias: true
         });
+        renderer.setSize(container.clientWidth, container.clientHeight);
         rendererRef.current = renderer;
         container.appendChild(renderer.domElement);
 

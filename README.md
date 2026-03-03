@@ -1,26 +1,57 @@
-Development
-===========
+# hellochar
 
-Install Node.js.
+Interactive art gallery built with React, Three.js/WebGL, and Web Audio. Features generative visualizations that respond to mouse, touch, and Leap Motion hand tracking. Runs as a website or a self-contained Electron desktop app.
 
-Install Leap Motion Software (see below).
+## Sketches
 
-In a command prompt, navigate to the project root folder (the same folder that contains package.json)
+- **flame** — Iterated function system fractal driven by your name, with generative audio
+- **line** — Particle line that responds to mouse/touch/Leap Motion attractors
+- **dots** — Particle grid with gravitational attractors
+- **cymatics** — Chladni plate vibration patterns with Leap Motion control
+- **waves** — Audio-reactive wave visualization
 
-Install local dependencies. `npm install`.
+## Development
 
-If using LeapMotion 5.x+, run the websocket server (see below).
+Install [Node.js](https://nodejs.org/), then:
 
-Run `npm run start` to start Vite dev server.
+```sh
+npm install
+npm run start
+```
 
-Deploying
-=========
+Opens at http://localhost:5173. Supports hot module replacement.
 
-`npm run build` creates a deployable production build.
-`npm run preview` serves the production build.
+## Web Build
 
-Leap Motion Requirements
-========================
-Leap Motion Software is required for development or deployment. This application is compatible out of the box with the leap motion software 4.x, or Leapmotion 5.x-6.x (such as [LeapMotion Gemini](https://leap2.ultraleap.com/downloads/leap-motion-controller/))) using [this compatibility layer](https://github.com/ultraleap/UltraleapTrackingWebSocket).
+```sh
+npm run build     # Production build to dist/
+npm run preview   # Serve the production build locally
+```
 
-A pre-built binary for macOS Apple Silicon is included. Run it using `npm run leap-websocket:macos`.
+## Electron App
+
+```sh
+npm run electron:dev       # Electron + Vite HMR dev mode
+npm run electron:build     # Build renderer + main process
+npm run electron:package   # Package into DMG (macOS) or portable exe (Windows)
+```
+
+To cross-compile for Windows from macOS, install Wine (`brew install --cask wine-stable`) then:
+
+```sh
+npm run electron:build && npx electron-builder --win
+```
+
+The Electron app auto-launches the Ultraleap WebSocket binary (if present in `bin/`) and enables audio autoplay without user gesture.
+
+## Leap Motion
+
+Optional. The line and cymatics sketches support [Leap Motion](https://www.ultraleap.com/) hand tracking.
+
+Compatible with Leap Motion Software 4.x out of the box. For 5.x+ (Gemini), the [UltraleapTrackingWebSocket](https://github.com/ultraleap/UltraleapTrackingWebSocket) compatibility layer is needed. A pre-built macOS Apple Silicon binary is included:
+
+```sh
+npm run leap-websocket:macos
+```
+
+In Electron mode, this binary is launched automatically on startup.

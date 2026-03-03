@@ -1,10 +1,10 @@
-import queryString from "query-string";
 import * as THREE from "three";
 import { EffectComposer, RenderPass } from "three-stdlib";
 
 import { ExplodeShaderPass } from "@/common/shaders/explode";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem, ParticleSystemParameters } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem";
+import { getQueryParams } from "@/common/queryParams";
 import { ISketch } from "@/sketch";
 import { createAudioGroup, DotSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
@@ -128,7 +128,7 @@ export default class Dots extends ISketch {
 
         const particles: IParticle[] = [];
         const EXTENT = 10;
-        const GRID_SIZE: number = Number(queryString.parse(location.search).gridSize) || 7;
+        const GRID_SIZE: number = Number(getQueryParams().gridSize) || 7;
         for (let x = -EXTENT * GRID_SIZE; x < this.canvas.width + EXTENT * GRID_SIZE; x += GRID_SIZE) {
             for (let y = -EXTENT * GRID_SIZE; y < this.canvas.height + EXTENT * GRID_SIZE; y += GRID_SIZE) {
                 particles.push(createParticle(x, y));
@@ -173,6 +173,7 @@ export default class Dots extends ISketch {
         shader.uniforms.iResolution.value = new THREE.Vector2(width, height);
 
         camera.updateProjectionMatrix();
+        this.composer?.setSize(width, height);
     }
 
     public destroy() {
