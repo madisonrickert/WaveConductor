@@ -388,6 +388,38 @@ export default class GPUComputationRenderer {
         `;
     }
 
+    /**
+     * Dispose all GPU resources owned by this renderer.
+     *
+     * NOTE: three-stdlib's GPUComputationRenderer.dispose() has a memory leak —
+     * it does not dispose ShaderMaterials created for each variable. These are
+     * allocated in addVariable() → createShaderMaterial() and stored in
+     * variable.material, but dispose() only calls mesh.material.dispose()
+     * (which is always passThruShader) and renderTarget.dispose() (which frees
+     * the framebuffer/texture, not materials). The variable ShaderMaterials and
+     * their associated WebGL programs are never released.
+     *
+     * Upstream file: src/misc/GPUComputationRenderer.js in pmndrs/three-stdlib
+     * Upstream dispose() as of 2026-03-03:
+     *
+     *   this.dispose = function () {
+     *     mesh.geometry.dispose()
+     *     mesh.material.dispose()                    // only passThruShader
+     *     const variables = this.variables
+     *     for (let i = 0; i < variables.length; i++) {
+     *       const variable = variables[i]
+     *       if (variable.initialValueTexture) variable.initialValueTexture.dispose()
+     *       const renderTargets = variable.renderTargets
+     *       for (let j = 0; j < renderTargets.length; j++) {
+     *         const renderTarget = renderTargets[j]
+     *         renderTarget.dispose()                 // frees framebuffer only
+     *       }
+     *     }
+     *     // variable.material.dispose() is never called  <-- leak
+     *   }
+     *
+     * Fix: add variable.material.dispose() inside the variables loop.
+     */
     public dispose(): void {
         // Dispose all variable render targets
         for (const variable of this.variables) {
