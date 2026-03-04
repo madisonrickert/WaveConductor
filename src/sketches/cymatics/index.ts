@@ -34,8 +34,7 @@ const TARGET_ACTIVE_RADIUS_INTERACTING = 7.5;
 const ACTIVE_RADIUS_INTERACTING_GROW_FACTOR = 0.01;
 const ACTIVE_RADIUS_IDLE_DECAY_FACTOR = 0.005;
 
-const SCREEN_SAVER_TIMEOUT_SECONDS = 30;
-const MINIMUM_SLEEP_TIMOUT_SECONDS = 10;
+const IDLE_TIMEOUT_SECONDS = 10;
 
 const INTERACTION_CENTER_LERP_FACTOR = 0.01;
 
@@ -43,10 +42,7 @@ export default class Cymatics extends Sketch {
     public slowDownAmount = 0;
     public handData: HandData[] = [];
 
-    // TODO move into core sketch
-    private lastInteractionTimestampMs: number = performance.now();
-    /** Tracks whether the sim has been idle long enough to sleep */
-    private isIdle: boolean = false;
+    protected idleTimeoutSeconds = IDLE_TIMEOUT_SECONDS;
 
     private mousePressed = false;
     private mousePosition = new THREE.Vector2(0, 0);
@@ -185,17 +181,7 @@ export default class Cymatics extends Sketch {
             this.animateSimulation();
         }
 
-        // --- Sleep Logic ---
-        const secondsSinceInteraction = (currentTimeMs - this.lastInteractionTimestampMs) / 1000;
-        this.isIdle =
-            secondsSinceInteraction >= MINIMUM_SLEEP_TIMOUT_SECONDS &&
-            this.activeRadius <= MINIMUM_ACTIVE_RADIUS + 1e-2;
-
-        // --- Screen Saver Logic ---
-        if (this.updateScreenSaverCallback) {
-            const showScreenSaver = secondsSinceInteraction >= SCREEN_SAVER_TIMEOUT_SECONDS;
-            this.updateScreenSaverCallback(showScreenSaver);
-        }
+        this.updateIdleState(currentTimeMs);
     }
 
     /**
@@ -369,8 +355,7 @@ export default class Cymatics extends Sketch {
         this.computation.dispose();
     }
 
-    private markInteraction(timestampMs: number = performance.now()) {
-        this.lastInteractionTimestampMs = timestampMs;
-        this.isIdle = false;
+    protected isReadyToSleep(): boolean {
+        return this.activeRadius <= MINIMUM_ACTIVE_RADIUS + 1e-2;
     }
 }

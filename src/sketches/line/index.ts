@@ -23,9 +23,6 @@ const PARTICLE_SYSTEM_PARAMS = {
 const MOUSE_ATTRACTOR_POWER_DECAY_SPEED = 0.9;
 const MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2;
 
-const SCREEN_SAVER_TIMEOUT_SECONDS = 30;
-const MINIMUM_SLEEP_TIMEOUT_SECONDS = 30;
-
 interface LineSketchParams extends Record<string, unknown> {
     p?: number;
     gamma?: number;
@@ -90,10 +87,6 @@ export default class LineSketch extends Sketch {
             }
         },
     };
-
-    // TODO move into core sketch
-    private lastInteractionTimestampMs: number = performance.now();
-    private isIdle: boolean = false;
 
     public audioGroup!: LineSketchAudioGroup;
     public particles: IParticle[] = [];
@@ -201,15 +194,7 @@ export default class LineSketch extends Sketch {
                 (this.mouseAttractor.power - MOUSE_ATTRACTOR_POWER_DECAY_FLOOR) * MOUSE_ATTRACTOR_POWER_DECAY_SPEED;
         }
 
-        // --- Sleep logic ---
-        const secondsSinceInteraction = (currentTimeMs - this.lastInteractionTimestampMs) / 1000;
-        this.isIdle = secondsSinceInteraction >= MINIMUM_SLEEP_TIMEOUT_SECONDS && !this.hasActiveAttractors();
-
-        // --- Screen Saver Logic ---
-        if (this.updateScreenSaverCallback) {
-            const showScreenSaver = secondsSinceInteraction >= SCREEN_SAVER_TIMEOUT_SECONDS;
-            this.updateScreenSaverCallback(showScreenSaver);
-        }
+        this.updateIdleState(currentTimeMs);
     }
 
     private animateSimulation(now: number = performance.now()): void {
@@ -315,8 +300,7 @@ export default class LineSketch extends Sketch {
         this.mouseAttractor.power = 0;
     }
 
-    private markInteraction(timestampMs: number = performance.now()) {
-        this.lastInteractionTimestampMs = timestampMs;
-        this.isIdle = false;
+    protected isReadyToSleep(): boolean {
+        return !this.hasActiveAttractors();
     }
 }

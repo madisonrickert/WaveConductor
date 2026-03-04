@@ -73,6 +73,41 @@ export abstract class Sketch {
 
     destroy?(): void;
 
+    // --- Idle / Screensaver Tracking ---
+    // Opt-in: subclasses must call `updateIdleState()` in their `animate()` method
+    // and `markInteraction()` in their event handlers to activate this behavior.
+
+    protected lastInteractionTimestampMs: number = performance.now();
+    protected isIdle: boolean = false;
+
+    /** Seconds of inactivity before the screensaver overlay appears. */
+    protected screenSaverTimeoutSeconds: number = 30;
+    /** Seconds of inactivity (plus `isReadyToSleep()`) before the sketch stops simulating. */
+    protected idleTimeoutSeconds: number = 30;
+
+    /** Call from event handlers and input sources to reset idle/screensaver timers. */
+    protected markInteraction(timestampMs: number = performance.now()) {
+        this.lastInteractionTimestampMs = timestampMs;
+        this.isIdle = false;
+    }
+
+    /**
+     * Call once per frame (in `animate`) to update `isIdle` and the screensaver overlay.
+     */
+    protected updateIdleState(currentTimeMs: number) {
+        const secondsSinceInteraction = (currentTimeMs - this.lastInteractionTimestampMs) / 1000;
+        this.isIdle = secondsSinceInteraction >= this.idleTimeoutSeconds && this.isReadyToSleep();
+
+        if (this.updateScreenSaverCallback) {
+            this.updateScreenSaverCallback(secondsSinceInteraction >= this.screenSaverTimeoutSeconds);
+        }
+    }
+
+    /** Override to add sketch-specific conditions for entering sleep (e.g. no active attractors). */
+    protected isReadyToSleep(): boolean {
+        return true;
+    }
+
     /**
      * Callback to update the screen saver state.
      * This is set by the parent component to control the visibility of the screen saver.
