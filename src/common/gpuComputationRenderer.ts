@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import WebGL from 'three/addons/capabilities/WebGL.js';
 
 // copied from https://github.com/mrdoob/three.js/blob/dev/examples/js/GPUComputationRenderer.js
 // copied from https://gist.github.com/murasaki-uma/ea652e3afb2e419f6f3eadbfac825628
@@ -119,6 +118,8 @@ export default class GPUComputationRenderer {
 
     public currentTextureIndex = 0;
 
+    public dataType: number = THREE.FloatType;
+
     public scene = new THREE.Scene();
 
     public camera = new THREE.Camera();
@@ -143,6 +144,11 @@ export default class GPUComputationRenderer {
         this.passThruShader = this.createShaderMaterial( this.getPassThroughFragmentShader(), this.passThruUniforms );
         this.mesh = new THREE.Mesh( new THREE.PlaneGeometry( 2, 2 ), this.passThruShader );
         this.scene.add( this.mesh );
+    }
+
+    public setDataType( type: number ) {
+        this.dataType = type;
+        return this;
     }
 
     public addVariable( variableName: string, computeFragmentShader: string, initialValueTexture: THREE.Texture ) {
@@ -175,7 +181,7 @@ export default class GPUComputationRenderer {
 
     public init() {
 
-        if ( ! WebGL.isWebGL2Available() && ! this.renderer.extensions.get( "OES_texture_float" ) ) {
+        if ( this.renderer.capabilities.isWebGL2 === false && this.renderer.extensions.has( "OES_texture_float" ) === false ) {
 
             return "No OES_texture_float support for float textures.";
 
@@ -319,8 +325,8 @@ export default class GPUComputationRenderer {
             minFilter: minFilter,
             magFilter: magFilter,
             format: THREE.RGBAFormat,
-            type: ( /(iPad|iPhone|iPod)/g.test( navigator.userAgent ) ) ? THREE.HalfFloatType : THREE.FloatType,
-            stencilBuffer: false,
+            type: this.dataType,
+            depthBuffer: false,
         } );
 
         return renderTarget;
@@ -361,10 +367,27 @@ export default class GPUComputationRenderer {
     };
 
     public doRenderTarget( material: THREE.ShaderMaterial, output: THREE.WebGLRenderTarget ) {
+        const currentRenderTarget = this.renderer.getRenderTarget();
+        const currentXrEnabled = this.renderer.xr.enabled;
+        const currentShadowAutoUpdate = this.renderer.shadowMap.autoUpdate;
+        const currentOutputColorSpace = this.renderer.outputColorSpace;
+        const currentToneMapping = this.renderer.toneMapping;
+
+        this.renderer.xr.enabled = false;
+        this.renderer.shadowMap.autoUpdate = false;
+        this.renderer.outputColorSpace = 'srgb-linear';
+        this.renderer.toneMapping = THREE.NoToneMapping;
+
         this.mesh.material = material;
         this.renderer.setRenderTarget( output );
         this.renderer.render( this.scene, this.camera );
         this.mesh.material = this.passThruShader;
+
+        this.renderer.xr.enabled = currentXrEnabled;
+        this.renderer.shadowMap.autoUpdate = currentShadowAutoUpdate;
+        this.renderer.outputColorSpace = currentOutputColorSpace;
+        this.renderer.toneMapping = currentToneMapping;
+        this.renderer.setRenderTarget( currentRenderTarget );
     };
 
     // Shaders
