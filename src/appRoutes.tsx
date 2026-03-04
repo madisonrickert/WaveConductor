@@ -14,17 +14,22 @@ export const AppRoutes = () => {
     const location = useLocation();
     const navigate = useNavigate();
 
-    useHotkeys('z', () => {
+    const navigatePrev = () => {
         const currentIndex = SKETCH_PATHS.indexOf(location.pathname);
         const prevIndex = currentIndex <= 0 ? SKETCH_PATHS.length - 1 : currentIndex - 1;
         throttledNavigate(SKETCH_PATHS[prevIndex]);
-    });
+    };
 
-    useHotkeys('x', () => {
+    const navigateNext = () => {
         const currentIndex = SKETCH_PATHS.indexOf(location.pathname);
         const nextIndex = currentIndex === -1 || currentIndex >= SKETCH_PATHS.length - 1 ? 0 : currentIndex + 1;
         throttledNavigate(SKETCH_PATHS[nextIndex]);
-    });
+    };
+
+    useHotkeys('z', navigatePrev);
+    useHotkeys('x', navigateNext);
+    useHotkeys('left', navigatePrev);
+    useHotkeys('right', navigateNext);
 
     useHotkeys('escape', () => {
         if (location.pathname !== '/') {

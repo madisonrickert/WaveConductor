@@ -65,12 +65,12 @@ The web build deploys to GitHub Pages automatically on every push to `main`.
 
 ## Keyboard Shortcuts
 
-| Key       | Action                          |
-|-----------|---------------------------------|
-| `z`       | Previous sketch                 |
-| `x`       | Next sketch                     |
-| `Escape`  | Return to home / gallery        |
-| `Shift+D` | Toggle dev settings panel       |
+| Key          | Action                          |
+|--------------|---------------------------------|
+| `z` / `←`    | Previous sketch                 |
+| `x` / `→`    | Next sketch                     |
+| `Escape`     | Return to home / gallery        |
+| `Shift+D`    | Toggle dev settings panel       |
 
 ## Leap Motion
 
