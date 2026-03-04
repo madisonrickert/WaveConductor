@@ -14,24 +14,16 @@ import { HandData } from "@/components/HandOverlay";
 
 import COMPUTE_CELL_STATE from "./computeCellState.frag";
 
-let mousePressed = false;
-const mousePosition = new THREE.Vector2(0, 0);
-
 enum Quality {
     Low,
     Medium,
     High,
 }
-let QUALITY: Quality;
-switch (true) {
-    case screen.width > 960:
-        QUALITY = Quality.High;
-        break;
-    case screen.width > 480:
-        QUALITY = Quality.Medium;
-        break;
-    default:
-        QUALITY = Quality.Low;
+
+function computeQuality(): Quality {
+    if (screen.width > 960) return Quality.High;
+    if (screen.width > 480) return Quality.Medium;
+    return Quality.Low;
 }
 
 // an integer makes perfect standing waves. the 0.002 means that the wave will oscillate very slightly per frame; 500 frames per oscillation period
@@ -50,12 +42,16 @@ const INTERACTION_CENTER_LERP_FACTOR = 0.01;
 export default class Cymatics extends ISketch {
     public slowDownAmount = 0;
     public handData: HandData[] = [];
-    
+
     // TODO move into core sketch
     private lastInteractionTimestampMs: number = performance.now();
     /** Tracks whether the sim has been idle long enough to sleep */
     private isIdle: boolean = false;
-    
+
+    private mousePressed = false;
+    private mousePosition = new THREE.Vector2(0, 0);
+    private quality: Quality = computeQuality();
+
     public events = {
         touchstart: (event: TouchEvent) => {
             // prevent emulated mouse events from occuring
@@ -78,7 +74,7 @@ export default class Cymatics extends ISketch {
         },
 
         touchend: (_event: TouchEvent) => {
-            mousePressed = false;
+            this.mousePressed = false;
         },
 
         mousedown: (event: MouseEvent) => {
@@ -96,20 +92,20 @@ export default class Cymatics extends ISketch {
         },
 
         mouseup: (_event: MouseEvent) => {
-            mousePressed = false;
+            this.mousePressed = false;
         },
     };
 
     startInteraction(pixelX: number, pixelY: number) {
         this.setMouse(pixelX, pixelY);
-        mousePressed = true;
+        this.mousePressed = true;
         this.slowDownAmount += 1;
         this.audio.triggerJitter();
         this.markInteraction();
     }
 
     setMouse(pixelX: number, pixelY: number) {
-        mousePosition.set(pixelX / this.canvas.width * 2 - 1, (1 - pixelY / this.canvas.height) * 2 - 1);
+        this.mousePosition.set(pixelX / this.canvas.width * 2 - 1, (1 - pixelY / this.canvas.height) * 2 - 1);
     }
 
     public id = "cymatics";
@@ -145,7 +141,7 @@ export default class Cymatics extends ISketch {
     public init() {
         this.renderer.setClearColor(0xfcfcfc);
         this.renderer.clear();
-        switch(QUALITY) {
+        switch(this.quality) {
             case Quality.High:
                 this.computation = new GPUComputationRenderer(1024, 1024, this.renderer);
                 break;
@@ -214,7 +210,7 @@ export default class Cymatics extends ISketch {
      * Runs each frame that the simulation is active
      */
     private animateSimulation(): void {
-        if (mousePressed) {
+        if (this.mousePressed) {
             this.numCycles += .0003 + (this.numCycles - DEFAULT_NUM_CYCLES) * 0.0008;
             if (this.activeRadius < MINIMUM_ACTIVE_RADIUS_INTERACTING) {
                 this.activeRadius = MINIMUM_ACTIVE_RADIUS_INTERACTING;
@@ -256,7 +252,7 @@ export default class Cymatics extends ISketch {
         this.audio.setOscFrequencyScalar(frequencyScalar);
 
         let numIterations;
-        switch(QUALITY) {
+        switch(this.quality) {
             case Quality.High:
                 numIterations = 30;
                 break;
@@ -294,7 +290,7 @@ export default class Cymatics extends ISketch {
             this.updateHandDataCallback(this.handData);
         }
         if (newHands.length === 0 && oldHandCount > 0) {
-            mousePressed = false;
+            this.mousePressed = false;
         }
 
         if (newHands.length === 0) {
@@ -308,13 +304,13 @@ export default class Cymatics extends ISketch {
         // Either hand can pinch or squeeze to trigger the effect
         const isPinched = newHands.some((hand) => hand.pinched);
         if (isPinched) {
-            if (!mousePressed) {
-                mousePressed = true;
+            if (!this.mousePressed) {
+                this.mousePressed = true;
                 this.slowDownAmount += 1;
                 this.audio.triggerJitter();
             }
         } else {
-            mousePressed = false;
+            this.mousePressed = false;
         }
 
         this.markInteraction();
@@ -337,7 +333,7 @@ export default class Cymatics extends ISketch {
      */
     private computeWantedCenter(): THREE.Vector2 {
         // clone-without-alloc: screen-space position in [-1, 1]^2 scaled down to the quadrant size
-        const screenCoord = this.tmpScreenCoord.copy(mousePosition).multiplyScalar(0.5);
+        const screenCoord = this.tmpScreenCoord.copy(this.mousePosition).multiplyScalar(0.5);
 
         if (1 / this.aspectRatio > 1.0) {
             // Widescreen layout: split into left/right halves.

@@ -82,7 +82,7 @@ class LineStrip {
     public gridOffsetY: number;
     public object: THREE.Object3D;
 
-    constructor(public width: number, public height: number, offsetX: number, offsetY: number, public gridSize: number) {
+    constructor(public width: number, public height: number, offsetX: number, offsetY: number, public gridSize: number, private material: THREE.LineBasicMaterial) {
         this.inlineAngle = Math.atan(offsetY / offsetX);
         this.dx = 1;
         this.dy = 1;
@@ -131,7 +131,7 @@ class LineStrip {
                 x + inlineOffsetX,
                 y + inlineOffsetY,
             );
-            const line = new THREE.Line(geometry, lineMaterial);
+            const line = new THREE.Line(geometry, this.material);
             const lineMesh = Object.assign(line, {
                 x,
                 y,
@@ -154,13 +154,11 @@ class LineStrip {
     }
 }
 
-const lineStrips: LineStrip[] = [];
-let isTimeFast = false;
-
-// threejs stuff
-const lineMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.03 });
-
 export default class Waves extends ISketch {
+    private lineStrips: LineStrip[] = [];
+    private isTimeFast = false;
+    private lineMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.03 });
+
     public events = {
         mousemove: (event: MouseEvent) => {
             this.setVelocityFromMouseEvent(event);
@@ -168,14 +166,14 @@ export default class Waves extends ISketch {
 
         mousedown: (event: MouseEvent) => {
             if (event.button === 0) {
-                isTimeFast = true;
+                this.isTimeFast = true;
                 this.setVelocityFromMouseEvent(event);
             }
         },
 
         mouseup: (event: MouseEvent) => {
             if (event.button === 0) {
-                isTimeFast = false;
+                this.isTimeFast = false;
                 this.setVelocityFromMouseEvent(event);
             }
         },
@@ -184,7 +182,7 @@ export default class Waves extends ISketch {
             // prevent emulated mouse events from occuring
             event.preventDefault();
 
-            isTimeFast = true;
+            this.isTimeFast = true;
             this.setVelocityFromTouchEvent(event);
         },
 
@@ -193,7 +191,7 @@ export default class Waves extends ISketch {
         },
 
         touchend: (_event: TouchEvent) => {
-            isTimeFast = false;
+            this.isTimeFast = false;
         },
     };
 
@@ -204,7 +202,7 @@ export default class Waves extends ISketch {
     public init() {
         this.audioGroup = createAudioGroup(this.audioContext, {
             HeightMap,
-            isTimeFast: () => isTimeFast,
+            isTimeFast: () => this.isTimeFast,
         });
         this.renderer.autoClearColor = false;
 
@@ -212,10 +210,10 @@ export default class Waves extends ISketch {
 
         // cheap mobile detection
         const gridSize = (window.screen.width > 1024) ? 50 : 100;
-        lineStrips.push(new LineStrip(HeightMap.width, HeightMap.height, 1, -1, gridSize));
-        lineStrips.push(new LineStrip(HeightMap.width, HeightMap.height, 0, 1, gridSize));
+        this.lineStrips.push(new LineStrip(HeightMap.width, HeightMap.height, 1, -1, gridSize, this.lineMaterial));
+        this.lineStrips.push(new LineStrip(HeightMap.width, HeightMap.height, 0, 1, gridSize, this.lineMaterial));
 
-        lineStrips.forEach((lineStrip) => {
+        this.lineStrips.forEach((lineStrip) => {
             this.scene.add(lineStrip.object);
         });
 
@@ -225,23 +223,23 @@ export default class Waves extends ISketch {
 
     public animate() {
         const opacityChangeFactor = 0.1;
-        if (isTimeFast) {
-            lineMaterial.opacity = lineMaterial.opacity * (1 - opacityChangeFactor) + 0.23 * opacityChangeFactor;
+        if (this.isTimeFast) {
+            this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.23 * opacityChangeFactor;
             HeightMap.frame += 4;
         } else {
-            lineMaterial.opacity = lineMaterial.opacity * (1 - opacityChangeFactor) + 0.03 * opacityChangeFactor;
+            this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.03 * opacityChangeFactor;
             HeightMap.frame += 1;
         }
 
         if (HeightMap.frame % 1000 < 500) {
-            lineMaterial.color.set("rgb(50, 12, 12)");
+            this.lineMaterial.color.set("rgb(50, 12, 12)");
         } else {
-            lineMaterial.color.set("rgb(252, 247, 243)");
+            this.lineMaterial.color.set("rgb(252, 247, 243)");
         }
 
         const scale = map(Math.sin(HeightMap.frame / 550), -1, 1, 1, 0.8);
         this.camera.scale.set(scale, scale, 1);
-        lineStrips.forEach((lineStrip) => {
+        this.lineStrips.forEach((lineStrip) => {
             lineStrip.update();
         });
         this.renderer.render(this.scene, this.camera);
@@ -268,7 +266,7 @@ export default class Waves extends ISketch {
         // draw black again
         HeightMap.frame = 0;
 
-        lineStrips.forEach((lineStrip) => {
+        this.lineStrips.forEach((lineStrip) => {
             lineStrip.resize(HeightMap.width, HeightMap.height);
         });
     }
@@ -290,7 +288,7 @@ export default class Waves extends ISketch {
     setVelocityFromCanvasCoordinates(canvasX: number, canvasY: number) {
         const dx = map(canvasX, 0, this.canvas.width, -1, 1) * 2.20;
         const dy = map(canvasY, 0, this.canvas.height, -1, 1) * 2.20;
-        lineStrips.forEach((lineStrip) => {
+        this.lineStrips.forEach((lineStrip) => {
             lineStrip.dx = dx;
             lineStrip.dy = dy;
         });
@@ -309,7 +307,7 @@ export default class Waves extends ISketch {
         this.audioGroup.dispose();
 
         // Clean up Three.js resources
-        lineStrips.forEach((lineStrip) => {
+        this.lineStrips.forEach((lineStrip) => {
             this.scene.remove(lineStrip.object);
             // Dispose geometry for each line in the strip
             lineStrip.object.children.forEach((child) => {
@@ -318,9 +316,7 @@ export default class Waves extends ISketch {
                 }
             });
         });
-
-        // Clear the module-level array for clean re-initialization
-        lineStrips.length = 0;
-        isTimeFast = false;
+        this.lineMaterial.dispose();
+        this.lineStrips.length = 0;
     }
 }

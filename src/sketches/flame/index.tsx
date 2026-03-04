@@ -12,12 +12,10 @@ import { Chord } from "./types";
 
 import "./flame.scss";
 
-const quality = screen.width > 480 ? "high" : "low";
 const GEN_DIVISOR = 2147483648 - 1; // 2^31 - 1
 const MAX_POINTS = 200000;
 
 const DEFAULT_NAME = "who are you?";
-const nameFromSearch: string = getQueryParam("name");
 
 function randomBranches(
     name: string,
@@ -131,7 +129,7 @@ function sigmoid(x: number) {
     }
 }
 
-function FlameNameInput({ onInput }: { onInput: (newName: string, isEmpty: boolean) => void }) {
+function FlameNameInput({ onInput, initialName }: { onInput: (newName: string, isEmpty: boolean) => void; initialName: string }) {
     const handleInput = (event: React.FormEvent<HTMLInputElement>) => {
         const value = event.currentTarget.value;
         const trimmed = value == null ? "" : value.trim();
@@ -141,7 +139,7 @@ function FlameNameInput({ onInput }: { onInput: (newName: string, isEmpty: boole
     return (
         <div className="flame-input">
             <input
-                defaultValue={nameFromSearch}
+                defaultValue={initialName}
                 placeholder={DEFAULT_NAME}
                 maxLength={20}
                 onInput={handleInput}
@@ -151,7 +149,9 @@ function FlameNameInput({ onInput }: { onInput: (newName: string, isEmpty: boole
 }
 
 export default class FlameSketch extends ISketch {
-    public elements = [<FlameNameInput key="input" onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />];
+    private quality = screen.width > 480 ? "high" : "low";
+    private nameFromSearch: string = getQueryParam("name");
+    public elements = [<FlameNameInput key="input" initialName={this.nameFromSearch} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />];
     public id = "flame";
     public events = {
         dblclick: () => { },
@@ -222,11 +222,11 @@ export default class FlameSketch extends ISketch {
         this.controls.minDistance = 0.1;
         this.controls.enablePan = false;
 
-        this.updateName(nameFromSearch || DEFAULT_NAME, !nameFromSearch);
+        this.updateName(this.nameFromSearch || DEFAULT_NAME, !this.nameFromSearch);
     }
 
     public animate(_millisElapsed: number) {
-        if (quality === "high") {
+        if (this.quality === "high") {
             this.animateSuperPoint();
         }
 
@@ -374,7 +374,7 @@ export default class FlameSketch extends ISketch {
         this.pointCloud.rotateX(-Math.PI / 2);
         this.scene.add(this.pointCloud);
 
-        if (quality === "low") {
+        if (this.quality === "low") {
             this.superPoint.recalculate(this.jumpiness, this.jumpiness, this.jumpiness, this.computeDepth(), false);
         }
     }

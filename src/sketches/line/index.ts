@@ -26,7 +26,7 @@ const MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2;
 const SCREEN_SAVER_TIMEOUT_SECONDS = 30;
 const MINIMUM_SLEEP_TIMEOUT_SECONDS = 30;
 
-interface LineSketchParams {
+interface LineSketchParams extends Record<string, unknown> {
     p?: number;
     gamma?: number;
 }

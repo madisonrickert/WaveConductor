@@ -15,14 +15,12 @@ const params: ParticleSystemParameters = {
     PULLING_DRAG_CONSTANT: 0.96075095702,
     INERTIAL_DRAG_CONSTANT: 0.23913643334,
     STATIONARY_CONSTANT: 0.01,
+    FADE_DURATION: 3,
     constrainToBox: false,
 };
 
 const ATTRACTOR_POWER_DECAY_SPEED = 0.9;
 const ATTRACTOR_POWER_DECAY_FLOOR = 2;
-
-const attractor = new Attractor();
-let mouseX: number, mouseY: number;
 
 function getRelativePoint(target: EventTarget | null, clientX: number, clientY: number) {
     if (target instanceof HTMLElement) {
@@ -35,81 +33,61 @@ function getRelativePoint(target: EventTarget | null, clientX: number, clientY: 
     return { x: clientX, y: clientY };
 }
 
-function touchstart(event: TouchEvent) {
-    // prevent emulated mouse events from occuring
-    event.preventDefault();
-    const touch = event.touches[0];
-    if (!touch) {
-        return;
-    }
-    const { x, y } = getRelativePoint(event.currentTarget, touch.clientX, touch.clientY);
-    createAttractor(x, y);
-    mouseX = x;
-    mouseY = y;
-}
-
-function touchmove(event: TouchEvent) {
-    const touch = event.touches[0];
-    if (!touch) {
-        return;
-    }
-    const { x, y } = getRelativePoint(event.currentTarget, touch.clientX, touch.clientY);
-    moveAttractor(x, y);
-    mouseX = x;
-    mouseY = y;
-}
-
-function touchend(_event: TouchEvent) {
-    removeAttractor();
-}
-
-function mousedown(event: MouseEvent) {
-    if (event.button === 0) {
-        const { x, y } = getRelativePoint(event.currentTarget, event.clientX, event.clientY);
-        mouseX = x;
-        mouseY = y;
-        createAttractor(mouseX, mouseY);
-    }
-}
-
-function mousemove(event: MouseEvent) {
-    const { x, y } = getRelativePoint(event.currentTarget, event.clientX, event.clientY);
-    mouseX = x;
-    mouseY = y;
-    moveAttractor(mouseX, mouseY);
-}
-
-function mouseup(event: MouseEvent) {
-    if (event.button === 0) {
-        removeAttractor();
-    }
-}
-
-function createAttractor(x: number, y: number) {
-    attractor.x = x;
-    attractor.y = y;
-    attractor.power = 1;
-}
-
-function moveAttractor(x: number, y: number) {
-    if (attractor != null) {
-        attractor.x = x;
-        attractor.y = y;
-    }
-}
-
-function removeAttractor() {
-    attractor.power = 0;
-}
-
 export default class Dots extends ISketch {
+    private attractor = new Attractor();
+    private mouseX = 0;
+    private mouseY = 0;
+
     public events = {
-        mousedown,
-        mousemove,
-        mouseup,
-        touchstart,
-        touchmove,
-        touchend,
+        touchstart: (event: TouchEvent) => {
+            // prevent emulated mouse events from occuring
+            event.preventDefault();
+            const touch = event.touches[0];
+            if (!touch) {
+                return;
+            }
+            const { x, y } = getRelativePoint(event.currentTarget, touch.clientX, touch.clientY);
+            this.createAttractor(x, y);
+            this.mouseX = x;
+            this.mouseY = y;
+        },
+
+        touchmove: (event: TouchEvent) => {
+            const touch = event.touches[0];
+            if (!touch) {
+                return;
+            }
+            const { x, y } = getRelativePoint(event.currentTarget, touch.clientX, touch.clientY);
+            this.moveAttractor(x, y);
+            this.mouseX = x;
+            this.mouseY = y;
+        },
+
+        touchend: (_event: TouchEvent) => {
+            this.removeAttractor();
+        },
+
+        mousedown: (event: MouseEvent) => {
+            if (event.button === 0) {
+                const { x, y } = getRelativePoint(event.currentTarget, event.clientX, event.clientY);
+                this.mouseX = x;
+                this.mouseY = y;
+                this.createAttractor(this.mouseX, this.mouseY);
+            }
+        },
+
+        mousemove: (event: MouseEvent) => {
+            const { x, y } = getRelativePoint(event.currentTarget, event.clientX, event.clientY);
+            this.mouseX = x;
+            this.mouseY = y;
+            this.moveAttractor(this.mouseX, this.mouseY);
+        },
+
+        mouseup: (event: MouseEvent) => {
+            if (event.button === 0) {
+                this.removeAttractor();
+            }
+        },
     };
 
     public shader = new ExplodeShaderPass();
@@ -147,7 +125,7 @@ export default class Dots extends ISketch {
     }
 
     public animate(_millisElapsed: number) {
-        const nonzeroAttractors = attractor.power > 0 ? [attractor] : [];
+        const nonzeroAttractors = this.attractor.power > 0 ? [this.attractor] : [];
         this.ps.stepParticles(nonzeroAttractors, this.pointCloud);
 
         const { flatRatio, normalizedVarianceLength, groupedUpness, averageVel } = computeStats(this.ps);
@@ -155,14 +133,14 @@ export default class Dots extends ISketch {
         this.audioGroup.setFrequency(120 / normalizedVarianceLength * averageVel / 100 );
         this.audioGroup.setVolume(Math.max(groupedUpness - 0.05, 0));
 
-        this.shader.uniforms.iMouse.value = new THREE.Vector2(mouseX / this.canvas.width, (this.canvas.height - mouseY) / this.canvas.height);
+        this.shader.uniforms.iMouse.value = new THREE.Vector2(this.mouseX / this.canvas.width, (this.canvas.height - this.mouseY) / this.canvas.height);
 
         this.composer.render();
 
-        if (attractor.power > 0) {
-            attractor.power =
+        if (this.attractor.power > 0) {
+            this.attractor.power =
                 ATTRACTOR_POWER_DECAY_FLOOR +
-                (attractor.power - ATTRACTOR_POWER_DECAY_FLOOR) * ATTRACTOR_POWER_DECAY_SPEED;
+                (this.attractor.power - ATTRACTOR_POWER_DECAY_FLOOR) * ATTRACTOR_POWER_DECAY_SPEED;
         }
     }
 
@@ -183,5 +161,20 @@ export default class Dots extends ISketch {
         // Clean up Three.js resources
         this.pointCloud.geometry.dispose();
         this.scene.remove(this.pointCloud);
+    }
+
+    private createAttractor(x: number, y: number) {
+        this.attractor.x = x;
+        this.attractor.y = y;
+        this.attractor.power = 1;
+    }
+
+    private moveAttractor(x: number, y: number) {
+        this.attractor.x = x;
+        this.attractor.y = y;
+    }
+
+    private removeAttractor() {
+        this.attractor.power = 0;
     }
 }
