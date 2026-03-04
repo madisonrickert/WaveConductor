@@ -24,13 +24,13 @@ type UIEventMap = Pick<GlobalEventHandlersEventMap, UIEventName>;
 
 export type UIEventHandler<E extends UIEventName = UIEventName> = (event: UIEventMap[E]) => void;
 
-export type UIEventReciever = Partial<{ [E in UIEventName]: UIEventHandler<E> }>;
+export type UIEventReceiver = Partial<{ [E in UIEventName]: UIEventHandler<E> }>;
 
 export abstract class Sketch {
     static id?: string;
 
     public elements?: React.JSX.Element[];
-    public events?: UIEventReciever;
+    public events?: UIEventReceiver;
     constructor(public renderer: THREE.WebGLRenderer, public audioContext: SketchAudioContext) {}
 
     /**
