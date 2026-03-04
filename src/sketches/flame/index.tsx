@@ -7,6 +7,7 @@ import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRo
 import { map } from "@/common/math";
 import { getQueryParam, setQueryParams } from "@/common/queryParams";
 import { Sketch } from "@/sketch";
+import { DEFAULT_NAME, FlameNameInput } from "./FlameNameInput";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
 import { Chord } from "./types";
 
@@ -14,8 +15,6 @@ import "./flame.scss";
 
 const GEN_DIVISOR = 2147483648 - 1; // 2^31 - 1
 const MAX_POINTS = 200000;
-
-const DEFAULT_NAME = "who are you?";
 
 function randomBranches(
     name: string,
@@ -127,25 +126,6 @@ function sigmoid(x: number) {
     } else {
         return 1 / (1 + Math.exp(-x));
     }
-}
-
-function FlameNameInput({ onInput, initialName }: { onInput: (newName: string, isEmpty: boolean) => void; initialName: string }) {
-    const handleInput = (event: React.FormEvent<HTMLInputElement>) => {
-        const value = event.currentTarget.value;
-        const trimmed = value == null ? "" : value.trim();
-        onInput(trimmed || DEFAULT_NAME, trimmed === "");
-    };
-
-    return (
-        <div className="flame-input">
-            <input
-                defaultValue={initialName}
-                placeholder={DEFAULT_NAME}
-                maxLength={20}
-                onInput={handleInput}
-            />
-        </div>
-    );
 }
 
 export default class FlameSketch extends Sketch {
