@@ -1,6 +1,6 @@
 {
-  "name": "hellochar.com",
-  "version": "3.0.0",
+  "name": "chargallery",
+  "version": "4.0.0-beta",
   "author": {
     "name": "Madison Rickert",
     "email": "3495636+madisonrickert@users.noreply.github.com",
@@ -9,6 +9,10 @@
   "contributors": [
     {
       "name": "Xiaohan Zhang"
+    },
+    {
+      "name": "Rich Trapani",
+      "url": "https://lovetech.org"
     }
   ],
   "description": "Interactive art gallery (Three.js/WebGL, Web Audio, Leap Motion)",
@@ -71,8 +75,8 @@
     "vitest": "^4.0.18"
   },
   "build": {
-    "appId": "com.hellochar.app",
-    "productName": "hellochar",
+    "appId": "com.chargallery.app",
+    "productName": "CharGallery",
     "directories": {
       "output": "release"
     },

@@ -37,7 +37,7 @@ function renderAtRoute(route: string) {
 describe('AppRoutes', () => {
   it('renders HomePage at /', () => {
     renderAtRoute('/');
-    expect(screen.getByText('hellochar')).toBeInTheDocument();
+    expect(screen.getByText('CharGallery')).toBeInTheDocument();
   });
 
   it.each(['/line', '/flame', '/dots', '/cymatics', '/waves'])('renders SketchComponent at %s', (path) => {
@@ -48,6 +48,6 @@ describe('AppRoutes', () => {
   it('renders LicensesPage at /licenses', () => {
     renderAtRoute('/licenses');
     // LicensesPage should render something - just check it doesn't crash
-    expect(screen.queryByText('hellochar')).not.toBeInTheDocument();
+    expect(screen.queryByText('CharGallery')).not.toBeInTheDocument();
   });
 });

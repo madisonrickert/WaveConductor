@@ -43,11 +43,11 @@ export function HomePage() {
                     {renderHighlight("Waves", wavesImg)}
                     <div className="work-grid-item credits-block">
                         <div className="credits-content">
-                            <h2>hellochar</h2>
+                            <h2>CharGallery</h2>
+                            <p className="credits-attribution">based on <a href="https://github.com/hellochar/hellochar.com">hellochar</a> by <a href="https://github.com/hellochar">Xiaohan Zhang</a></p>
                             <ul>
-                                <li><a href="https://github.com/hellochar">Xiaohan Zhang</a></li>
                                 <li><a href="https://joshrickert.com">Madison Rickert</a></li>
-                                <li><a href="https://lovetech.org">Rich Trapani / LoveTech</a></li>
+                                <li><a href="https://lovetech.org">Rich Trapani | LoveTech</a></li>
                             </ul>
                             <Link to="/licenses" className="licenses-link">Open Source Licenses</Link>
                         </div>

@@ -17,6 +17,6 @@ describe('App', () => {
       render(<App />);
     });
     // The homepage should render by default (HashRouter starts at /)
-    expect(screen.getByText('hellochar')).toBeInTheDocument();
+    expect(screen.getByText('CharGallery')).toBeInTheDocument();
   });
 });

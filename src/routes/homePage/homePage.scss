@@ -97,8 +97,15 @@
             font-size: 1.8rem;
             font-weight: bold;
             color: $light-gray5;
-            margin: 0 0 1em 0;
+            margin: 0 0 0.3em 0;
             letter-spacing: 0.1em;
+        }
+
+        .credits-attribution {
+            font-family: $palatino-family;
+            font-size: 1rem;
+            color: $gray1;
+            margin: 0 0 1em 0;
         }
 
         ul {

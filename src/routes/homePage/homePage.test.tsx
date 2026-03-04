@@ -21,7 +21,7 @@ describe('HomePage', () => {
 
   it('renders credits section', () => {
     renderHomePage();
-    expect(screen.getByText('hellochar')).toBeInTheDocument();
+    expect(screen.getByText('CharGallery')).toBeInTheDocument();
     expect(screen.getByText('Xiaohan Zhang')).toBeInTheDocument();
     expect(screen.getByText('Madison Rickert')).toBeInTheDocument();
   });
