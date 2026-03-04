@@ -7,7 +7,7 @@ import { EffectComposer, ShaderPass/*, RenderPass */} from "three-stdlib";
 
 import GPUComputationRenderer, { GPUComputationRendererVariable } from "@/common/gpuComputationRenderer";
 import { mirroredRepeat } from "@/common/math";
-import { ISketch } from "@/sketch";
+import { Sketch } from "@/sketch";
 import { CymaticsAudio } from "./audio";
 import { RenderCymaticsShader } from "./renderCymaticsShader";
 import { HandData } from "@/components/HandOverlay";
@@ -39,7 +39,7 @@ const MINIMUM_SLEEP_TIMOUT_SECONDS = 10;
 
 const INTERACTION_CENTER_LERP_FACTOR = 0.01;
 
-export default class Cymatics extends ISketch {
+export default class Cymatics extends Sketch {
     public slowDownAmount = 0;
     public handData: HandData[] = [];
 

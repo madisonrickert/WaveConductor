@@ -5,7 +5,7 @@ import { computeStats, createParticle, createParticlePoints, IParticle, Particle
 import { Attractor } from "@/common/particleSystem/attractor";
 import { triangleWaveApprox } from "@/common/math";
 import { getQueryParams } from "@/common/queryParams";
-import { ISketch } from "@/sketch";
+import { Sketch } from "@/sketch";
 import { createAudioGroup, LineSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
 import { LeapAttractorController } from "./LeapAttractorController";
@@ -31,7 +31,7 @@ interface LineSketchParams extends Record<string, unknown> {
     gamma?: number;
 }
 
-export default class LineSketch extends ISketch {
+export default class LineSketch extends Sketch {
     public events = {
         touchstart: (event: TouchEvent) => {
             // Prevent emulated mouse events from occuring

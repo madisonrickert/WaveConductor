@@ -26,7 +26,7 @@ export type UIEventHandler<E extends UIEventName = UIEventName> = (event: UIEven
 
 export type UIEventReciever = Partial<{ [E in UIEventName]: UIEventHandler<E> }>;
 
-export abstract class ISketch {
+export abstract class Sketch {
     static id?: string;
 
     public elements?: React.JSX.Element[];
@@ -91,7 +91,7 @@ export abstract class ISketch {
 }
 
 export interface SketchConstructor {
-    new (renderer: THREE.WebGLRenderer, audioContext: SketchAudioContext): ISketch;
+    new (renderer: THREE.WebGLRenderer, audioContext: SketchAudioContext): Sketch;
 
     id?: string;
 }

@@ -5,7 +5,7 @@ import { ExplodeShaderPass } from "@/common/shaders/explode";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem, ParticleSystemParameters } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem";
 import { getQueryParams } from "@/common/queryParams";
-import { ISketch } from "@/sketch";
+import { Sketch } from "@/sketch";
 import { createAudioGroup, DotSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
 
@@ -22,7 +22,7 @@ const params: ParticleSystemParameters = {
 const ATTRACTOR_POWER_DECAY_SPEED = 0.9;
 const ATTRACTOR_POWER_DECAY_FLOOR = 2;
 
-export default class Dots extends ISketch {
+export default class Dots extends Sketch {
     private attractor = new Attractor();
     private mouseX = 0;
     private mouseY = 0;

@@ -6,7 +6,7 @@ import { createWhiteNoise } from "@/audio/noise";
 import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, LengthVarianceTrackerVisitor, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "@/common/flame";
 import { map } from "@/common/math";
 import { getQueryParam, setQueryParams } from "@/common/queryParams";
-import { ISketch } from "@/sketch";
+import { Sketch } from "@/sketch";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
 import { Chord } from "./types";
 
@@ -148,7 +148,7 @@ function FlameNameInput({ onInput, initialName }: { onInput: (newName: string, i
     );
 }
 
-export default class FlameSketch extends ISketch {
+export default class FlameSketch extends Sketch {
     private quality = screen.width > 480 ? "high" : "low";
     private nameFromSearch: string = getQueryParam("name");
     public elements = [<FlameNameInput key="input" initialName={this.nameFromSearch} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />];

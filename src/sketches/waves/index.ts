@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 import { lerp, map } from "@/common/math";
-import { ISketch } from "@/sketch";
+import { Sketch } from "@/sketch";
 import { createAudioGroup, WavesSketchAudioGroup } from "./audio";
 
 const LINE_SEGMENT_LENGTH = (window.screen.width > 1024) ? 11 : 22;
@@ -154,7 +154,7 @@ class LineStrip {
     }
 }
 
-export default class Waves extends ISketch {
+export default class Waves extends Sketch {
     private lineStrips: LineStrip[] = [];
     private isTimeFast = false;
     private lineMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.03 });

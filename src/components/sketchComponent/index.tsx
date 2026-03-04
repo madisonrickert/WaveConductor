@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import classnames from "classnames";
 
-import { ISketch, SketchConstructor, UI_EVENTS, UIEventName } from "@/sketch";
+import { Sketch, SketchConstructor, UI_EVENTS, UIEventName } from "@/sketch";
 import { VolumeButton } from "@/components/volumeButton";
 import { HandData, HandOverlay } from "@/components/HandOverlay";
 import { ScreenSaver } from "@/components/screenSaver";
@@ -18,11 +18,11 @@ const EVENT_LISTENER_OPTIONS: Partial<Record<UIEventName, AddEventListenerOption
     touchmove: { passive: false },
 };
 
-export interface ISketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
+export interface SketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
     sketchClass: SketchConstructor;
 }
 
-function useSketchUIEvents(sketch: ISketch) {
+function useSketchUIEvents(sketch: Sketch) {
     useEffect(() => {
         const canvas = sketch.renderer.domElement;
         canvas.setAttribute("tabindex", "1");
@@ -50,7 +50,7 @@ function useSketchUIEvents(sketch: ISketch) {
     }, [sketch]);
 }
 
-function SketchRenderer({ sketch }: { sketch: ISketch }) {
+function SketchRenderer({ sketch }: { sketch: Sketch }) {
     const [, setTick] = useState(0);
 
     useSketchUIEvents(sketch);
@@ -78,11 +78,11 @@ function SketchRenderer({ sketch }: { sketch: ISketch }) {
     );
 }
 
-export function SketchComponent({ sketchClass, ...containerProps }: ISketchComponentProps) {
+export function SketchComponent({ sketchClass, ...containerProps }: SketchComponentProps) {
     // Use the shared AudioContext from the provider
     const { audioContext, setUserVolume } = useAudioContext();
 
-    const [sketch, setSketch] = useState<ISketch | null>(null);
+    const [sketch, setSketch] = useState<Sketch | null>(null);
     const [volumeEnabled, setVolumeEnabled] = useState(() =>
         JSON.parse(window.localStorage.getItem("sketch-volumeEnabled") || "true")
     );
