@@ -12,6 +12,15 @@ const DEFAULT_OPTIONS = {
     loop: false,
 };
 
+const MIME_TYPES: Record<string, string> = {
+    mp3: "audio/mpeg",
+    ogg: "audio/ogg",
+    wav: "audio/wav",
+    webm: "audio/webm",
+    flac: "audio/flac",
+    aac: "audio/aac",
+};
+
 export class AudioClip {
     private element: HTMLMediaElement;
     private node: MediaElementAudioSourceNode;
@@ -23,10 +32,10 @@ export class AudioClip {
         this.element.volume = volume;
         this.element.preload = "auto";
         for (const srcUrl of srcs) {
-            const extension = srcUrl.split(".").pop();
+            const extension = srcUrl.split(".").pop()?.toLowerCase() ?? "";
             const source = document.createElement("source");
             source.src = srcUrl;
-            source.type = `audio/${extension}`;
+            source.type = MIME_TYPES[extension] ?? `audio/${extension}`;
             this.element.appendChild(source);
         }
 
