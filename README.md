@@ -2,6 +2,16 @@
 
 Interactive art gallery built with React, Three.js/WebGL, and Web Audio. Features generative visualizations that respond to mouse, touch, and Leap Motion hand tracking. Runs as a website or a self-contained Electron desktop app.
 
+## Features
+
+- **5 interactive sketches** — generative visualizations built with Three.js/WebGL, each with unique physics and rendering
+- **Generative audio** — every sketch produces real-time audio driven by its simulation state
+- **Mouse, touch, and Leap Motion input** — immersive tactile interaction from a variety of input styles
+- **Screensaver mode** — auto-activates after 30 seconds of idle
+- **Developer settings panel** — per-sketch tuning (particle density, quality, gamma) via `Shift`+`D`
+- **Electron desktop app** — fullscreen kiosk mode with display sleep prevention, auto-launching Leap Motion Websocket compatibility server
+- **Cross-platform builds** — DMG for macOS, portable exe for Windows, and a browser target for web portfolio use
+
 ## Sketches
 
 - **flame** — Iterated function system fractal driven by your name, with generative audio
