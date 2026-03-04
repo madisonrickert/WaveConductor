@@ -7,7 +7,7 @@ import wavesBackgroundAudioOGG from "./audio/waves_background.ogg";
 import wavesProcessorUrl from "./waves-processor.ts?worker&url";
 
 // return a number from [0..1] indicating in general how dark the image is; 1.0 means very dark, while 0.0 means very light
-function getDarkness(frame: number) {
+export function getDarkness(frame: number) {
     if (frame % 1000 < 500) {
         return map(frame % 500, 0, 500, 0, 1);
     } else {
