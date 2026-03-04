@@ -4,7 +4,8 @@ import { EffectComposer, RenderPass } from "three-stdlib";
 import { ExplodeShaderPass } from "@/common/shaders/explode";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem, ParticleSystemParameters } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem";
-import { getQueryParams } from "@/common/queryParams";
+import { loadSettings } from "@/common/sketchSettingsStore";
+import { SettingDef } from "@/common/sketchSettings";
 import { Sketch } from "@/sketch";
 import { createAudioGroup, DotSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
@@ -23,6 +24,11 @@ const ATTRACTOR_POWER_DECAY_SPEED = 0.9;
 const ATTRACTOR_POWER_DECAY_FLOOR = 2;
 
 export default class Dots extends Sketch {
+    static id = "dots";
+    static settings = {
+        dotSpacing: { default: 20, category: "dev", label: "Dot spacing (px)", requiresRestart: true } satisfies SettingDef<number>,
+        gamma: { default: 1.0, category: "dev", label: "Gamma", requiresRestart: true, step: 0.1 } satisfies SettingDef<number>,
+    };
     private attractor = new Attractor();
     private mouseX = 0;
     private mouseY = 0;
@@ -95,9 +101,10 @@ export default class Dots extends Sketch {
 
         const particles: IParticle[] = [];
         const EXTENT = 10;
-        const GRID_SIZE: number = Number(getQueryParams().gridSize) || 7;
-        for (let x = -EXTENT * GRID_SIZE; x < this.canvas.width + EXTENT * GRID_SIZE; x += GRID_SIZE) {
-            for (let y = -EXTENT * GRID_SIZE; y < this.canvas.height + EXTENT * GRID_SIZE; y += GRID_SIZE) {
+        const settings = loadSettings("dots", Dots.settings);
+        const dotSpacing = settings.dotSpacing;
+        for (let x = -EXTENT * dotSpacing; x < this.canvas.width + EXTENT * dotSpacing; x += dotSpacing) {
+            for (let y = -EXTENT * dotSpacing; y < this.canvas.height + EXTENT * dotSpacing; y += dotSpacing) {
                 particles.push(createParticle(x, y));
             }
         }
@@ -109,6 +116,7 @@ export default class Dots extends Sketch {
         this.composer = new EffectComposer(this.renderer);
         this.composer.addPass(new RenderPass(this.scene, this.camera));
         this.shader.uniforms.iResolution.value = this.resolution;
+        this.shader.uniforms.gamma.value = settings.gamma;
         this.shader.renderToScreen = true;
         this.composer.addPass(this.shader);
     }

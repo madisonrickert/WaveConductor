@@ -104,7 +104,7 @@ export default class Cymatics extends Sketch {
         this.mousePosition.set(pixelX / this.canvas.width * 2 - 1, (1 - pixelY / this.canvas.height) * 2 - 1);
     }
 
-    public id = "cymatics";
+    static id = "cymatics";
 
     public computation!: GPUComputationRenderer;
 

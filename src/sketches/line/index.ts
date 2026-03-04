@@ -4,7 +4,8 @@ import { GravityShaderPass } from "@/common/shaders/gravity";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem/attractor";
 import { triangleWaveApprox } from "@/common/math";
-import { getQueryParams } from "@/common/queryParams";
+import { loadSettings } from "@/common/sketchSettingsStore";
+import { SettingDef } from "@/common/sketchSettings";
 import { Sketch } from "@/sketch";
 import { createAudioGroup, LineSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
@@ -23,12 +24,12 @@ const PARTICLE_SYSTEM_PARAMS = {
 const MOUSE_ATTRACTOR_POWER_DECAY_SPEED = 0.9;
 const MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2;
 
-interface LineSketchParams extends Record<string, unknown> {
-    p?: number;
-    gamma?: number;
-}
-
 export default class LineSketch extends Sketch {
+    static id = "line";
+    static settings = {
+        particleDensity: { default: 10, category: "dev", label: "Particle density (per px)", requiresRestart: true } satisfies SettingDef<number>,
+        gamma: { default: 1.0, category: "dev", label: "Gamma", requiresRestart: true, step: 0.1 } satisfies SettingDef<number>,
+    };
     public events = {
         touchstart: (event: TouchEvent) => {
             // Prevent emulated mouse events from occuring
@@ -121,9 +122,7 @@ export default class LineSketch extends Sketch {
     }
 
     public init() {
-        const params: LineSketchParams = getQueryParams<LineSketchParams>({
-            parseNumbers: true
-        });
+        const params = loadSettings("line", LineSketch.settings);
 
         // Set up audio
         this.audioGroup = createAudioGroup(this.audioContext);
@@ -135,8 +134,7 @@ export default class LineSketch extends Sketch {
         // Add mouse attractor mesh to scene
         this.scene.add(this.mouseAttractor.ringMeshesGroup);
 
-        // Determine number of particles (query param or screen size)
-        const particleCount = params.p || screen.width * 10;
+        const particleCount = Math.round(params.particleDensity * this.canvas.width);
         
         // Evenly space particles across the middle of the screen in a line
         for (let i = 0; i < particleCount; i++) {
@@ -159,9 +157,7 @@ export default class LineSketch extends Sketch {
         this.composer = new EffectComposer(this.renderer);
         this.composer.addPass(new RenderPass(this.scene, this.camera));
         this.gravityShaderPass.uniforms.iResolution.value = new THREE.Vector2(this.canvas.width, this.canvas.height);
-        if (params.gamma) {
-            this.gravityShaderPass.uniforms.gamma.value = params.gamma;
-        }
+        this.gravityShaderPass.uniforms.gamma.value = params.gamma;
         this.gravityShaderPass.renderToScreen = true;
         this.composer.addPass(this.gravityShaderPass);
 

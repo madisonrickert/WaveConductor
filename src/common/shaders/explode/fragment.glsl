@@ -1,6 +1,7 @@
 uniform vec2 iMouse;
 uniform vec2 iResolution;
 uniform float shrinkFactor;
+uniform float gamma;
 uniform sampler2D tDiffuse;
 varying vec2 vTextureCoord;
 
@@ -33,5 +34,5 @@ void main(void)
         shrink *= shrinkFactor;
         center -= m2*(center - vec2(0.5))*0.5928;
     }
-    gl_FragColor = col + original;
+    gl_FragColor = pow(col + original, vec4(gamma));
 }

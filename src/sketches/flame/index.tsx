@@ -5,7 +5,8 @@ import { OrbitControls } from "three-stdlib";
 import { createWhiteNoise, AudioNodeTracker } from "@/audio";
 import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, LengthVarianceTrackerVisitor, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "@/common/flame";
 import { map } from "@/common/math";
-import { getQueryParam, setQueryParams } from "@/common/queryParams";
+import { loadSettings, saveSetting } from "@/common/sketchSettingsStore";
+import { SettingDef } from "@/common/sketchSettings";
 import { Sketch } from "@/sketch";
 import { DEFAULT_NAME, FlameNameInput } from "./FlameNameInput";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
@@ -129,9 +130,13 @@ function sigmoid(x: number) {
 }
 
 export default class FlameSketch extends Sketch {
+    static id = "flame";
+    static settings = {
+        name: { default: "", category: "user", label: "Name" } satisfies SettingDef<string>,
+    };
+
     private quality = screen.width > 480 ? "high" : "low";
-    private nameFromSearch: string = getQueryParam("name");
-    public id = "flame";
+    private savedName: string = loadSettings("flame", FlameSketch.settings).name;
     public events = {
         dblclick: () => { },
         mousemove: (event: MouseEvent) => {
@@ -185,7 +190,7 @@ export default class FlameSketch extends Sketch {
     private oscHighGate = 0;
 
     public render() {
-        return <FlameNameInput key="input" initialName={this.nameFromSearch} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />;
+        return <FlameNameInput key="input" initialName={this.savedName} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />;
     }
 
     public init() {
@@ -206,7 +211,7 @@ export default class FlameSketch extends Sketch {
         this.controls.minDistance = 0.1;
         this.controls.enablePan = false;
 
-        this.updateName(this.nameFromSearch || DEFAULT_NAME, !this.nameFromSearch);
+        this.updateName(this.savedName || DEFAULT_NAME, !this.savedName);
     }
 
     public animate(_millisElapsed: number) {
@@ -294,7 +299,7 @@ export default class FlameSketch extends Sketch {
 
     public updateName(name: string = DEFAULT_NAME, isEmpty: boolean = true) {
         this.audioContext.gain.gain.setValueAtTime(0, 0);
-        setQueryParams(isEmpty ? {} : { name });
+        saveSetting("flame", FlameSketch.settings, "name", isEmpty ? "" : name);
 
         const hash = stringHash(name);
         const hashNorm = (hash % 1024) / 1024;

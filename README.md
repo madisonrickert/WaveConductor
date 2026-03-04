@@ -44,6 +44,15 @@ npm run electron:build && npx electron-builder --win
 
 The Electron app auto-launches the Ultraleap WebSocket binary (if present in `bin/`) and enables audio autoplay without user gesture.
 
+## Keyboard Shortcuts
+
+| Key       | Action                          |
+|-----------|---------------------------------|
+| `z`       | Previous sketch                 |
+| `x`       | Next sketch                     |
+| `Escape`  | Return to home / gallery        |
+| `Shift+D` | Toggle dev settings panel       |
+
 ## Leap Motion
 
 Optional. The line and cymatics sketches support [Leap Motion](https://www.ultraleap.com/) hand tracking.

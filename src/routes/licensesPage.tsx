@@ -102,7 +102,7 @@ export function LicensesPage() {
                 <p>
                     This project also uses the following open-source libraries under the MIT License:
                     Three.js, React, React DOM, React Router, react-icons, react-hotkeys-hook,
-                    normalize.css, classnames, radash, query-string, three-stdlib, and Sass.
+                    normalize.css, classnames, radash, three-stdlib, and Sass.
                 </p>
                 <p className="license-meta">
                     The MIT License permits use, modification, and distribution with attribution.

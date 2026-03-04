@@ -1,6 +1,7 @@
 import type React from "react";
 import * as THREE from "three";
 import { HandData } from "./components/HandOverlay";
+import { SettingsDefs } from "./common/sketchSettings";
 
 export type UIEventName =
     | "click"
@@ -125,6 +126,7 @@ export interface SketchConstructor {
     new (renderer: THREE.WebGLRenderer, audioContext: SketchAudioContext): Sketch;
 
     id?: string;
+    settings?: SettingsDefs;
 }
 
 export interface SketchAudioContext extends AudioContext {

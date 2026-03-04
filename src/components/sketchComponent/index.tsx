@@ -1,4 +1,4 @@
-import React, { Component, useEffect, useRef, useState } from "react";
+import React, { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import classnames from "classnames";
 
@@ -6,10 +6,13 @@ import { Sketch, SketchConstructor, UIEventName } from "@/sketch";
 import { VolumeButton } from "@/components/volumeButton";
 import { HandData, HandOverlay } from "@/components/HandOverlay";
 import { ScreenSaver } from "@/components/screenSaver";
+import { DevSettingsPanel } from "@/components/devSettingsPanel";
 import { useSketchLifecycle } from "@/common/hooks/useSketchLifecycle";
 import { useSketchAnimationLoop } from "@/common/hooks/useSketchAnimationLoop";
 import { useSketchResize } from "@/common/hooks/useSketchResize";
 import { useAudioContext } from "@/common/useAudioContext";
+import { loadSettings, saveSettings } from "@/common/sketchSettingsStore";
+import { SketchSettingsContext } from "@/common/useSketchSettings";
 
 import "./sketchComponent.scss";
 
@@ -110,10 +113,45 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
     );
     const [handData, setHandData] = useState<HandData[]>([]);
     const [shouldShowScreenSaver, setShouldShowScreenSaver] = useState(false);
+    const [showDevPanel, setShowDevPanel] = useState(false);
 
     const containerRef = useRef<HTMLDivElement | null>(null);
 
-    // Initialize sketch when container mounts
+    // Settings management
+    const sketchId = sketchClass.id ?? sketchClass.name;
+    const defs = sketchClass.settings ?? {};
+
+    const [settings, setSettingsState] = useState(() => loadSettings(sketchId, defs));
+
+    const setSetting = useCallback((key: string, value: unknown) => {
+        setSettingsState(prev => {
+            const next = { ...prev, [key]: value };
+            saveSettings(sketchId, next);
+            return next;
+        });
+    }, [sketchId]);
+
+    // Compute a key from requiresRestart settings — when it changes, sketch re-inits
+    const restartKey = useMemo(() => {
+        return Object.entries(defs)
+            .filter(([, def]) => def.requiresRestart)
+            .map(([k]) => `${k}=${JSON.stringify(settings[k])}`)
+            .join("&");
+    }, [defs, settings]);
+
+    // Shift+D to toggle dev settings panel
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+            if (e.shiftKey && e.key === "D") {
+                setShowDevPanel(prev => !prev);
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, []);
+
+    // Initialize sketch when container mounts (or restartKey changes)
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
@@ -147,7 +185,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
 
             queueMicrotask(() => setSketch(null));
         };
-    }, [sketchClass, audioContext]);
+    }, [sketchClass, audioContext, restartKey]);
 
     // Sync volume changes to the shared AudioContext
     useEffect(() => {
@@ -176,18 +214,25 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
 
     const className = classnames("sketch-component", sketch ? "success" : "loading");
 
+    const settingsContextValue = useMemo(() => ({
+        settings, defs, sketchId, setSetting
+    }), [settings, defs, sketchId, setSetting]);
+
     return (
-        <div {...containerProps} id={sketchClass.id} className={className} ref={containerRef}>
-            <div style={{ position: "relative" }}>
-                {sketch && (
-                    <SketchErrorBoundary>
-                        <SketchRenderer key={sketchClass.id} sketch={sketch} />
-                        <HandOverlay hands={handData} />
-                    </SketchErrorBoundary>
-                )}
+        <SketchSettingsContext.Provider value={settingsContextValue}>
+            <div {...containerProps} id={sketchClass.id} className={className} ref={containerRef}>
+                <div style={{ position: "relative" }}>
+                    {sketch && (
+                        <SketchErrorBoundary>
+                            <SketchRenderer key={sketchClass.id} sketch={sketch} />
+                            <HandOverlay hands={handData} />
+                        </SketchErrorBoundary>
+                    )}
+                </div>
+                <ScreenSaver shouldShow={shouldShowScreenSaver} />
+                <VolumeButton volumeEnabled={volumeEnabled} onClick={handleVolumeButtonClick} />
+                {showDevPanel && <DevSettingsPanel />}
             </div>
-            <ScreenSaver shouldShow={shouldShowScreenSaver} />
-            <VolumeButton volumeEnabled={volumeEnabled} onClick={handleVolumeButtonClick} />
-        </div>
+        </SketchSettingsContext.Provider>
     );
 }
