@@ -202,7 +202,6 @@ export default class Waves extends Sketch {
     public init() {
         this.audioGroup = createAudioGroup(this.audioContext, {
             HeightMap,
-            isTimeFast: () => this.isTimeFast,
         });
         this.renderer.autoClearColor = false;
 
@@ -230,6 +229,8 @@ export default class Waves extends Sketch {
             this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.03 * opacityChangeFactor;
             HeightMap.frame += 1;
         }
+
+        this.audioGroup.updateParameters();
 
         if (HeightMap.frame % 1000 < 500) {
             this.lineMaterial.color.set("rgb(50, 12, 12)");

@@ -4,6 +4,7 @@ import { map } from "@/common/math";
 
 import wavesBackgroundAudioMP3 from "./audio/waves_background.mp3";
 import wavesBackgroundAudioOGG from "./audio/waves_background.ogg";
+import wavesProcessorUrl from "./waves-processor.ts?worker&url";
 
 // return a number from [0..1] indicating in general how dark the image is; 1.0 means very dark, while 0.0 means very light
 function getDarkness(frame: number) {
@@ -15,7 +16,7 @@ function getDarkness(frame: number) {
 }
 
 export interface WavesSketchAudioGroup {
-    biquadFilter: ScriptProcessorNode;
+    updateParameters(): void;
     dispose(): void;
 }
 
@@ -23,11 +24,10 @@ export function createAudioGroup(
     audioContext: SketchAudioContext,
     opts: {
         HeightMap: { frame: number; getWaviness: (frame: number) => number },
-        isTimeFast: () => boolean
     }
 ): WavesSketchAudioGroup {
     const tracker = new AudioNodeTracker();
-    const { HeightMap, isTimeFast } = opts;
+    const { HeightMap } = opts;
 
     const backgroundAudio = new AudioClip({
         context: audioContext,
@@ -45,48 +45,47 @@ export function createAudioGroup(
     const noise = createWhiteNoise(audioContext);
     tracker.trackSource(noise);
 
-    const biquadFilter = (() => {
-        const node = audioContext.createScriptProcessor(undefined, 1, 1);
-        let a0 = 1;
-        let b1 = 0;
-
-        function setBiquadParameters(frame: number) {
-            a0 = getDarkness(frame + 10) * 0.8;
-            b1 = map(Math.pow(HeightMap.getWaviness(frame), 2), 0, 1, -0.92, -0.27);
-            backgroundAudioGain.gain.setTargetAtTime(map(getDarkness(frame + 10), 0, 1, 1, 0.8), audioContext.currentTime, 0.016);
-        }
-
-        node.onaudioprocess = (e) => {
-            const input = e.inputBuffer.getChannelData(0);
-            const output = e.outputBuffer.getChannelData(0);
-            const framesPerSecond = isTimeFast() ? 60 * 4 : 60;
-            for (let n = 0; n < e.inputBuffer.length; n++) {
-                if (n % 512 === 0) {
-                    const frameOffset = n / audioContext.sampleRate * framesPerSecond;
-                    setBiquadParameters(HeightMap.frame + frameOffset);
-                }
-                const x = input[n];
-                const y1 = output[n - 1] || 0;
-
-                output[n] = a0 * x - b1 * y1;
-            }
-        };
-        return node;
-    })();
-    noise.connect(biquadFilter);
-
     const biquadFilterGain = audioContext.createGain();
     biquadFilterGain.gain.setValueAtTime(0.01, 0);
-    biquadFilter.connect(biquadFilterGain);
-
     biquadFilterGain.connect(audioContext.gain);
 
-    tracker.trackNode(backgroundAudioGain, biquadFilter, biquadFilterGain);
+    // Load AudioWorklet asynchronously; noise stays disconnected until ready
+    let workletNode: AudioWorkletNode | null = null;
+    let disposed = false;
+
+    audioContext.audioWorklet.addModule(wavesProcessorUrl).then(() => {
+        if (disposed) return;
+
+        workletNode = new AudioWorkletNode(audioContext, 'waves-biquad-processor');
+        noise.connect(workletNode);
+        workletNode.connect(biquadFilterGain);
+        tracker.trackNode(workletNode);
+    }).catch((err) => {
+        console.error('Failed to load waves audio worklet:', err);
+    });
+
+    tracker.trackNode(backgroundAudioGain, biquadFilterGain);
 
     return {
-        biquadFilter,
+        updateParameters() {
+            const frame = HeightMap.frame;
+            const darkness = getDarkness(frame + 10);
+            const a0 = darkness * 0.8;
+            const b1 = map(Math.pow(HeightMap.getWaviness(frame), 2), 0, 1, -0.92, -0.27);
+
+            if (workletNode) {
+                workletNode.parameters.get('a0')!.setValueAtTime(a0, audioContext.currentTime);
+                workletNode.parameters.get('b1')!.setValueAtTime(b1, audioContext.currentTime);
+            }
+
+            backgroundAudioGain.gain.setTargetAtTime(
+                map(darkness, 0, 1, 1, 0.8),
+                audioContext.currentTime,
+                0.016
+            );
+        },
         dispose() {
-            biquadFilter.onaudioprocess = null;
+            disposed = true;
             tracker.dispose();
             backgroundAudio.dispose();
         },
