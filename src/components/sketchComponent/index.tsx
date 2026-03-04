@@ -119,7 +119,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
 
     // Settings management
     const sketchId = sketchClass.id ?? sketchClass.name;
-    const defs = sketchClass.settings ?? {};
+    const defs = useMemo(() => sketchClass.settings ?? {}, [sketchClass.settings]);
 
     const [settings, setSettingsState] = useState(() => loadSettings(sketchId, defs));
 
