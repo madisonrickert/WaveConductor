@@ -1,4 +1,5 @@
 import { SketchAudioContext } from "@/sketch";
+import { AudioNodeTracker, createWhiteNoise } from "@/audio";
 import { map } from "@/common/math";
 
 import wavesBackgroundAudioMP3 from "./audio/waves_background.mp3";
@@ -25,7 +26,9 @@ export function createAudioGroup(
         isTimeFast: () => boolean
     }
 ): WavesSketchAudioGroup {
+    const tracker = new AudioNodeTracker();
     const { HeightMap, isTimeFast } = opts;
+
     const backgroundAudio = document.createElement("audio");
     backgroundAudio.autoplay = true;
     backgroundAudio.loop = true;
@@ -48,18 +51,8 @@ export function createAudioGroup(
     sourceNode.connect(backgroundAudioGain);
     backgroundAudioGain.connect(audioContext.gain);
 
-    const noise = (() => {
-        const node = audioContext.createBufferSource()
-        , buffer = audioContext.createBuffer(1, audioContext.sampleRate * 5, audioContext.sampleRate)
-        , data = buffer.getChannelData(0);
-        for (let i = 0; i < buffer.length; i++) {
-            data[i] = Math.random() * 2 - 1;
-        }
-        node.buffer = buffer;
-        node.loop = true;
-        node.start(0);
-        return node;
-    })();
+    const noise = createWhiteNoise(audioContext);
+    tracker.trackSource(noise);
 
     const biquadFilter = (() => {
         const node = audioContext.createScriptProcessor(undefined, 1, 1);
@@ -96,37 +89,16 @@ export function createAudioGroup(
     biquadFilter.connect(biquadFilterGain);
 
     biquadFilterGain.connect(audioContext.gain);
+
+    tracker.trackNode(sourceNode, backgroundAudioGain, biquadFilter, biquadFilterGain);
+
     return {
         biquadFilter,
         dispose() {
-            // Stop and disconnect noise buffer source
-            try {
-                noise.stop();
-                noise.disconnect();
-            } catch (_e) {
-                // May already be stopped
-            }
-
-            // Disconnect script processor (deprecated but still needs cleanup)
-            try {
-                biquadFilter.disconnect();
-                // Clear the processor callback to prevent further processing
-                biquadFilter.onaudioprocess = null;
-            } catch (_e) {
-                // May already be disconnected
-            }
-
-            // Disconnect other audio nodes
-            const audioNodes = [sourceNode, backgroundAudioGain, biquadFilterGain];
-            audioNodes.forEach(node => {
-                try {
-                    node.disconnect();
-                } catch (_e) {
-                    // Node may already be disconnected
-                }
-            });
-
-            // Clean up DOM element - this was appended to document.body
+            // Clear the processor callback to prevent further processing
+            biquadFilter.onaudioprocess = null;
+            tracker.dispose();
+            // Clean up DOM element
             backgroundAudio.pause();
             backgroundAudio.remove();
         },

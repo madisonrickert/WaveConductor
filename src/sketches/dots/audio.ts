@@ -1,4 +1,4 @@
-import { createWhiteNoise } from "@/audio/noise";
+import { createWhiteNoise, AudioNodeTracker, detuned } from "@/audio";
 import { SketchAudioContext } from "@/sketch";
 
 export interface DotSketchAudioGroup {
@@ -14,58 +14,34 @@ export interface DotSketchAudioGroup {
 }
 
 export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAudioGroup {
-    // Track all oscillators for cleanup
-    const oscillators: OscillatorNode[] = [];
+    const tracker = new AudioNodeTracker();
 
     // white noise
     const noise = createWhiteNoise(audioContext);
+    tracker.trackSource(noise);
     const noiseGain = audioContext.createGain();
     noiseGain.gain.setValueAtTime(0, 0);
     noise.connect(noiseGain);
 
     const BASE_FREQUENCY = 164.82;
-    function detuned(freq: number, centsOffset: number) {
-        return freq * Math.pow(2, centsOffset / 1200);
-    }
-    const source1 = (() => {
-        const node = audioContext.createOscillator();
-        node.frequency.setValueAtTime(detuned(BASE_FREQUENCY / 2, 2), 0);
-        node.type = "triangle";
-        node.start(0);
-        oscillators.push(node);
-
-        const gain = audioContext.createGain();
-        gain.gain.setValueAtTime(0.3, 0);
-        node.connect(gain);
-
-        return gain;
-    })();
-    const source2 = (() => {
-        const node = audioContext.createOscillator();
-        node.frequency.setValueAtTime(BASE_FREQUENCY, 0);
-        node.type = "triangle";
-        node.start(0);
-        oscillators.push(node);
-
-        const gain = audioContext.createGain();
-        gain.gain.setValueAtTime(0.30, 0);
-        node.connect(gain);
-
-        return gain;
-    })();
+    const { gain: source1 } = tracker.createOsc(audioContext, {
+        frequency: detuned(BASE_FREQUENCY / 2, 2),
+        type: "triangle",
+        gain: 0.3,
+    });
+    const { gain: source2 } = tracker.createOsc(audioContext, {
+        frequency: BASE_FREQUENCY,
+        type: "triangle",
+        gain: 0.30,
+    });
 
     const sourceGain = audioContext.createGain();
     sourceGain.gain.setValueAtTime(0.0, 0);
 
-    const lfo = audioContext.createOscillator();
-    lfo.frequency.setValueAtTime(8.66, 0);
-    lfo.start(0);
-    oscillators.push(lfo);
-
-    const lfoGain = audioContext.createGain();
-    lfoGain.gain.setValueAtTime(0, 0);
-
-    lfo.connect(lfoGain);
+    const { osc: lfo, gain: lfoGain } = tracker.createOsc(audioContext, {
+        frequency: 8.66,
+        gain: 0,
+    });
 
     const filter = audioContext.createBiquadFilter();
     filter.type = "lowpass";
@@ -91,6 +67,9 @@ export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAud
 
     noiseGain.connect(audioContext.gain);
     filterGain.connect(audioContext.gain);
+
+    tracker.trackNode(noiseGain, sourceGain, filter, filter2, filterGain);
+
     return {
         sourceGain,
         lfo,
@@ -108,36 +87,7 @@ export function createAudioGroup(audioContext: SketchAudioContext): DotSketchAud
             noiseGain.gain.setValueAtTime(volume * 0.05, 0);
         },
         dispose() {
-            // Stop all oscillators
-            oscillators.forEach(osc => {
-                try {
-                    osc.stop();
-                    osc.disconnect();
-                } catch (_e) {
-                    // Oscillator may already be stopped
-                }
-            });
-
-            // Stop noise buffer source
-            try {
-                noise.stop();
-                noise.disconnect();
-            } catch (_e) {
-                // May already be stopped
-            }
-
-            // Disconnect all audio nodes
-            const audioNodes = [
-                noiseGain, source1, source2, sourceGain,
-                lfoGain, filter, filter2, filterGain
-            ];
-            audioNodes.forEach(node => {
-                try {
-                    node.disconnect();
-                } catch (_e) {
-                    // Node may already be disconnected
-                }
-            });
+            tracker.dispose();
         },
     };
 }

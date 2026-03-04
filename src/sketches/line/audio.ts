@@ -1,4 +1,4 @@
-import { AudioClip } from "@/audio";
+import { AudioClip, createWhiteNoise, AudioNodeTracker, detuned, semitone } from "@/audio";
 import { SketchAudioContext } from "@/sketch";
 
 import audioBackgroundMp3 from "./audio/line_background.mp3";
@@ -21,6 +21,8 @@ export interface LineSketchAudioGroup {
 }
 
 export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup {
+    const tracker = new AudioNodeTracker();
+
     const backgroundAudio = new AudioClip({
         context: ctx,
         srcs: [
@@ -34,22 +36,9 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
 
     backgroundAudio.getNode().connect(ctx.gain);
 
-    // Keep track of all oscillators for cleanup
-    const oscillators: OscillatorNode[] = [];
-    
     // white noise
-    const noise = (() => {
-        const node = ctx.createBufferSource()
-            , buffer = ctx.createBuffer(1, ctx.sampleRate * 5, ctx.sampleRate)
-            , data = buffer.getChannelData(0);
-        for (let i = 0; i < buffer.length; i++) {
-            data[i] = Math.random();
-        }
-        node.buffer = buffer;
-        node.loop = true;
-        node.start(0);
-        return node;
-    })();
+    const noise = createWhiteNoise(ctx);
+    tracker.trackSource(noise);
 
     const noiseSourceGain = ctx.createGain();
     noiseSourceGain.gain.setValueAtTime(0, 0);
@@ -72,91 +61,41 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
     noiseShelf.connect(noiseGain);
 
     const BASE_FREQUENCY = 320;
-    function detuned(freq: number, centsOffset: number) {
-        return freq * Math.pow(2, centsOffset / 1200);
-    }
-    function semitone(freq: number, semitoneOffset: number) {
-        return detuned(freq, semitoneOffset * 100);
-    }
-    const source1 = (() => {
-        const node = ctx.createOscillator();
-        node.frequency.setValueAtTime(detuned(BASE_FREQUENCY / 2, 2), 0);
-        node.type = "square";
-        node.start(0);
-        oscillators.push(node);
 
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.30, 0);
-        node.connect(gain);
-
-        return gain;
-    })();
-    
-    const source2 = (() => {
-        const node = ctx.createOscillator();
-        node.frequency.setValueAtTime(BASE_FREQUENCY, 0);
-        node.type = "sawtooth";
-        node.start(0);
-        oscillators.push(node);
-
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.30, 0);
-        node.connect(gain);
-
-        return gain;
-    })();
-
-    const sourceLow = (() => {
-        const node = ctx.createOscillator();
-        node.frequency.setValueAtTime(BASE_FREQUENCY / 4, 0);
-        node.type = "sawtooth";
-        node.start(0);
-        oscillators.push(node);
-
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.90, 0);
-        node.connect(gain);
-
-        return gain;
-    })();
+    const { gain: source1 } = tracker.createOsc(ctx, {
+        frequency: detuned(BASE_FREQUENCY / 2, 2),
+        type: "square",
+        gain: 0.30,
+    });
+    const { gain: source2 } = tracker.createOsc(ctx, {
+        frequency: BASE_FREQUENCY,
+        type: "sawtooth",
+        gain: 0.30,
+    });
+    const { gain: sourceLow } = tracker.createOsc(ctx, {
+        frequency: BASE_FREQUENCY / 4,
+        type: "sawtooth",
+        gain: 0.90,
+    });
 
     function makeChordSource(baseFrequency: number) {
-        const base = ctx.createOscillator();
-        base.frequency.setValueAtTime(baseFrequency, 0);
-        base.start(0);
-        oscillators.push(base);
-
-        const octave = ctx.createOscillator();
-        octave.frequency.setValueAtTime(semitone(baseFrequency, 12), 0);
-        octave.type = "sawtooth";
-        octave.start(0);
-        oscillators.push(octave);
-
-        const fifth = ctx.createOscillator();
-        fifth.frequency.setValueAtTime(semitone(baseFrequency, 12 + 7), 0);
-        fifth.type = "sawtooth";
-        fifth.start(0);
-        oscillators.push(fifth);
-
-        const octave2 = ctx.createOscillator();
-        octave2.frequency.setValueAtTime(semitone(baseFrequency, 24), 0);
-        octave2.type = "sawtooth";
-        octave2.start(0);
-        oscillators.push(octave2);
-
-        const fourth = ctx.createOscillator();
-        fourth.frequency.setValueAtTime(semitone(baseFrequency, 24 + 4), 0);
-        fourth.start(0);
-        oscillators.push(fourth);
+        const intervals = [
+            { freq: baseFrequency, type: "sine" as OscillatorType },
+            { freq: semitone(baseFrequency, 12), type: "sawtooth" as OscillatorType },
+            { freq: semitone(baseFrequency, 12 + 7), type: "sawtooth" as OscillatorType },
+            { freq: semitone(baseFrequency, 24), type: "sawtooth" as OscillatorType },
+            { freq: semitone(baseFrequency, 24 + 4), type: "sine" as OscillatorType },
+        ];
 
         const gain = ctx.createGain();
         gain.gain.setValueAtTime(0.0, 0);
-        base.connect(gain);
-        octave.connect(gain);
-        fifth.connect(gain);
-        octave2.connect(gain);
-        fourth.connect(gain);
 
+        for (const { freq, type } of intervals) {
+            const { gain: oscGain } = tracker.createOsc(ctx, { frequency: freq, type });
+            oscGain.connect(gain);
+        }
+
+        tracker.trackNode(gain);
         return gain;
     }
     const chordSource = makeChordSource(BASE_FREQUENCY);
@@ -165,15 +104,10 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
     const sourceGain = ctx.createGain();
     sourceGain.gain.setValueAtTime(0.0, 0);
 
-    const sourceLfo = ctx.createOscillator();
-    sourceLfo.frequency.setValueAtTime(8.66, 0);
-    sourceLfo.start(0);
-    oscillators.push(sourceLfo);
-
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.setValueAtTime(0, 0);
-
-    sourceLfo.connect(lfoGain);
+    const { osc: sourceLfo, gain: lfoGain } = tracker.createOsc(ctx, {
+        frequency: 8.66,
+        gain: 0,
+    });
 
     const filter = ctx.createBiquadFilter();
     filter.type = "bandpass";
@@ -229,13 +163,11 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
 
     highAttenuation2.connect(ctx.gain);
 
-    // Keep track of all audio nodes for cleanup
-    const audioNodes = [
+    tracker.trackNode(
         noiseSourceGain, noiseFilter, noiseShelf, noiseGain,
-        source1, source2, sourceLow, chordSource, chordHigh,
-        sourceGain, lfoGain, filter, filter2, filterGain,
+        sourceGain, filter, filter2, filterGain,
         audioGain, analyser, compressor, highAttenuation, highAttenuation2
-    ];
+    );
 
     return {
         analyser,
@@ -252,7 +184,7 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
 
             filter2.frequency.cancelScheduledValues(ctx.currentTime);
             filter2.frequency.setTargetAtTime(freq, ctx.currentTime, 0.016);
-            
+
             lfoGain.gain.cancelScheduledValues(ctx.currentTime);
             lfoGain.gain.setTargetAtTime(freq * .06, ctx.currentTime, 0.016);
         },
@@ -274,32 +206,7 @@ export function createAudioGroup(ctx: SketchAudioContext): LineSketchAudioGroup 
             backgroundAudio.volume = volume;
         },
         dispose() {
-            // Stop all oscillators
-            oscillators.forEach(osc => {
-                try {
-                    osc.stop();
-                } catch (_e) {
-                    // Oscillator may already be stopped
-                }
-            });
-            
-            // Stop buffer source
-            try {
-                noise.stop();
-            } catch (_e) {
-                // May already be stopped
-            }
-            
-            // Disconnect all audio nodes
-            audioNodes.forEach(node => {
-                try {
-                    node.disconnect();
-                } catch (_e) {
-                    // Node may already be disconnected
-                }
-            });
-            
-            // Clean up background audio
+            tracker.dispose();
             backgroundAudio.dispose();
         }
     };

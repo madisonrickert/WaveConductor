@@ -1,12 +1,8 @@
 import * as THREE from "three";
 import { throttle } from "radash";
 
-import { AudioClip, createWhiteNoise } from "@/audio";
+import { AudioClip, createWhiteNoise, AudioNodeTracker } from "@/audio";
 import { SketchAudioContext } from "@/sketch";
-
-interface OscillatorWithGain extends OscillatorNode {
-    gain: GainNode;
-}
 
 function makeAudioSrcs(fileName: string) {
     return [
@@ -16,26 +12,33 @@ function makeAudioSrcs(fileName: string) {
     ];
 }
 
+interface OscWithGain {
+    osc: OscillatorNode;
+    gain: GainNode;
+}
+
 export class CymaticsAudio {
     private kick: AudioClip;
     private risingBass: AudioClip;
     private blub: AudioClip;
 
-    private oscBase: OscillatorWithGain;
-    private oscUnison: OscillatorWithGain;
-    private oscFifth: OscillatorWithGain;
-    private oscSub: OscillatorWithGain;
-    private oscHigh4: OscillatorWithGain;
-    private oscHigh4Second: OscillatorWithGain;
-    private whiteNoise: AudioBufferSourceNode;
+    private oscBase: OscWithGain;
+    private oscUnison: OscWithGain;
+    private oscFifth: OscWithGain;
+    private oscSub: OscWithGain;
+    private oscHigh4: OscWithGain;
+    private oscHigh4Second: OscWithGain;
     private whiteNoiseGain: GainNode;
     private whiteNoiseFilter: BiquadFilterNode;
-    private lfo: OscillatorWithGain;
+    private lfo: OscWithGain;
     private lfoGain: GainNode;
     private oscGain: GainNode;
+    private tracker: AudioNodeTracker;
     private debouncedTriggerJitter: () => void;
 
     constructor(public audio: SketchAudioContext) {
+        this.tracker = new AudioNodeTracker();
+
         this.kick = new AudioClip({
             context: audio,
             srcs: makeAudioSrcs("kick"),
@@ -58,12 +61,12 @@ export class CymaticsAudio {
         });
         this.blub.getNode().connect(audio.gain);
 
-        this.oscBase = this.makeOsc(1);
-        this.oscUnison = this.makeOsc(0.5);
-        this.oscFifth = this.makeOsc(0.5);
-        this.oscSub = this.makeOsc(0.5);
-        this.oscHigh4 = this.makeOsc(0.02);
-        this.oscHigh4Second = this.makeOsc(0.01);
+        this.oscBase = this.tracker.createOsc(audio, { frequency: OSC_FREQ_BASE, gain: 1 });
+        this.oscUnison = this.tracker.createOsc(audio, { frequency: OSC_FREQ_BASE, gain: 0.5 });
+        this.oscFifth = this.tracker.createOsc(audio, { frequency: OSC_FREQ_BASE, gain: 0.5 });
+        this.oscSub = this.tracker.createOsc(audio, { frequency: OSC_FREQ_BASE, gain: 0.5 });
+        this.oscHigh4 = this.tracker.createOsc(audio, { frequency: OSC_FREQ_BASE, gain: 0.02 });
+        this.oscHigh4Second = this.tracker.createOsc(audio, { frequency: OSC_FREQ_BASE, gain: 0.01 });
 
         this.oscGain = audio.createGain();
         this.oscGain.gain.setValueAtTime(0.0, 0);
@@ -78,16 +81,17 @@ export class CymaticsAudio {
         this.lfoGain = audio.createGain();
         this.oscGain.connect(this.lfoGain);
 
-        this.lfo = this.makeOsc(0.5);
-        this.lfo.frequency.setValueAtTime(1, 0);
-        this.lfo.connect(this.lfoGain.gain);
+        this.lfo = this.tracker.createOsc(audio, { frequency: 1, gain: 0.5 });
+        this.lfo.osc.connect(this.lfoGain.gain);
 
         this.lfoGain.connect(audio.gain);
 
-        this.whiteNoise = createWhiteNoise(this.audio);
+        // White noise
+        const whiteNoise = createWhiteNoise(this.audio);
+        this.tracker.trackSource(whiteNoise);
         this.whiteNoiseGain = audio.createGain();
         this.whiteNoiseGain.gain.setValueAtTime(0.1, 0);
-        this.whiteNoise.connect(this.whiteNoiseGain);
+        whiteNoise.connect(this.whiteNoiseGain);
 
         this.whiteNoiseFilter = audio.createBiquadFilter();
         this.whiteNoiseFilter.type = "bandpass";
@@ -95,6 +99,8 @@ export class CymaticsAudio {
         this.whiteNoiseGain.connect(this.whiteNoiseFilter);
 
         this.whiteNoiseFilter.connect(audio.gain);
+
+        this.tracker.trackNode(this.oscGain, this.lfoGain, this.whiteNoiseGain, this.whiteNoiseFilter);
 
         this.setOscFrequencyScalar(1);
 
@@ -105,21 +111,6 @@ export class CymaticsAudio {
                 this.risingBass.play();
             }
         );
-    }
-
-    private makeOsc(volume: number) {
-        const osc = this.audio.createOscillator() as OscillatorWithGain;
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(OSC_FREQ_BASE, 0);
-        osc.start();
-
-        const gain = this.audio.createGain();
-        gain.gain.setValueAtTime(volume, 0);
-        osc.connect(gain);
-
-        osc.gain = gain;
-
-        return osc;
     }
 
     triggerJitter() {
@@ -141,64 +132,19 @@ export class CymaticsAudio {
     setOscFrequencyScalar(freqScalar: number) {
         const freq = OSC_FREQ_BASE * freqScalar;
 
-        this.oscUnison.frequency.setTargetAtTime(freq, this.audio.currentTime + 0.016, 0.016 / 3);
-        this.oscFifth.frequency.setTargetAtTime(freq * Math.pow(2, 7 / 12), this.audio.currentTime + 0.016, 0.016 / 3);
-        this.oscSub.frequency.setTargetAtTime(freq / 2, this.audio.currentTime + 0.016, 0.016 / 3);
-        this.oscHigh4.frequency.setTargetAtTime(freq * Math.pow(2, 4) + 4, this.audio.currentTime + 0.016, 0.016 / 3);
-        this.oscHigh4Second.frequency.setTargetAtTime(freq * freqScalar * Math.pow(2, 4 + 1 / 12) + 9, this.audio.currentTime + 0.016, 0.016 / 3);
-        this.lfo.frequency.setTargetAtTime((freqScalar - 1) * 100 + 1e-10, this.audio.currentTime + 0.016, 0.016 / 3);
+        this.oscUnison.osc.frequency.setTargetAtTime(freq, this.audio.currentTime + 0.016, 0.016 / 3);
+        this.oscFifth.osc.frequency.setTargetAtTime(freq * Math.pow(2, 7 / 12), this.audio.currentTime + 0.016, 0.016 / 3);
+        this.oscSub.osc.frequency.setTargetAtTime(freq / 2, this.audio.currentTime + 0.016, 0.016 / 3);
+        this.oscHigh4.osc.frequency.setTargetAtTime(freq * Math.pow(2, 4) + 4, this.audio.currentTime + 0.016, 0.016 / 3);
+        this.oscHigh4Second.osc.frequency.setTargetAtTime(freq * freqScalar * Math.pow(2, 4 + 1 / 12) + 9, this.audio.currentTime + 0.016, 0.016 / 3);
+        this.lfo.osc.frequency.setTargetAtTime((freqScalar - 1) * 100 + 1e-10, this.audio.currentTime + 0.016, 0.016 / 3);
 
         this.whiteNoiseGain.gain.setTargetAtTime(THREE.MathUtils.clamp((freqScalar - 1.002) * 20, 0, 1), this.audio.currentTime + 0.016, 0.016 / 3);
         this.whiteNoiseFilter.frequency.setTargetAtTime(1500 * (1 + freqScalar * freqScalar), this.audio.currentTime + 0.016, 0.016 / 3);
     }
 
     dispose() {
-        // Stop and disconnect all oscillators
-        const oscillators = [
-            this.oscBase,
-            this.oscUnison, 
-            this.oscFifth,
-            this.oscSub,
-            this.oscHigh4,
-            this.oscHigh4Second,
-            this.lfo
-        ];
-
-        oscillators.forEach(osc => {
-            try {
-                osc.stop();
-                osc.disconnect();
-                osc.gain.disconnect();
-            } catch (_e) {
-                // Oscillator may already be stopped/disconnected
-            }
-        });
-
-        // Stop and disconnect white noise buffer source
-        try {
-            this.whiteNoise.stop();
-            this.whiteNoise.disconnect();
-        } catch (_e) {
-            // May already be stopped
-        }
-
-        // Disconnect all audio nodes
-        const audioNodes = [
-            this.whiteNoiseGain,
-            this.whiteNoiseFilter,
-            this.oscGain,
-            this.lfoGain
-        ];
-
-        audioNodes.forEach(node => {
-            try {
-                node.disconnect();
-            } catch (_e) {
-                // Node may already be disconnected
-            }
-        });
-
-        // Dispose of audio clips
+        this.tracker.dispose();
         this.kick.dispose();
         this.risingBass.dispose();
         this.blub.dispose();
