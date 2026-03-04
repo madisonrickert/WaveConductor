@@ -3,11 +3,11 @@ import * as THREE from "three";
 import { OrbitControls } from "three-stdlib";
 
 import { createWhiteNoise, AudioNodeTracker } from "@/audio";
-import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, LengthVarianceTrackerVisitor, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "@/common/flame";
+import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, LengthVarianceTrackerVisitor, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "./flame";
 import { map } from "@/common/math";
 import { loadSettings, saveSetting } from "@/common/sketchSettingsStore";
 import { SettingDef } from "@/common/sketchSettings";
-import { Sketch } from "@/sketch";
+import { Sketch } from "@/common/sketch";
 import { DEFAULT_NAME, FlameNameInput } from "./FlameNameInput";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
 import { Chord } from "./types";

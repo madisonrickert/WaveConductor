@@ -5,12 +5,12 @@ import * as THREE from "three";
 import { MathUtils } from "three";
 import { EffectComposer, ShaderPass/*, RenderPass */} from "three-stdlib";
 
-import GPUComputationRenderer, { GPUComputationRendererVariable } from "@/common/gpuComputationRenderer";
+import GPUComputationRenderer, { GPUComputationRendererVariable } from "./gpuComputationRenderer";
 import { mirroredRepeat } from "@/common/math";
-import { Sketch } from "@/sketch";
+import { Sketch } from "@/common/sketch";
 import { CymaticsAudio } from "./audio";
 import { RenderCymaticsShader } from "./renderCymaticsShader";
-import { HandData } from "@/components/HandOverlay";
+import { HandData } from "@/components/handOverlay";
 
 import COMPUTE_CELL_STATE from "./computeCellState.frag";
 

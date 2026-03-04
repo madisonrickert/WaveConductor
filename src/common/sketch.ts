@@ -1,7 +1,7 @@
 import type React from "react";
 import * as THREE from "three";
-import { HandData } from "./components/HandOverlay";
-import { SettingsDefs } from "./common/sketchSettings";
+import { HandData } from "@/components/handOverlay";
+import { SettingsDefs } from "./sketchSettings";
 
 export type UIEventName =
     | "click"

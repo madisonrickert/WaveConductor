@@ -1,5 +1,5 @@
 import { createWhiteNoise, AudioNodeTracker, detuned } from "@/audio";
-import { SketchAudioContext } from "@/sketch";
+import { SketchAudioContext } from "@/common/sketch";
 
 export interface DotSketchAudioGroup {
     sourceGain: GainNode;

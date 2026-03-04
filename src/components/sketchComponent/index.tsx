@@ -2,17 +2,17 @@ import React, { Component, useCallback, useEffect, useMemo, useRef, useState } f
 import * as THREE from "three";
 import classnames from "classnames";
 
-import { Sketch, SketchConstructor, UIEventName } from "@/sketch";
+import { Sketch, SketchConstructor, UIEventName } from "@/common/sketch";
 import { VolumeButton } from "@/components/volumeButton";
-import { HandData, HandOverlay } from "@/components/HandOverlay";
+import { HandData, HandOverlay } from "@/components/handOverlay";
 import { ScreenSaver } from "@/components/screenSaver";
 import { DevSettingsPanel } from "@/components/devSettingsPanel";
 import { useSketchLifecycle } from "@/common/hooks/useSketchLifecycle";
 import { useSketchAnimationLoop } from "@/common/hooks/useSketchAnimationLoop";
 import { useSketchResize } from "@/common/hooks/useSketchResize";
-import { useAudioContext } from "@/common/useAudioContext";
+import { useAudioContext } from "@/common/hooks/useAudioContext";
 import { loadSettings, saveSettings } from "@/common/sketchSettingsStore";
-import { SketchSettingsContext } from "@/common/useSketchSettings";
+import { SketchSettingsContext } from "@/common/hooks/useSketchSettings";
 
 import "./sketchComponent.scss";
 

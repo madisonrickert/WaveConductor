@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { SketchAudioContext } from "@/sketch";
+import { SketchAudioContext } from "@/common/sketch";
 
 export interface AudioContextValue {
     audioContext: SketchAudioContext;

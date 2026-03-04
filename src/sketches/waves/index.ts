@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 import { lerp, map } from "@/common/math";
-import { Sketch } from "@/sketch";
+import { Sketch } from "@/common/sketch";
 import { createAudioGroup, WavesSketchAudioGroup } from "./audio";
 
 const LINE_SEGMENT_LENGTH = (window.screen.width > 1024) ? 11 : 22;

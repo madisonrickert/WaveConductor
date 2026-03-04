@@ -1,5 +1,5 @@
 import React from "react";
-import { useSketchSettings } from "@/common/useSketchSettings";
+import { useSketchSettings } from "@/common/hooks/useSketchSettings";
 
 import "./devSettingsPanel.scss";
 

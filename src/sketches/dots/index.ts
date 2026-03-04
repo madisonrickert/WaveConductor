@@ -1,12 +1,12 @@
 import * as THREE from "three";
 import { EffectComposer, RenderPass } from "three-stdlib";
 
-import { ExplodeShaderPass } from "@/common/shaders/explode";
+import { ExplodeShaderPass } from "./shaders/explode";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem, ParticleSystemParameters } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem";
 import { loadSettings } from "@/common/sketchSettingsStore";
 import { SettingDef } from "@/common/sketchSettings";
-import { Sketch } from "@/sketch";
+import { Sketch } from "@/common/sketch";
 import { createAudioGroup, DotSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
 

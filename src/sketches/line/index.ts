@@ -1,12 +1,12 @@
 import * as THREE from "three";
 import { RenderPass, EffectComposer } from "three-stdlib";
-import { GravityShaderPass } from "@/common/shaders/gravity";
+import { GravityShaderPass } from "./shaders/gravity";
 import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem } from "@/common/particleSystem";
 import { Attractor } from "@/common/particleSystem/attractor";
 import { triangleWaveApprox } from "@/common/math";
 import { loadSettings } from "@/common/sketchSettingsStore";
 import { SettingDef } from "@/common/sketchSettings";
-import { Sketch } from "@/sketch";
+import { Sketch } from "@/common/sketch";
 import { createAudioGroup, LineSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/common/materials/starMaterial";
 import { LeapAttractorController } from "./LeapAttractorController";
