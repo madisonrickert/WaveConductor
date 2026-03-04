@@ -238,6 +238,7 @@ export default class FlameSketch extends Sketch {
             canvas: this.canvas,
             renderer: this.renderer,
             getConnectionCallback: () => this.updateLeapConnectionCallback,
+            getProtocolVersionCallback: () => this.updateLeapProtocolVersionCallback,
             renderMode: { type: "overlay" },
             onFrame: (hands) => {
                 // Only grabbing hands drive the sketch

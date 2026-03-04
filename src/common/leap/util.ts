@@ -5,28 +5,63 @@ import { LeapConnectionStatus } from "@/common/leapStatus";
 /**
  * Wires Leap controller connection events to a status callback.
  * Returns a cleanup function that removes all listeners.
+ *
+ * Streaming detection: Our UltraleapTrackingWebSocket server reports protocol
+ * v6 but doesn't send deviceEvent messages, so leapjs's built-in
+ * streamingStarted/streamingStopped events never fire. Instead, we detect
+ * streaming by monitoring actual frames on the connection (not controller —
+ * connection frames are server-only, not synthetic animation frames).
  */
 export function wireLeapConnectionEvents(
     controller: Controller,
     getCallback: () => ((status: LeapConnectionStatus) => void) | undefined,
+    getProtocolVersionCallback?: () => ((version: number | null) => void) | undefined,
 ) {
+    const STREAMING_TIMEOUT_MS = 3000;
+    let streamingTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isStreaming = false;
+
     const onConnect = () => getCallback()?.("connected");
-    const onDisconnect = () => getCallback()?.("disconnected");
-    const onStreamingStarted = () => getCallback()?.("streaming");
-    const onStreamingStopped = () => getCallback()?.("connected");
+
+    const onDisconnect = () => {
+        isStreaming = false;
+        if (streamingTimeout) { clearTimeout(streamingTimeout); streamingTimeout = null; }
+        getCallback()?.("disconnected");
+        getProtocolVersionCallback?.()?.call(null, null);
+    };
+
+    const onReady = () => {
+        const version = controller.connection.protocol?.version ?? null;
+        getProtocolVersionCallback?.()?.call(null, version);
+    };
+
+    const onConnectionFrame = () => {
+        if (!isStreaming) {
+            isStreaming = true;
+            getCallback()?.("streaming");
+        }
+        if (streamingTimeout) clearTimeout(streamingTimeout);
+        streamingTimeout = setTimeout(() => {
+            if (isStreaming) {
+                isStreaming = false;
+                getCallback()?.("connected");
+            }
+        }, STREAMING_TIMEOUT_MS);
+    };
 
     controller
         .on('connect', onConnect)
         .on('disconnect', onDisconnect)
-        .on('streamingStarted', onStreamingStarted)
-        .on('streamingStopped', onStreamingStopped);
+        .on('ready', onReady);
+    controller.connection.on('frame', onConnectionFrame);
 
     return () => {
+        if (streamingTimeout) { clearTimeout(streamingTimeout); streamingTimeout = null; }
         controller
             .removeListener('connect', onConnect)
             .removeListener('disconnect', onDisconnect)
-            .removeListener('streamingStarted', onStreamingStarted)
-            .removeListener('streamingStopped', onStreamingStopped);
+            .removeListener('ready', onReady);
+        controller.connection.removeListener('frame', onConnectionFrame);
     };
 }
 

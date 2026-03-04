@@ -166,6 +166,7 @@ export default class Cymatics extends Sketch {
             canvas: this.canvas,
             renderer: this.renderer,
             getConnectionCallback: () => this.updateLeapConnectionCallback,
+            getProtocolVersionCallback: () => this.updateLeapProtocolVersionCallback,
             renderMode: { type: "overlay" },
             handMaterial: new THREE.MeshBasicMaterial({
                 color: new THREE.Color(235 / 255, 89 / 255, 56 / 255),

@@ -136,6 +136,7 @@ export default class Dots extends Sketch {
             canvas: this.canvas,
             renderer: this.renderer,
             getConnectionCallback: () => this.updateLeapConnectionCallback,
+            getProtocolVersionCallback: () => this.updateLeapProtocolVersionCallback,
             renderMode: { type: "in-scene", scene: this.scene },
             onFrame: (hands) => {
                 hands.forEach(({ hand, index, canvasPosition }) => {

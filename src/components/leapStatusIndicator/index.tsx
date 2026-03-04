@@ -6,6 +6,7 @@ import "./leapStatusIndicator.scss";
 interface LeapStatusIndicatorProps {
     processStatus: LeapProcessStatus;
     connectionStatus: LeapConnectionStatus;
+    protocolVersion: number | null;
     onStart: () => void;
     onStop: () => void;
 }
@@ -38,7 +39,7 @@ const PROCESS_COLORS: Record<LeapProcessStatus, string> = {
     external: "#3498db",
 };
 
-export function LeapStatusIndicator({ processStatus, connectionStatus, onStart, onStop }: LeapStatusIndicatorProps) {
+export function LeapStatusIndicator({ processStatus, connectionStatus, protocolVersion, onStart, onStop }: LeapStatusIndicatorProps) {
     const [expanded, setExpanded] = useState(false);
     const panelRef = useRef<HTMLDivElement>(null);
 
@@ -91,6 +92,12 @@ export function LeapStatusIndicator({ processStatus, connectionStatus, onStart, 
                             {CONNECTION_LABELS[connectionStatus]}
                         </span>
                     </div>
+                    {protocolVersion !== null && (
+                        <div className="leap-status-row">
+                            <span className="leap-status-label">Protocol</span>
+                            <span className="leap-status-value">v{protocolVersion}</span>
+                        </div>
+                    )}
                     {showToggle && (
                         <button
                             className="leap-status-toggle"

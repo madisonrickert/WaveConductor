@@ -120,6 +120,12 @@ export abstract class Sketch {
      * This is set by the parent component to receive connection status updates.
      */
     public updateLeapConnectionCallback?: (status: LeapConnectionStatus) => void;
+
+    /**
+     * Callback to report the negotiated protocol version.
+     * Set by the parent component to receive protocol version after connection handshake.
+     */
+    public updateLeapProtocolVersionCallback?: (version: number | null) => void;
 }
 
 export interface SketchConstructor {

@@ -18,6 +18,7 @@ export interface LeapHandControllerOptions {
     canvas: HTMLCanvasElement;
     renderer: THREE.WebGLRenderer;
     getConnectionCallback: () => ((status: LeapConnectionStatus) => void) | undefined;
+    getProtocolVersionCallback?: () => ((version: number | null) => void) | undefined;
     renderMode: HandRenderMode;
     handMaterial?: THREE.MeshBasicMaterial;
     onFrame: (hands: LeapHandInfo[]) => void;
@@ -60,6 +61,7 @@ export class LeapHandController {
         this._cleanupConnectionEvents = wireLeapConnectionEvents(
             this._controller,
             options.getConnectionCallback,
+            options.getProtocolVersionCallback,
         );
     }
 

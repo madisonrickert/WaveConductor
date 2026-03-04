@@ -242,6 +242,7 @@ export default class Waves extends Sketch {
             canvas: this.canvas,
             renderer: this.renderer,
             getConnectionCallback: () => this.updateLeapConnectionCallback,
+            getProtocolVersionCallback: () => this.updateLeapProtocolVersionCallback,
             renderMode: { type: "overlay" },
             handMaterial: new THREE.MeshBasicMaterial({
                 color: new THREE.Color(210 / 255, 190 / 255, 165 / 255),

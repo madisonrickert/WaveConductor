@@ -4,6 +4,7 @@ import { LeapProcessStatus, LeapConnectionStatus } from "@/common/leapStatus";
 export function useLeapStatus() {
     const [processStatus, setProcessStatus] = useState<LeapProcessStatus>("not-started");
     const [connectionStatus, setConnectionStatus] = useState<LeapConnectionStatus>("disconnected");
+    const [protocolVersion, setProtocolVersion] = useState<number | null>(null);
 
     useEffect(() => {
         const api = window.electronAPI;
@@ -32,5 +33,5 @@ export function useLeapStatus() {
         ? processStatus
         : connectionStatus !== "disconnected" ? "external" as const : "not-started" as const;
 
-    return { processStatus: effectiveProcessStatus, connectionStatus, setConnectionStatus, startProcess, stopProcess };
+    return { processStatus: effectiveProcessStatus, connectionStatus, setConnectionStatus, protocolVersion, setProtocolVersion, startProcess, stopProcess };
 }

@@ -114,7 +114,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
     );
     const [shouldShowScreenSaver, setShouldShowScreenSaver] = useState(false);
     const [showDevPanel, setShowDevPanel] = useState(false);
-    const { processStatus, connectionStatus, setConnectionStatus, startProcess, stopProcess } = useLeapStatus();
+    const { processStatus, connectionStatus, setConnectionStatus, protocolVersion, setProtocolVersion, startProcess, stopProcess } = useLeapStatus();
 
     const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -170,12 +170,14 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
         const sketchInstance = new sketchClass(renderer, audioContext);
         sketchInstance.updateScreenSaverCallback = setShouldShowScreenSaver;
         sketchInstance.updateLeapConnectionCallback = setConnectionStatus;
+        sketchInstance.updateLeapProtocolVersionCallback = setProtocolVersion;
         queueMicrotask(() => setSketch(sketchInstance));
 
         return () => {
             // Clear callbacks to prevent stale references
             sketchInstance.updateScreenSaverCallback = undefined;
             sketchInstance.updateLeapConnectionCallback = undefined;
+            sketchInstance.updateLeapProtocolVersionCallback = undefined;
 
             // Clean up Three.js resources
             renderer.domElement.remove();
@@ -186,7 +188,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
 
             queueMicrotask(() => setSketch(null));
         };
-    }, [sketchClass, audioContext, restartKey, setConnectionStatus]);
+    }, [sketchClass, audioContext, restartKey, setConnectionStatus, setProtocolVersion]);
 
     // Prevent display sleep while a sketch is running (Electron only)
     useEffect(() => {
@@ -242,6 +244,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
                 <LeapStatusIndicator
                     processStatus={processStatus}
                     connectionStatus={connectionStatus}
+                    protocolVersion={protocolVersion}
                     onStart={startProcess}
                     onStop={stopProcess}
                 />
