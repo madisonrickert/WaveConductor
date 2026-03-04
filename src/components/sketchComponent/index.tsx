@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { Component, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import classnames from "classnames";
 
@@ -74,6 +74,30 @@ function SketchRenderer({ sketch }: { sketch: Sketch }) {
             {sketch.render?.()}
         </div>
     );
+}
+
+interface SketchErrorBoundaryState {
+    error: Error | null;
+}
+
+class SketchErrorBoundary extends Component<{ children: React.ReactNode }, SketchErrorBoundaryState> {
+    state: SketchErrorBoundaryState = { error: null };
+
+    static getDerivedStateFromError(error: Error) {
+        return { error };
+    }
+
+    render() {
+        if (this.state.error) {
+            return (
+                <div className="sketch-error">
+                    <p>Something went wrong rendering this sketch.</p>
+                    <pre>{this.state.error.message}</pre>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
 }
 
 export function SketchComponent({ sketchClass, ...containerProps }: SketchComponentProps) {
@@ -156,10 +180,10 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
         <div {...containerProps} id={sketchClass.id} className={className} ref={containerRef}>
             <div style={{ position: "relative" }}>
                 {sketch && (
-                    <>
+                    <SketchErrorBoundary>
                         <SketchRenderer key={sketchClass.id} sketch={sketch} />
                         <HandOverlay hands={handData} />
-                    </>
+                    </SketchErrorBoundary>
                 )}
             </div>
             <ScreenSaver shouldShow={shouldShowScreenSaver} />
