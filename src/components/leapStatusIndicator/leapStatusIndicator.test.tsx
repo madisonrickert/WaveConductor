@@ -1,16 +1,26 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { LeapStatusIndicator } from './index';
+import type { LeapProcessStatus, LeapConnectionStatus } from '@/common/leapStatus';
 
-const defaultProps = {
-    processStatus: "running" as const,
-    connectionStatus: "disconnected" as const,
-    onStart: vi.fn(),
-    onStop: vi.fn(),
-};
+interface IndicatorOverrides {
+    processStatus?: LeapProcessStatus;
+    connectionStatus?: LeapConnectionStatus;
+    protocolVersion?: number | null;
+    onStart?: () => void;
+    onStop?: () => void;
+}
 
-function renderIndicator(overrides: Partial<typeof defaultProps> = {}) {
-    return render(<LeapStatusIndicator {...defaultProps} {...overrides} />);
+function renderIndicator(overrides: IndicatorOverrides = {}) {
+    const props = {
+        processStatus: "running" as LeapProcessStatus,
+        connectionStatus: "disconnected" as LeapConnectionStatus,
+        protocolVersion: null,
+        onStart: vi.fn(),
+        onStop: vi.fn(),
+        ...overrides,
+    };
+    return render(<LeapStatusIndicator {...props} />);
 }
 
 describe('LeapStatusIndicator', () => {
