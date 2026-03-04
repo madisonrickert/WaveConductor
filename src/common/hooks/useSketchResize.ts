@@ -15,19 +15,22 @@ export function useSketchResize(
   });
 
   useEffect(() => {
+    const canvas = renderer.domElement;
+    const parent = canvas.parentElement;
+    if (!parent) return;
+
     const resize = () => {
-      const canvas = renderer.domElement;
-      const parent = canvas.parentElement;
-      if (!parent) return;
       renderer.setSize(parent.clientWidth, parent.clientHeight);
       onResizeRef.current(canvas.width, canvas.height);
     };
 
     resize(); // initial
-    window.addEventListener("resize", resize);
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(parent);
 
     return () => {
-      window.removeEventListener("resize", resize);
+      observer.disconnect();
     };
   }, [renderer]);
 }
