@@ -9,7 +9,7 @@
     font-family: monospace;
     font-size: 13px;
     z-index: 1000;
-    min-width: 200px;
+    min-width: 260px;
     backdrop-filter: blur(4px);
 
     .dev-settings-title {
@@ -27,7 +27,7 @@
         margin-bottom: 6px;
 
         input {
-            width: 80px;
+            width: 100px;
             padding: 2px 6px;
             background: rgba(255, 255, 255, 0.1);
             border: 1px solid rgba(255, 255, 255, 0.2);

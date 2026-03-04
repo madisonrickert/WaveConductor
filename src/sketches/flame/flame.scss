@@ -1,10 +1,12 @@
 @use "@/styles/colors" as *;
 @use "@/styles/fonts" as *;
 .flame-input {
-    margin: 20px auto 0 auto;
+    margin: 0 auto;
     width: 33%;
-    position: relative;
-    bottom: 20%;
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
 
     input {
         background: rgba(0, 0, 0, 0.35);
