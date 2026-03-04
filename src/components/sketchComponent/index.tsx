@@ -66,14 +66,13 @@ function SketchRenderer({ sketch }: { sketch: Sketch }) {
         } catch (e) {
             console.error(e);
         }
-        // Force re-render to update sketch.render() and sketch.elements
+        // Force re-render to update sketch.render()
         setTick((t) => t + 1);
     });
 
     return (
         <div className="sketch-elements">
             {sketch.render?.()}
-            {sketch.elements?.map((el, idx) => <el.type {...el.props} key={idx} />)}
         </div>
     );
 }

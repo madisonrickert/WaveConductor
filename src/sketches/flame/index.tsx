@@ -131,7 +131,6 @@ function sigmoid(x: number) {
 export default class FlameSketch extends Sketch {
     private quality = screen.width > 480 ? "high" : "low";
     private nameFromSearch: string = getQueryParam("name");
-    public elements = [<FlameNameInput key="input" initialName={this.nameFromSearch} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />];
     public id = "flame";
     public events = {
         dblclick: () => { },
@@ -183,6 +182,10 @@ export default class FlameSketch extends Sketch {
     private audioHasChord = false;
     private oscLowGate = 0;
     private oscHighGate = 0;
+
+    public render() {
+        return <FlameNameInput key="input" initialName={this.nameFromSearch} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />;
+    }
 
     public init() {
         this.initAudio();
