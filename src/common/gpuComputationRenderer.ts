@@ -124,7 +124,7 @@ export default class GPUComputationRenderer {
     public camera = new THREE.Camera();
 
     public passThruUniforms = {
-        texture: { value: null } as THREE.IUniform,
+        passThruTexture: { value: null } as THREE.IUniform,
     };
 
     public passThruShader: THREE.ShaderMaterial;
@@ -352,11 +352,11 @@ export default class GPUComputationRenderer {
         // input = Texture
         // output = RenderTarget
 
-        this.passThruUniforms.texture.value = input;
+        this.passThruUniforms.passThruTexture.value = input;
 
         this.doRenderTarget( this.passThruShader, output);
 
-        this.passThruUniforms.texture.value = null;
+        this.passThruUniforms.passThruTexture.value = null;
 
     };
 
@@ -379,11 +379,11 @@ export default class GPUComputationRenderer {
 
     public getPassThroughFragmentShader() {
         return `
-            uniform sampler2D inputTexture;
+            uniform sampler2D passThruTexture;
 
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
-                gl_FragColor = texture2D( inputTexture, uv );
+                gl_FragColor = texture2D( passThruTexture, uv );
             }
         `;
     }
