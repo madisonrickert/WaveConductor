@@ -8,8 +8,7 @@ export interface IParticle {
     y: number;
     dx: number;
     dy: number;
-    vertex: THREE.Vector3 | null;
-    color: THREE.Vector4 | null;
+    color: THREE.Vector4;
 }
 
 export function createParticle(originalX: number, originalY: number): IParticle {
@@ -20,8 +19,7 @@ export function createParticle(originalX: number, originalY: number): IParticle 
         originalY,
         x: originalX,
         y: originalY,
-        vertex: null!,
-        color: null!,
+        color: new THREE.Vector4(1, 1, 1, 0),
     };
 }
 
@@ -53,8 +51,7 @@ export class ParticleSystem {
         particle.x = particle.originalX;
         particle.y = particle.originalY;
         particle.dx = particle.dy = 0;
-        if (particle.color)
-            particle.color.w = 0;
+        particle.color.w = 0;
     }
 
     stepParticles(nonzeroAttractors: Attractor[], pointCloud: THREE.Points) {
@@ -76,7 +73,6 @@ export class ParticleSystem {
         const pointsPositionAttribute = pointCloud.geometry.getAttribute('position');
         const pointsColorAttribute = pointCloud.geometry.getAttribute('color');
 
-        let positionNeedsUpdate = false;
         let colorNeedsUpdate = false;
 
         const hasAttractors = nonzeroAttractors.length > 0;
@@ -98,9 +94,9 @@ export class ParticleSystem {
             if (STATIONARY_CONSTANT > 0) {
                 const dx = particle.originalX - particle.x;
                 const dy = particle.originalY - particle.y;
-                const length2 = Math.sqrt(dx * dx + dy * dy);
-                const forceX = STATIONARY_CONSTANT * dx * length2;
-                const forceY = STATIONARY_CONSTANT * dy * length2;
+                const length = Math.sqrt(dx * dx + dy * dy);
+                const forceX = STATIONARY_CONSTANT * dx * length;
+                const forceY = STATIONARY_CONSTANT * dy * length;
 
                 particle.dx += forceX * timeStep;
                 particle.dy += forceY * timeStep;
@@ -122,28 +118,20 @@ export class ParticleSystem {
                 }
             }
 
-            particle.vertex!.x = particle.x;
-            particle.vertex!.y = particle.y;
-
             // Update the position attribute for the points geometry
             pointsPositionAttribute.setXY(i, particle.x, particle.y);
-            positionNeedsUpdate = true;
 
-            // Update particle colors
-            if (particle.color) {
-                // Fade up alpha towards 1
-                let alpha = particle.color.w;
-                if (alpha < 1) {
-                    alpha = Math.min(1, alpha + timeStep / params.FADE_DURATION);
-                    particle.color.w = alpha;
-                }
-                pointsColorAttribute.setW(i, alpha);
-
+            // Fade up alpha towards 1
+            const alpha = particle.color.w;
+            if (alpha < 1) {
+                const newAlpha = Math.min(1, alpha + timeStep / params.FADE_DURATION);
+                particle.color.w = newAlpha;
+                pointsColorAttribute.setW(i, newAlpha);
                 colorNeedsUpdate = true;
             }
         }
 
-        pointsPositionAttribute.needsUpdate = positionNeedsUpdate;
+        pointsPositionAttribute.needsUpdate = true;
         pointsColorAttribute.needsUpdate = colorNeedsUpdate;
     }
 }
