@@ -1,5 +1,5 @@
 import { SketchAudioContext } from "@/sketch";
-import { AudioNodeTracker, createWhiteNoise } from "@/audio";
+import { AudioClip, AudioNodeTracker, createWhiteNoise } from "@/audio";
 import { map } from "@/common/math";
 
 import wavesBackgroundAudioMP3 from "./audio/waves_background.mp3";
@@ -29,26 +29,17 @@ export function createAudioGroup(
     const tracker = new AudioNodeTracker();
     const { HeightMap, isTimeFast } = opts;
 
-    const backgroundAudio = document.createElement("audio");
-    backgroundAudio.autoplay = true;
-    backgroundAudio.loop = true;
-
-    const backgroundAudioSourceMp3 = document.createElement("source");
-    backgroundAudioSourceMp3.src = wavesBackgroundAudioMP3;
-    backgroundAudioSourceMp3.type = "audio/mp3";
-    backgroundAudio.appendChild(backgroundAudioSourceMp3);
-
-    const backgroundAudioSourceOgg = document.createElement("source");
-    backgroundAudioSourceOgg.src = wavesBackgroundAudioOGG;
-    backgroundAudioSourceOgg.type = "audio/ogg";
-    backgroundAudio.appendChild(backgroundAudioSourceOgg);
-
-    const sourceNode = audioContext.createMediaElementSource(backgroundAudio);
-    document.body.appendChild(backgroundAudio);
+    const backgroundAudio = new AudioClip({
+        context: audioContext,
+        srcs: [wavesBackgroundAudioMP3, wavesBackgroundAudioOGG],
+        autoplay: true,
+        loop: true,
+        volume: 1.0,
+    });
 
     const backgroundAudioGain = audioContext.createGain();
     backgroundAudioGain.gain.setValueAtTime(0.0, 0);
-    sourceNode.connect(backgroundAudioGain);
+    backgroundAudio.getNode().connect(backgroundAudioGain);
     backgroundAudioGain.connect(audioContext.gain);
 
     const noise = createWhiteNoise(audioContext);
@@ -90,17 +81,14 @@ export function createAudioGroup(
 
     biquadFilterGain.connect(audioContext.gain);
 
-    tracker.trackNode(sourceNode, backgroundAudioGain, biquadFilter, biquadFilterGain);
+    tracker.trackNode(backgroundAudioGain, biquadFilter, biquadFilterGain);
 
     return {
         biquadFilter,
         dispose() {
-            // Clear the processor callback to prevent further processing
             biquadFilter.onaudioprocess = null;
             tracker.dispose();
-            // Clean up DOM element
-            backgroundAudio.pause();
-            backgroundAudio.remove();
+            backgroundAudio.dispose();
         },
     };
 }
