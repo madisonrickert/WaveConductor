@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron";
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
@@ -140,6 +140,23 @@ function stopLeapWebSocket() {
     leapProcess = null;
   }
 }
+
+// --- Power Save Blocker ---
+let powerSaveBlockerId: number | null = null;
+
+ipcMain.handle("start-power-save-blocker", () => {
+  if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+    return;
+  }
+  powerSaveBlockerId = powerSaveBlocker.start("prevent-display-sleep");
+});
+
+ipcMain.handle("stop-power-save-blocker", () => {
+  if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+    powerSaveBlocker.stop(powerSaveBlockerId);
+    powerSaveBlockerId = null;
+  }
+});
 
 // IPC handlers
 ipcMain.handle("get-leap-process-status", () => {

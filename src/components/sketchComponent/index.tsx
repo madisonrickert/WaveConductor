@@ -188,6 +188,14 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
         };
     }, [sketchClass, audioContext, restartKey, setConnectionStatus]);
 
+    // Prevent display sleep while a sketch is running (Electron only)
+    useEffect(() => {
+        const api = window.electronAPI;
+        if (!api) return;
+        api.startPowerSaveBlocker();
+        return () => { api.stopPowerSaveBlocker(); };
+    }, []);
+
     // Sync volume changes to the shared AudioContext
     useEffect(() => {
         setUserVolume(volumeEnabled ? 1 : 0);

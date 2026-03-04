@@ -11,4 +11,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("leap-process-status", handler);
     };
   },
+  startPowerSaveBlocker: () => ipcRenderer.invoke("start-power-save-blocker"),
+  stopPowerSaveBlocker: () => ipcRenderer.invoke("stop-power-save-blocker"),
 });
