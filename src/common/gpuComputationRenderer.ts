@@ -1,9 +1,14 @@
 import * as THREE from 'three';
 
-// copied from https://github.com/mrdoob/three.js/blob/dev/examples/js/GPUComputationRenderer.js
-// copied from https://gist.github.com/murasaki-uma/ea652e3afb2e419f6f3eadbfac825628
-
 /**
+ * TypeScript fork of GPUComputationRenderer from three-stdlib (pmndrs/three-stdlib).
+ *
+ * Differences from upstream:
+ *   - Typed class with public members instead of closure-scoped this-assigned functions
+ *   - dispose() also disposes variable ShaderMaterials (upstream leaks them)
+ *   - Exports GPUComputationRendererVariable interface
+ *   - Exposes sizeX/sizeY as public properties
+ *
  * @author yomboprime https://github.com/yomboprime
  *
  * GPUComputationRenderer, based on SimulationRenderer by zz85
