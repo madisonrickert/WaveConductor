@@ -25,7 +25,7 @@ function getElectronPlugins(): Plugin[] {
 }
 
 export default defineConfig({
-  base: process.env.ELECTRON ? '/' : '/chargallery/',
+  base: process.env.ELECTRON ? './' : '/chargallery/',
   plugins: [react(), glsl(), nodePolyfills(), eslint({}), ...getElectronPlugins()],
   resolve: {
     alias: {
