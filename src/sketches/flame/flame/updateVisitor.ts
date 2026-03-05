@@ -8,6 +8,11 @@ export class VelocityTrackerVisitor implements UpdateVisitor {
     public velocity = 0;
     public numVisited = 0;
 
+    public reset() {
+        this.velocity = 0;
+        this.numVisited = 0;
+    }
+
     public visit(p: SuperPoint) {
         this.velocity += p.lastPoint.distanceTo(p.point);
         this.numVisited++;
@@ -54,6 +59,14 @@ export class BoxCountVisitor implements UpdateVisitor {
         this.counts = sideLengths.map(() => 0);
         this.densities = sideLengths.map(() => 0);
         this.logSideLengths = sideLengths.map((s) => Math.log(s));
+    }
+
+    public reset() {
+        for (const map of this.boxHashes) {
+            map.clear();
+        }
+        this.counts.fill(0);
+        this.densities.fill(0);
     }
 
     public visit(p: SuperPoint) {

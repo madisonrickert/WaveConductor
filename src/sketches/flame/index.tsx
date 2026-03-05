@@ -197,6 +197,10 @@ export default class FlameSketch extends Sketch {
     private noiseGainScale = 0;
     private audioHasNoise = false;
 
+    // Reusable visitors (reset each frame to avoid per-frame allocations)
+    private velocityVisitor = new VelocityTrackerVisitor();
+    private countVisitor = new BoxCountVisitor([1, 0.1, 0.01, 0.001]);
+
     public render() {
         return <FlameNameInput key="input" initialName={this.savedName} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />;
     }
@@ -341,11 +345,11 @@ export default class FlameSketch extends Sketch {
     private animateSuperPoint() {
         const time = performance.now() / 3000;
         this.cX = 2 * sigmoid(6 * Math.sin(time)) - 1;
-        const velocityVisitor = new VelocityTrackerVisitor();
-        const countVisitor = new BoxCountVisitor([1, 0.1, 0.01, 0.001]);
-        this.superPoint.recalculate(this.jumpiness, this.jumpiness, this.jumpiness, this.computeDepth(), true, [velocityVisitor, countVisitor]);
+        this.velocityVisitor.reset();
+        this.countVisitor.reset();
+        this.superPoint.recalculate(this.jumpiness, this.jumpiness, this.jumpiness, this.computeDepth(), true, [this.velocityVisitor, this.countVisitor]);
 
-        this.updateAudio(velocityVisitor, countVisitor);
+        this.updateAudio(this.velocityVisitor, this.countVisitor);
     }
 
     private updateAudio(
