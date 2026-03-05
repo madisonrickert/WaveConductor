@@ -10,6 +10,12 @@ export const GLOBAL_SETTINGS_DEFS = {
         label: "Leap: receive frames when tab is not focused",
         event: "leap-background-changed",
     },
+    volumeEnabled: {
+        default: true,
+        category: "user" as const,
+        label: "Volume enabled",
+        event: "volume-enabled-changed",
+    },
 } satisfies Record<string, SettingsDefs[string] & { event?: string }>;
 
 export function loadGlobalSettings() {

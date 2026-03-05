@@ -13,6 +13,7 @@ import { useSketchResize } from "@/common/hooks/useSketchResize";
 import { useAudioContext } from "@/common/hooks/useAudioContext";
 import { loadSettings, saveSettings } from "@/common/sketchSettingsStore";
 import { SketchSettingsContext } from "@/common/hooks/useSketchSettings";
+import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings, saveGlobalSetting } from "@/common/globalSettings";
 import { useLeapStatus } from "@/common/hooks/useLeapStatus";
 import { HomeButton } from "@/components/homeButton";
 
@@ -116,9 +117,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
     const { audioContext, setUserVolume } = useAudioContext();
 
     const [sketch, setSketch] = useState<Sketch | null>(null);
-    const [volumeEnabled, setVolumeEnabled] = useState(() =>
-        JSON.parse(window.localStorage.getItem("sketch-volumeEnabled") || "true")
-    );
+    const [volumeEnabled, setVolumeEnabled] = useState(() => loadGlobalSettings().volumeEnabled);
     const [shouldShowScreenSaver, setShouldShowScreenSaver] = useState(false);
     const [showDevPanel, setShowDevPanel] = useState(false);
     const { processStatus, connectionStatus, setConnectionStatus, protocolVersion, setProtocolVersion, startProcess, stopProcess } = useLeapStatus();
@@ -147,17 +146,28 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
             .join("&");
     }, [defs, settings]);
 
-    // Shift+D to toggle dev settings panel
+    const toggleVolume = useCallback(() => {
+        setVolumeEnabled((prev: boolean) => {
+            const next = !prev;
+            saveGlobalSetting("volumeEnabled", next);
+            return next;
+        });
+    }, []);
+
+    // Keyboard shortcuts
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
             if (e.shiftKey && e.key === "D") {
                 setShowDevPanel(prev => !prev);
             }
+            if (e.key === "v" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                toggleVolume();
+            }
         };
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, []);
+    }, [toggleVolume]);
 
     // Initialize sketch when container mounts (or restartKey changes)
     useEffect(() => {
@@ -222,13 +232,7 @@ export function SketchComponent({ sketchClass, ...containerProps }: SketchCompon
         return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
     }, [volumeEnabled, setUserVolume]);
 
-    const handleVolumeButtonClick = () => {
-        setVolumeEnabled((prev: boolean) => {
-            const next = !prev;
-            window.localStorage.setItem("sketch-volumeEnabled", JSON.stringify(next));
-            return next;
-        });
-    };
+    const handleVolumeButtonClick = toggleVolume;
 
     const className = classnames("sketch-component", sketch ? "success" : "loading");
 

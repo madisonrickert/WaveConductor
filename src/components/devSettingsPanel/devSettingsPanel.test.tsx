@@ -12,8 +12,8 @@ function renderWithContext(value: SketchSettingsContextValue) {
 }
 
 describe('DevSettingsPanel', () => {
-  it('renders nothing when there are no dev-category settings', () => {
-    const { container } = renderWithContext({
+  it('renders global dev settings even when there are no per-sketch dev settings', () => {
+    renderWithContext({
       defs: {
         name: { default: 'hello', category: 'user', label: 'Name' },
       },
@@ -21,7 +21,8 @@ describe('DevSettingsPanel', () => {
       sketchId: 'test',
       setSetting: vi.fn(),
     });
-    expect(container.querySelector('.dev-settings-panel')).not.toBeInTheDocument();
+    // Global dev settings (e.g. leapBackground) should still appear
+    expect(screen.getByText('Leap: receive frames when tab is not focused')).toBeInTheDocument();
   });
 
   it('renders a row for each dev-category setting', () => {
