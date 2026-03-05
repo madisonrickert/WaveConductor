@@ -1,7 +1,19 @@
 // AudioWorklet processor — runs on the audio render thread, NOT the main thread.
 // Cannot import from other project modules.
 
+/**
+ * A simple one-pole IIR filter running as an AudioWorklet.
+ *
+ * Transfer function: y[n] = a0 * x[n] - b1 * y[n-1]
+ *
+ * - `a0` controls input gain (0 = silent, 1 = full). Driven by visual darkness.
+ * - `b1` controls feedback/resonance (negative values; closer to -1 = more resonant/colored).
+ *   Driven by waviness² of the heightmap.
+ *
+ * Fed white noise, this produces a filtered rumble that tracks the visual state.
+ */
 class WavesBiquadProcessor extends AudioWorkletProcessor {
+  /** Previous output sample for the one-pole feedback loop. */
   private y1 = 0;
 
   static get parameterDescriptors() {

@@ -6,39 +6,69 @@ import { LeapHandController } from "@/common/leap/LeapHandController";
 
 const LINE_SEGMENT_LENGTH = (window.screen.width > 1024) ? 11 : 22;
 
-const HeightMap = {
-    width: 1200,
-    height: 1200,
-    frame: 0,
+/**
+ * Procedural heightmap that drives the visual distortion of the line grid.
+ * Combines a central bulb (logistic), radial waves (cosine), and a mouse-following ripple.
+ * The mix between bulb and waves oscillates over time via {@link cachedWaviness}.
+ */
+export class HeightMap {
+    /** Logical dimensions of the heightmap in world units, updated on resize. */
+    width = 1200;
+    height = 1200;
+    /** Animation time counter, incremented each frame (by 1 normally, by 4 when mouse/touch is held). */
+    frame = 0;
+
     /**
      * How wavy the heightmap is, from [0..1]. 0 means not wavy at all (only bulbous); 1.0 means only wavy.
+     * Cached per-frame via {@link cacheFrame} to avoid recomputing per-vertex.
      */
-    getWaviness(frame: number) {
-        return (1 + Math.sin(frame / 100)) / 2;
-    },
+    cachedWaviness = 0;
+
+    /** Must be called once per frame before any evaluate/gradient calls. */
+    cacheFrame() {
+        this.cachedWaviness = (1 + Math.sin(this.frame / 100)) / 2;
+    }
+
+    /** Returns the height value at world-space position (x, y). */
     evaluate(x: number, y: number) {
         const length2 = x * x + y * y;
         // z1 creates the bulb shape at the center (using a logistic function)
         const z1 = 23000 / (1 + Math.exp(-length2 / 10000));
         // z2 creates the radial wave shapes from the center
-        const z2 = 600 * Math.cos(length2 / 25000 + HeightMap.frame / 25);
+        const z2 = 600 * Math.cos(length2 / 25000 + this.frame / 25);
         // z3 is a smaller radial wave shape that is centered towards the mouse
-        const z3 = 100 * Math.cos(Math.sqrt(Math.pow(x - HeightMap.width, 2) + Math.pow(y - HeightMap.height, 2)) / 20 + HeightMap.frame / 25);
+        const dx = x - this.width;
+        const dy = y - this.height;
+        const z3 = 100 * Math.cos(Math.sqrt(dx * dx + dy * dy) / 20 + this.frame / 25);
 
-        return lerp(z1, z2, HeightMap.getWaviness(HeightMap.frame)) + z3;
-    },
+        return lerp(z1, z2, this.cachedWaviness) + z3;
+    }
+
+    /** Returns the numerical gradient [dz/dx, dz/dy] at (x, y) via finite differences. */
     gradient(x: number, y: number) {
-        const fnxy = HeightMap.evaluate(x, y);
+        const fnxy = this.evaluate(x, y);
         const epsilon = 1e-4;
-        const ddx = (HeightMap.evaluate(x + epsilon, y) - fnxy) / epsilon;
-        const ddy = (HeightMap.evaluate(x, y + epsilon) - fnxy) / epsilon;
+        const ddx = (this.evaluate(x + epsilon, y) - fnxy) / epsilon;
+        const ddy = (this.evaluate(x, y + epsilon) - fnxy) / epsilon;
 
         return [ddx, ddy];
-    },
-};
+    }
+}
 
-function permutedLine(ox: number, oy: number, nx: number, ny: number, geometryIn?: THREE.BufferGeometry) {
-    const distance = Math.sqrt(Math.pow(ox - nx, 2) + Math.pow(oy - ny, 2));
+/**
+ * Creates (or updates) a line geometry between two endpoints, displacing each vertex
+ * along the heightmap gradient to produce a warped/distorted line effect.
+ *
+ * @param ox - Origin x
+ * @param oy - Origin y
+ * @param nx - End x
+ * @param ny - End y
+ * @param geometryIn - If provided, reuses this geometry buffer instead of allocating a new one.
+ */
+function permutedLine(heightMap: HeightMap, ox: number, oy: number, nx: number, ny: number, geometryIn?: THREE.BufferGeometry) {
+    const ddx = nx - ox;
+    const ddy = ny - oy;
+    const distance = Math.sqrt(ddx * ddx + ddy * ddy);
     // about 11 units per line segment
     const steps = distance / LINE_SEGMENT_LENGTH;
     let geometry: THREE.BufferGeometry;
@@ -50,39 +80,48 @@ function permutedLine(ox: number, oy: number, nx: number, ny: number, geometryIn
         geometry = geometryIn;
     }
 
-    function permutePoint(x: number, y: number, idx: number) {
-        const grad = HeightMap.gradient(x, y);
-        const position = geometry.getAttribute('position') as THREE.BufferAttribute;
-        position.setXYZ(idx, x + grad[0], y + grad[1], 0);
-        position.needsUpdate = true;
-    }
-
-    for ( let t = 0; t <= steps; t++) {
+    const position = geometry.getAttribute('position') as THREE.BufferAttribute;
+    for (let t = 0; t <= steps; t++) {
         const percentage = t / steps;
-        permutePoint(ox + (nx - ox) * percentage,
-                        oy + (ny - oy) * percentage, t);
+        const x = ox + ddx * percentage;
+        const y = oy + ddy * percentage;
+        const grad = heightMap.gradient(x, y);
+        position.setXYZ(t, x + grad[0], y + grad[1], 0);
     }
+    position.needsUpdate = true;
     return geometry;
 }
 
+/** A THREE.Line augmented with its grid position and inline extent, used for efficient per-frame updates. */
 interface PositionedLine extends THREE.Line {
+    /** Base grid position (before gridOffset is applied). */
     x: number;
     y: number;
+    /** Half-extent of the line along its inline direction. */
     inlineOffsetX: number;
     inlineOffsetY: number;
 }
 
-// offsetX and offsetY define the vector that the line draws on (the inline direction). the direction that
-// the vector offsets to repeat itself is the traversal direction. The two are always orthogonal.
+/**
+ * A set of parallel lines that tile the viewport along one direction.
+ *
+ * "Inline" is the direction each line draws along (defined by offsetX/offsetY in the constructor).
+ * "Traversal" is the perpendicular direction in which lines are repeated at {@link gridSize} spacing.
+ * Each frame, the entire strip shifts by (dx, dy) and wraps modulo gridSize, creating a scrolling effect.
+ */
 class LineStrip {
+    /** Angle of the inline (line-drawing) direction in radians. */
     public inlineAngle: number;
+    /** Per-frame velocity of the grid offset, set by mouse/touch/Leap position. */
     public dx: number;
     public dy: number;
+    /** Current scroll offset of the line grid, wraps modulo gridSize. */
     public gridOffsetX: number;
     public gridOffsetY: number;
+    /** Container for all THREE.Line children; added to the sketch scene. */
     public object: THREE.Object3D;
 
-    constructor(public width: number, public height: number, offsetX: number, offsetY: number, public gridSize: number, private material: THREE.LineBasicMaterial) {
+    constructor(private heightMap: HeightMap, public width: number, public height: number, offsetX: number, offsetY: number, public gridSize: number, private material: THREE.LineBasicMaterial) {
         this.inlineAngle = Math.atan(offsetY / offsetX);
         this.dx = 1;
         this.dy = 1;
@@ -101,15 +140,14 @@ class LineStrip {
         this.gridOffsetY = ((this.gridOffsetY + this.dy) % this.gridSize + this.gridSize) % this.gridSize;
         (this.object.children as PositionedLine[]).forEach((lineMesh) => {
             const { x, y, inlineOffsetX, inlineOffsetY } = lineMesh;
-            const geometry = lineMesh.geometry as THREE.BufferGeometry;
             permutedLine(
+                this.heightMap,
                 x + this.gridOffsetX - inlineOffsetX,
                 y + this.gridOffsetY - inlineOffsetY,
                 x + this.gridOffsetX + inlineOffsetX,
                 y + this.gridOffsetY + inlineOffsetY,
-                geometry,
+                lineMesh.geometry as THREE.BufferGeometry,
             );
-            geometry.attributes.position.needsUpdate = true;
         });
     }
 
@@ -126,6 +164,7 @@ class LineStrip {
             const inlineOffsetX = Math.cos(this.inlineAngle) * diagLength / 2;
             const inlineOffsetY = Math.sin(this.inlineAngle) * diagLength / 2;
             const geometry = permutedLine(
+                this.heightMap,
                 x - inlineOffsetX,
                 y - inlineOffsetY,
                 x + inlineOffsetX,
@@ -154,8 +193,18 @@ class LineStrip {
     }
 }
 
+/**
+ * Waves sketch — an interactive, generative line-art animation.
+ *
+ * Two orthogonal {@link LineStrip}s of parallel lines are distorted by a procedural {@link HeightMap}.
+ * Mouse/touch/Leap input controls the scroll direction and speed of the line grid.
+ * Holding down (or grabbing with Leap) increases animation speed and line opacity.
+ * The color palette cycles between dark red and off-white over a 1000-frame period.
+ */
 export default class Waves extends Sketch {
+    private heightMap = new HeightMap();
     private lineStrips: LineStrip[] = [];
+    /** When true (mouse held / Leap grab), animation runs 4x faster with higher line opacity. */
     private isTimeFast = false;
     private lineMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.03 });
 
@@ -218,7 +267,7 @@ export default class Waves extends Sketch {
 
     public init() {
         this.audioGroup = createAudioGroup(this.audioContext, {
-            HeightMap,
+            heightMap: this.heightMap,
         });
         this.renderer.autoClearColor = false;
 
@@ -228,8 +277,8 @@ export default class Waves extends Sketch {
 
         // cheap mobile detection
         const gridSize = (window.screen.width > 1024) ? 50 : 100;
-        this.lineStrips.push(new LineStrip(HeightMap.width, HeightMap.height, 1, -1, gridSize, this.lineMaterial));
-        this.lineStrips.push(new LineStrip(HeightMap.width, HeightMap.height, 0, 1, gridSize, this.lineMaterial));
+        this.lineStrips.push(new LineStrip(this.heightMap, this.heightMap.width, this.heightMap.height, 1, -1, gridSize, this.lineMaterial));
+        this.lineStrips.push(new LineStrip(this.heightMap, this.heightMap.width, this.heightMap.height, 0, 1, gridSize, this.lineMaterial));
 
         this.lineStrips.forEach((lineStrip) => {
             this.scene.add(lineStrip.object);
@@ -271,21 +320,23 @@ export default class Waves extends Sketch {
             const opacityChangeFactor = 0.1;
             if (this.isTimeFast) {
                 this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.23 * opacityChangeFactor;
-                HeightMap.frame += 4;
+                this.heightMap.frame += 4;
             } else {
                 this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.03 * opacityChangeFactor;
-                HeightMap.frame += 1;
+                this.heightMap.frame += 1;
             }
 
+            this.heightMap.cacheFrame();
             this.audioGroup.updateParameters();
 
-            if (HeightMap.frame % 1000 < 500) {
-                this.lineMaterial.color.set("rgb(50, 12, 12)");
+            // Cycle line color between dark red and off-white over a 1000-frame period
+            if (this.heightMap.frame % 1000 < 500) {
+                this.lineMaterial.color.setRGB(50 / 255, 12 / 255, 12 / 255);
             } else {
-                this.lineMaterial.color.set("rgb(252, 247, 243)");
+                this.lineMaterial.color.setRGB(252 / 255, 247 / 255, 243 / 255);
             }
 
-            const scale = map(Math.sin(HeightMap.frame / 550), -1, 1, 1, 0.8);
+            const scale = map(Math.sin(this.heightMap.frame / 550), -1, 1, 1, 0.8);
             this.camera.scale.set(scale, scale, 1);
             this.lineStrips.forEach((lineStrip) => {
                 lineStrip.update();
@@ -309,27 +360,27 @@ export default class Waves extends Sketch {
 
     public resize(width: number, height: number) {
         if (width > height) {
-            HeightMap.height = 1200;
-            HeightMap.width = 1200 * width / height;
+            this.heightMap.height = 1200;
+            this.heightMap.width = 1200 * width / height;
         } else {
-            HeightMap.width = 1200;
-            HeightMap.height = 1200 * height / width;
+            this.heightMap.width = 1200;
+            this.heightMap.height = 1200 * height / width;
         }
         const camera = this.camera;
-        camera.left = -HeightMap.width / 2;
-        camera.top = -HeightMap.height / 2;
-        camera.bottom = HeightMap.height / 2;
-        camera.right = HeightMap.width / 2;
+        camera.left = -this.heightMap.width / 2;
+        camera.top = -this.heightMap.height / 2;
+        camera.bottom = this.heightMap.height / 2;
+        camera.right = this.heightMap.width / 2;
         camera.updateProjectionMatrix();
 
         this.renderer.setClearColor(0xfcfcfc, 1);
         this.renderer.clear();
 
         // draw black again
-        HeightMap.frame = 0;
+        this.heightMap.frame = 0;
 
         this.lineStrips.forEach((lineStrip) => {
-            lineStrip.resize(HeightMap.width, HeightMap.height);
+            lineStrip.resize(this.heightMap.width, this.heightMap.height);
         });
 
         this.leapHands?.resize(width, height);
