@@ -14,9 +14,7 @@ import COMPUTE_CELL_STATE from "./computeCellState.frag";
 
 /** Compute a sane default vertical resolution based on screen size. */
 function defaultVerticalResolution(): number {
-    if (screen.width > 960) return 1024;
-    if (screen.width > 480) return 512;
-    return 256;
+    return 480;
 }
 
 /** Compute a sane default iteration count based on screen size. */
@@ -58,7 +56,7 @@ export default class Cymatics extends Sketch {
             requiresRestart: true,
             step: 1,
             min: 1,
-            max: 50,
+            max: 120,
         } satisfies SettingDef<number>,
     };
 
@@ -167,7 +165,7 @@ export default class Cymatics extends Sketch {
 
         const settings = loadSettings("cymatics", Cymatics.settings);
         this.verticalRes = Math.max(1, Math.min(1080, Math.round(settings.verticalResolution)));
-        this.numIterations = Math.max(1, Math.min(50, Math.round(settings.iterations)));
+        this.numIterations = Math.max(1, Math.min(120, Math.round(settings.iterations)));
         const screenAR = this.canvas.width / this.canvas.height;
         const horizontalRes = Math.round(this.verticalRes * screenAR);
         this.computation = new GPUComputationRenderer(horizontalRes, this.verticalRes, this.renderer);
@@ -176,6 +174,11 @@ export default class Cymatics extends Sketch {
         this.cellStateVariable = this.computation.addVariable("cellStateVariable", COMPUTE_CELL_STATE, initialTexture);
         this.cellStateVariable.wrapS = THREE.ClampToEdgeWrapping;
         this.cellStateVariable.wrapT = THREE.ClampToEdgeWrapping;
+        // Use linear filtering so the render shader bilinearly interpolates between
+        // simulation texels, reducing pixelation at lower resolutions for free.
+        // Computation reads are always at exact texel centers so this doesn't affect simulation accuracy.
+        this.cellStateVariable.minFilter = THREE.LinearFilter;
+        this.cellStateVariable.magFilter = THREE.LinearFilter;
         this.computation.setVariableDependencies(this.cellStateVariable, [this.cellStateVariable]);
         this.cellStateVariable.material.uniforms.iGlobalTime = { value: 0 };
         this.cellStateVariable.material.uniforms.center = { value: new THREE.Vector2(0.5, 0.5) };
