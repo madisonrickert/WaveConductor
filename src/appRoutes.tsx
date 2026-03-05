@@ -31,6 +31,12 @@ export const AppRoutes = () => {
     useHotkeys('left', navigatePrev);
     useHotkeys('right', navigateNext);
 
+    useHotkeys('1', () => throttledNavigate(SKETCH_PATHS[0]));
+    useHotkeys('2', () => throttledNavigate(SKETCH_PATHS[1]));
+    useHotkeys('3', () => throttledNavigate(SKETCH_PATHS[2]));
+    useHotkeys('4', () => throttledNavigate(SKETCH_PATHS[3]));
+    useHotkeys('5', () => throttledNavigate(SKETCH_PATHS[4]));
+
     useHotkeys('escape', () => {
         if (location.pathname !== '/') {
             navigate('/');

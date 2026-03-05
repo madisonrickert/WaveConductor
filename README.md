@@ -67,6 +67,7 @@ The web build deploys to GitHub Pages automatically on every push to `main`.
 
 | Key          | Action                          |
 |--------------|---------------------------------|
+| `1`–`5`      | Jump to sketch (1=line, 2=flame, 3=dots, 4=cymatics, 5=waves) |
 | `z` / `←`    | Previous sketch                 |
 | `x` / `→`    | Next sketch                     |
 | `Escape`     | Return to home / gallery        |
