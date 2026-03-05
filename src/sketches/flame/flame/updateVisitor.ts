@@ -53,12 +53,16 @@ export class BoxCountVisitor implements UpdateVisitor {
     public counts: number[];
     public densities: number[];
     private logSideLengths: number[];
+    private logCounts: number[];
+    private logDensities: number[];
 
     public constructor(public sideLengths: number[]) {
         this.boxHashes = sideLengths.map(() => new Map<number, number>());
         this.counts = sideLengths.map(() => 0);
         this.densities = sideLengths.map(() => 0);
         this.logSideLengths = sideLengths.map((s) => Math.log(s));
+        this.logCounts = sideLengths.map(() => 0);
+        this.logDensities = sideLengths.map(() => 0);
     }
 
     public reset() {
@@ -109,8 +113,11 @@ export class BoxCountVisitor implements UpdateVisitor {
         // the formula is roughly count = C * side^dimension
         // lets just log both of them
         // log(count) = dimesion*log(C*side); linear regression out the C*side to get the dimension
-        const logCounts = counts.map((count) => Math.log(count));
-        const logDensities = densities.map((density) => Math.log(density));
+        const { logCounts, logDensities } = this;
+        for (let i = 0; i < counts.length; i++) {
+            logCounts[i] = Math.log(counts[i]);
+            logDensities[i] = Math.log(densities[i]);
+        }
 
         const slopeCount = -this.slopeApproximation(this.logSideLengths, logCounts);
         const slopeDensity = -this.slopeApproximation(this.logSideLengths, logDensities);
