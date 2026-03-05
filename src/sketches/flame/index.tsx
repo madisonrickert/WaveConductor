@@ -188,24 +188,14 @@ export default class FlameSketch extends Sketch {
     // Audio nodes
     private audioTracker!: AudioNodeTracker;
     private noiseGain!: GainNode;
-    private oscLow!: OscillatorNode;
-    private oscHigh!: OscillatorNode;
-    private oscHighGain!: GainNode;
     private oscGain!: GainNode;
     private chord!: Chord;
     private filter!: BiquadFilterNode;
     private compressor!: DynamicsCompressorNode;
 
     // Audio state
-    private baseFrequency = 0;
-    private baseLowFrequency = 0;
     private noiseGainScale = 0;
-    private baseThirdBias = 0;
-    private baseFifthBias = 0;
     private audioHasNoise = false;
-    private audioHasChord = false;
-    private oscLowGate = 0;
-    private oscHighGate = 0;
 
     public render() {
         return <FlameNameInput key="input" initialName={this.savedName} onInput={(name, isEmpty) => this.updateName(name, isEmpty)} />;
@@ -378,14 +368,10 @@ export default class FlameSketch extends Sketch {
         const newOscGain = this.oscGain.gain.value * 0.9 + 0.1 * Math.max(0, Math.min(velocity * velocity * 2000, 0.6) - 0.01);
         this.oscGain.gain.setTargetAtTime(newOscGain, this.oscGain.context.currentTime, 0.016);
 
-        if (this.audioHasChord) {
-            const baseOffset = THREE.MathUtils.clamp(Math.floor(map(density, 1.0, 3, 0, 24)), 0, 48);
-            this.chord.setScaleDegree(baseOffset);
-            const target = (this.chord.gain.gain.value * 0.9 + 0.1 * (velocityFactor * count * count / 8 + 0.0001));
-            this.chord.gain.gain.setTargetAtTime(target, this.chord.gain.context.currentTime, 0.016);
-        } else {
-            this.chord.gain.gain.setTargetAtTime(0, this.chord.gain.context.currentTime, 0.016);
-        }
+        const baseOffset = THREE.MathUtils.clamp(Math.floor(map(density, 1.0, 3, 0, 24)), 0, 48);
+        this.chord.setScaleDegree(baseOffset);
+        const chordTarget = (this.chord.gain.gain.value * 0.9 + 0.1 * (velocityFactor * count * count / 8 + 0.0001));
+        this.chord.gain.gain.setTargetAtTime(chordTarget, this.chord.gain.context.currentTime, 0.016);
     }
 
     private computeDepth() {
@@ -404,22 +390,15 @@ export default class FlameSketch extends Sketch {
 
         const hash = stringHash(name);
         const hashNorm = (hash % 1024) / 1024;
-        this.baseFrequency = map((hash % 2048) / 2048, 0, 1, 10, 6000);
         const hash2 = hash * hash + hash * 31 + 9;
         this.filter.frequency.setValueAtTime(map((hash2 % 2e12) / 2e12, 0, 1, 120, 400), 0);
         const hash3 = hash2 * hash2 + hash2 * 31 + 9;
         this.filter.Q.setValueAtTime(map((hash3 % 2e12) / 2e12, 0, 1, 5, 8), 0);
-        this.baseLowFrequency = map((hash3 % 10) / 10, 0, 1, 10, 20);
         this.noiseGainScale = map((hash2 * hash3 % 100) / 100, 0, 1, 0.5, 1);
-        this.baseThirdBias = (hash2 % 4) / 4;
-        this.baseFifthBias = (hash3 % 3) / 3;
         this.chord.setIsMajor(hash2 % 2 === 0);
 
         // basically boolean randoms; we don't want mod 2 cuz the hashes are related to each other at that small level
         this.audioHasNoise = (hash3 % 100) >= 50;
-        this.oscLowGate = (hash2 * hash3 % 96) < 48 ? 0 : 1;
-        this.oscHighGate = (hash3 * hash3 % 4000) < 2000 ? 0 : 1;
-        this.audioHasChord = true;
 
         this.cY = map(hashNorm, 0, 1, -2.5, 2.5);
 
@@ -479,12 +458,11 @@ export default class FlameSketch extends Sketch {
         noise.connect(this.noiseGain);
         this.noiseGain.connect(this.compressor);
 
-        const { osc: oscLow, gain: oscLowGain } = tracker.createOsc(context, {
+        const { gain: oscLowGain } = tracker.createOsc(context, {
             frequency: 0,
             type: "square",
             gain: 0.6,
         });
-        this.oscLow = oscLow;
 
         this.filter = context.createBiquadFilter();
         this.filter.type = "lowpass";
@@ -492,18 +470,16 @@ export default class FlameSketch extends Sketch {
         this.filter.Q.setValueAtTime(2.18, 0);
         oscLowGain.connect(this.filter);
 
-        const { osc: oscHigh, gain: oscHighGain } = tracker.createOsc(context, {
+        const { gain: oscHighGain } = tracker.createOsc(context, {
             frequency: 0,
             type: "triangle",
             gain: 0.05,
         });
-        this.oscHigh = oscHigh;
-        this.oscHighGain = oscHighGain;
 
         this.oscGain = context.createGain();
         this.oscGain.gain.setValueAtTime(0.0, 0);
         this.filter.connect(this.oscGain);
-        this.oscHighGain.connect(this.oscGain);
+        oscHighGain.connect(this.oscGain);
         this.oscGain.connect(this.compressor);
 
         // plays a major or minor chord
