@@ -18,6 +18,8 @@ import { HomeButton } from "@/components/homeButton";
 
 import "./sketchComponent.scss";
 
+const noop = () => {};
+
 const EVENT_LISTENER_OPTIONS: Partial<Record<UIEventName, AddEventListenerOptions>> = {
     touchstart: { passive: false },
     touchmove: { passive: false },
@@ -55,7 +57,7 @@ function useSketchUIEvents(sketch: Sketch) {
 }
 
 function SketchRenderer({ sketch }: { sketch: Sketch }) {
-    const [, setTick] = useState(0);
+    // const [, setTick] = useState(0);
 
     useSketchUIEvents(sketch);
     useSketchLifecycle(sketch);
@@ -71,7 +73,11 @@ function SketchRenderer({ sketch }: { sketch: Sketch }) {
             console.error(e);
         }
         // Force re-render to update sketch.render()
-        setTick((t) => t + 1);
+        // setTick((t) => t + 1);
+        // Keep event loop active so Chromium delivers WebSocket messages at full rate.
+        // Without this, Chromium throttles WebSocket I/O when the main thread is idle
+        // between rAF frames, starving leapjs of hand tracking data (~2-6fps vs ~60fps).
+        setTimeout(noop, 0);
     });
 
     return (
