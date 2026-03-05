@@ -309,6 +309,7 @@ export default class Waves extends Sketch {
 
         this.audioGroup = createAudioGroup(this.audioContext, {
             heightMap: this.heightMap,
+            getGrabStrength: () => this.speedFactor,
         });
         this.renderer.autoClearColor = false;
 
