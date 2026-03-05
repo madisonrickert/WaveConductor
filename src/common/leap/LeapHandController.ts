@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { HandMesh } from "./handMesh";
 import { mapLeapToThreePosition, wireLeapConnectionEvents } from "./util";
 import { LeapConnectionStatus } from "@/common/leapStatus";
+import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings } from "@/common/globalSettings";
 
 export interface LeapHandInfo {
     hand: Leap.Hand;
@@ -53,7 +54,8 @@ export class LeapHandController {
             this._handScene.add(this._handMeshesGroup);
         }
 
-        this._controller = new Leap.Controller({ background: true });
+        const globalSettings = loadGlobalSettings();
+        this._controller = new Leap.Controller({ background: globalSettings.leapBackground });
         this._controller
             .connect()
             .on("frame", this._handleFrame);
@@ -63,6 +65,8 @@ export class LeapHandController {
             options.getConnectionCallback,
             options.getProtocolVersionCallback,
         );
+
+        window.addEventListener(GLOBAL_SETTINGS_DEFS.leapBackground.event, this._handleBackgroundChanged);
     }
 
     public renderOverlay(): void {
@@ -83,6 +87,7 @@ export class LeapHandController {
     }
 
     public dispose(): void {
+        window.removeEventListener(GLOBAL_SETTINGS_DEFS.leapBackground.event, this._handleBackgroundChanged);
         this._cleanupConnectionEvents();
         this._controller
             .removeListener("frame", this._handleFrame)
@@ -103,6 +108,11 @@ export class LeapHandController {
         }
         return this._handMeshesGroup.children[index] as HandMesh;
     }
+
+    private _handleBackgroundChanged = (e: Event): void => {
+        const background = (e as CustomEvent<boolean>).detail;
+        this._controller.setBackground(background);
+    };
 
     private _handleFrame = (frame: Leap.Frame): void => {
         const validHands = frame.hands.filter((h) => h.valid);
