@@ -3,7 +3,10 @@ import * as THREE from "three";
 import { OrbitControls } from "three-stdlib";
 
 import { createWhiteNoise, AudioNodeTracker } from "@/audio";
-import { AFFINES, BoxCountVisitor, Branch, createInterpolatedVariation, createRouterVariation, SuperPoint, VARIATIONS, VelocityTrackerVisitor } from "./flame";
+import { Branch } from "./branch";
+import { SuperPoint } from "./superPoint";
+import { AFFINES, VARIATIONS, createInterpolatedVariation, createRouterVariation } from "./transforms";
+import { BoxCountVisitor, VelocityTrackerVisitor } from "./updateVisitor";
 import { map } from "@/common/math";
 import { loadSettings, saveSetting } from "@/common/sketchSettingsStore";
 import { SettingDef } from "@/common/sketchSettings";
