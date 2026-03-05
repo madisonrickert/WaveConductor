@@ -14,7 +14,7 @@ import { useSketchResize } from "@/common/hooks/useSketchResize";
 import { useAudioContext } from "@/common/hooks/useAudioContext";
 import { loadSettings, saveSettings } from "@/common/sketchSettingsStore";
 import { SketchSettingsContext } from "@/common/hooks/useSketchSettings";
-import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings, saveGlobalSetting } from "@/common/globalSettings";
+import { loadGlobalSettings, saveGlobalSetting } from "@/common/globalSettings";
 import { useLeapStatus } from "@/common/hooks/useLeapStatus";
 import { HomeButton } from "@/components/homeButton";
 
