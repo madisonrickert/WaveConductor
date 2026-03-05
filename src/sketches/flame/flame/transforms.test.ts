@@ -197,6 +197,20 @@ describe('createInterpolatedVariation', () => {
     variation(p);
     expect(p.x).toBeCloseTo(Math.PI / 2);
   });
+
+  it('blends both variations at interpolation = 0.5', () => {
+    const variation = createInterpolatedVariation(
+      VARIATIONS.Sin,
+      VARIATIONS.Linear,
+      () => 0.5,
+    );
+    const p = new THREE.Vector3(Math.PI / 2, 0, 0);
+    variation(p);
+    // Sin(PI/2) = 1, Linear(PI/2) = PI/2 ≈ 1.5708
+    // blend: 0.5 * 1 + 0.5 * PI/2
+    expect(p.x).toBeCloseTo(0.5 * 1 + 0.5 * Math.PI / 2);
+    expect(p.y).toBeCloseTo(0);
+  });
 });
 
 describe('createRouterVariation', () => {
