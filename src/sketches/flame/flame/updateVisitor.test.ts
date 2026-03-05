@@ -79,4 +79,65 @@ describe('BoxCountVisitor', () => {
     visitor.visit(makeSuperPoint(0.7, 0.3, 0.1));
     expect(visitor.densities[0]).toBeGreaterThan(densityAfterOne);
   });
+
+  describe('computeCountAndCountDensity', () => {
+    it('returns finite values for points spread across boxes', () => {
+      const visitor = new BoxCountVisitor([1, 0.1, 0.01]);
+      // Place points in clearly different boxes
+      for (let i = 0; i < 10; i++) {
+        visitor.visit(makeSuperPoint(i * 2, 0, 0));
+      }
+      const [count, density] = visitor.computeCountAndCountDensity();
+      expect(Number.isFinite(count)).toBe(true);
+      expect(Number.isFinite(density)).toBe(true);
+    });
+
+    it('returns finite values for scattered points', () => {
+      const visitor = new BoxCountVisitor([1, 0.1, 0.01, 0.001]);
+      for (let i = 0; i < 200; i++) {
+        visitor.visit(makeSuperPoint(i * 0.05, Math.sin(i) * 2, 0));
+      }
+      const [count, density] = visitor.computeCountAndCountDensity();
+      expect(Number.isFinite(count)).toBe(true);
+      expect(Number.isFinite(density)).toBe(true);
+    });
+
+    it('count slope is positive when points cluster at coarse scales but spread at fine scales', () => {
+      const visitor = new BoxCountVisitor([1, 0.1, 0.01]);
+      // Many points in a small region — at sideLength=1, few boxes; at sideLength=0.1, many boxes
+      for (let i = 0; i < 100; i++) {
+        visitor.visit(makeSuperPoint(i * 0.01, i * 0.01, 0));
+      }
+      // sideLength=1: 1 box. sideLength=0.1: ~10 boxes
+      expect(visitor.counts[1]).toBeGreaterThan(visitor.counts[0]);
+      const [count] = visitor.computeCountAndCountDensity();
+      expect(count).toBeGreaterThan(0);
+    });
+
+    it('computes correct slope for a known linear relationship', () => {
+      // If log(count) = m * log(sideLength) + b, the slope is m
+      // For points on a line, box-counting dimension should be ~1
+      const visitor = new BoxCountVisitor([1, 0.1, 0.01, 0.001]);
+      for (let i = 0; i < 100; i++) {
+        visitor.visit(makeSuperPoint(i * 0.03, 0, 0));
+      }
+      const [count] = visitor.computeCountAndCountDensity();
+      // Box-counting dimension of a line should be approximately 1
+      expect(count).toBeGreaterThan(0.5);
+      expect(count).toBeLessThan(1.5);
+    });
+
+    it('slopeApproximation produces stable values (regression lock)', () => {
+      // Lock in the exact output of the slope approximation so accidental
+      // "fixes" to the math are caught. These values come from the current
+      // (intentional) implementation which the audio system depends on.
+      const visitor = new BoxCountVisitor([1, 0.1, 0.01, 0.001]);
+      for (let i = 0; i < 100; i++) {
+        visitor.visit(makeSuperPoint(i * 0.03, 0, 0));
+      }
+      const [count, density] = visitor.computeCountAndCountDensity();
+      expect(count).toBeCloseTo(1.3181, 3);
+      expect(density).toBeCloseTo(2.6848, 3);
+    });
+  });
 });

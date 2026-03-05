@@ -32,6 +32,39 @@ describe('AFFINES', () => {
     });
   });
 
+  describe('TowardsOrigin2', () => {
+    it('transforms a known point correctly', () => {
+      const p = new THREE.Vector3(1, 1, 1);
+      AFFINES.TowardsOrigin2(p);
+      expect(p.x).toBeCloseTo(1);           // (1 + 1) / 2
+      expect(p.y).toBeCloseTo(-0.1);        // (1 - 1) / 2 - 0.1
+      expect(p.z).toBeCloseTo(0.9);         // (1 + 1) / 2 - 0.1
+    });
+  });
+
+  describe('SwapSub', () => {
+    it('computes (y-z, z-x, x-y) / 2', () => {
+      const p = new THREE.Vector3(6, 2, 4);
+      AFFINES.SwapSub(p);
+      expect(p.x).toBeCloseTo(-1);          // (2 - 4) / 2
+      expect(p.y).toBeCloseTo(-1);          // (4 - 6) / 2
+      expect(p.z).toBeCloseTo(2);           // (6 - 2) / 2
+    });
+  });
+
+  describe('NegateSwap', () => {
+    it('transforms a known point correctly', () => {
+      const p = new THREE.Vector3(2.1, 0, 0);
+      AFFINES.NegateSwap(p);
+      // x: (-2.1 + 0 + 0) / 2.1 = -1
+      // y: (0 + 2.1 + 0) / 2.1 = 1
+      // z: (0 + 2.1 + 0) / 2.1 = 1
+      expect(p.x).toBeCloseTo(-1);
+      expect(p.y).toBeCloseTo(1);
+      expect(p.z).toBeCloseTo(1);
+    });
+  });
+
   describe('TowardsOriginNegativeBias', () => {
     it('transforms a known point correctly', () => {
       const p = new THREE.Vector3(1, 1, 1);

@@ -45,4 +45,9 @@ export class FlamePointsMaterial extends THREE.ShaderMaterial {
     public setFocalLength(length: number) {
         this.uniforms.focalLength.value = length;
     }
+
+    public dispose() {
+        this.map?.dispose();
+        super.dispose();
+    }
 }

@@ -27,11 +27,8 @@ export class SuperPoint {
 
         this.slot = SuperPoint.nextSlot++;
 
-        const positionAttribute = rootGeometry.attributes.position as THREE.BufferAttribute;
-        const colorAttribute = rootGeometry.attributes.color as THREE.BufferAttribute;
-
-        const positionArray = positionAttribute.array as Float32Array;
-        const colorArray = colorAttribute.array as Float32Array;
+        const positionArray = (rootGeometry.attributes.position as THREE.BufferAttribute).array as Float32Array;
+        const colorArray = (rootGeometry.attributes.color as THREE.BufferAttribute).array as Float32Array;
 
         const offset = this.slot * 3;
         positionArray[offset] = point.x;
@@ -42,7 +39,7 @@ export class SuperPoint {
         colorArray[offset + 2] = color.b;
     }
 
-    public updateSubtree(depth: number, shouldLerp: boolean, visitors: UpdateVisitor[]) {
+    public updateSubtree(depth: number, shouldLerp: boolean, visitors: UpdateVisitor[], posArr: Float32Array, colArr: Float32Array) {
         if (depth === 0) { return; }
 
         if (this.children === undefined) {
@@ -55,9 +52,6 @@ export class SuperPoint {
                 );
             });
         }
-
-        const posArr = (this.rootGeometry.attributes.position as THREE.BufferAttribute).array as Float32Array;
-        const colArr = (this.rootGeometry.attributes.color as THREE.BufferAttribute).array as Float32Array;
 
         for (let idx = 0, l = this.children.length; idx < l; idx++) {
             SuperPoint.globalSubtreeIterationIndex++;
@@ -96,7 +90,7 @@ export class SuperPoint {
                 }
             }
 
-            child.updateSubtree(depth - 1, shouldLerp, visitors);
+            child.updateSubtree(depth - 1, shouldLerp, visitors, posArr, colArr);
         }
     }
 
@@ -110,14 +104,16 @@ export class SuperPoint {
         SuperPoint.globalSubtreeIterationIndex = 0;
         this.point.set(initialX, initialY, initialZ);
 
-        // Write root position back to buffer
         const posArr = (this.rootGeometry.attributes.position as THREE.BufferAttribute).array as Float32Array;
+        const colArr = (this.rootGeometry.attributes.color as THREE.BufferAttribute).array as Float32Array;
+
+        // Write root position back to buffer
         const rootOffset = this.slot * 3;
         posArr[rootOffset] = this.point.x;
         posArr[rootOffset + 1] = this.point.y;
         posArr[rootOffset + 2] = this.point.z;
 
-        this.updateSubtree(depth, shouldLerp, visitors);
+        this.updateSubtree(depth, shouldLerp, visitors, posArr, colArr);
 
         this.rootGeometry.setDrawRange(0, SuperPoint.nextSlot);
         (this.rootGeometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;

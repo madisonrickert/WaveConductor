@@ -314,7 +314,7 @@ export default class FlameSketch extends Sketch {
         this.material.setFocalLength(cameraLength);
 
         this.cDx = THREE.MathUtils.mapLinear(this.mousePosition.x, 0, this.canvas.width, -1, 1);
-        this.cDy = THREE.MathUtils.mapLinear(this.mousePosition.y, 0, this.canvas.width, -1, 1);
+        this.cDy = THREE.MathUtils.mapLinear(this.mousePosition.y, 0, this.canvas.height, -1, 1);
 
         // Apply fling momentum from Leap grab release
         if (this._grabbingHandCount === 0 && (Math.abs(this._angularVelocityX) > 0.0001 || Math.abs(this._angularVelocityY) > 0.0001)) {
@@ -424,6 +424,9 @@ export default class FlameSketch extends Sketch {
         this.audioHasChord = true;
 
         this.cY = map(hashNorm, 0, 1, -2.5, 2.5);
+
+        // Dispose old geometry and point cloud before creating new ones
+        this.geometry?.dispose();
 
         // Reset slot counter before building a new tree
         SuperPoint.nextSlot = 0;
