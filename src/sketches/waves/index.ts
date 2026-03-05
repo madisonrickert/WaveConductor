@@ -198,14 +198,17 @@ class LineStrip {
  *
  * Two orthogonal {@link LineStrip}s of parallel lines are distorted by a procedural {@link HeightMap}.
  * Mouse/touch/Leap input controls the scroll direction and speed of the line grid.
- * Holding down (or grabbing with Leap) increases animation speed and line opacity.
+ * Holding down (mouse/touch) or squeezing with Leap scales animation speed (1–5×) and line opacity.
  * The color palette cycles between dark red and off-white over a 1000-frame period.
  */
 export default class Waves extends Sketch {
     private heightMap = new HeightMap();
     private lineStrips: LineStrip[] = [];
-    /** When true (mouse held / Leap grab), animation runs 4x faster with higher line opacity. */
-    private isTimeFast = false;
+    /**
+     * Continuous squeeze intensity in [0..1]. Controls animation speed (1–5×) and line opacity (0.03–0.23).
+     * Set to 1 by mouse/touch hold, or mapped from Leap grab strength.
+     */
+    private speedFactor = 0;
     private lineMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.03 });
 
     private leapHands!: LeapHandController;
@@ -229,7 +232,7 @@ export default class Waves extends Sketch {
 
         mousedown: (event: MouseEvent) => {
             if (event.button === 0) {
-                this.isTimeFast = true;
+                this.speedFactor = 1;
                 this.setVelocityFromMouseEvent(event);
                 this.markInteraction();
             }
@@ -237,7 +240,7 @@ export default class Waves extends Sketch {
 
         mouseup: (event: MouseEvent) => {
             if (event.button === 0) {
-                this.isTimeFast = false;
+                this.speedFactor = 0;
                 this.setVelocityFromMouseEvent(event);
             }
         },
@@ -246,7 +249,7 @@ export default class Waves extends Sketch {
             // prevent emulated mouse events from occuring
             event.preventDefault();
 
-            this.isTimeFast = true;
+            this.speedFactor = 1;
             this.setVelocityFromTouchEvent(event);
             this.markInteraction();
         },
@@ -257,7 +260,7 @@ export default class Waves extends Sketch {
         },
 
         touchend: (_event: TouchEvent) => {
-            this.isTimeFast = false;
+            this.speedFactor = 0;
         },
     };
 
@@ -301,9 +304,10 @@ export default class Waves extends Sketch {
             onFrame: (hands) => {
                 if (hands.length > 0) {
                     this.setVelocityFromCanvasCoordinates(hands[0].canvasPosition.x, hands[0].canvasPosition.y);
+                    // Use the strongest grab across all hands as the speed factor
+                    const maxGrab = Math.max(...hands.map(({ hand }) => hand.grabStrength));
+                    this.speedFactor = maxGrab;
                 }
-                const isGrabbing = hands.some(({ hand }) => hand.grabStrength > 0.5);
-                this.isTimeFast = hands.length > 0 ? isGrabbing : this.isTimeFast;
             },
         });
     }
@@ -317,14 +321,11 @@ export default class Waves extends Sketch {
         }
 
         if (!this.isIdle) {
+            // Interpolate animation speed (1–5) and line opacity (0.03–0.23) based on squeeze intensity
+            const targetOpacity = lerp(0.03, 0.23, this.speedFactor);
             const opacityChangeFactor = 0.1;
-            if (this.isTimeFast) {
-                this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.23 * opacityChangeFactor;
-                this.heightMap.frame += 4;
-            } else {
-                this.lineMaterial.opacity = this.lineMaterial.opacity * (1 - opacityChangeFactor) + 0.03 * opacityChangeFactor;
-                this.heightMap.frame += 1;
-            }
+            this.lineMaterial.opacity = lerp(this.lineMaterial.opacity, targetOpacity, opacityChangeFactor);
+            this.heightMap.frame += lerp(1, 5, this.speedFactor);
 
             this.heightMap.cacheFrame();
             this.audioGroup.updateParameters();
