@@ -80,17 +80,12 @@ void main() {
     vec2 uv;
 
     vec3 col;
-    float aspectRatio = resolution.x / resolution.y;
-    vec3 cymaticsColor;
-    if (aspectRatio > 1.0) {
-        normCoord = screenCoord * vec2(aspectRatio, 1.);
-        uv = normCoord + vec2(1.0, 0.5);
-        cymaticsColor = color(uv);
-    } else {
-        normCoord = screenCoord * vec2(1., 1. / aspectRatio);
-        uv = normCoord + vec2(0.5, 1.0);
-        cymaticsColor = color(uv);
-    }
+    // Scale screen coords by screen/sim aspect ratio so sim fills screen when ARs match
+    float screenAR = resolution.x / resolution.y;
+    float simAR = cellStateResolution.x / cellStateResolution.y;
+    normCoord = screenCoord * vec2(screenAR / simAR, 1.0);
+    uv = normCoord + vec2(0.5);
+    vec3 cymaticsColor = color(uv);
 
     float vignetteAmount = 1. - clamp(-udRoundBox(screenCoord, vec2(0.45), 0.05) * 40., 0., 1.);
     vec3 colBg = vec3(0.25 - length(normCoord) * 0.2);

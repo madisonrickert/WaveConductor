@@ -3,7 +3,6 @@ import { MathUtils } from "three";
 import { EffectComposer, ShaderPass, RenderPass, UnrealBloomPass } from "three-stdlib";
 
 import GPUComputationRenderer, { GPUComputationRendererVariable } from "./gpuComputationRenderer";
-import { mirroredRepeat } from "@/common/math";
 import { Sketch } from "@/common/sketch";
 import { CymaticsAudio } from "./audio";
 import { RenderCymaticsShader } from "./renderCymaticsShader";
@@ -40,12 +39,14 @@ export default class Cymatics extends Sketch {
 
     private leapHands!: LeapHandController;
     private _handComposer!: EffectComposer;
-    private _prevHandCount = 0;
 
     protected idleTimeoutSeconds = IDLE_TIMEOUT_SECONDS;
 
     private mousePressed = false;
     private mousePosition = new THREE.Vector2(0, 0);
+    private mousePosition2 = new THREE.Vector2(0, 0);
+    /** Leap hand ID holding each center, or null if free */
+    private centerHeldByHandId: [string | null, string | null] = [null, null];
     private quality: Quality = computeQuality();
 
     public events = {
@@ -100,8 +101,16 @@ export default class Cymatics extends Sketch {
         this.markInteraction();
     }
 
+    private pixelToNDC(pixelX: number, pixelY: number, out: THREE.Vector2) {
+        out.set(pixelX / this.canvas.width * 2 - 1, (1 - pixelY / this.canvas.height) * 2 - 1);
+    }
+
     setMouse(pixelX: number, pixelY: number) {
-        this.mousePosition.set(pixelX / this.canvas.width * 2 - 1, (1 - pixelY / this.canvas.height) * 2 - 1);
+        this.pixelToNDC(pixelX, pixelY, this.mousePosition);
+    }
+
+    setMouse2(pixelX: number, pixelY: number) {
+        this.pixelToNDC(pixelX, pixelY, this.mousePosition2);
     }
 
     static id = "cymatics";
@@ -127,25 +136,32 @@ export default class Cymatics extends Sketch {
     public init() {
         this.renderer.setClearColor(0xfcfcfc);
         this.renderer.clear();
+
+        // Vertical resolution from quality tier; horizontal matches window aspect ratio
+        let verticalRes: number;
         switch(this.quality) {
             case Quality.High:
-                this.computation = new GPUComputationRenderer(1024, 1024, this.renderer);
+                verticalRes = 1024;
                 break;
             case Quality.Medium:
-                this.computation = new GPUComputationRenderer(512, 512, this.renderer);
+                verticalRes = 512;
                 break;
             default:
-                this.computation = new GPUComputationRenderer(256, 256, this.renderer);
+                verticalRes = 256;
                 break;
         }
+        const screenAR = this.canvas.width / this.canvas.height;
+        const horizontalRes = Math.round(verticalRes * screenAR);
+        this.computation = new GPUComputationRenderer(horizontalRes, verticalRes, this.renderer);
 
         const initialTexture = this.computation.createTexture();
         this.cellStateVariable = this.computation.addVariable("cellStateVariable", COMPUTE_CELL_STATE, initialTexture);
-        this.cellStateVariable.wrapS = THREE.MirroredRepeatWrapping;
-        this.cellStateVariable.wrapT = THREE.MirroredRepeatWrapping;
+        this.cellStateVariable.wrapS = THREE.ClampToEdgeWrapping;
+        this.cellStateVariable.wrapT = THREE.ClampToEdgeWrapping;
         this.computation.setVariableDependencies(this.cellStateVariable, [this.cellStateVariable]);
         this.cellStateVariable.material.uniforms.iGlobalTime = { value: 0 };
         this.cellStateVariable.material.uniforms.center = { value: new THREE.Vector2(0.5, 0.5) };
+        this.cellStateVariable.material.uniforms.center2 = { value: new THREE.Vector2(0.5, 0.5) };
         this.cellStateVariable.material.uniforms.activeRadius = { value: MINIMUM_ACTIVE_RADIUS };
         const computationInitError = this.computation.init();
         if (computationInitError != null) {
@@ -174,30 +190,54 @@ export default class Cymatics extends Sketch {
                 wireframe: true,
             }),
             onFrame: (hands) => {
-                const oldHandCount = this._prevHandCount;
-                this._prevHandCount = hands.length;
-
-                if (hands.length === 0 && oldHandCount > 0) {
-                    this.mousePressed = false;
-                }
-                if (hands.length === 0) return;
-
-                // Primary hand controls simulation position
-                this.setMouse(hands[0].canvasPosition.x, hands[0].canvasPosition.y);
-
-                // Either hand can grab to trigger the effect
-                const isPinched = hands.some(({ hand }) => hand.grabStrength > 0.5);
-                if (isPinched) {
-                    if (!this.mousePressed) {
-                        this.mousePressed = true;
-                        this.slowDownAmount += 1;
-                        this.audio.triggerJitter();
+                // Release centers whose hands are gone or no longer grabbing
+                for (let i = 0; i < 2; i++) {
+                    const heldId = this.centerHeldByHandId[i];
+                    if (heldId === null) continue;
+                    const hand = hands.find(h => h.hand.id === heldId);
+                    if (!hand || hand.hand.grabStrength <= 0.5) {
+                        this.centerHeldByHandId[i] = null;
                     }
-                } else {
-                    this.mousePressed = false;
                 }
 
-                this.markInteraction();
+                // For newly grabbing hands not yet assigned, attach to nearest free center
+                for (const h of hands) {
+                    if (h.hand.grabStrength <= 0.5) continue;
+                    if (this.centerHeldByHandId[0] === h.hand.id || this.centerHeldByHandId[1] === h.hand.id) continue;
+
+                    // Convert hand position to sim UV for proximity check
+                    this.pixelToNDC(h.canvasPosition.x, h.canvasPosition.y, this.tmpHandNDC);
+                    const handUV = this.screenToSimUV(this.tmpHandNDC, this.tmpHandUV);
+
+                    const c1 = this.cellStateVariable.material.uniforms.center.value as THREE.Vector2;
+                    const c2 = this.cellStateVariable.material.uniforms.center2.value as THREE.Vector2;
+                    const d1 = this.centerHeldByHandId[0] === null ? handUV.distanceTo(c1) : Infinity;
+                    const d2 = this.centerHeldByHandId[1] === null ? handUV.distanceTo(c2) : Infinity;
+
+                    if (d1 <= d2) {
+                        this.centerHeldByHandId[0] = h.hand.id;
+                    } else {
+                        this.centerHeldByHandId[1] = h.hand.id;
+                    }
+
+                    // Trigger interaction effects on new grab
+                    this.slowDownAmount += 1;
+                    this.audio.triggerJitter();
+                }
+
+                // Update positions of held centers
+                for (const h of hands) {
+                    if (this.centerHeldByHandId[0] === h.hand.id) {
+                        this.setMouse(h.canvasPosition.x, h.canvasPosition.y);
+                    }
+                    if (this.centerHeldByHandId[1] === h.hand.id) {
+                        this.setMouse2(h.canvasPosition.x, h.canvasPosition.y);
+                    }
+                }
+
+                if (hands.length > 0) {
+                    this.markInteraction();
+                }
             },
         });
 
@@ -251,7 +291,11 @@ export default class Cymatics extends Sketch {
      * Runs each frame that the simulation is active
      */
     private animateSimulation(): void {
-        if (this.mousePressed) {
+        const c1Held = this.centerHeldByHandId[0] !== null;
+        const c2Held = this.centerHeldByHandId[1] !== null;
+        const interacting = this.mousePressed || c1Held || c2Held;
+
+        if (interacting) {
             this.numCycles += .0003 + (this.numCycles - DEFAULT_NUM_CYCLES) * 0.0008;
             if (this.activeRadius < MINIMUM_ACTIVE_RADIUS_INTERACTING) {
                 this.activeRadius = MINIMUM_ACTIVE_RADIUS_INTERACTING;
@@ -270,10 +314,33 @@ export default class Cymatics extends Sketch {
             this.numCycles = this.numCycles * 0.95 + DEFAULT_NUM_CYCLES * 0.05;
         }
 
-        const wantedCenter = this.computeWantedCenter();
-        // how fast the center's moving; max is about 0.06
-        const centerSpeed = wantedCenter.distanceTo(this.cellStateVariable.material.uniforms.center.value) * INTERACTION_CENTER_LERP_FACTOR;
-        this.cellStateVariable.material.uniforms.center.value.lerp(wantedCenter, INTERACTION_CENTER_LERP_FACTOR);
+        const center1 = this.cellStateVariable.material.uniforms.center.value as THREE.Vector2;
+        const center2 = this.cellStateVariable.material.uniforms.center2.value as THREE.Vector2;
+        const wantedCenter1 = this.computeWantedCenter();
+
+        // Update held centers from their hand positions
+        if (c1Held) {
+            center1.lerp(wantedCenter1, INTERACTION_CENTER_LERP_FACTOR);
+        }
+        if (c2Held) {
+            center2.lerp(this.computeWantedCenter2(), INTERACTION_CENTER_LERP_FACTOR);
+        }
+
+        // Free centers mirror the other; if neither held, center1 follows mouse
+        if (!c1Held) {
+            if (c2Held) {
+                this.tmpWantedCenter.set(1 - center2.x, 1 - center2.y);
+                center1.lerp(this.tmpWantedCenter, INTERACTION_CENTER_LERP_FACTOR);
+            } else {
+                center1.lerp(wantedCenter1, INTERACTION_CENTER_LERP_FACTOR);
+            }
+        }
+        if (!c2Held) {
+            this.tmpWantedCenter2.set(1 - center1.x, 1 - center1.y);
+            center2.lerp(this.tmpWantedCenter2, INTERACTION_CENTER_LERP_FACTOR);
+        }
+
+        const centerSpeed = wantedCenter1.distanceTo(center1) * INTERACTION_CENTER_LERP_FACTOR;
 
         const skewIntensity = Math.pow(Math.max(0, (this.numCycles - DEFAULT_NUM_CYCLES) / 2. - 0.5), 2);
 
@@ -326,42 +393,36 @@ export default class Cymatics extends Sketch {
     }
 
     private tmpScreenCoord = new THREE.Vector2();
-    private tmpNormCoord = new THREE.Vector2();
-    private tmpUv = new THREE.Vector2();
     private tmpWantedCenter = new THREE.Vector2();
+    private tmpWantedCenter2 = new THREE.Vector2();
+    private tmpHandNDC = new THREE.Vector2();
+    private tmpHandUV = new THREE.Vector2();
 
     /**
-     * Computes the simulation’s focal point based on the current aspect ratio and mouse/hand position.
-     *
-     * The cymatics shader splits the viewport into mirrored regions so the visual pattern
-     * repeats across wide and tall screens. This helper replicates the fragment shader’s logic
-     * in TypeScript so we can smoothly lerp the `center` uniform on the CPU without reallocating
-     * vectors each frame.
-     *
-     * @returns A mutable reference to the cached `Vector2` containing the desired center (range [0, 1]).
+     * Maps mouse NDC position to simulation UV space [0, 1].
+     * Uses screen-to-sim aspect ratio correction so the UV mapping matches the render shader.
      */
+    private screenToSimUV(mousePos: THREE.Vector2, out: THREE.Vector2): THREE.Vector2 {
+        const screenCoord = this.tmpScreenCoord.copy(mousePos).multiplyScalar(0.5);
+        const screenAR = this.canvas.width / this.canvas.height;
+        const simAR = this.computation.sizeX / this.computation.sizeY;
+
+        out.set(
+            screenCoord.x * (screenAR / simAR) + 0.5,
+            screenCoord.y + 0.5,
+        );
+
+        out.x = MathUtils.clamp(out.x, 0, 1);
+        out.y = MathUtils.clamp(out.y, 0, 1);
+        return out;
+    }
+
     private computeWantedCenter(): THREE.Vector2 {
-        // clone-without-alloc: screen-space position in [-1, 1]^2 scaled down to the quadrant size
-        const screenCoord = this.tmpScreenCoord.copy(this.mousePosition).multiplyScalar(0.5);
+        return this.screenToSimUV(this.mousePosition, this.tmpWantedCenter);
+    }
 
-        if (1 / this.aspectRatio > 1.0) {
-            // Widescreen layout: split into left/right halves.
-            // tmpNormCoord holds the stretch factor, tmpUv accumulates the offset.
-            const uv = this.tmpUv
-                .copy(screenCoord)
-                .multiply(this.tmpNormCoord.set(1 / this.aspectRatio, 1))
-                .add(this.tmpNormCoord.set(1, 0.5));
-            this.tmpWantedCenter.set(mirroredRepeat(uv.x), mirroredRepeat(uv.y));
-        } else {
-            // Tall layout: split into top/bottom halves using the reciprocal aspect.
-            const uv = this.tmpUv
-                .copy(screenCoord)
-                .multiply(this.tmpNormCoord.set(1, this.aspectRatio))
-                .add(this.tmpNormCoord.set(0.5, 1));
-            this.tmpWantedCenter.set(mirroredRepeat(uv.x), mirroredRepeat(uv.y));
-        }
-
-        return this.tmpWantedCenter;
+    private computeWantedCenter2(): THREE.Vector2 {
+        return this.screenToSimUV(this.mousePosition2, this.tmpWantedCenter2);
     }
 
     resize(width: number, height: number) {

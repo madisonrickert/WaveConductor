@@ -71,16 +71,6 @@
 
 ---
 
-## Feature addition:
-Allow uploading a custom image that creates the template for the Line sketch.
-
----
-
-## Feature addition:
-Allow the two sides of the cymatics sketch to follow two different hands. Make this and the old behavior (mirrored mode) a settings toggle accessed in the shift-D.
-
----
-
 ## Waves: Immersive Hand Interaction Ideas
 
 ### One-Hand Interactions
@@ -104,15 +94,6 @@ Allow the two sides of the cymatics sketch to follow two different hands. Make t
 **Microphone input → heightmap modulation.** Feed mic through an analyser, use bass energy to perturb frame advancement or add a fourth z-term that pulses with the beat. Existing AudioWorklet infrastructure makes this straightforward.
 
 **Per-hand audio panning.** Background audio is mono. With a StereoPannerNode, hand X position could pan the filtered noise left/right — audio spatially matches where you're interacting.
-
-**Grab strength → filter resonance blend.** Instead of `b1` only tracking waviness, blend in grab strength so squeezing produces audibly harsher/brighter tone — visceral feedback beyond just speed.
-
-### Recommended First Combination
-
-These three layer well (independent axes, no conflicts, each closes a different feedback loop):
-1. **Z height → waviness** (direct visual/audio control)
-2. **Two-hand distance → heightmap scale** (zoom dimension)
-3. **Grab strength → filter resonance blend** (audio feedback for squeeze)
 
 ---
 
