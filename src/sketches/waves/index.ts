@@ -224,8 +224,8 @@ class LineStrip {
 export default class Waves extends Sketch {
     static id = "waves";
     static settings = {
-        lineColor: { default: "#320c0c", category: "dev", label: "Line color", requiresRestart: true, type: "color" } satisfies SettingDef<string>,
-        backgroundColor: { default: "#ffffff", category: "dev", label: "Background color", requiresRestart: true, type: "color" } satisfies SettingDef<string>,
+        lineColor: { default: "#e9e9e9", category: "dev", label: "Line color", requiresRestart: true, type: "color" } satisfies SettingDef<string>,
+        backgroundColor: { default: "#578fa0", category: "dev", label: "Background color", requiresRestart: true, type: "color" } satisfies SettingDef<string>,
     };
 
     private heightMap = new HeightMap();
