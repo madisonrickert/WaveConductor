@@ -22,7 +22,7 @@
   "scripts": {
     "lint": "eslint --ext .js,.jsx,.ts,.tsx .",
     "lint:fix": "eslint --ext .js,.jsx,.ts,.tsx . --fix",
-    "leap-websocket:macos": "bin/Ultraleap-Tracking-WS-arm64",
+    "leap-websocket": "npx tsx scripts/leap-websocket.ts",
     "start": "vite --port 5173",
     "build": "vite build",
     "preview": "vite preview --port 4173",

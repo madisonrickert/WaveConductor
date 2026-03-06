@@ -78,10 +78,10 @@ The web build deploys to GitHub Pages automatically on every push to `main`.
 
 Optional. Sketches support [Leap Motion](https://www.ultraleap.com/) hand tracking.
 
-Compatible with Leap Motion Software 4.x out of the box. For 5.x+ (Gemini), the [UltraleapTrackingWebSocket](https://github.com/ultraleap/UltraleapTrackingWebSocket) compatibility layer is needed. A pre-built macOS Apple Silicon binary is included:
+Compatible with Leap Motion Software 4.x out of the box. For 5.x+ (Gemini), the [UltraleapTrackingWebSocket](https://github.com/madisonrickert/UltraleapTrackingWebSocket) compatibility layer is needed. Leap appears to be abandonware at this point so that link is Madison's updated fork. Pre-built binaries are included for macOS (Apple Silicon & Intel) and Windows:
 
 ```sh
-npm run leap-websocket:macos
+npm run leap-websocket
 ```
 
 In Electron mode, this binary is launched automatically on startup.
