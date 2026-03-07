@@ -4,7 +4,7 @@ import path from "path";
 function getBinaryName(): string {
   switch (process.platform) {
     case "win32":
-      return "Ultraleap-Tracking-WS-win32.exe";
+      return "Ultraleap-Tracking-WS.exe";
     case "darwin":
       return process.arch === "x64"
         ? "Ultraleap-Tracking-WS-x86"

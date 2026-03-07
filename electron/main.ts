@@ -56,7 +56,7 @@ function getLeapBinaryName(): string | null {
         ? "Ultraleap-Tracking-WS-x86"
         : "Ultraleap-Tracking-WS-arm64";
     case "win32":
-      return "Ultraleap-Tracking-WS-win32.exe";
+      return "Ultraleap-Tracking-WS.exe";
     default:
       return null;
   }

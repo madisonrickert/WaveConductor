@@ -19,6 +19,7 @@
 *.eot binary
 *.pkg binary
 *.exe binary
+*.dll binary
 
 # Normalize line endings for source code
 *.js text eol=lf

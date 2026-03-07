@@ -110,8 +110,13 @@
       "target": "portable",
       "extraResources": [
         {
-          "from": "bin/Ultraleap-Tracking-WS-win32.exe",
-          "to": "bin/Ultraleap-Tracking-WS-win32.exe"
+          "from": "bin/Ultraleap-Tracking-WS.exe",
+          "to": "bin/Ultraleap-Tracking-WS.exe"
+        },
+        {
+          "from": "bin",
+          "to": "bin",
+          "filter": ["*.dll"]
         }
       ]
     }
