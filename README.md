@@ -48,7 +48,6 @@ npm run electron:package   # Package into DMG (macOS) or portable exe (Windows)
 
 ### Windows build requirements
 
-- [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/visual-studio-cpp-build-tools/) with the "Desktop development with C++" workload (needed by node-gyp to rebuild native modules)
 - Windows Developer Mode enabled (Settings > System > For developers) — required for electron-builder's code signing cache extraction
 
 ### Cross-compiling
