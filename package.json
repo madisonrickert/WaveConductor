@@ -94,7 +94,7 @@
         "arch": "universal"
       },
       "category": "public.app-category.entertainment",
-      "x64ArchFiles": "{Contents/Resources/app.asar.unpacked/node_modules/@parcel/watcher-darwin-x64,Contents/Resources/bin}/**",
+      "x64ArchFiles": "{Contents/Resources/app.asar.unpacked/node_modules/@parcel/watcher-darwin-x64,Contents/Resources/app.asar.unpacked/node_modules/@parcel/watcher-darwin-arm64,Contents/Resources/bin}/**",
       "extraResources": [
         {
           "from": "bin/Ultraleap-Tracking-WS-arm64",
