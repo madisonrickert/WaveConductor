@@ -437,6 +437,10 @@ export default class GPUComputationRenderer {
      *   }
      *
      * Fix: add variable.material.dispose() inside the variables loop.
+     *
+     * Submitted upstream:
+     * - three.js: https://github.com/mrdoob/three.js/pull/33318
+     * - three-stdlib: https://github.com/pmndrs/three-stdlib/pull/428
      */
     public dispose(): void {
         // Dispose all variable render targets
