@@ -1,6 +1,6 @@
 import { renderHook } from '@testing-library/react';
 import { useSketchLifecycle } from './useSketchLifecycle';
-import { Sketch } from '@/common/sketch';
+import { Sketch } from '@/sketch/Sketch';
 
 describe('useSketchLifecycle', () => {
   const makeMockSketch = () => ({

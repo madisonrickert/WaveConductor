@@ -1,5 +1,5 @@
 import { AudioClip, createWhiteNoise, AudioNodeTracker, detuned, semitone } from "@/audio";
-import { SketchAudioContext } from "@/common/sketch";
+import { SketchAudioContext } from "@/sketch/Sketch";
 
 import audioBackgroundMp3 from "./audio/line_background.mp3";
 import audioBackgroundOgg from "./audio/line_background.ogg";

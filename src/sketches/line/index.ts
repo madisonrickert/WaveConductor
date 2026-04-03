@@ -1,15 +1,15 @@
 import * as THREE from "three";
 import { RenderPass, EffectComposer } from "three-stdlib";
 import { GravityShaderPass } from "./shaders/gravity";
-import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem } from "@/common/particleSystem";
-import { Attractor } from "@/common/particleSystem/attractor";
-import { triangleWaveApprox } from "@/common/math";
-import { loadSettings } from "@/common/sketchSettingsStore";
-import { SettingDef } from "@/common/sketchSettings";
-import { Sketch } from "@/common/sketch";
+import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem } from "@/particles";
+import { Attractor } from "@/particles/attractor";
+import { triangleWaveApprox } from "@/math";
+import { loadSettings } from "@/settings/store";
+import { SettingDef } from "@/settings/types";
+import { Sketch } from "@/sketch/Sketch";
 import { createAudioGroup, LineSketchAudioGroup } from "./audio";
-import { starMaterial } from "@/common/materials/starMaterial";
-import { LeapHandController } from "@/common/leap/LeapHandController";
+import { starMaterial } from "@/materials/starMaterial";
+import { LeapHandController } from "@/leap/LeapHandController";
 import { sampleParticlesFromHeatmap } from "./heatmapSampler";
 
 const LEAP_ATTRACTOR_POWER_ATTACK_SPEED = 0.005;

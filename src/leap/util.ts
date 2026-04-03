@@ -1,6 +1,6 @@
 import { Controller } from "leapjs";
-import { map } from "@/common/math";
-import { LeapConnectionStatus } from "@/common/leapStatus";
+import { map } from "@/math";
+import { LeapConnectionStatus } from "@/leap/leapStatus";
 
 /**
  * Wires Leap controller connection events to a status callback.

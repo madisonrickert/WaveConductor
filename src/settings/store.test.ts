@@ -1,5 +1,5 @@
-import { loadSettings, saveSettings, saveSetting } from './sketchSettingsStore';
-import { SettingsDefs } from './sketchSettings';
+import { loadSettings, saveSettings, saveSetting } from './store';
+import { SettingsDefs } from './types';
 
 const testDefs = {
   speed: { default: 1, category: 'dev' as const, label: 'Speed' },

@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { DevSettingsPanel } from './index';
-import { SketchSettingsContext, SketchSettingsContextValue } from '@/common/hooks/useSketchSettings';
+import { DevSettingsPanel } from './DevSettingsPanel';
+import { SketchSettingsContext, SketchSettingsContextValue } from '@/settings/useSketchSettings';
 
 function renderWithContext(value: SketchSettingsContextValue) {
   return render(

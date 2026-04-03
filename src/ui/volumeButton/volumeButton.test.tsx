@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { VolumeButton } from './index';
+import { VolumeButton } from './VolumeButton';
 
 describe('VolumeButton', () => {
   it('renders a button with the user-volume class', () => {

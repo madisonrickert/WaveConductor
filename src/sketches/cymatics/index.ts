@@ -3,12 +3,12 @@ import { MathUtils } from "three";
 import { EffectComposer, ShaderPass, RenderPass, UnrealBloomPass } from "three-stdlib";
 
 import GPUComputationRenderer, { GPUComputationRendererVariable } from "./gpuComputationRenderer";
-import { Sketch } from "@/common/sketch";
-import { SettingDef } from "@/common/sketchSettings";
-import { loadSettings } from "@/common/sketchSettingsStore";
+import { Sketch } from "@/sketch/Sketch";
+import { SettingDef } from "@/settings/types";
+import { loadSettings } from "@/settings/store";
 import { CymaticsAudio } from "./audio";
 import { RenderCymaticsShader } from "./renderCymaticsShader";
-import { LeapHandController } from "@/common/leap/LeapHandController";
+import { LeapHandController } from "@/leap/LeapHandController";
 
 import COMPUTE_CELL_STATE from "./computeCellState.frag";
 

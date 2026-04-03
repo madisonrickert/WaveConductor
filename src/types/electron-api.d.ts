@@ -1,4 +1,4 @@
-import { LeapProcessStatus } from "@/common/leapStatus";
+import { LeapProcessStatus } from "@/leap/leapStatus";
 
 interface ElectronAPI {
   getLeapProcessStatus: () => Promise<LeapProcessStatus>;

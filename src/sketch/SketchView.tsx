@@ -2,23 +2,23 @@ import React, { Component, useCallback, useEffect, useMemo, useRef, useState } f
 import * as THREE from "three";
 import classnames from "classnames";
 
-import { Sketch, SketchConstructor, UIEventName } from "@/common/sketch";
+import { Sketch, SketchConstructor, UIEventName } from "@/sketch/Sketch";
 import { FaCog } from "react-icons/fa";
-import { VolumeButton } from "@/components/volumeButton";
-import { ScreenSaver } from "@/components/screenSaver";
-import { DevSettingsPanel } from "@/components/devSettingsPanel";
-import { LeapStatusIndicator } from "@/components/leapStatusIndicator";
-import { useSketchLifecycle } from "@/common/hooks/useSketchLifecycle";
-import { useSketchAnimationLoop } from "@/common/hooks/useSketchAnimationLoop";
-import { useSketchResize } from "@/common/hooks/useSketchResize";
-import { useAudioContext } from "@/common/hooks/useAudioContext";
-import { loadSettings, saveSettings } from "@/common/sketchSettingsStore";
-import { SketchSettingsContext } from "@/common/hooks/useSketchSettings";
-import { loadGlobalSettings, saveGlobalSetting } from "@/common/globalSettings";
-import { useLeapStatus } from "@/common/hooks/useLeapStatus";
-import { HomeButton } from "@/components/homeButton";
+import { VolumeButton } from "@/ui/volumeButton/VolumeButton";
+import { ScreenSaver } from "@/ui/screenSaver/ScreenSaver";
+import { DevSettingsPanel } from "@/settings/DevSettingsPanel/DevSettingsPanel";
+import { LeapStatusIndicator } from "@/leap/LeapStatusIndicator/LeapStatusIndicator";
+import { useSketchLifecycle } from "@/sketch/useSketchLifecycle";
+import { useSketchAnimationLoop } from "@/sketch/useSketchAnimationLoop";
+import { useSketchResize } from "@/sketch/useSketchResize";
+import { useAudioContext } from "@/audio/useAudioContext";
+import { loadSettings, saveSettings } from "@/settings/store";
+import { SketchSettingsContext } from "@/settings/useSketchSettings";
+import { loadGlobalSettings, saveGlobalSetting } from "@/settings/globalSettings";
+import { useLeapStatus } from "@/leap/useLeapStatus";
+import { HomeButton } from "@/ui/homeButton/HomeButton";
 
-import "./sketchComponent.scss";
+import "./sketchView.scss";
 
 const noop = () => {};
 
@@ -27,7 +27,7 @@ const EVENT_LISTENER_OPTIONS: Partial<Record<UIEventName, AddEventListenerOption
     touchmove: { passive: false },
 };
 
-export interface SketchComponentProps extends React.DOMAttributes<HTMLDivElement> {
+export interface SketchViewProps extends React.DOMAttributes<HTMLDivElement> {
     sketchClass: SketchConstructor;
 }
 
@@ -113,7 +113,7 @@ class SketchErrorBoundary extends Component<{ children: React.ReactNode }, Sketc
     }
 }
 
-export function SketchComponent({ sketchClass, ...containerProps }: SketchComponentProps) {
+export function SketchView({ sketchClass, ...containerProps }: SketchViewProps) {
     // Use the shared AudioContext from the provider
     const { audioContext, setUserVolume } = useAudioContext();
 

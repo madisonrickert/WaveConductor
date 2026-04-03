@@ -1,4 +1,4 @@
-import { SettingsDefs, SettingsValues } from "./sketchSettings";
+import { SettingsDefs, SettingsValues } from "./types";
 
 const STORAGE_PREFIX = "sketch-settings:";
 

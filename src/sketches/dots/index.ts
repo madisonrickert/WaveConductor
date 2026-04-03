@@ -2,14 +2,14 @@ import * as THREE from "three";
 import { EffectComposer, RenderPass } from "three-stdlib";
 
 import { ExplodeShaderPass } from "./shaders/explode";
-import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem, ParticleSystemParameters } from "@/common/particleSystem";
-import { Attractor } from "@/common/particleSystem";
-import { loadSettings } from "@/common/sketchSettingsStore";
-import { SettingDef } from "@/common/sketchSettings";
-import { Sketch } from "@/common/sketch";
+import { computeStats, createParticle, createParticlePoints, IParticle, ParticleSystem, ParticleSystemParameters } from "@/particles";
+import { Attractor } from "@/particles";
+import { loadSettings } from "@/settings/store";
+import { SettingDef } from "@/settings/types";
+import { Sketch } from "@/sketch/Sketch";
 import { createAudioGroup, DotSketchAudioGroup } from "./audio";
-import { starMaterial } from "@/common/materials/starMaterial";
-import { LeapHandController } from "@/common/leap/LeapHandController";
+import { starMaterial } from "@/materials/starMaterial";
+import { LeapHandController } from "@/leap/LeapHandController";
 
 const params: ParticleSystemParameters = {
     timeStep: 0.016 * 3,

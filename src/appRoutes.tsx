@@ -1,9 +1,9 @@
 import { Route, Routes, useLocation, useNavigate } from "react-router";
-import { HomePage } from "./routes/homePage";
-import { LicensesPage } from "./routes/licensesPage";
-import { SketchComponent } from "./components/sketchComponent";
+import { HomePage } from "./routes/homePage/HomePage";
+import { LicensesPage } from "./routes/licensesPage/LicensesPage";
+import { SketchView } from "@/sketch/SketchView";
 import { useHotkeys } from 'react-hotkeys-hook';
-import { useThrottledNavigate } from "@/common/hooks/useThrottledNavigate";
+import { useThrottledNavigate } from "@/hooks/useThrottledNavigate";
 
 import { LineSketch, FlameSketch, Dots, Cymatics, Waves } from "./sketches";
 
@@ -45,11 +45,11 @@ export const AppRoutes = () => {
 
     return (
         <Routes>
-            <Route path="/line" element={<SketchComponent key="line" sketchClass={LineSketch} />} />
-            <Route path="/flame" element={<SketchComponent key="flame" sketchClass={FlameSketch} />} />
-            <Route path="/dots" element={<SketchComponent key="dots" sketchClass={Dots} />} />
-            <Route path="/cymatics" element={<SketchComponent key="cymatics" sketchClass={Cymatics} />} />
-            <Route path="/waves" element={<SketchComponent key="waves" sketchClass={Waves} />} />
+            <Route path="/line" element={<SketchView key="line" sketchClass={LineSketch} />} />
+            <Route path="/flame" element={<SketchView key="flame" sketchClass={FlameSketch} />} />
+            <Route path="/dots" element={<SketchView key="dots" sketchClass={Dots} />} />
+            <Route path="/cymatics" element={<SketchView key="cymatics" sketchClass={Cymatics} />} />
+            <Route path="/waves" element={<SketchView key="waves" sketchClass={Waves} />} />
             <Route path="/licenses" element={<LicensesPage />} />
             <Route path="/" element={<HomePage />} />
         </Routes>

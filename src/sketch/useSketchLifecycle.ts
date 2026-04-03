@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Sketch } from "@/common/sketch";
+import { Sketch } from "@/sketch/Sketch";
 
 /**
  * Runs init/cleanup for the sketch.

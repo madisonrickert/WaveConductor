@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, ReactNode, useCallback } from "react";
 import * as THREE from "three";
-import { SketchAudioContext } from "./sketch";
-import { AudioContextContext, AudioContextValue } from "./hooks/useAudioContext";
+import { SketchAudioContext } from "@/sketch/Sketch";
+import { AudioContextContext, AudioContextValue } from "./useAudioContext";
 
 interface AudioContextProviderProps {
     children: ReactNode;

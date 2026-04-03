@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { LeapProcessStatus, LeapConnectionStatus } from "@/common/leapStatus";
+import { LeapProcessStatus, LeapConnectionStatus } from "@/leap/leapStatus";
 
 export function useLeapStatus() {
     const [processStatus, setProcessStatus] = useState<LeapProcessStatus>("not-started");

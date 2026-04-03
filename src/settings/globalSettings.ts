@@ -1,5 +1,5 @@
-import { SettingsDefs } from "./sketchSettings";
-import { loadSettings, saveSetting } from "./sketchSettingsStore";
+import { SettingsDefs } from "./types";
+import { loadSettings, saveSetting } from "./store";
 
 const GLOBAL_SETTINGS_ID = "__global";
 

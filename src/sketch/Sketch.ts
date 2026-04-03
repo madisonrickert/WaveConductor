@@ -1,7 +1,7 @@
 import type React from "react";
 import * as THREE from "three";
 import { SettingsDefs } from "./sketchSettings";
-import { LeapConnectionStatus } from "./leapStatus";
+import { LeapConnectionStatus } from "@/leap/leapStatus";
 
 export type UIEventName =
     | "click"

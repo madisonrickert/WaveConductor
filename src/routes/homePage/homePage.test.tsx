@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { HomePage } from './index';
+import { HomePage } from './HomePage';
 
 describe('HomePage', () => {
   const renderHomePage = () =>

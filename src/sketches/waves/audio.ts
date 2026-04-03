@@ -1,6 +1,6 @@
-import { SketchAudioContext } from "@/common/sketch";
+import { SketchAudioContext } from "@/sketch/Sketch";
 import { AudioClip, AudioNodeTracker, createWhiteNoise } from "@/audio";
-import { map } from "@/common/math";
+import { map } from "@/math";
 
 import wavesBackgroundAudioMP3 from "./audio/waves_background.mp3";
 import wavesBackgroundAudioOGG from "./audio/waves_background.ogg";

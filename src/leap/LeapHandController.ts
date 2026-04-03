@@ -2,8 +2,8 @@ import * as Leap from "leapjs";
 import * as THREE from "three";
 import { HandMesh } from "./handMesh";
 import { mapLeapToThreePosition, wireLeapConnectionEvents } from "./util";
-import { LeapConnectionStatus } from "@/common/leapStatus";
-import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings } from "@/common/globalSettings";
+import { LeapConnectionStatus } from "@/leap/leapStatus";
+import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings } from "@/settings/globalSettings";
 
 export interface LeapHandInfo {
     hand: Leap.Hand;

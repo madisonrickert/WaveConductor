@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { LeapStatusIndicator } from './index';
-import type { LeapProcessStatus, LeapConnectionStatus } from '@/common/leapStatus';
+import { LeapStatusIndicator } from './LeapStatusIndicator';
+import type { LeapProcessStatus, LeapConnectionStatus } from '@/leap/leapStatus';
 
 interface IndicatorOverrides {
     processStatus?: LeapProcessStatus;

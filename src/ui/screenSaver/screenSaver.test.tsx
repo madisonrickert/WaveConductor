@@ -1,5 +1,5 @@
 import { render } from '@testing-library/react';
-import { ScreenSaver } from './index';
+import { ScreenSaver } from './ScreenSaver';
 
 describe('ScreenSaver', () => {
   it('renders with visible class when shouldShow is true', () => {

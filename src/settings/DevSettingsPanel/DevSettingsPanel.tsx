@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useSketchSettings } from "@/common/hooks/useSketchSettings";
-import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings, saveGlobalSetting } from "@/common/globalSettings";
+import { useSketchSettings } from "@/settings/useSketchSettings";
+import { GLOBAL_SETTINGS_DEFS, loadGlobalSettings, saveGlobalSetting } from "@/settings/globalSettings";
 import { BooleanToggle } from "./inputs/BooleanToggle";
 import { ColorInput } from "./inputs/ColorInput";
 import { ImageInput } from "./inputs/ImageInput";

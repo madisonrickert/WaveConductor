@@ -7,14 +7,14 @@ import { Branch } from "./branch";
 import { SuperPoint } from "./superPoint";
 import { AFFINES, VARIATIONS, createInterpolatedVariation, createRouterVariation } from "./transforms";
 import { BoxCountVisitor, VelocityTrackerVisitor } from "./updateVisitor";
-import { map } from "@/common/math";
-import { loadSettings, saveSetting } from "@/common/sketchSettingsStore";
-import { SettingDef } from "@/common/sketchSettings";
-import { Sketch } from "@/common/sketch";
+import { map } from "@/math";
+import { loadSettings, saveSetting } from "@/settings/store";
+import { SettingDef } from "@/settings/types";
+import { Sketch } from "@/sketch/Sketch";
 import { DEFAULT_NAME, FlameNameInput } from "./FlameNameInput";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
 import { Chord } from "./types";
-import { LeapHandController } from "@/common/leap/LeapHandController";
+import { LeapHandController } from "@/leap/LeapHandController";
 
 import "./flame.scss";
 

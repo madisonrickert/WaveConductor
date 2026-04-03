@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { SettingsDefs, SettingsValues } from "../sketchSettings";
+import { SettingsDefs, SettingsValues } from "./types";
 
 export interface SketchSettingsContextValue<D extends SettingsDefs = SettingsDefs> {
     settings: SettingsValues<D>;

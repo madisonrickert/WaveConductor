@@ -1,7 +1,7 @@
 import { HashRouter } from "react-router";
 
 import { AppRoutes } from "./appRoutes";
-import { AudioContextProvider } from "./common/audioContext";
+import { AudioContextProvider } from "@/audio/AudioContextProvider";
 
 export default function App() {
     return (

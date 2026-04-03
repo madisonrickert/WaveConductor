@@ -1,4 +1,4 @@
-import { createParticle, IParticle } from "@/common/particleSystem";
+import { createParticle, IParticle } from "@/particles";
 
 /**
  * Sample particle positions from an image used as a brightness heatmap.

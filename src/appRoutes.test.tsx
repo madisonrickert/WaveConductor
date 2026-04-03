@@ -1,11 +1,11 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { AppRoutes } from './appRoutes';
-import { AudioContextContext, AudioContextValue } from '@/common/hooks/useAudioContext';
+import { AudioContextContext, AudioContextValue } from '@/audio/useAudioContext';
 
-// Mock SketchComponent to avoid WebGL dependencies
-vi.mock('./components/sketchComponent', () => ({
-  SketchComponent: ({ sketchClass }: { sketchClass: { id?: string; name: string } }) => (
+// Mock SketchView to avoid WebGL dependencies
+vi.mock('@/sketch/SketchView', () => ({
+  SketchView: ({ sketchClass }: { sketchClass: { id?: string; name: string } }) => (
     <div data-testid="sketch-component">{sketchClass.id ?? sketchClass.name}</div>
   ),
 }));
@@ -40,7 +40,7 @@ describe('AppRoutes', () => {
     expect(screen.getByText('CharGallery')).toBeInTheDocument();
   });
 
-  it.each(['/line', '/flame', '/dots', '/cymatics', '/waves'])('renders SketchComponent at %s', (path) => {
+  it.each(['/line', '/flame', '/dots', '/cymatics', '/waves'])('renders SketchView at %s', (path) => {
     renderAtRoute(path);
     expect(screen.getByTestId('sketch-component')).toBeInTheDocument();
   });

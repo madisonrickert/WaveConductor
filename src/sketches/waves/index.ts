@@ -1,10 +1,10 @@
 import * as THREE from "three";
-import { lerp, map } from "@/common/math";
-import { Sketch } from "@/common/sketch";
+import { lerp, map } from "@/math";
+import { Sketch } from "@/sketch/Sketch";
 import { createAudioGroup, WavesSketchAudioGroup } from "./audio";
-import { LeapHandController } from "@/common/leap/LeapHandController";
-import { SettingDef } from "@/common/sketchSettings";
-import { loadSettings } from "@/common/sketchSettingsStore";
+import { LeapHandController } from "@/leap/LeapHandController";
+import { SettingDef } from "@/settings/types";
+import { loadSettings } from "@/settings/store";
 
 const LINE_SEGMENT_LENGTH = (window.screen.width > 1024) ? 11 : 22;
 
