@@ -2,4 +2,9 @@
     top: 12px;
     right: 12px;
     font-size: 16px;
+
+    @media (pointer: coarse) {
+        top: 16px;
+        right: 16px;
+    }
 }

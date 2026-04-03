@@ -54,6 +54,11 @@
 .advanced-settings-toggle {
     top: 12px;
     right: 52px;
+
+    @media (pointer: coarse) {
+        top: 16px;
+        right: 68px;
+    }
 }
 
 .mouse-idle {

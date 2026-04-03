@@ -1,4 +1,9 @@
 .home-button {
     top: 12px;
     left: 12px;
+
+    @media (pointer: coarse) {
+        top: 16px;
+        left: 16px;
+    }
 }
