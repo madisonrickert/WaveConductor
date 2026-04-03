@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 
-const IDLE_TIMEOUT_MS = 3000;
+import { isTouchDevice } from "@/device";
 
-const isTouchDevice = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
+const IDLE_TIMEOUT_MS = 3000;
 
 /**
  * Tracks mouse activity and returns `true` after {@link IDLE_TIMEOUT_MS} of

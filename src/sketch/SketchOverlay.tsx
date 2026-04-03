@@ -8,8 +8,7 @@ import { LeapStatusIndicator } from "@/leap/LeapStatusIndicator/LeapStatusIndica
 import { HomeButton } from "@/ui/homeButton/HomeButton";
 import { useLeapStatus } from "@/leap/useLeapStatus";
 import { LeapConnectionStatus } from "@/leap/leapStatus";
-
-const isTouchDevice = matchMedia("(pointer: coarse)").matches;
+import { isTouchDevice } from "@/device";
 
 function getDismissMethod(connectionStatus: LeapConnectionStatus): DismissMethod {
     if (isTouchDevice) return "touch";

@@ -108,6 +108,11 @@ export abstract class BaseSketch {
     /** Leap Motion controller, created via {@link createLeapController}. */
     protected leapHands?: LeapHandController;
 
+    /** Whether a Leap Motion controller is active (for gating frame workarounds). */
+    public get hasLeapController(): boolean {
+        return this.leapHands !== undefined;
+    }
+
     /** Called once when the sketch mounts (via useSketchLifecycle). */
     abstract init(): void;
 

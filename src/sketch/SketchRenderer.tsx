@@ -64,7 +64,7 @@ export function SketchRenderer({ sketch }: { sketch: BaseSketch }) {
         // Keep event loop active so Chromium delivers WebSocket messages at full rate.
         // Without this, Chromium throttles WebSocket I/O when the main thread is idle
         // between rAF frames, starving leapjs of hand tracking data (~2-6fps vs ~60fps).
-        setTimeout(noop, 0);
+        if (sketch.hasLeapController) setTimeout(noop, 0);
     });
 
     return (

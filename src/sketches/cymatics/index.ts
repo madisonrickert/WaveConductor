@@ -10,17 +10,18 @@ import { loadSettings } from "@/settings/store";
 import { CymaticsAudio } from "./audio";
 import { RenderCymaticsShader } from "./renderCymaticsShader";
 import COMPUTE_CELL_STATE from "./computeCellState.frag";
+import { isTouchDevice } from "@/device";
 
 /** Compute a sane default vertical resolution based on screen size. */
 function defaultVerticalResolution(): number {
+    if (screen.width <= 480) return 240;
     return 480;
 }
 
 /** Compute a sane default iteration count based on screen size. */
 function defaultIterations(): number {
-    if (screen.width > 960) return 30;
-    if (screen.width > 480) return 20;
-    return 15;
+    if (screen.width <= 480) return 15;
+    return 20;
 }
 
 // an integer makes perfect standing waves. the 0.002 means that the wave will oscillate very slightly per frame; 500 frames per oscillation period
@@ -196,7 +197,8 @@ export default class CymaticsSketch extends BaseSketch {
         this.composer.addPass(this.renderCymaticsPass);
         this.audio = new CymaticsAudio(this.audioContext);
 
-        // Leap Motion setup
+        // Leap Motion setup — skip on touch devices (no Leap hardware)
+        if (!isTouchDevice) {
         this.leapHands = this.createLeapController({
             renderMode: { type: "overlay" },
             handMaterial: new THREE.MeshBasicMaterial({
@@ -285,6 +287,7 @@ export default class CymaticsSketch extends BaseSketch {
             blending: THREE.AdditiveBlending,
             transparent: true,
         })));
+        }
     }
 
     protected step(): void {
@@ -419,7 +422,7 @@ export default class CymaticsSketch extends BaseSketch {
     destroy(): void {
         super.destroy();
         this.audio.dispose();
-        this._handComposer.dispose();
+        this._handComposer?.dispose();
         disposeComposer(this.composer);
         this.computation.dispose();
     }
