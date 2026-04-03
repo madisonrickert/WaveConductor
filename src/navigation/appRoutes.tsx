@@ -8,7 +8,7 @@ import { useEdgeSwipeNavigation } from "@/navigation/useEdgeSwipeNavigation";
 
 import { LineSketch, FlameSketch, DotsSketch, CymaticsSketch, WavesSketch } from "@/sketches";
 
-const SKETCH_PATHS = ['/line', '/flame', '/dots', '/cymatics', '/waves'];
+const SKETCH_PATHS = ['/gravity', '/you-niverse', '/fabric', '/cymatics', '/waves'];
 
 export const AppRoutes = () => {
     const throttledNavigate = useThrottledNavigate(500);
@@ -47,9 +47,9 @@ export const AppRoutes = () => {
 
     return (
         <Routes>
-            <Route path="/line" element={<SketchView key="line" sketchClass={LineSketch} />} />
-            <Route path="/flame" element={<SketchView key="flame" sketchClass={FlameSketch} />} />
-            <Route path="/dots" element={<SketchView key="dots" sketchClass={DotsSketch} />} />
+            <Route path="/gravity" element={<SketchView key="gravity" sketchClass={LineSketch} />} />
+            <Route path="/you-niverse" element={<SketchView key="you-niverse" sketchClass={FlameSketch} />} />
+            <Route path="/fabric" element={<SketchView key="fabric" sketchClass={DotsSketch} />} />
             <Route path="/cymatics" element={<SketchView key="cymatics" sketchClass={CymaticsSketch} />} />
             <Route path="/waves" element={<SketchView key="waves" sketchClass={WavesSketch} />} />
             <Route path="/licenses" element={<LicensesPage />} />

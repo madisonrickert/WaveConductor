@@ -40,7 +40,7 @@ describe('AppRoutes', () => {
     expect(screen.getByText('CharGallery')).toBeInTheDocument();
   });
 
-  it.each(['/line', '/flame', '/dots', '/cymatics', '/waves'])('renders SketchView at %s', (path) => {
+  it.each(['/gravity', '/you-niverse', '/fabric', '/cymatics', '/waves'])('renders SketchView at %s', (path) => {
     renderAtRoute(path);
     expect(screen.getByTestId('sketch-component')).toBeInTheDocument();
   });

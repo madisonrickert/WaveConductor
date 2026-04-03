@@ -13,9 +13,9 @@ describe('HomePage', () => {
   it('renders all five sketch thumbnails', () => {
     renderHomePage();
     expect(screen.getByAltText('Cymatics')).toBeInTheDocument();
-    expect(screen.getByAltText('Line')).toBeInTheDocument();
-    expect(screen.getByAltText('Flame')).toBeInTheDocument();
-    expect(screen.getByAltText('Dots')).toBeInTheDocument();
+    expect(screen.getByAltText('Gravity')).toBeInTheDocument();
+    expect(screen.getByAltText('You-niverse')).toBeInTheDocument();
+    expect(screen.getByAltText('Fabric')).toBeInTheDocument();
     expect(screen.getByAltText('Waves')).toBeInTheDocument();
   });
 

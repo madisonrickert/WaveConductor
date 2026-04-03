@@ -37,9 +37,9 @@ export function HomePage() {
             <main className="content">
                 <section className="content-section work work-grid" id="work">
                     {renderHighlight("Cymatics", cymaticsImg)}
-                    {renderHighlight("Line", lineImg)}
-                    {renderHighlight("Flame", flameImg)}
-                    {renderHighlight("Dots", dotsImg)}
+                    {renderHighlight("Gravity", lineImg)}
+                    {renderHighlight("You-niverse", flameImg)}
+                    {renderHighlight("Fabric", dotsImg)}
                     {renderHighlight("Waves", wavesImg)}
                     <div className="work-grid-item credits-block">
                         <div className="credits-content">
