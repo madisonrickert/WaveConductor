@@ -7,6 +7,7 @@ import { triangleWaveApprox } from "@/math";
 import { loadSettings } from "@/settings/store";
 import { SettingDef } from "@/settings/types";
 import { BaseSketch } from "@/sketch/BaseSketch";
+import { disposeComposer } from "@/sketch/disposeComposer";
 import { createAudioGroup, LineSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/materials/starMaterial";
 import { sampleParticlesFromHeatmap } from "./heatmapSampler";
@@ -281,13 +282,8 @@ export default class LineSketch extends BaseSketch {
         this.particles.length = 0;
         this.scene.clear();
         
-        // Dispose of Three.js resources
-        while(this.composer.passes.length > 0) {
-            this.composer.passes[0].dispose();
-            this.composer.removePass(this.composer.passes[0]);
-        }
-        this.composer.dispose();
-        
+        disposeComposer(this.composer);
+
         // Dispose point cloud (may not exist if image was still loading)
         this.pointCloud?.geometry.dispose();
     }

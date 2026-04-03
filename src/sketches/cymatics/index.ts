@@ -4,6 +4,7 @@ import { EffectComposer, ShaderPass, RenderPass, UnrealBloomPass } from "three-s
 
 import GPUComputationRenderer, { GPUComputationRendererVariable } from "./gpuComputationRenderer";
 import { BaseSketch } from "@/sketch/BaseSketch";
+import { disposeComposer } from "@/sketch/disposeComposer";
 import { SettingDef } from "@/settings/types";
 import { loadSettings } from "@/settings/store";
 import { CymaticsAudio } from "./audio";
@@ -418,15 +419,8 @@ export default class CymaticsSketch extends BaseSketch {
     destroy(): void {
         super.destroy();
         this.audio.dispose();
-
         this._handComposer.dispose();
-
-        // Clean up Three.js resources
-        while(this.composer.passes.length > 0) {
-            this.composer.passes[0].dispose();
-            this.composer.removePass(this.composer.passes[0]);
-        }
-        this.composer.dispose();
+        disposeComposer(this.composer);
         this.computation.dispose();
     }
 

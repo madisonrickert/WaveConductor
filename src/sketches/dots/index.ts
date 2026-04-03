@@ -7,6 +7,7 @@ import { Attractor } from "@/particles";
 import { loadSettings } from "@/settings/store";
 import { SettingDef } from "@/settings/types";
 import { BaseSketch } from "@/sketch/BaseSketch";
+import { disposeComposer } from "@/sketch/disposeComposer";
 import { createAudioGroup, DotSketchAudioGroup } from "./audio";
 import { starMaterial } from "@/materials/starMaterial";
 
@@ -202,6 +203,7 @@ export default class DotsSketch extends BaseSketch {
     public destroy() {
         super.destroy();
         this.audioGroup.dispose();
+        disposeComposer(this.composer);
         this.pointCloud.geometry.dispose();
         this.scene.remove(this.pointCloud);
     }
