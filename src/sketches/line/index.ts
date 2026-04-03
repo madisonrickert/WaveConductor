@@ -50,7 +50,7 @@ export default class LineSketch extends BaseSketch {
             const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
             let touchY = y;
             // Offset the touchY by its radius so the attractor is above the thumb
-            touchY -= 100;
+            touchY -= 30;
 
             this.setGravityFocalPoint(x, touchY);
             this.enableMouseAttractor(x, touchY);
@@ -64,7 +64,7 @@ export default class LineSketch extends BaseSketch {
             }
             const { x, y } = this.getRelativeCoordinates(touch.clientX, touch.clientY);
             let touchY = y;
-            touchY -= 100;
+            touchY -= 30;
 
             this.setGravityFocalPoint(x, touchY);
             this.moveMouseAttractor(x, touchY);
