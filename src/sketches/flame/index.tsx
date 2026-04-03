@@ -202,8 +202,8 @@ export default class FlameSketch extends BaseSketch {
         this.scene.background = bgColor;
 
         this.camera = new THREE.PerspectiveCamera(60, 1 / this.aspectRatio, 0.01, 25);
-        this.camera.position.z = 2;
-        this.camera.position.y = 1;
+        this.camera.position.z = 0.7;
+        this.camera.position.y = 0.35;
         this.camera.lookAt(new THREE.Vector3());
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.autoRotate = true;
