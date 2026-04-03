@@ -76,13 +76,13 @@ export function SketchOverlay({ volumeEnabled, onToggleVolume, shouldShowScreenS
                 </button>
                 {showDevPanel && <DevSettingsPanel />}
             </div>
-            <LeapStatusIndicator
+            {!isTouchDevice && <LeapStatusIndicator
                 processStatus={leapStatus.processStatus}
                 connectionStatus={leapStatus.connectionStatus}
                 protocolVersion={leapStatus.protocolVersion}
                 onStart={leapStatus.startProcess}
                 onStop={leapStatus.stopProcess}
-            />
+            />}
         </>
     );
 }
