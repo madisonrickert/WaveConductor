@@ -27,7 +27,9 @@ export class AudioClip {
     constructor(options: AudioClipOptions) {
         const { autoplay, loop, volume, srcs } = { ...DEFAULT_OPTIONS, ...options };
         this.element = document.createElement("audio");
-        this.element.autoplay = autoplay;
+        // Don't use the HTML autoplay attribute — on some mobile browsers (e.g.
+        // Firefox iOS / WKWebView) it can bypass the Web Audio graph and play
+        // through the native output before the AudioContext is running.
         this.element.loop = loop;
         this.element.volume = volume;
         this.element.preload = "auto";
@@ -43,6 +45,18 @@ export class AudioClip {
         document.body.appendChild(this.element);
 
         this.node = options.context.createMediaElementSource(this.element);
+
+        // Start playback only once the AudioContext is running, ensuring audio
+        // is routed exclusively through the Web Audio graph.
+        if (autoplay) {
+            const tryPlay = () => {
+                if (options.context.state === "running" && this.element.paused) {
+                    this.element.play().catch(() => {});
+                }
+            };
+            tryPlay();
+            options.context.addEventListener("statechange", tryPlay);
+        }
     }
 
     get volume() {
