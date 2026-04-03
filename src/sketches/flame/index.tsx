@@ -2,7 +2,6 @@ import React from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three-stdlib";
 
-import { createWhiteNoise, AudioNodeTracker } from "@/audio";
 import { Branch } from "./branch";
 import { SuperPoint } from "./superPoint";
 import { AFFINES, VARIATIONS, createInterpolatedVariation, createRouterVariation } from "./transforms";
@@ -13,7 +12,7 @@ import { SettingDef } from "@/settings/types";
 import { BaseSketch } from "@/sketch/BaseSketch";
 import { DEFAULT_NAME, FlameNameInput } from "./FlameNameInput";
 import { FlamePointsMaterial } from "./flamePointsMaterial";
-import { Chord } from "./types";
+import { FlameAudio } from "./audio";
 
 import "./flame.scss";
 
@@ -184,17 +183,8 @@ export default class FlameSketch extends BaseSketch {
     private _angularVelocityX = 0;
     private _angularVelocityY = 0;
 
-    // Audio nodes
-    private audioTracker!: AudioNodeTracker;
-    private noiseGain!: GainNode;
-    private oscGain!: GainNode;
-    private chord!: Chord;
-    private filter!: BiquadFilterNode;
-    private compressor!: DynamicsCompressorNode;
-
-    // Audio state
-    private noiseGainScale = 0;
-    private audioHasNoise = false;
+    // Audio
+    private audio!: FlameAudio;
 
     // Reusable visitors (reset each frame to avoid per-frame allocations)
     private velocityVisitor = new VelocityTrackerVisitor();
@@ -205,7 +195,7 @@ export default class FlameSketch extends BaseSketch {
     }
 
     public init() {
-        this.initAudio();
+        this.audio = new FlameAudio(this.audioContext);
         const bgColor = new THREE.Color("#10101f");
         this.scene = new THREE.Scene();
         this.scene.fog = new THREE.Fog(bgColor.getHex(), 2, 60);
@@ -282,8 +272,7 @@ export default class FlameSketch extends BaseSketch {
         }
 
         const cameraLength = this.camera.position.length();
-        this.compressor.ratio.setTargetAtTime(1 + 0.5 / (1. + cameraLength), this.audioContext.currentTime, 0.016);
-        this.audioContext.gain.gain.setTargetAtTime((1.0 / (1. + cameraLength)) + 0.5, this.audioContext.currentTime, 0.016);
+        this.audio.updateForCamera(cameraLength);
 
         this.material.setFocalLength(cameraLength);
 
@@ -313,7 +302,7 @@ export default class FlameSketch extends BaseSketch {
 
     public destroy() {
         super.destroy();
-        this.audioTracker.dispose();
+        this.audio.dispose();
         this.controls.dispose();
         this.geometry.dispose();
         this.material.dispose();
@@ -327,33 +316,9 @@ export default class FlameSketch extends BaseSketch {
         this.countVisitor.reset();
         this.superPoint.recalculate(this.jumpiness, this.jumpiness, this.jumpiness, this.computeDepth(), true, [this.velocityVisitor, this.countVisitor]);
 
-        this.updateAudio(this.velocityVisitor, this.countVisitor);
-    }
-
-    private updateAudio(
-        velocityVisitor: VelocityTrackerVisitor,
-        countVisitor: BoxCountVisitor,
-    ) {
-        const velocity = velocityVisitor.computeVelocity();
-        const [count, countDensity] = countVisitor.computeCountAndCountDensity();
-
-        // density ranges from 1 to ~6 or 7 at the high end.
-        const density = countDensity / count;
-
-        const velocityFactor = Math.min(velocity * this.noiseGainScale, 0.06);
-        if (this.audioHasNoise) {
-            const noiseAmplitude = 2 / (1 + density * density);
-            const target = this.noiseGain.gain.value * 0.5 + 0.5 * (velocityFactor * noiseAmplitude + 1e-5);
-            this.noiseGain.gain.setTargetAtTime(target, this.noiseGain.context.currentTime, 0.016);
-        }
-
-        const newOscGain = this.oscGain.gain.value * 0.9 + 0.1 * Math.max(0, Math.min(velocity * velocity * 2000, 0.6) - 0.01);
-        this.oscGain.gain.setTargetAtTime(newOscGain, this.oscGain.context.currentTime, 0.016);
-
-        const baseOffset = THREE.MathUtils.clamp(Math.floor(map(density, 1.0, 3, 0, 24)), 0, 48);
-        this.chord.setScaleDegree(baseOffset);
-        const chordTarget = (this.chord.gain.gain.value * 0.9 + 0.1 * (velocityFactor * count * count / 8 + 0.0001));
-        this.chord.gain.gain.setTargetAtTime(chordTarget, this.chord.gain.context.currentTime, 0.016);
+        const velocity = this.velocityVisitor.computeVelocity();
+        const [count, countDensity] = this.countVisitor.computeCountAndCountDensity();
+        this.audio.updateFromFractalStats(velocity, count, countDensity);
     }
 
     private computeDepth() {
@@ -373,14 +338,8 @@ export default class FlameSketch extends BaseSketch {
         const hash = stringHash(name);
         const hashNorm = (hash % 1024) / 1024;
         const hash2 = hash * hash + hash * 31 + 9;
-        this.filter.frequency.setValueAtTime(map((hash2 % 2e12) / 2e12, 0, 1, 120, 400), 0);
         const hash3 = hash2 * hash2 + hash2 * 31 + 9;
-        this.filter.Q.setValueAtTime(map((hash3 % 2e12) / 2e12, 0, 1, 5, 8), 0);
-        this.noiseGainScale = map((hash2 * hash3 % 100) / 100, 0, 1, 0.5, 1);
-        this.chord.setIsMajor(hash2 % 2 === 0);
-
-        // basically boolean randoms; we don't want mod 2 cuz the hashes are related to each other at that small level
-        this.audioHasNoise = (hash3 % 100) >= 50;
+        this.audio.configureForName(hash, hash2, hash3);
 
         this.cY = map(hashNorm, 0, 1, -2.5, 2.5);
 
@@ -419,132 +378,6 @@ export default class FlameSketch extends BaseSketch {
         if (this.quality === "low") {
             this.superPoint.recalculate(this.jumpiness, this.jumpiness, this.jumpiness, this.computeDepth(), false, []);
         }
-    }
-
-    private initAudio() {
-        const context = this.audioContext;
-        const tracker = new AudioNodeTracker();
-        this.audioTracker = tracker;
-
-        this.compressor = context.createDynamicsCompressor();
-        this.compressor.threshold.setValueAtTime(-40, 0);
-        this.compressor.knee.setValueAtTime(35, 0);
-        this.compressor.attack.setValueAtTime(0.1, 0);
-        this.compressor.release.setValueAtTime(0.25, 0);
-        this.compressor.ratio.setValueAtTime(1.8, 0);
-
-        const noise = createWhiteNoise(context);
-        tracker.trackSource(noise);
-        this.noiseGain = context.createGain();
-        this.noiseGain.gain.setValueAtTime(0, 0);
-        noise.connect(this.noiseGain);
-        this.noiseGain.connect(this.compressor);
-
-        const { gain: oscLowGain } = tracker.createOsc(context, {
-            frequency: 0,
-            type: "square",
-            gain: 0.6,
-        });
-
-        this.filter = context.createBiquadFilter();
-        this.filter.type = "lowpass";
-        this.filter.frequency.setValueAtTime(100, 0);
-        this.filter.Q.setValueAtTime(2.18, 0);
-        oscLowGain.connect(this.filter);
-
-        const { gain: oscHighGain } = tracker.createOsc(context, {
-            frequency: 0,
-            type: "triangle",
-            gain: 0.05,
-        });
-
-        this.oscGain = context.createGain();
-        this.oscGain.gain.setValueAtTime(0.0, 0);
-        this.filter.connect(this.oscGain);
-        oscHighGain.connect(this.oscGain);
-        this.oscGain.connect(this.compressor);
-
-        // plays a major or minor chord
-        this.chord = (() => {
-            const { osc: root } = tracker.createOsc(context, { type: "sine" });
-            const { osc: third } = tracker.createOsc(context, { type: "sine" });
-            const { osc: fifth, gain: fifthGain } = tracker.createOsc(context, { type: "sine", gain: 0.7 });
-            const { osc: sub, gain: subGain } = tracker.createOsc(context, { type: "triangle", gain: 0.9 });
-            const { osc: sub2, gain: sub2Gain } = tracker.createOsc(context, { type: "triangle", gain: 0.8 });
-
-            const gain = context.createGain();
-            gain.gain.setValueAtTime(0, 0);
-            root.connect(gain);
-            third.connect(gain);
-            fifthGain.connect(gain);
-            subGain.connect(gain);
-            sub2Gain.connect(gain);
-
-            tracker.trackNode(gain);
-
-            // 0 = full major, 1 = full minor
-            let minorBias = 0;
-            const rootFreq = 120;
-            let fifthBias = 0;
-            let baseScaleDegree = 0;
-            let isMajor = true;
-
-            const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
-            const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
-
-            function getSemitoneNumber(scaleIndex: number) {
-                const scale = isMajor ? MAJOR_SCALE : MINOR_SCALE;
-                const octave = Math.floor(scaleIndex / scale.length);
-                const pitchClass = scaleIndex % scale.length;
-                const semitoneNumber = octave * 12 + scale[pitchClass];
-                return semitoneNumber;
-            }
-
-            function getFreq(semitoneNumber: number) {
-                return rootFreq * Math.pow(2, semitoneNumber / 12);
-            }
-
-            function recompute() {
-                const rootSemitone = getSemitoneNumber(baseScaleDegree + 0);
-                root.frequency.setValueAtTime(getFreq(rootSemitone), 0);
-
-                const thirdSemitone = getSemitoneNumber(baseScaleDegree + 3) - minorBias;
-                third.frequency.setValueAtTime(getFreq(thirdSemitone), 0);
-
-                const fifthSemitone = getSemitoneNumber(baseScaleDegree + 5) + fifthBias;
-                fifth.frequency.setValueAtTime(getFreq(fifthSemitone), 0);
-
-                sub.frequency.setValueAtTime(getFreq(rootSemitone) / 2, 0);
-                sub2.frequency.setValueAtTime(getFreq(rootSemitone) / 4, 0);
-            }
-
-            return {
-                root,
-                third,
-                fifth,
-                gain,
-                setIsMajor: (major: boolean) => {
-                    isMajor = major;
-                    recompute();
-                },
-                setScaleDegree: (sd: number) => {
-                    baseScaleDegree = Math.round(sd);
-                    recompute();
-                },
-                setMinorBias: (mB: number) => {
-                    minorBias = Math.round(mB);
-                    recompute();
-                },
-                setFifthBias: (fB: number) => {
-                    fifthBias = Math.round(fB);
-                    recompute();
-                },
-            };
-        })();
-        this.chord.gain.connect(this.compressor);
-
-        tracker.trackNode(this.noiseGain, this.filter, this.oscGain, this.compressor);
-        this.compressor.connect(context.gain);
     }
 
 }
