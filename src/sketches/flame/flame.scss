@@ -10,6 +10,16 @@
     left: 50%;
     transform: translateX(-50%);
 
+    @media (pointer: coarse) {
+        // Fit between home button (left) and settings+volume buttons (right)
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        left: 72px;
+        right: 128px;
+        transform: none;
+    }
+
     input {
         background: rgba(0, 0, 0, 0.35);
         backdrop-filter: blur(8px);
@@ -36,6 +46,12 @@
             outline: none;
             border-color: rgba($light-gray5, 0.6);
             box-shadow: 0 0 12px rgba($light-gray5, 0.1);
+        }
+
+        @media (pointer: coarse) {
+            height: 44px;
+            padding: 0 12px;
+            font-size: 16px;
         }
     }
 }
