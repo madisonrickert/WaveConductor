@@ -6,7 +6,7 @@
 //! through the pointers without knowing the concrete type.
 
 use bevy::prelude::*;
-use bevy::reflect::GetTypeRegistration;
+use bevy::reflect::{FromType, GetTypeRegistration, TypePath};
 
 use super::def::SettingDef;
 use super::event::SketchRestart;
@@ -25,6 +25,9 @@ pub struct RegisteredSettings {
     /// Persist the current value of the registered resource by reading it
     /// from `world` and calling `persistence::save`.
     pub save_fn: fn(&World),
+    /// Returns `true` if the registered resource has been mutated this frame.
+    /// Used by the debounced auto-save system in [`super::autosave`].
+    pub is_changed_fn: fn(&World) -> bool,
     /// Returns true if any `requires_restart` field changed value since the
     /// previous frame. Implementation maintains a per-type `Local`-style
     /// last-seen snapshot inside a hidden resource (`PreviousSnapshot<S>`).
@@ -84,6 +87,14 @@ pub fn save_fn<S: SketchSettings>(world: &World) {
     persistence::save::<S>(&value);
 }
 
+/// Returns `true` when the `S` resource has been mutated since the last tick.
+///
+/// Used by the debounced auto-save system to arm the per-type timer without
+/// cloning the full settings value.
+pub fn is_changed_fn<S: SketchSettings>(world: &World) -> bool {
+    world.is_resource_changed::<S>()
+}
+
 /// The restart-diff closure baked per `S` at registration time.
 ///
 /// Short-circuits when `S` has not been mutated this frame — no cloning,
@@ -119,15 +130,20 @@ pub trait RegisterSketchSettingsExt {
     /// Loads any persisted value (else default), inserts it as a resource,
     /// records type metadata in [`SettingsRegistry`], and seeds a
     /// [`PreviousSnapshot`] so restart-diffing has a baseline.
-    fn register_sketch_settings<S: SketchSettings + GetTypeRegistration>(&mut self) -> &mut Self;
+    fn register_sketch_settings<S: SketchSettings + GetTypeRegistration + TypePath>(
+        &mut self,
+    ) -> &mut Self;
 }
 
 impl RegisterSketchSettingsExt for App {
-    fn register_sketch_settings<S: SketchSettings + GetTypeRegistration>(&mut self) -> &mut Self {
+    fn register_sketch_settings<S: SketchSettings + GetTypeRegistration + TypePath>(
+        &mut self,
+    ) -> &mut Self {
         let initial = persistence::load::<S>();
         self.insert_resource(initial.clone());
         self.insert_resource(PreviousSnapshot::<S>(initial));
         self.register_type::<S>();
+        self.register_type_data::<S, SettingsTypeKey>();
 
         let mut registry = self
             .world_mut()
@@ -137,6 +153,7 @@ impl RegisterSketchSettingsExt for App {
             storage_key: S::STORAGE_KEY,
             def: S::settings_def(),
             save_fn: save_fn::<S>,
+            is_changed_fn: is_changed_fn::<S>,
             diff_requires_restart_fn: diff_requires_restart_fn::<S>,
         });
         self.insert_resource(registry);
@@ -144,21 +161,50 @@ impl RegisterSketchSettingsExt for App {
     }
 }
 
+/// Inline stack snapshot type for `emit_restart_events`.
+///
+/// Holds `(diff_fn, storage_key)` pairs without allocating for ≤8 types.
+type RestartSnapshot = smallvec::SmallVec<[(fn(&mut World) -> bool, &'static str); 8]>;
+
 /// System that, once per frame, walks the registry calling each entry's
 /// `diff_requires_restart_fn` and emits a [`SketchRestart`] if any returned
 /// true.
+///
+/// Snapshots only the function pointer + storage key for each entry into a
+/// stack `SmallVec` so the registry resource stays unborrowed while the
+/// per-type functions reborrow the world. No per-frame `Vec<SettingDef>`
+/// clone; the `def` field is left untouched.
 pub fn emit_restart_events(world: &mut World) {
-    let registry = world
+    // Snapshot the (fn, key) pairs. Most apps will register ≤8 settings types.
+    let snapshot: RestartSnapshot = world
         .get_resource::<SettingsRegistry>()
-        .cloned()
+        .map(|r| {
+            r.entries
+                .iter()
+                .map(|e| (e.diff_requires_restart_fn, e.storage_key))
+                .collect()
+        })
         .unwrap_or_default();
-    for entry in &registry.entries {
-        if (entry.diff_requires_restart_fn)(world) {
+    for (diff_fn, storage_key) in snapshot {
+        if diff_fn(world) {
             world
                 .resource_mut::<bevy::prelude::Messages<SketchRestart>>()
-                .write(SketchRestart {
-                    storage_key: entry.storage_key,
-                });
+                .write(SketchRestart { storage_key });
         }
+    }
+}
+
+/// Reflect type-data that tags a settings type with its
+/// [`super::trait_def::SketchSettings::STORAGE_KEY`].
+///
+/// Inserted at registration time by [`RegisterSketchSettingsExt`]. The
+/// reflection-driven user panel walker (the private `panel_user` module) looks
+/// up types by this key.
+#[derive(Clone, Debug)]
+pub struct SettingsTypeKey(pub &'static str);
+
+impl<T: SketchSettings> FromType<T> for SettingsTypeKey {
+    fn from_type() -> Self {
+        Self(T::STORAGE_KEY)
     }
 }

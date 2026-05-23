@@ -45,6 +45,9 @@ fn make_app() -> App {
     // before constructing the `SystemState` that would build `EguiContexts`,
     // so no egui assets (and no wgpu context) are needed in this harness.
     app.add_plugins(SettingsPlugin);
+    // TestSketchSettings is cfg(test) only; register it here so the tests
+    // below have a concrete settings type to exercise.
+    app.register_sketch_settings::<TestSketchSettings>();
     app
 }
 
@@ -172,4 +175,42 @@ fn full_app_schedule_runs_without_panicking() {
     for _ in 0..30 {
         app.update();
     }
+}
+
+#[test]
+fn autosave_fires_after_debounce_window() {
+    use std::time::Duration;
+    use wc_core::settings::test_settings::TestSketchSettings;
+
+    let mut app = make_app();
+    app.update(); // baseline
+
+    // Mutate
+    app.world_mut()
+        .resource_mut::<TestSketchSettings>()
+        .tempo_hz = 2.5;
+
+    // In Bevy 0.18, `Time<()>` is overwritten each frame by `update_virtual_time`
+    // which derives it from `Time<Virtual>` and `Time<Real>`. Direct
+    // `Time::advance_by` is therefore NOT the right way to control elapsed time
+    // in tests. Use `TimeUpdateStrategy::ManualDuration` so each `app.update()`
+    // advances `Time<()>.delta_secs()` by the given amount.
+    app.world_mut()
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(100),
+        ));
+
+    // Advance time past the debounce window in 100 ms chunks.
+    // DEBOUNCE_SECS = 0.5, so 7 steps of 100 ms (700 ms total) is ample.
+    for _ in 0..7_u32 {
+        app.update();
+    }
+
+    // Reload from disk and confirm the value persisted.
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert!(
+        (loaded.tempo_hz - 2.5).abs() < 1e-6,
+        "got {}",
+        loaded.tempo_hz
+    );
 }

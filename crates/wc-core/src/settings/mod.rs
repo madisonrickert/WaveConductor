@@ -18,11 +18,12 @@
 //!    true, exposing every Reflect-registered resource (including the
 //!    sketch settings types, which `register_sketch_settings` registers
 //!    automatically).
-//! 5. (Phase B) A debounced save system will write the current resource back
-//!    to disk shortly after the last mutation. Phase A does not wire this
-//!    automatically — call [`persistence::save::<S>`] manually when you need
-//!    to persist a change.
+//! 5. A debounced auto-save system ([`autosave::detect_changes`] +
+//!    [`autosave::tick`]) observes resource changes and writes the affected
+//!    settings to disk after a quiet window of [`autosave::DEBOUNCE_SECS`]
+//!    seconds. Callers can also invoke [`persistence::save::<S>`] directly.
 
+pub mod autosave;
 pub mod def;
 pub mod event;
 pub mod panel_dev;
@@ -52,22 +53,21 @@ impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsRegistry>()
             .init_resource::<DevPanelVisible>()
+            .init_resource::<autosave::AutosaveState>()
             .add_message::<SketchRestart>()
-            // Always-on registration of the synthetic test settings so the
-            // panels have at least one struct to render even before any
-            // sketches exist. Sketches will register their own structs
-            // additionally in Plan 6+.
-            .register_sketch_settings::<test_settings::TestSketchSettings>()
+            // Real sketches register their own settings via `LinePlugin`, `FlamePlugin`,
+            // etc. The synthetic TestSketchSettings only lives in #[cfg(test)] builds
+            // where it backs the integration tests in this crate's tests/ directory.
             .add_systems(
                 Update,
                 (
                     panel_dev::handle_dev_panel_toggle,
                     registry::emit_restart_events,
+                    autosave::detect_changes,
+                    autosave::tick,
                 )
                     .chain(),
             );
-        // TODO Phase B: wire save_fn as a debounced system so mutations are
-        // persisted automatically without callers invoking save::<S> manually.
         // egui-based UI systems are wired below.
         panel_user::add_systems(app);
         panel_dev::add_systems(app);

@@ -1,74 +1,59 @@
 //! Curated user-facing settings panel.
 //!
-//! Iterates [`super::SettingsRegistry`] and, for each registered settings
-//! resource, draws an `egui` collapsing header containing typed widgets
-//! for every field with `category = User`. `Dev`-category fields are
-//! invisible here — the Shift+D inspector renders them instead.
+//! Walks [`super::SettingsRegistry`] each frame and, for each registered
+//! settings resource, renders an `egui::CollapsingHeader` containing typed
+//! widgets for every `SettingDef` whose `category == User`. Field values are
+//! read and written through `bevy_reflect::ReflectMut` so this panel works
+//! for any settings type without per-struct dispatch code.
 //!
-//! ## Implementation notes
+//! ## Why reflection
 //!
-//! - Uses an exclusive `world: &mut World` system because we need to read
-//!   the registry's `Vec<RegisteredSettings>` and then mutate each
-//!   resource it points at; this can't be expressed with normal system
-//!   params.
-//! - The panel is registered behind an `egui::Window` keyed by a stable
-//!   id so egui persists position / collapsed state across frames.
+//! Plan 5 shipped a typed-match-ladder version that only knew how to render
+//! `TestSketchSettings`. Plan 6 (Line) makes that approach untenable: every
+//! sketch would add another monomorphized renderer with another match
+//! ladder. Reflection drives a single walker that consumes the metadata
+//! table the derive macro already emits.
 
 #![allow(
     clippy::as_conversions,
-    reason = "panel renderer converts between u32/i64/f32 for egui widgets; bounds-checked above"
-)]
-#![allow(
-    clippy::cast_lossless,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
     clippy::cast_precision_loss,
-    reason = "numeric type conversions for egui slider bounds and widget values; values are range-limited before conversion"
-)]
-#![allow(
-    clippy::expect_used,
-    reason = "checked_downcast_mut panics only when TypeId was not verified by the caller, which is a programmer error"
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    reason = "egui sliders use f32/i64 widget ranges; bounds-checked against SettingDef metadata"
 )]
 
 use bevy::prelude::*;
+use bevy::reflect::ReflectMut;
 use bevy_egui::{egui, EguiContexts};
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
-use super::test_settings::TestSketchSettings;
-use super::trait_def::SketchSettings;
 
 /// Plugin assembly hook called by [`super::SettingsPlugin::build`].
 ///
-/// Scheduled inside `bevy_egui::EguiPrimaryContextPass`, not `Update`. The
-/// 0.33+ `bevy_egui` API splits the frame: `Context::begin_pass` runs before
-/// `EguiPrimaryContextPass`, `Context::end_pass` runs after. Calling
-/// `egui::Window::show` from a generic `Update` system panics with
-/// "Called `available_rect()` before `Context::run()`" because the pass
-/// hasn't started yet.
+/// Scheduled inside `bevy_egui::EguiPrimaryContextPass`. See [`super::panel_dev`]
+/// for the same scheduling rationale.
 pub(super) fn add_systems(app: &mut App) {
     app.add_systems(bevy_egui::EguiPrimaryContextPass, draw_user_panel);
 }
 
 /// Exclusive system that draws the user panel.
 fn draw_user_panel(world: &mut World) {
-    let registry = world
-        .get_resource::<SettingsRegistry>()
-        .cloned()
-        .unwrap_or_default();
-    if registry.entries.is_empty() {
-        return;
-    }
-
-    // Guard: EguiPlugin must be initialized. In test harnesses that use
-    // MinimalPlugins without EguiPlugin the resource won't exist and
-    // SystemState::new would panic when initializing EguiContexts.
+    // Skip when no egui context is up (e.g., MinimalPlugins test harness).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
         return;
     }
+    // Snapshot the storage keys we need to iterate so the registry resource
+    // stays unborrowed while we mutate per-type resources.
+    let keys: Vec<&'static str> = world
+        .get_resource::<SettingsRegistry>()
+        .map(|r| r.entries.iter().map(|e| e.storage_key).collect())
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return;
+    }
 
-    // Pull the egui context out via SystemState, then apply it back before
-    // calling any further world mutations.
     let mut state: bevy::ecs::system::SystemState<EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
     let mut contexts = state.get_mut(world);
@@ -80,118 +65,185 @@ fn draw_user_panel(world: &mut World) {
 
     egui::Window::new("Settings")
         .id(egui::Id::new("wc-settings-user-panel"))
-        .default_open(false)
+        .default_open(true)
         .show(&ctx, |ui| {
-            for entry in &registry.entries {
-                ui.collapsing(entry.storage_key, |ui| {
-                    // For Plan 5 we only ship one typed renderer per known
-                    // settings struct. Real sketches in Plan 6+ will each
-                    // add a renderer here (or we'll switch to a fully
-                    // reflection-driven walker once we hit two real
-                    // sketches and have something to factor against).
-                    if entry.storage_key == TestSketchSettings::STORAGE_KEY {
-                        render_user_fields::<TestSketchSettings>(world, ui, &entry.def);
-                    } else {
-                        ui.label(
-                            "(no typed renderer; open the dev panel with \
-                             Shift+D for full inspection)",
-                        );
-                    }
-                });
+            for key in keys {
+                render_section_by_key(world, ui, key);
             }
         });
 }
 
-/// Render every `category = User` field of `S` against `ui`.
-///
-/// The caller ([`draw_user_panel`]) is responsible for confirming the
-/// `TypeId` match before dispatching to this monomorphized instance.
-/// The [`checked_downcast_mut`] call below validates at runtime via
-/// `Any::downcast_mut`, preserving the safety contract even without the
-/// outer guard.
-fn render_user_fields<S: SketchSettings>(
-    world: &mut World,
-    ui: &mut egui::Ui,
-    defs: &[SettingDef],
-) {
-    // We avoid `bevy_reflect::ReflectMut` plumbing for the typed renderer.
-    // Instead, switch on the field name. For Plan 5 this is the single
-    // synthetic struct, so the cost is tiny and the code is explicit.
-    let mut value = world.resource::<S>().clone();
-    let mut dirty = false;
-
-    // Safe cast: draw_user_panel confirmed the storage key before calling
-    // this monomorphized instance; checked_downcast_mut also validates at
-    // runtime via Any::downcast_mut.
-    let typed: &mut TestSketchSettings = checked_downcast_mut(&mut value);
-    for def in defs {
-        if def.category != SettingsCategory::User {
-            continue;
-        }
-        match def.field_name {
-            "widget_count" => {
-                if let SettingKind::Number(range) = &def.kind {
-                    let mut tmp = typed.widget_count as i64;
-                    let lo = range.min.unwrap_or(0.0) as i64;
-                    let hi = range.max.unwrap_or(1000.0) as i64;
-                    let mut slider = egui::Slider::new(&mut tmp, lo..=hi).text(def.label);
-                    if let Some(step) = range.step {
-                        slider = slider.step_by(step);
-                    }
-                    if ui.add(slider).changed() {
-                        typed.widget_count = tmp.max(0) as u32;
-                        dirty = true;
-                    }
-                }
-            }
-            "tempo_hz" => {
-                if let SettingKind::Number(range) = &def.kind {
-                    let lo = range.min.unwrap_or(0.0) as f32;
-                    let hi = range.max.unwrap_or(1.0) as f32;
-                    let mut slider =
-                        egui::Slider::new(&mut typed.tempo_hz, lo..=hi).text(def.label);
-                    if let Some(step) = range.step {
-                        slider = slider.step_by(step);
-                    }
-                    if ui.add(slider).changed() {
-                        dirty = true;
-                    }
-                }
-            }
-            "enable_tint" => {
-                if ui.checkbox(&mut typed.enable_tint, def.label).changed() {
-                    dirty = true;
-                }
-            }
-            "tint_color" => {
-                ui.horizontal(|ui| {
-                    ui.label(def.label);
-                    // `color_edit_button_rgba_unmultiplied` takes `&mut [f32; 4]`
-                    // and writes the new RGBA value back in place — no separate
-                    // conversion needed.
-                    if ui
-                        .color_edit_button_rgba_unmultiplied(&mut typed.tint_color)
-                        .changed()
-                    {
-                        dirty = true;
-                    }
-                });
-            }
-            _ => {}
-        }
+/// Look up the type registration matching `storage_key` and render its
+/// `User`-category fields. Walks the `TypeRegistry` to find the registered
+/// settings type whose `SETTINGS_STORAGE_KEY` matches; uses reflection to
+/// read/write fields without static type knowledge.
+fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'static str) {
+    // Find the entry's defs (still a borrow of the resource; copy out).
+    let defs: Vec<SettingDef> = world
+        .get_resource::<SettingsRegistry>()
+        .and_then(|r| r.entries.iter().find(|e| e.storage_key == storage_key))
+        .map(|e| e.def.clone())
+        .unwrap_or_default();
+    if defs.iter().all(|d| d.category != SettingsCategory::User) {
+        return;
     }
 
-    if dirty {
-        *world.resource_mut::<S>() = value;
+    ui.collapsing(storage_key, |ui| {
+        // Walk the type registry to find the settings type by its
+        // SketchSettings::STORAGE_KEY. Compare by value, not pointer identity.
+        let type_id = world
+            .resource::<AppTypeRegistry>()
+            .read()
+            .iter()
+            .find_map(|reg| settings_type_id_for_key(reg, storage_key));
+        let Some(type_id) = type_id else {
+            ui.label("(settings type not in TypeRegistry — register via App::register_type)");
+            return;
+        };
+
+        // Get a Reflect handle on the resource.
+        // Clone the Arc so the read guard doesn't borrow `world`.
+        let registry = world.resource::<AppTypeRegistry>().clone();
+        let registry_read = registry.read();
+        let Some(type_data) =
+            registry_read.get_type_data::<bevy::ecs::reflect::ReflectResource>(type_id)
+        else {
+            ui.label("(no ReflectResource on settings type)");
+            return;
+        };
+        // `&mut World` implements `Into<FilteredResourcesMut>`, so this is
+        // safe to call without any unsafe code.
+        let reflect_result = type_data.reflect_mut(world);
+        drop(registry_read);
+        let Ok(mut reflect_mut) = reflect_result else {
+            ui.label("(resource not present)");
+            return;
+        };
+        // Deref `Mut<dyn Reflect>` to get `&mut dyn Reflect`.
+        render_user_fields_via_reflect(&mut *reflect_mut, &defs, ui);
+    });
+}
+
+/// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
+/// each user-category field as a typed widget.
+fn render_user_fields_via_reflect(
+    reflect: &mut dyn Reflect,
+    defs: &[SettingDef],
+    ui: &mut egui::Ui,
+) {
+    let ReflectMut::Struct(struct_mut) = reflect.reflect_mut() else {
+        ui.label("(settings is not a struct)");
+        return;
+    };
+
+    for def in defs.iter().filter(|d| d.category == SettingsCategory::User) {
+        let Some(field) = struct_mut.field_mut(def.field_name) else {
+            continue;
+        };
+        render_widget(field, def, ui);
     }
 }
 
-/// Reinterpret `&mut S` as `&mut T` once the caller has verified
-/// `TypeId::of::<S>() == TypeId::of::<T>()`. Uses `Any::downcast_mut`
-/// (safe, runtime-checked) so the workspace `unsafe_code = "deny"` lint
-/// stays clean. Kept in one place so the contract is auditable.
-fn checked_downcast_mut<S: SketchSettings, T: 'static>(value: &mut S) -> &mut T {
-    let any: &mut dyn std::any::Any = value;
-    any.downcast_mut::<T>()
-        .expect("caller verified TypeId match")
+/// Render one widget into `field` based on the metadata in `def`.
+///
+/// `field` is `&mut dyn PartialReflect` as returned by [`Struct::field_mut`].
+fn render_widget(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    def: &SettingDef,
+    ui: &mut egui::Ui,
+) {
+    match &def.kind {
+        SettingKind::Number(range) => render_number(field, def.label, range, ui),
+        SettingKind::Boolean => render_bool(field, def.label, ui),
+        SettingKind::Color => render_color(field, def.label, ui),
+        SettingKind::Text => render_text(field, def.label, ui),
+    }
+}
+
+/// Render a numeric field. Dispatches on the field's concrete Rust type
+/// (u32, f32, etc.) via `try_downcast_mut`.
+fn render_number(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    label: &str,
+    range: &super::def::NumberRange,
+    ui: &mut egui::Ui,
+) {
+    let lo = range.min.unwrap_or(0.0);
+    let hi = range.max.unwrap_or(1.0);
+    let step = range.step;
+
+    if let Some(v) = field.try_downcast_mut::<u32>() {
+        let mut tmp = *v as i64;
+        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64)).text(label);
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        if ui.add(slider).changed() {
+            *v = tmp.max(0) as u32;
+        }
+        return;
+    }
+    if let Some(v) = field.try_downcast_mut::<f32>() {
+        let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32)).text(label);
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        ui.add(slider);
+        return;
+    }
+    if let Some(v) = field.try_downcast_mut::<f64>() {
+        let mut slider = egui::Slider::new(v, lo..=hi).text(label);
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        ui.add(slider);
+        return;
+    }
+    ui.label(format!("(unsupported number type for {label})"));
+}
+
+fn render_bool(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<bool>() {
+        ui.checkbox(v, label);
+    } else {
+        ui.label(format!("(expected bool for {label})"));
+    }
+}
+
+fn render_color(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<[f32; 4]>() {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.color_edit_button_rgba_unmultiplied(v);
+        });
+    } else {
+        ui.label(format!("(expected [f32; 4] for {label})"));
+    }
+}
+
+fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<String>() {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.text_edit_singleline(v);
+        });
+    } else {
+        ui.label(format!("(expected String for {label})"));
+    }
+}
+
+/// Look up a `TypeRegistration`'s `SketchSettings::STORAGE_KEY` and return its
+/// `TypeId` if it matches.
+///
+/// The derive macro emits the storage key as a const associated to the
+/// trait, not as type-registration metadata. We sidestep that by storing
+/// the `(type_id, storage_key)` mapping at registration time via
+/// [`super::registry::SettingsTypeKey`] type-data.
+fn settings_type_id_for_key(
+    reg: &bevy::reflect::TypeRegistration,
+    storage_key: &str,
+) -> Option<std::any::TypeId> {
+    use super::registry::SettingsTypeKey;
+    let data = reg.data::<SettingsTypeKey>()?;
+    (data.0 == storage_key).then(|| reg.type_id())
 }
