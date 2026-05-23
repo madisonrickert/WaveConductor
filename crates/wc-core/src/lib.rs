@@ -12,6 +12,7 @@ pub mod audio;
 pub mod input;
 pub mod lifecycle;
 pub mod settings;
+pub mod sketch;
 
 use bevy::prelude::*;
 
