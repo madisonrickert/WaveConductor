@@ -1,5 +1,7 @@
 //! `cargo xtask manifest` — list all xtask subcommands with descriptions.
 
+use std::fmt::Write as _;
+
 use clap::Args as ClapArgs;
 
 /// Arguments for the manifest subcommand.
@@ -33,10 +35,11 @@ pub fn run(args: &Args) {
         let mut out = String::from("[\n");
         for (i, entry) in SUBCOMMANDS.iter().enumerate() {
             let comma = if i + 1 < SUBCOMMANDS.len() { "," } else { "" };
-            out.push_str(&format!(
-                "  {{\"name\": \"{}\", \"description\": \"{}\"}}{}\n",
+            let _ = writeln!(
+                out,
+                "  {{\"name\": \"{}\", \"description\": \"{}\"}}{}",
                 entry.name, entry.description, comma,
-            ));
+            );
         }
         out.push(']');
         println!("{out}");

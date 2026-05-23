@@ -3,6 +3,15 @@ name = "wc-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WaveConductor shared infrastructure: lifecycle, audio, input, settings, math."
 
-# Stub crate — implementation lands in Plan 2.
+[lints]
+workspace = true
+
+[dependencies]
+bevy = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

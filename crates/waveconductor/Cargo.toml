@@ -3,6 +3,20 @@ name = "waveconductor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WaveConductor v5 — Rust + Bevy interactive art gallery."
 
-# Stub crate — implementation lands in Plan 2.
+[[bin]]
+name = "waveconductor"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+bevy = { workspace = true }
+wc-core = { workspace = true }
+wc-sketches = { workspace = true }
+tracing = { workspace = true }

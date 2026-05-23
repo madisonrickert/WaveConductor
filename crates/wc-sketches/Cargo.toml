@@ -3,6 +3,14 @@ name = "wc-sketches"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WaveConductor sketch plugins: line, flame, dots, cymatics, waves."
 
-# Stub crate — implementation lands in Plan 2.
+[lints]
+workspace = true
+
+[dependencies]
+bevy = { workspace = true }
+wc-core = { workspace = true }

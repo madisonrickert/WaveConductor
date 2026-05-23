@@ -105,7 +105,7 @@ fn should_skip(path: &Path) -> bool {
     }
     // Skip binary / lock / generated files by extension.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    SKIP_EXTS.iter().any(|&e| e == ext)
+    SKIP_EXTS.contains(&ext)
 }
 
 /// Escape a string for inclusion as a JSON string value.
