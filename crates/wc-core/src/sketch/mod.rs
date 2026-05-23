@@ -7,7 +7,7 @@
 //!    `OnEnter(AppState::X)`.
 //! 3. The sketch's plugin schedules [`cleanup::despawn_with::<*Root>`] on
 //!    `OnExit(AppState::X)` to free everything.
-//! 4. Update systems are gated with `.run_if(sketch_active::<AppState::X>())`
+//! 4. Update systems are gated with `.run_if(sketch_active(AppState::X))`
 //!    so they only run when the sketch is foregrounded AND
 //!    `SketchActivity::Active`.
 

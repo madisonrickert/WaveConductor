@@ -10,7 +10,9 @@ use bevy::prelude::*;
 /// app.add_systems(OnExit(AppState::Line), despawn_with::<LineRoot>);
 /// ```
 ///
-/// Recursive: entity children are despawned alongside their parents.
+/// Cascading: entity children are despawned alongside their parents
+/// (Bevy 0.14+ makes `despawn` cascade by default — children of any
+/// despawned entity are also freed).
 pub fn despawn_with<M: Component>(
     mut commands: Commands<'_, '_>,
     query: Query<'_, '_, Entity, With<M>>,
