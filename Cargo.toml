@@ -40,6 +40,8 @@ bevy-inspector-egui = "0.27"
 leafwing-input-manager = "0.20"
 # Diagnostics & debug
 bevy_mod_debugdump = "0.13"
+# Small inline vectors (hand-tracking: typically ≤2 active hands)
+smallvec = { version = "1", features = ["const_generics", "union"] }
 # Errors & logging
 thiserror = "1"
 tracing = "0.1"

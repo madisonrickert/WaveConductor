@@ -55,8 +55,9 @@ impl InteractionTimer {
 
 /// Resets [`InteractionTimer`] whenever any input event is observed.
 ///
-/// Reads mouse, keyboard, and touch message streams. Hand-tracking will be added
-/// in Plan 3 (Input system) by also watching `Messages<HandTrackingFrame>`.
+/// Reads mouse, keyboard, touch, and hand-tracking message streams. A hand
+/// entering the tracking volume (any [`crate::input::state::HandTrackingFrame`]
+/// arriving) counts as user interaction.
 ///
 /// Note: Bevy 0.18 renamed `EventReader`/`EventWriter` to `MessageReader`/`MessageWriter`.
 /// The readers must consume (`.read()`) messages rather than merely peeking with
@@ -69,11 +70,13 @@ pub fn reset_on_interaction(
     mut mouse_buttons: MessageReader<'_, '_, bevy::input::mouse::MouseButtonInput>,
     mut keyboard: MessageReader<'_, '_, bevy::input::keyboard::KeyboardInput>,
     mut touch: MessageReader<'_, '_, bevy::input::touch::TouchInput>,
+    mut hand_tracking: MessageReader<'_, '_, crate::input::state::HandTrackingFrame>,
 ) {
     let any_event = mouse_motion.read().count() > 0
         || mouse_buttons.read().count() > 0
         || keyboard.read().count() > 0
-        || touch.read().count() > 0;
+        || touch.read().count() > 0
+        || hand_tracking.read().count() > 0;
     if any_event {
         timer.mark(time.elapsed());
     }

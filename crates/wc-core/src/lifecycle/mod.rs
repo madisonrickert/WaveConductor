@@ -42,6 +42,11 @@ impl Plugin for LifecyclePlugin {
             .init_resource::<ActionState<actions::WaveConductorAction>>()
             // Idle / interaction tracking
             .init_resource::<idle::InteractionTimer>()
+            // Register HandTrackingFrame message so reset_on_interaction can
+            // read it. If HandTrackingPlugin is also present, Bevy deduplicates
+            // the registration; registering here ensures lifecycle tests that do
+            // not add HandTrackingPlugin still compile and run.
+            .add_message::<crate::input::state::HandTrackingFrame>()
             // Systems
             .add_systems(
                 Update,

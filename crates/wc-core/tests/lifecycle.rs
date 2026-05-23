@@ -4,6 +4,13 @@
 //! plugin and drives it through realistic sequences using leafwing's physical
 //! key input injection and manual time advancement.
 
+// Note: the hand-tracking branch of `reset_on_interaction` is exercised by
+// the `hand_tracking_frame_resets_interaction_timer` test in `tests/input.rs`,
+// which is currently `#[ignore]`'d pending richer test infrastructure in
+// Plan 6. Until that lands, the hand-tracking interaction-reset path has
+// no active integration coverage. If you're modifying `reset_on_interaction`,
+// also verify the input test re-enables cleanly.
+
 use std::time::Duration;
 
 use bevy::prelude::*;
