@@ -22,3 +22,16 @@ rustfft = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+wc-core-macros.workspace = true
+bevy_egui.workspace = true
+bevy-inspector-egui.workspace = true
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

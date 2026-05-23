@@ -1,0 +1,26 @@
+[package]
+name = "wc-core-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Proc-macro support crate for wc-core: emits SketchSettings impls."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+wc-core.workspace = true
+bevy.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/waveconductor",
     "crates/wc-core",
+    "crates/wc-core-macros",
     "crates/wc-sketches",
     "xtask",
 ]
@@ -34,8 +35,8 @@ bevy = { version = "0.18", default-features = false, features = [
     "zstd_rust",
 ] }
 # UI
-bevy_egui = "0.30"
-bevy-inspector-egui = "0.27"
+bevy_egui = "0.39"
+bevy-inspector-egui = "0.36"
 # Input action mapping (added in Plan 2; 0.20 is the Bevy-0.18-compatible release)
 leafwing-input-manager = "0.20"
 # Diagnostics & debug
@@ -61,8 +62,17 @@ clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 regex = "1"
 tempfile = "3"
+# proc-macro toolchain (settings derive)
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+# JSON for the wasm localStorage path
+serde_json = "1"
+# wasm-only web bindings (used by settings persistence on web targets)
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
 # Workspace-internal crates
 wc-core = { version = "5.0.0-dev", path = "crates/wc-core" }
+wc-core-macros = { version = "5.0.0-dev", path = "crates/wc-core-macros" }
 wc-sketches = { version = "5.0.0-dev", path = "crates/wc-sketches" }
 
 [workspace.lints.rust]

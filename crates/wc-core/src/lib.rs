@@ -4,9 +4,14 @@
 //! settings, and math helpers. Sketches consume this crate via [`CorePlugin`];
 //! the binary crate registers `CorePlugin` once at app startup.
 
+// Allow `::wc_core::...` paths to resolve inside this crate itself, which
+// the `#[derive(SketchSettings)]` macro emits for all trait implementations.
+extern crate self as wc_core;
+
 pub mod audio;
 pub mod input;
 pub mod lifecycle;
+pub mod settings;
 
 use bevy::prelude::*;
 
@@ -20,6 +25,7 @@ impl Plugin for CorePlugin {
         app.add_plugins(lifecycle::LifecyclePlugin);
         app.add_plugins(input::HandTrackingPlugin);
         app.add_plugins(audio::AudioPlugin);
+        app.add_plugins(settings::SettingsPlugin);
     }
 }
 
@@ -30,6 +36,13 @@ mod tests {
 
     #[test]
     fn core_plugin_builds_without_panicking() {
+        // NOTE: `EguiPlugin` is intentionally omitted — it requires `Assets<Shader>`
+        // which is only present with `DefaultPlugins` (not `MinimalPlugins`).
+        // Phase A panel stubs don't add any egui systems, so the plugin compiles
+        // cleanly without it. Phase B will require a richer test harness.
+        //
+        // `CorePlugin` → `LifecyclePlugin` adds `InputManagerPlugin` and
+        // `ActionState`, so we must NOT add them again here.
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_plugins(bevy::input::InputPlugin);
