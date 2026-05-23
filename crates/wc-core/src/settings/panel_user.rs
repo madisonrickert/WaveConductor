@@ -96,6 +96,12 @@ fn draw_user_panel(world: &mut World) {
 }
 
 /// Render every `category = User` field of `S` against `ui`.
+///
+/// The caller ([`draw_user_panel`]) is responsible for confirming the
+/// `TypeId` match before dispatching to this monomorphized instance.
+/// The [`checked_downcast_mut`] call below validates at runtime via
+/// `Any::downcast_mut`, preserving the safety contract even without the
+/// outer guard.
 fn render_user_fields<S: SketchSettings>(
     world: &mut World,
     ui: &mut egui::Ui,
@@ -107,61 +113,64 @@ fn render_user_fields<S: SketchSettings>(
     let mut value = world.resource::<S>().clone();
     let mut dirty = false;
 
-    if std::any::TypeId::of::<S>() == std::any::TypeId::of::<TestSketchSettings>() {
-        // Safe cast: same TypeId.
-        let typed: &mut TestSketchSettings = checked_downcast_mut(&mut value);
-        for def in defs {
-            if def.category != SettingsCategory::User {
-                continue;
-            }
-            match def.field_name {
-                "widget_count" => {
-                    if let SettingKind::Number(range) = &def.kind {
-                        let mut tmp = typed.widget_count as i64;
-                        let lo = range.min.unwrap_or(0.0) as i64;
-                        let hi = range.max.unwrap_or(1000.0) as i64;
-                        if ui
-                            .add(egui::Slider::new(&mut tmp, lo..=hi).text(def.label))
-                            .changed()
-                        {
-                            typed.widget_count = tmp.max(0) as u32;
-                            dirty = true;
-                        }
+    // Safe cast: draw_user_panel confirmed the storage key before calling
+    // this monomorphized instance; checked_downcast_mut also validates at
+    // runtime via Any::downcast_mut.
+    let typed: &mut TestSketchSettings = checked_downcast_mut(&mut value);
+    for def in defs {
+        if def.category != SettingsCategory::User {
+            continue;
+        }
+        match def.field_name {
+            "widget_count" => {
+                if let SettingKind::Number(range) = &def.kind {
+                    let mut tmp = typed.widget_count as i64;
+                    let lo = range.min.unwrap_or(0.0) as i64;
+                    let hi = range.max.unwrap_or(1000.0) as i64;
+                    let mut slider = egui::Slider::new(&mut tmp, lo..=hi).text(def.label);
+                    if let Some(step) = range.step {
+                        slider = slider.step_by(step);
                     }
-                }
-                "tempo_hz" => {
-                    if let SettingKind::Number(range) = &def.kind {
-                        let lo = range.min.unwrap_or(0.0) as f32;
-                        let hi = range.max.unwrap_or(1.0) as f32;
-                        if ui
-                            .add(egui::Slider::new(&mut typed.tempo_hz, lo..=hi).text(def.label))
-                            .changed()
-                        {
-                            dirty = true;
-                        }
-                    }
-                }
-                "enable_tint" => {
-                    if ui.checkbox(&mut typed.enable_tint, def.label).changed() {
+                    if ui.add(slider).changed() {
+                        typed.widget_count = tmp.max(0) as u32;
                         dirty = true;
                     }
                 }
-                "tint_color" => {
-                    ui.horizontal(|ui| {
-                        ui.label(def.label);
-                        // `color_edit_button_rgba_unmultiplied` takes `&mut [f32; 4]`
-                        // and writes the new RGBA value back in place — no separate
-                        // conversion needed.
-                        if ui
-                            .color_edit_button_rgba_unmultiplied(&mut typed.tint_color)
-                            .changed()
-                        {
-                            dirty = true;
-                        }
-                    });
-                }
-                _ => {}
             }
+            "tempo_hz" => {
+                if let SettingKind::Number(range) = &def.kind {
+                    let lo = range.min.unwrap_or(0.0) as f32;
+                    let hi = range.max.unwrap_or(1.0) as f32;
+                    let mut slider =
+                        egui::Slider::new(&mut typed.tempo_hz, lo..=hi).text(def.label);
+                    if let Some(step) = range.step {
+                        slider = slider.step_by(step);
+                    }
+                    if ui.add(slider).changed() {
+                        dirty = true;
+                    }
+                }
+            }
+            "enable_tint" => {
+                if ui.checkbox(&mut typed.enable_tint, def.label).changed() {
+                    dirty = true;
+                }
+            }
+            "tint_color" => {
+                ui.horizontal(|ui| {
+                    ui.label(def.label);
+                    // `color_edit_button_rgba_unmultiplied` takes `&mut [f32; 4]`
+                    // and writes the new RGBA value back in place — no separate
+                    // conversion needed.
+                    if ui
+                        .color_edit_button_rgba_unmultiplied(&mut typed.tint_color)
+                        .changed()
+                    {
+                        dirty = true;
+                    }
+                });
+            }
+            _ => {}
         }
     }
 

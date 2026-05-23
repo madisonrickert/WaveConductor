@@ -35,21 +35,18 @@ pub fn handle_dev_panel_toggle(
 /// Adds:
 /// - [`draw_dev_panel`] system on `Update`, conditional on
 ///   [`DevPanelVisible::0`] being true.
-pub(super) fn add_systems(app: &mut bevy::prelude::App) {
-    app.add_systems(
-        bevy::prelude::Update,
-        draw_dev_panel.run_if(dev_panel_visible),
-    );
+pub(super) fn add_systems(app: &mut App) {
+    app.add_systems(Update, draw_dev_panel.run_if(dev_panel_visible));
 }
 
-fn dev_panel_visible(visible: bevy::prelude::Res<'_, DevPanelVisible>) -> bool {
+fn dev_panel_visible(visible: Res<'_, DevPanelVisible>) -> bool {
     visible.0
 }
 
 /// Exclusive `&mut World` system that opens a `bevy-inspector-egui`
 /// world-inspector window. Renders nothing when the panel is hidden
 /// (the `run_if` above gates entry).
-fn draw_dev_panel(world: &mut bevy::prelude::World) {
+fn draw_dev_panel(world: &mut World) {
     // Guard: EguiPlugin must be initialized. In test harnesses that use
     // MinimalPlugins without EguiPlugin the resource won't exist and
     // SystemState::new would panic when initializing EguiContexts.

@@ -40,9 +40,10 @@ fn make_app() -> App {
     app.init_resource::<leafwing_input_manager::prelude::ActionState<
         wc_core::lifecycle::actions::WaveConductorAction,
     >>();
-    // EguiPlugin requires `Assets<Shader>` from DefaultPlugins; Phase A panel stubs
-    // don't add egui systems, so EguiPlugin is not needed for Phase A tests.
-    // Phase B will require a richer harness (e.g. wgpu headless or mock contexts).
+    // EguiPlugin is intentionally omitted. Both panel systems guard with
+    // `World::contains_resource::<EguiUserTextures>()` and return early
+    // before constructing the `SystemState` that would build `EguiContexts`,
+    // so no egui assets (and no wgpu context) are needed in this harness.
     app.add_plugins(SettingsPlugin);
     app
 }
@@ -162,10 +163,11 @@ fn toggling_dev_panel_via_action_updates_resource() {
 
 #[test]
 fn full_app_schedule_runs_without_panicking() {
-    // Smoke test: 30 frames of updates must not panic with the egui
-    // contexts uninitialized (we never spawn a real window in this test,
-    // but EguiContexts::ctx_mut returns Err which the panel systems
-    // handle gracefully via the EguiUserTextures guard).
+    // Smoke test: 30 frames of updates must not panic with egui absent.
+    // The panel systems guard with `World::contains_resource::<EguiUserTextures>()`
+    // and return early before constructing the `SystemState` that would build
+    // `EguiContexts` — so the 30-frame loop runs without ever touching an egui
+    // context, and never panics from a missing one.
     let mut app = make_app();
     for _ in 0..30 {
         app.update();
