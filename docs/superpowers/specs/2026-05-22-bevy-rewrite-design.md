@@ -189,18 +189,51 @@ Mouse, touch, and keyboard are handled by Bevy's native input resources directly
 
 This is the idiomatic Bevy way and matches how every Bevy app reads mouse, touch, and keyboard. Wrapping these in a custom adapter is pure ceremony — they are already abstracted over the OS input backends by Bevy.
 
-The only input modality Bevy does not natively know about is hand tracking. That gets a custom trait:
+The only input modality Bevy does not natively know about is hand tracking. We add it the same way Bevy adds its own input modalities: a `HandTrackingPlugin` modeled exactly on `InputPlugin`, exposing the same shape of resources and events that sketches already use for mouse and touch.
+
+```rust
+pub struct HandTrackingPlugin;
+
+impl Plugin for HandTrackingPlugin {
+    fn build(&self, app: &mut App) {
+        app
+            .init_resource::<HandTrackingState>()       // continuous, like Touches
+            .init_resource::<ButtonInput<HandButton>>() // discrete press state, like ButtonInput<MouseButton>
+            .add_event::<HandTrackingFrame>()           // raw provider output
+            .add_event::<HandGestureEvent>()            // derived discrete moments
+            .add_systems(
+                PreUpdate,
+                (
+                    poll_active_provider,
+                    update_hand_tracking_state,
+                    detect_gestures,
+                )
+                    .chain()
+                    .in_set(InputSystems),              // ride Bevy's existing ordering label
+            );
+    }
+}
+```
+
+What sketches consume:
+
+- `Res<HandTrackingState>` — continuous per-hand data (active hand count, 21-landmark per-hand data, palm normal, pinch strength, grab strength, timestamp). Same idiom as `Res<Touches>`.
+- `Res<ButtonInput<HandButton>>` where `HandButton ∈ {LeftPinch, RightPinch, LeftGrab, RightGrab, …}` — gives sketches `pinch.just_pressed(HandButton::LeftPinch)` with the exact same shape as `mouse.just_pressed(MouseButton::Left)`.
+- `Events<HandGestureEvent>` — discrete moments worth eventing (swipe, double-pinch).
+- `Events<HandTrackingFrame>` — raw provider frames for systems that want them (analytics, recording).
+
+Behind the plugin, a strategy-pattern trait selects which source feeds the pipeline:
 
 ```rust
 pub trait HandTrackingProvider: Send + Sync + 'static {
     fn start(&mut self) -> Result<(), HandTrackingError>;
     fn stop(&mut self);
-    fn poll(&mut self, state: &mut HandTrackingState);
+    fn poll(&mut self, out: &mut Events<HandTrackingFrame>);
     fn status(&self) -> HandTrackingStatus;
 }
 ```
 
-`Res<HandTrackingState>` mirrors the shape of `Res<Touches>`: a per-frame snapshot of active hands with convenience accessors — active hand count, per-hand 21-landmark data, palm normal, pinch strength, grab strength, timestamp. Discrete moments (pinch-down, pinch-up, swipe) are emitted as `Events<HandGestureEvent>`. This follows Bevy's split convention: continuous state in `Resource`s, discrete moments as `Event`s.
+App startup picks one provider and installs it as a resource; everything downstream is invisible to sketch code. Sketches never reference the trait. `poll_active_provider` calls `poll()` once per frame in `PreUpdate`; `update_hand_tracking_state` consumes those raw frames into `HandTrackingState` + `ButtonInput<HandButton>`; `detect_gestures` turns frame-to-frame transitions into `HandGestureEvent`s.
 
 Providers in v5.0:
 
