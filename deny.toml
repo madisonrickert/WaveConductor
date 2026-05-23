@@ -3,7 +3,13 @@ all-features = true
 
 [advisories]
 db-urls = ["https://github.com/RustSec/advisory-db"]
-ignore = []
+ignore = [
+    # `paste` (used transitively by Bevy via wgpu → wgpu-hal → metal) was archived
+    # by its author. No safe upgrade available; the entire wgpu/Bevy stack will
+    # need to migrate. Tracked widely across the Bevy ecosystem. Re-evaluate
+    # when wgpu or metal drop the dependency.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [

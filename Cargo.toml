@@ -53,8 +53,8 @@ walkdir = "2"
 regex = "1"
 tempfile = "3"
 # Workspace-internal crates
-wc-core = { path = "crates/wc-core" }
-wc-sketches = { path = "crates/wc-sketches" }
+wc-core = { version = "5.0.0-dev", path = "crates/wc-core" }
+wc-sketches = { version = "5.0.0-dev", path = "crates/wc-sketches" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
