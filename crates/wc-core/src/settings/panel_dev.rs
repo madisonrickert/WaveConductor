@@ -32,11 +32,15 @@ pub fn handle_dev_panel_toggle(
 
 /// Plugin assembly hook called by [`super::SettingsPlugin::build`].
 ///
-/// Adds:
-/// - [`draw_dev_panel`] system on `Update`, conditional on
-///   [`DevPanelVisible::0`] being true.
+/// Adds [`draw_dev_panel`] to `bevy_egui::EguiPrimaryContextPass`, gated by
+/// [`DevPanelVisible::0`]. The egui pass schedule is required (not `Update`)
+/// because `Window::show` panics with "Called `available_rect()` before
+/// `Context::run()`" when invoked outside an active egui pass.
 pub(super) fn add_systems(app: &mut App) {
-    app.add_systems(Update, draw_dev_panel.run_if(dev_panel_visible));
+    app.add_systems(
+        bevy_egui::EguiPrimaryContextPass,
+        draw_dev_panel.run_if(dev_panel_visible),
+    );
 }
 
 fn dev_panel_visible(visible: Res<'_, DevPanelVisible>) -> bool {

@@ -39,8 +39,15 @@ use super::test_settings::TestSketchSettings;
 use super::trait_def::SketchSettings;
 
 /// Plugin assembly hook called by [`super::SettingsPlugin::build`].
+///
+/// Scheduled inside `bevy_egui::EguiPrimaryContextPass`, not `Update`. The
+/// 0.33+ `bevy_egui` API splits the frame: `Context::begin_pass` runs before
+/// `EguiPrimaryContextPass`, `Context::end_pass` runs after. Calling
+/// `egui::Window::show` from a generic `Update` system panics with
+/// "Called `available_rect()` before `Context::run()`" because the pass
+/// hasn't started yet.
 pub(super) fn add_systems(app: &mut App) {
-    app.add_systems(Update, draw_user_panel);
+    app.add_systems(bevy_egui::EguiPrimaryContextPass, draw_user_panel);
 }
 
 /// Exclusive system that draws the user panel.
