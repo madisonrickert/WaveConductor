@@ -13,5 +13,10 @@ publish = false
 workspace = true
 
 [dependencies]
-bevy = { workspace = true }
-wc-core = { workspace = true }
+bevy.workspace = true
+wc-core.workspace = true
+wc-core-macros.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+tracing.workspace = true
+leafwing-input-manager.workspace = true

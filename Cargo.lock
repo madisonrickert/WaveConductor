@@ -913,6 +913,7 @@ dependencies = [
  "bevy_pbr",
  "bevy_render",
  "bevy_shader",
+ "bevy_sprite_render",
  "bevy_transform",
  "bevy_utils",
  "bytemuck",
@@ -5827,7 +5828,12 @@ name = "wc-sketches"
 version = "5.0.0-dev"
 dependencies = [
  "bevy",
+ "bytemuck",
+ "leafwing-input-manager",
+ "serde",
+ "tracing",
  "wc-core",
+ "wc-core-macros",
 ]
 
 [[package]]

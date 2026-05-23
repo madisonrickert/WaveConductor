@@ -26,6 +26,9 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_render",
     "bevy_pbr",
     "bevy_core_pipeline",
+    "bevy_sprite",
+    "bevy_sprite_render",
+    "bevy_mesh",
     "bevy_asset",
     "default_font",
     "x11",
@@ -66,6 +69,8 @@ tempfile = "3"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
+# GPU struct alignment helpers (used by Line sketch particle/uniform buffers)
+bytemuck = { version = "1", features = ["derive"] }
 # JSON for the wasm localStorage path
 serde_json = "1"
 # wasm-only web bindings (used by settings persistence on web targets)
