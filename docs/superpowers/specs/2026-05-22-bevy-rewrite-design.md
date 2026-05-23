@@ -375,7 +375,7 @@ A `requires_restart` change fires a `SketchRestart` event; the lifecycle plugin 
 
 ### 5.6 Web build
 
-- **Renderer**: wgpu auto-selects WebGPU where available, WebGL2 fallback otherwise. WebGL2 means no compute shaders. Particle sketches (Line, Dots, Flame) ship a CPU-side fallback path selected at startup by a runtime capability check on `Features::COMPUTE_SHADER`. Fragment-shader-only sketches (Cymatics, Waves) are unaffected.
+- **Renderer**: WebGPU only. As of May 2026 WebGPU is stable in Chrome (since 2023), Safari (since 2024), and Firefox (rolling); ~84% support surface is acceptable for this target. Browsers without WebGPU get the "browser unsupported" page; no WebGL2 fallback ships. Particle sketches (Line, Dots, Flame) run their WGSL compute path on both native and web — no parallel CPU path, no runtime `Features::COMPUTE_SHADER` capability check. Fragment-shader-only sketches (Cymatics, Waves) are unaffected.
 - **Bundle**: Bevy WASM is ~15–30 MB compressed. Accepted cost. `wasm-opt -Oz` in the release pipeline; gzip and brotli served from GitHub Pages.
 - **Audio**: cpal's WASM backend uses `web_sys` `AudioContext`. `AudioPlugin` API is identical across targets.
 - **Input on web**: `WebSocketProvider` for Leap (existing Ultraleap WS server continues to work). Mouse, touch, and keyboard are Bevy native and always available on web. Mobile web is touch + keyboard only.
