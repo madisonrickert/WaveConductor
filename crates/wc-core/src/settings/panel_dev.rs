@@ -30,9 +30,49 @@ pub fn handle_dev_panel_toggle(
     }
 }
 
-/// Plugin assembly hook called by [`super::SettingsPlugin::build`]. Empty in
-/// Phase A; real implementation lands in Task 15.
-pub(super) fn add_systems(_app: &mut bevy::prelude::App) {}
+/// Plugin assembly hook called by [`super::SettingsPlugin::build`].
+///
+/// Adds:
+/// - [`draw_dev_panel`] system on `Update`, conditional on
+///   [`DevPanelVisible::0`] being true.
+pub(super) fn add_systems(app: &mut bevy::prelude::App) {
+    app.add_systems(
+        bevy::prelude::Update,
+        draw_dev_panel.run_if(dev_panel_visible),
+    );
+}
+
+fn dev_panel_visible(visible: bevy::prelude::Res<'_, DevPanelVisible>) -> bool {
+    visible.0
+}
+
+/// Exclusive `&mut World` system that opens a `bevy-inspector-egui`
+/// world-inspector window. Renders nothing when the panel is hidden
+/// (the `run_if` above gates entry).
+fn draw_dev_panel(world: &mut bevy::prelude::World) {
+    // Guard: EguiPlugin must be initialized. In test harnesses that use
+    // MinimalPlugins without EguiPlugin the resource won't exist and
+    // SystemState::new would panic when initializing EguiContexts.
+    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+        return;
+    }
+
+    let mut state: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
+        bevy::ecs::system::SystemState::new(world);
+    let mut contexts = state.get_mut(world);
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let ctx = ctx.clone();
+    state.apply(world);
+
+    bevy_egui::egui::Window::new("Dev Inspector")
+        .id(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
+        .default_open(true)
+        .show(&ctx, |ui| {
+            bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+        });
+}
 
 #[cfg(test)]
 mod tests {

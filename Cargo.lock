@@ -5671,6 +5671,7 @@ name = "waveconductor"
 version = "5.0.0-dev"
 dependencies = [
  "bevy",
+ "bevy_egui",
  "tracing",
  "tracing-subscriber",
  "wc-core",

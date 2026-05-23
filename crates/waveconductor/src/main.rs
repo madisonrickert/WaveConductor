@@ -21,6 +21,7 @@ fn main() {
                 }),
                 ..default()
             }),
+            bevy_egui::EguiPlugin::default(),
             CorePlugin,
             SketchesPlugin,
         ))

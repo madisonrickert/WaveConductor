@@ -35,6 +35,8 @@ fn make_app() -> App {
     app.add_plugins(leafwing_input_manager::plugin::InputManagerPlugin::<
         wc_core::lifecycle::actions::WaveConductorAction,
     >::default());
+    // Insert the default input map so key presses can be translated to actions.
+    app.insert_resource(wc_core::lifecycle::actions::default_input_map());
     app.init_resource::<leafwing_input_manager::prelude::ActionState<
         wc_core::lifecycle::actions::WaveConductorAction,
     >>();
@@ -135,4 +137,37 @@ fn second_register_with_different_type_lists_both() {
     let keys: Vec<&str> = registry.entries.iter().map(|e| e.storage_key).collect();
     assert!(keys.contains(&"test"));
     assert!(keys.contains(&"second"));
+}
+
+#[test]
+fn toggling_dev_panel_via_action_updates_resource() {
+    use leafwing_input_manager::prelude::Buttonlike as _;
+
+    let mut app = make_app();
+    app.update();
+    assert!(!app.world().resource::<DevPanelVisible>().0);
+
+    // Simulate Shift+D using leafwing's `Buttonlike::press(world)` which
+    // sends `KeyboardInput` messages that `keyboard_input_system` processes
+    // in `PreUpdate`, letting leafwing translate them to `ToggleDevPanel`
+    // before `handle_dev_panel_toggle` runs in `Update`.
+    bevy::prelude::KeyCode::ShiftLeft.press(app.world_mut());
+    bevy::prelude::KeyCode::KeyD.press(app.world_mut());
+    app.update();
+    assert!(
+        app.world().resource::<DevPanelVisible>().0,
+        "Shift+D should make DevPanelVisible true"
+    );
+}
+
+#[test]
+fn full_app_schedule_runs_without_panicking() {
+    // Smoke test: 30 frames of updates must not panic with the egui
+    // contexts uninitialized (we never spawn a real window in this test,
+    // but EguiContexts::ctx_mut returns Err which the panel systems
+    // handle gracefully via the EguiUserTextures guard).
+    let mut app = make_app();
+    for _ in 0..30 {
+        app.update();
+    }
 }
