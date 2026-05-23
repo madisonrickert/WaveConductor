@@ -22,6 +22,10 @@ use super::state::AudioState;
 /// Wraps the live `cpal::Stream` so Bevy keeps it alive for the app's
 /// lifetime. `cpal::Stream` is `!Send` on macOS, hence the non-send resource.
 pub struct AudioStream {
+    /// Owned `cpal::Stream` handle. Never accessed after construction —
+    /// dropping `AudioStream` stops the underlying audio thread. The leading
+    /// underscore documents that intent to readers and silences the unused-
+    /// field lint. Do not rename to remove the underscore.
     _stream: cpal::Stream,
 }
 

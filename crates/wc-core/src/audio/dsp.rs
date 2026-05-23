@@ -75,9 +75,11 @@ impl DspHost {
         // Compute the effective gain once per buffer; both volume and mute
         // are buffer-level (no per-sample envelope yet).
         let gain = if self.muted { 0.0 } else { self.volume };
-        // Future synthesis would write samples and then multiply by gain.
-        // For now there are no sources, so the buffer is filled with zeros
-        // (which is `0.0 * gain`).
+        // TODO Plan 6: once synthesis sources are active, fill `output` from
+        // the DSP graph and multiply by `gain`. The Plan 4 mute test
+        // (`muted_render_outputs_zero_even_when_volume_high`) currently
+        // passes trivially because the buffer is forced to zero below; it
+        // must be re-validated against a non-silent source.
         let _ = gain;
         for sample in output.iter_mut() {
             *sample = 0.0;
