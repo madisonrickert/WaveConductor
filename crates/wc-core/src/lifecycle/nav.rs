@@ -63,8 +63,5 @@ pub fn handle_navigation_actions(
     }
 
     // ToggleVolume is handled by crate::audio::nav::handle_volume_toggle (Plan 4).
-    // ToggleDevPanel lands in Plan 5.
-    if actions.just_pressed(&A::ToggleDevPanel) {
-        tracing::info!("toggle dev panel (Plan 5 will handle)");
-    }
+    // ToggleDevPanel is handled by crate::settings::panel_dev::handle_dev_panel_toggle (Plan 5).
 }

@@ -13,19 +13,32 @@ fn main() {
     init_tracing();
     App::new()
         .add_plugins((
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "WaveConductor".into(),
-                    resolution: (1280_u32, 720_u32).into(),
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "WaveConductor".into(),
+                        resolution: (1280_u32, 720_u32).into(),
+                        ..default()
+                    }),
                     ..default()
-                }),
-                ..default()
-            }),
+                })
+                // We initialize tracing-subscriber in init_tracing() above;
+                // Bevy's LogPlugin would clobber that with its own subscriber
+                // and emit `ERROR Could not set global logger…` at startup.
+                .disable::<bevy::log::LogPlugin>(),
             bevy_egui::EguiPlugin::default(),
             CorePlugin,
             SketchesPlugin,
         ))
+        .add_systems(Startup, spawn_camera)
         .run();
+}
+
+/// Spawn the primary 2D camera. Required by `bevy_egui`, whose render pass
+/// is attached per camera — without one, the settings panels never reach the
+/// surface. Sketches in Plan 6+ keep this camera and project into it.
+fn spawn_camera(mut commands: Commands<'_, '_>) {
+    commands.spawn(Camera2d);
 }
 
 /// Initialize the global tracing subscriber.
