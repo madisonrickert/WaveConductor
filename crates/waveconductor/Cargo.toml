@@ -21,3 +21,4 @@ bevy = { workspace = true }
 wc-core = { workspace = true }
 wc-sketches = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

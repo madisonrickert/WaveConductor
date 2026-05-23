@@ -1,0 +1,138 @@
+//! Interaction tracking and idle / screensaver state transitions.
+//!
+//! The `InteractionTimer` resource records the time of the last detected
+//! interaction. Two systems drive its evolution:
+//!
+//! - [`reset_on_interaction`] resets the timer whenever any input event
+//!   (mouse, keyboard, touch) is observed.
+//! - [`advance_activity`] reads the timer each frame and transitions
+//!   [`crate::lifecycle::state::SketchActivity`] through
+//!   `Active → Idle → Screensaver` as the elapsed time crosses thresholds.
+
+use std::time::Duration;
+
+use bevy::prelude::*;
+
+use super::state::SketchActivity;
+
+/// Tracks when the user last interacted with the app, plus the thresholds at
+/// which the lifecycle plugin transitions the sketch activity state.
+#[derive(Resource, Debug, Clone)]
+pub struct InteractionTimer {
+    /// Time of last detected interaction, in `Res<Time>::elapsed()` units.
+    last_interaction: Duration,
+    /// After this much idle time, transition `Active → Idle`.
+    pub idle_threshold: Duration,
+    /// Additional idle time (beyond [`Self::idle_threshold`]) before the screensaver
+    /// overlay is shown. With the defaults of 30 s each, the screensaver appears
+    /// after 60 s of total inactivity.
+    pub screensaver_threshold: Duration,
+}
+
+impl Default for InteractionTimer {
+    fn default() -> Self {
+        Self {
+            last_interaction: Duration::ZERO,
+            // Both default to 30 s per v4 BaseSketch.ts.
+            idle_threshold: Duration::from_secs(30),
+            screensaver_threshold: Duration::from_secs(30),
+        }
+    }
+}
+
+impl InteractionTimer {
+    /// Record that an interaction just happened.
+    pub fn mark(&mut self, now: Duration) {
+        self.last_interaction = now;
+    }
+
+    /// Seconds elapsed since the last interaction.
+    #[must_use]
+    pub fn idle_for(&self, now: Duration) -> Duration {
+        now.saturating_sub(self.last_interaction)
+    }
+}
+
+/// Resets [`InteractionTimer`] whenever any input event is observed.
+///
+/// Reads mouse, keyboard, and touch message streams. Hand-tracking will be added
+/// in Plan 3 (Input system) by also watching `Messages<HandTrackingFrame>`.
+///
+/// Note: Bevy 0.18 renamed `EventReader`/`EventWriter` to `MessageReader`/`MessageWriter`.
+/// The readers must consume (`.read()`) messages rather than merely peeking with
+/// `.is_empty()`, because an unconsumed reader cursor never advances and would
+/// incorrectly report messages present on every subsequent frame.
+pub fn reset_on_interaction(
+    time: Res<'_, Time>,
+    mut timer: ResMut<'_, InteractionTimer>,
+    mut mouse_motion: MessageReader<'_, '_, bevy::input::mouse::MouseMotion>,
+    mut mouse_buttons: MessageReader<'_, '_, bevy::input::mouse::MouseButtonInput>,
+    mut keyboard: MessageReader<'_, '_, bevy::input::keyboard::KeyboardInput>,
+    mut touch: MessageReader<'_, '_, bevy::input::touch::TouchInput>,
+) {
+    let any_event = mouse_motion.read().count() > 0
+        || mouse_buttons.read().count() > 0
+        || keyboard.read().count() > 0
+        || touch.read().count() > 0;
+    if any_event {
+        timer.mark(time.elapsed());
+    }
+}
+
+/// Reads [`InteractionTimer`] and transitions [`SketchActivity`] when the
+/// configured thresholds are crossed.
+///
+/// Skips cleanly when `SketchActivity` doesn't exist (i.e. when `AppState` is
+/// `Home`): the sub-state resource is absent outside sketch states, so both
+/// params are wrapped in `Option` to avoid system-param validation failures.
+pub fn advance_activity(
+    time: Res<'_, Time>,
+    timer: Res<'_, InteractionTimer>,
+    current: Option<Res<'_, State<SketchActivity>>>,
+    next: Option<ResMut<'_, NextState<SketchActivity>>>,
+) {
+    let (Some(current), Some(mut next)) = (current, next) else {
+        return; // Not in a sketch state; nothing to do.
+    };
+    let idle = timer.idle_for(time.elapsed());
+    let target = if idle >= timer.screensaver_threshold + timer.idle_threshold {
+        SketchActivity::Screensaver
+    } else if idle >= timer.idle_threshold {
+        SketchActivity::Idle
+    } else {
+        SketchActivity::Active
+    };
+    if *current.get() != target {
+        next.set(target);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_for_handles_clock_resets() {
+        let mut timer = InteractionTimer::default();
+        timer.mark(Duration::from_secs(10));
+        // Querying with an earlier "now" should saturate to zero, not panic.
+        assert_eq!(timer.idle_for(Duration::from_secs(5)), Duration::ZERO);
+    }
+
+    #[test]
+    fn idle_for_reports_elapsed() {
+        let mut timer = InteractionTimer::default();
+        timer.mark(Duration::from_secs(10));
+        assert_eq!(
+            timer.idle_for(Duration::from_secs(45)),
+            Duration::from_secs(35)
+        );
+    }
+
+    #[test]
+    fn defaults_match_v4_thirty_second_idle() {
+        let timer = InteractionTimer::default();
+        assert_eq!(timer.idle_threshold, Duration::from_secs(30));
+        assert_eq!(timer.screensaver_threshold, Duration::from_secs(30));
+    }
+}

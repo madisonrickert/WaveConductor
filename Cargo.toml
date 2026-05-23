@@ -20,6 +20,7 @@ rust-version = "1.89"
 # cpal+fundsp+rustfft directly, not bevy_audio). DefaultPlugins gracefully
 # skips AudioPlugin when the feature is absent.
 bevy = { version = "0.18", default-features = false, features = [
+    "bevy_state",
     "bevy_winit",
     "bevy_render",
     "bevy_pbr",
@@ -35,13 +36,14 @@ bevy = { version = "0.18", default-features = false, features = [
 # UI
 bevy_egui = "0.30"
 bevy-inspector-egui = "0.27"
-# Input action mapping (added in Plan 2; declared here so workspace pins the version)
-leafwing-input-manager = "0.16"
+# Input action mapping (added in Plan 2; 0.20 is the Bevy-0.18-compatible release)
+leafwing-input-manager = "0.20"
 # Diagnostics & debug
 bevy_mod_debugdump = "0.13"
 # Errors & logging
 thiserror = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Serde stack (used by settings persistence in Plan 2)
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -71,6 +73,8 @@ as_conversions = "warn"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
+# Bevy system functions take `Res<T>` by value — that's the Bevy system-param contract.
+needless_pass_by_value = "allow"
 
 [profile.dev]
 opt-level = 1

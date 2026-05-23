@@ -14,5 +14,6 @@ workspace = true
 
 [dependencies]
 bevy = { workspace = true }
+leafwing-input-manager = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
