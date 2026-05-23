@@ -253,9 +253,55 @@ For sketches that want a single "wherever the user is pointing" stream across mo
 
 A `wc-core/ui/` egui widget renders the `LeapStatusIndicator` equivalent, reading `HandTrackingStatus` from the active provider. The widget is the v4 indicator at feature parity.
 
-#### Keyboard shortcuts via `leafwing-input-manager`
+#### Action-shaped input via `leafwing-input-manager`
 
-v4's keyboard shortcuts (`1`–`5` jump to sketch, `z`/`←` previous, `x`/`→` next, `Escape` home, `V` volume, `Shift+D` dev panel, `F11` fullscreen, `Alt+F4` quit) are bound declaratively via `leafwing-input-manager` rather than ad-hoc `ButtonInput<KeyCode>` checks. A `WaveConductorAction` enum (e.g. `NavigatePrev`, `NavigateNext`, `SelectSketch(u8)`, `ToggleVolume`, `ToggleDevPanel`, `ToggleFullscreen`, `Quit`) is bound to physical keys at startup; sketches and the lifecycle plugin read `Res<ActionState<WaveConductorAction>>` with the same idioms as `ButtonInput`. Bindings are configurable at runtime and persisted alongside other app-level settings.
+All *discrete, action-shaped* input across every modality (keyboard, mouse buttons, touch presence, hand buttons) is unified through `leafwing-input-manager`. *Continuous positional* and *structured* data (cursor position, hand landmarks, audio spectrum) stays on Bevy-native resources — leafwing is not designed for those and we don't bend it to fit. The dividing line:
+
+| Input shape                                                | Read from                                                                              |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Discrete action state ("pressed", "just pressed", "just released") | `Res<ActionState<T>>` (leafwing)                                                       |
+| Continuous positional data (cursor, touches, palm in screen space) | Bevy native (`window.cursor_position()`, `Res<Touches>`) + `Res<PointerState>` merge   |
+| Continuous structured state (hand landmarks, FFT bins, palm normal) | `Res<HandTrackingState>`, `Res<AudioState>`                                            |
+
+**App-level shortcuts** are one global `WaveConductorAction` enum bound by leafwing:
+
+```rust
+#[derive(Actionlike, Reflect, Clone, Hash, PartialEq, Eq, Debug)]
+enum WaveConductorAction {
+    NavigatePrev, NavigateNext, SelectSketch(u8),
+    ToggleVolume, ToggleDevPanel, ToggleFullscreen, Quit,
+}
+```
+
+v4's hotkey table (`1`–`5`, `z`/`←`, `x`/`→`, `Escape`, `V`, `Shift+D`, `F11`, `Alt+F4`) becomes the `InputMap<WaveConductorAction>` bindings. The lifecycle plugin and UI systems read `Res<ActionState<WaveConductorAction>>` with the same `pressed` / `just_pressed` idioms as `ButtonInput`.
+
+**Per-sketch interactions** are per-sketch action enums, each independently bound and cross-modal:
+
+```rust
+#[derive(Actionlike, Reflect, Clone, Hash, PartialEq, Eq, Debug)]
+enum LineAction {
+    SpawnAttractor,    // bound to MouseButton::Left, any TouchInput active,
+                       // HandButton::LeftPinch, HandButton::RightPinch
+}
+```
+
+A sketch system then reads action and position as two separate questions:
+
+```rust
+fn line_update(
+    action_state: Res<ActionState<LineAction>>,
+    pointer: Res<PointerState>,
+    // ...
+) {
+    if action_state.pressed(&LineAction::SpawnAttractor) {
+        spawn_attractor_at(pointer.primary);
+    }
+}
+```
+
+The sketch asks "is the user trying to attract?" (action) and "where are they pointing?" (position). It does not know or care which physical input fired the action.
+
+**Integration**: `HandButton` implements leafwing's `Buttonlike` trait in `wc-core/input/` so it can appear in `InputMap`. `HandTrackingPlugin` continues to populate `Res<ButtonInput<HandButton>>` (the Bevy-native resource) *and* drives leafwing's `ActionState` through the trait. Future `MediaPipeProvider` slots in with zero leafwing-side changes — same `HandButton` enum, different driver underneath. Future "rebind controls" UI gets built once and covers keyboard, mouse, and hand uniformly.
 
 ### 5.4 Audio
 
@@ -469,7 +515,7 @@ A single dispatcher script under `xtask/` (its own workspace member) provides th
 | ---------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `bevy-egui`                  | Settings UI panels (User category), in-app overlays                                                  |
 | `bevy-inspector-egui`        | Dev panel (Shift+D) — Reflect-based inspection of all settings and any other inspectable resource. Replaces the v4 ad-hoc dev panel. |
-| `leafwing-input-manager`     | Keyboard shortcuts (1–5, z/x, Escape, V, Shift+D, F11, Alt+F4) as declarative `ActionState` enums. Replaces ad-hoc `ButtonInput<KeyCode>` polling. v4's `react-hotkeys-hook` equivalent. |
+| `leafwing-input-manager`     | All discrete, action-shaped input across keyboard, mouse buttons, touch presence, and hand buttons. Declarative `ActionState<T>` enums with cross-modal binding (one action can fire from keyboard *or* mouse *or* hand pinch). Used for app-level shortcuts and per-sketch interactions. Continuous positional/structured data stays on Bevy-native resources, not leafwing. |
 | `bevy_framepace`             | Deterministic frame pacing for multi-hour thermal stability. Spike during perf-audit; adopt if it helps the thermal goal. |
 | `bevy_mod_debugdump`         | Schedule inspection in integration tests (already in §5.8)                                           |
 
