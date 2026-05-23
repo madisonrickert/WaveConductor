@@ -199,8 +199,8 @@ impl Plugin for HandTrackingPlugin {
         app
             .init_resource::<HandTrackingState>()       // continuous, like Touches
             .init_resource::<ButtonInput<HandButton>>() // discrete press state, like ButtonInput<MouseButton>
-            .add_event::<HandTrackingFrame>()           // raw provider output
-            .add_event::<HandGestureEvent>()            // derived discrete moments
+            .add_message::<HandTrackingFrame>()         // raw provider output
+            .add_message::<HandGestureEvent>()          // derived discrete moments
             .add_systems(
                 PreUpdate,
                 (
@@ -219,8 +219,8 @@ What sketches consume:
 
 - `Res<HandTrackingState>` — continuous per-hand data (active hand count, 21-landmark per-hand data, palm normal, pinch strength, grab strength, timestamp). Same idiom as `Res<Touches>`.
 - `Res<ButtonInput<HandButton>>` where `HandButton ∈ {LeftPinch, RightPinch, LeftGrab, RightGrab, …}` — gives sketches `pinch.just_pressed(HandButton::LeftPinch)` with the exact same shape as `mouse.just_pressed(MouseButton::Left)`.
-- `Events<HandGestureEvent>` — discrete moments worth eventing (swipe, double-pinch).
-- `Events<HandTrackingFrame>` — raw provider frames for systems that want them (analytics, recording).
+- `Messages<HandGestureEvent>` — discrete moments worth eventing (swipe, double-pinch).
+- `Messages<HandTrackingFrame>` — raw provider frames for systems that want them (analytics, recording).
 
 Behind the plugin, a strategy-pattern trait selects which source feeds the pipeline:
 
@@ -228,7 +228,7 @@ Behind the plugin, a strategy-pattern trait selects which source feeds the pipel
 pub trait HandTrackingProvider: Send + Sync + 'static {
     fn start(&mut self) -> Result<(), HandTrackingError>;
     fn stop(&mut self);
-    fn poll(&mut self, out: &mut Events<HandTrackingFrame>);
+    fn poll(&mut self, out: &mut Messages<HandTrackingFrame>);
     fn status(&self) -> HandTrackingStatus;
 }
 ```

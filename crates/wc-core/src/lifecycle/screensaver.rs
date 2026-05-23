@@ -11,13 +11,13 @@ use bevy::prelude::*;
 #[derive(Resource, Default, Debug)]
 pub struct ScreensaverActive;
 
-/// `OnEnter(SketchActivity::Screensaver)` handler — inserts the marker.
+/// `OnEnter(SketchActivity::Screensaver)` handler — inserts the [`ScreensaverActive`] marker resource and logs the transition.
 pub fn show(mut commands: Commands<'_, '_>) {
     tracing::info!("screensaver: show");
     commands.insert_resource(ScreensaverActive);
 }
 
-/// `OnExit(SketchActivity::Screensaver)` handler — removes the marker.
+/// `OnExit(SketchActivity::Screensaver)` handler — removes the [`ScreensaverActive`] marker resource and logs the transition.
 pub fn hide(mut commands: Commands<'_, '_>) {
     tracing::info!("screensaver: hide");
     commands.remove_resource::<ScreensaverActive>();
