@@ -62,11 +62,8 @@ pub fn handle_navigation_actions(
         exit.write(AppExit::Success);
     }
 
-    // ToggleVolume and ToggleDevPanel land in Plans 4 and 5 respectively.
-    // For now we log so manual testing can verify the action is firing.
-    if actions.just_pressed(&A::ToggleVolume) {
-        tracing::info!("toggle volume (Plan 4 will handle)");
-    }
+    // ToggleVolume is handled by crate::audio::nav::handle_volume_toggle (Plan 4).
+    // ToggleDevPanel lands in Plan 5.
     if actions.just_pressed(&A::ToggleDevPanel) {
         tracing::info!("toggle dev panel (Plan 5 will handle)");
     }

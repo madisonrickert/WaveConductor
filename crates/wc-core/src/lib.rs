@@ -4,6 +4,7 @@
 //! settings, and math helpers. Sketches consume this crate via [`CorePlugin`];
 //! the binary crate registers `CorePlugin` once at app startup.
 
+pub mod audio;
 pub mod input;
 pub mod lifecycle;
 
@@ -11,14 +12,14 @@ use bevy::prelude::*;
 
 /// Single plugin that bundles every wc-core subsystem.
 ///
-/// Registered once by the binary crate. As subsystems land in later plans,
-/// they are added as sub-plugins inside this `build()` method.
+/// Registered once by the binary crate.
 pub struct CorePlugin;
 
 impl Plugin for CorePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(lifecycle::LifecyclePlugin);
         app.add_plugins(input::HandTrackingPlugin);
+        app.add_plugins(audio::AudioPlugin);
     }
 }
 

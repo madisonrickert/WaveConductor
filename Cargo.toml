@@ -46,6 +46,11 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Audio (Plan 4): cross-platform I/O, DSP graph, FFT, lock-free rings.
+cpal = "0.16"
+fundsp = { version = "0.21", default-features = false }
+rtrb = "0.3"
+rustfft = "6"
 # Serde stack (used by settings persistence in Plan 2)
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
