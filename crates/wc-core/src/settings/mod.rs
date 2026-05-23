@@ -12,8 +12,8 @@
 //! 3. Each frame, [`registry::emit_restart_events`] diffs every registered
 //!    resource against its [`registry::PreviousSnapshot`]; any change to a
 //!    `requires_restart` field writes a [`event::SketchRestart`] message.
-//! 4. The user panel ([`panel_user`]) iterates the registry and draws only
-//!    `category = User` fields. The dev panel ([`panel_dev`]) opens a
+//! 4. The user panel (`panel_user`, private) iterates the registry and draws
+//!    only `category = User` fields. The dev panel ([`panel_dev`]) opens a
 //!    `bevy-inspector-egui` window when [`panel_dev::DevPanelVisible`] is
 //!    true, exposing every Reflect-registered resource (including the
 //!    sketch settings types, which `register_sketch_settings` registers

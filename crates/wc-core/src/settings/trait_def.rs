@@ -12,7 +12,7 @@ use super::def::SettingDef;
 ///
 /// - Live as a Bevy `Resource`, so systems read them with `Res<S>`.
 /// - Round-trip through `serde` (Serialize + Deserialize) for persistence.
-/// - Carry a [`bevy_reflect::Reflect`] impl so the dev panel can edit them
+/// - Carry a [`bevy::reflect::Reflect`] impl so the dev panel can edit them
 ///   without per-struct code.
 ///
 /// The derive macro emits `Default` for the implementor and the

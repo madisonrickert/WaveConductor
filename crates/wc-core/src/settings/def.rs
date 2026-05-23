@@ -36,7 +36,7 @@ pub struct NumberRange {
 /// Which panel a setting is shown in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsCategory {
-    /// User-facing curated control. Appears in the [`crate::settings::panel_user`] panel.
+    /// User-facing curated control. Appears in the curated settings panel.
     User,
     /// Developer-only knob. Visible only via the Shift+D dev inspector.
     Dev,
