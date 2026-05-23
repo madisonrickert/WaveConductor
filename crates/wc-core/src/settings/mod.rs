@@ -18,8 +18,10 @@
 //!    true, exposing every Reflect-registered resource (including the
 //!    sketch settings types, which `register_sketch_settings` registers
 //!    automatically).
-//! 5. A debounced save system writes the current resource value back to
-//!    disk shortly after the last mutation.
+//! 5. (Phase B) A debounced save system will write the current resource back
+//!    to disk shortly after the last mutation. Phase A does not wire this
+//!    automatically — call [`persistence::save::<S>`] manually when you need
+//!    to persist a change.
 
 pub mod def;
 pub mod event;
@@ -64,6 +66,8 @@ impl Plugin for SettingsPlugin {
                 )
                     .chain(),
             );
+        // TODO Phase B: wire save_fn as a debounced system so mutations are
+        // persisted automatically without callers invoking save::<S> manually.
         // egui-based UI systems are wired below.
         panel_user::add_systems(app);
         panel_dev::add_systems(app);

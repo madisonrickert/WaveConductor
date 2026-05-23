@@ -55,7 +55,7 @@ impl<S: SketchSettings> Default for PreviousSnapshot<S> {
 /// Returns `true` if any field marked `requires_restart` differs between
 /// `prev` and `curr`. Compares by serializing both to TOML values — slower
 /// than per-field equality but works without a per-struct generated diff
-/// function and is only called when the resource is mutated.
+/// function. Only called after confirming `S` was mutated this frame.
 fn requires_restart_changed<S: SketchSettings>(prev: &S, curr: &S) -> bool {
     let restart_fields: Vec<&'static str> = S::settings_def()
         .iter()
@@ -86,11 +86,18 @@ pub fn save_fn<S: SketchSettings>(world: &World) {
 
 /// The restart-diff closure baked per `S` at registration time.
 ///
-/// Updates the `PreviousSnapshot<S>` resource on every call so subsequent
-/// frames diff against the most recent persisted view.
+/// Short-circuits when `S` has not been mutated this frame — no cloning,
+/// no snapshot update, no TOML serialization. Only when `is_resource_changed`
+/// returns true does it clone the resource, update `PreviousSnapshot<S>`,
+/// and delegate to `requires_restart_changed`.
 pub fn diff_requires_restart_fn<S: SketchSettings>(world: &mut World) -> bool {
+    if !world.is_resource_changed::<S>() {
+        return false;
+    }
     let curr = world.resource::<S>().clone();
-    // SAFETY: we know the snapshot was inserted at registration time.
+    // PreviousSnapshot<S> is inserted at registration time; if it's missing
+    // here, S was not registered through register_sketch_settings — return
+    // false rather than panicking.
     let prev_snap = world
         .get_resource_mut::<PreviousSnapshot<S>>()
         .map(|mut p| {

@@ -19,10 +19,11 @@ use wc_core::settings::{
 fn make_app() -> App {
     // Isolate config dir so this test doesn't read the dev's real settings file.
     let dir = std::env::temp_dir().join(format!("wc-settings-plugin-test-{}", std::process::id()));
-    // SAFETY: tests in this binary run with --test-threads=1 implicitly via
-    // cargo test's per-binary single-threaded default for #[test] fns that
-    // share process state. If we add tests that need parallelism later,
-    // gate this with a Mutex like settings_persistence.rs does.
+    // SAFETY: all invocations of make_app write the same idempotent value
+    // (a stable per-process temp dir path derived from std::process::id()) to
+    // the same env var, so repeated or concurrent writes converge on a
+    // consistent result. If this binary is ever run with multiple threads,
+    // guard this with a Mutex as settings_persistence.rs does.
     unsafe {
         std::env::set_var("WAVECONDUCTOR_CONFIG_DIR", &dir);
     }
