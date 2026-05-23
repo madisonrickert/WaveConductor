@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "WaveConductor shared infrastructure: lifecycle, audio, input, settings, math."
+publish = false
 
 [lints]
 workspace = true

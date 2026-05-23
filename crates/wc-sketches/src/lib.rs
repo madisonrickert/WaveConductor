@@ -4,8 +4,6 @@
 //! themselves arrive in Plan 3 (Line) and Plan 4 (Flame, Dots, Cymatics, Waves).
 //! In Plan 1 this is an empty placeholder so the workspace builds end-to-end.
 
-#![warn(missing_docs)]
-
 use bevy::prelude::*;
 
 /// Single plugin that bundles every sketch.

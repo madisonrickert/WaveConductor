@@ -80,7 +80,7 @@ waveconductor/                                # repo root
 ├── assets/                                   # shaders, fonts, images, audio samples
 │   ├── shaders/                              # WGSL files, hot-reloadable in dev
 │   ├── fonts/
-│   └── icons/
+│   └── app-icons/                          # renamed from "icons" — macOS global gitignore `Icon?` matches "icons" case-insensitively
 ├── crates/
 │   ├── waveconductor/
 │   │   ├── Cargo.toml

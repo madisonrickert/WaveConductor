@@ -14,7 +14,20 @@ Interactive art gallery. Five generative-art sketches with hand-tracking and aud
 cargo run -p waveconductor
 ```
 
-Requires Rust 1.85+. Pinned via `rust-toolchain.toml`.
+Requires Rust 1.89+. Pinned via `rust-toolchain.toml`.
+
+### Linux build prerequisites
+
+On Debian/Ubuntu, install Bevy's native dependencies:
+
+```sh
+sudo apt-get install -y \
+    libasound2-dev libudev-dev \
+    libwayland-dev libxkbcommon-dev \
+    libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+```
+
+macOS and Windows have no extra prerequisites beyond Rust.
 
 ## Documentation
 

@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "WaveConductor v5 — Rust + Bevy interactive art gallery."
+publish = false
 
 [[bin]]
 name = "waveconductor"

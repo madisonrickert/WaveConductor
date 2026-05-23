@@ -18,6 +18,11 @@ struct Entry {
     description: &'static str,
 }
 
+// Hand-maintained list of xtask subcommands. The `Command` enum in `main.rs` is
+// the authoritative source for what subcommands exist; this table mirrors that
+// list for the human-readable manifest output. If you add a subcommand to
+// `main.rs`, you MUST add an entry here too, or the manifest will silently
+// diverge from the real command surface.
 const SUBCOMMANDS: &[Entry] = &[
     Entry {
         name: "manifest",

@@ -7,8 +7,6 @@
 //! In Plan 1, `CorePlugin` is an empty placeholder. Subsystems are filled in by
 //! Plan 2 (Core Scaffolding) and beyond.
 
-#![warn(missing_docs)]
-
 use bevy::prelude::*;
 
 /// Single plugin that bundles every wc-core subsystem.
