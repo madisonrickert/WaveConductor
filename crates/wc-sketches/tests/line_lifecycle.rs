@@ -183,8 +183,16 @@ fn update_sim_params_does_not_run_when_idle() {
         .get_resource::<LineSimParams>()
         .map_or(0.0_f32, |p| p.params.dt);
 
-    assert_eq!(
-        dt_before, dt_after,
-        "update_sim_params must not run while SketchActivity::Idle (dt changed)"
-    );
+    // Intentional bit-for-bit equality: if the system did not run, the value
+    // must be exactly unchanged — not approximately equal.
+    #[allow(
+        clippy::float_cmp,
+        reason = "bit-for-bit equality check: update_sim_params must not have written to sim.params.dt"
+    )]
+    {
+        assert_eq!(
+            dt_before, dt_after,
+            "update_sim_params must not run while SketchActivity::Idle (dt changed)"
+        );
+    }
 }
