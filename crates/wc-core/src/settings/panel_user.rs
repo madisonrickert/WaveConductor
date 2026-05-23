@@ -75,7 +75,7 @@ fn draw_user_panel(world: &mut World) {
 
 /// Look up the type registration matching `storage_key` and render its
 /// `User`-category fields. Walks the `TypeRegistry` to find the registered
-/// settings type whose `SETTINGS_STORAGE_KEY` matches; uses reflection to
+/// settings type whose `STORAGE_KEY` matches; uses reflection to
 /// read/write fields without static type knowledge.
 fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'static str) {
     // Find the entry's defs (still a borrow of the resource; copy out).

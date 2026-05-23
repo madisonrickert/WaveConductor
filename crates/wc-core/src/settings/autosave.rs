@@ -8,13 +8,14 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use smallvec::SmallVec;
 
 use super::registry::SettingsRegistry;
 
 /// Function pointer + key pair snapshot for change detection.
-type ChangedSnapshot = Vec<(fn(&World) -> bool, &'static str)>;
+type ChangedSnapshot = SmallVec<[(fn(&World) -> bool, &'static str); 8]>;
 /// Function pointer + key pair snapshot for save dispatch.
-type SaveSnapshot = Vec<(fn(&World), &'static str)>;
+type SaveSnapshot = SmallVec<[(fn(&World), &'static str); 8]>;
 
 /// Debounce window. Saves trigger this many seconds after the last change.
 pub const DEBOUNCE_SECS: f32 = 0.5;
@@ -39,7 +40,7 @@ pub fn detect_changes(world: &mut World) {
                 .collect()
         })
         .unwrap_or_default();
-    let mut to_arm = Vec::new();
+    let mut to_arm = SmallVec::<[&'static str; 8]>::new();
     for (changed_fn, key) in snapshot {
         if changed_fn(world) {
             to_arm.push(key);
@@ -57,9 +58,9 @@ pub fn detect_changes(world: &mut World) {
 /// Advance debounce timers and fire `save_fn` when a timer reaches zero.
 pub fn tick(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
-    let to_save: Vec<&'static str> = {
+    let to_save: SmallVec<[&'static str; 8]> = {
         let mut state = world.resource_mut::<AutosaveState>();
-        let mut fire = Vec::new();
+        let mut fire = SmallVec::<[&'static str; 8]>::new();
         state.pending.retain(|key, timer| {
             *timer -= dt;
             if *timer <= 0.0 {

@@ -1,10 +1,12 @@
-//! Synthetic settings struct exercised by Plan-5 integration tests and
-//! used to populate the user panel before any real sketches exist.
+//! Synthetic settings struct exercised by Plan-5 integration tests.
 //!
-//! This file ships in the production binary because the dev panel and user
-//! panel both want at least one example struct to render against before
-//! Plan 6+ ships real sketches. After the first real sketch lands, this
-//! file becomes test-only — gate it on `#[cfg(test)]` then.
+//! Plan 5 originally registered this in production `SettingsPlugin::build` so
+//! the panels had something to render before any real sketches existed. Plan 6
+//! Phase 0 (this commit's lineage) moved that registration into the integration
+//! test harness — the file still ships in the production binary (no `#[cfg(test)]`
+//! gate) but is no longer instantiated unless a test explicitly registers it.
+//! The next plan that introduces a second real sketch can drop the file entirely
+//! or `#[cfg(test)]`-gate the module.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
