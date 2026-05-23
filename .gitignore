@@ -1,28 +1,38 @@
-node_modules/
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock.bak
 
-ableton music
-
-Thumbs.db
-.DS_Store
-
-*.js.map
-*.css.map
-
+# IDE
+.vscode/
 .idea/
+*.swp
+*.swo
+*~
 
-yarn-error.log
+# OS
+.DS_Store
+Thumbs.db
 
-dist
-dist-electron/
-release/
+# Build artifacts
+/dist/
+/release/
+/release-artifacts/
 
-openpose-1.3.0-win64-gpu-binaries/
+# Local env
+.env
+.env.local
 
-# VS Code
-*.code-workspace
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/*.code-snippets
+# Coverage
+/coverage/
+/lcov.info
+
+# Web build outputs (Plan 5)
+/web/dist/
+/web/.trunk/
+
+# Perf audit outputs (Plan 6) — keep reports, ignore intermediate raw data
+/perf-harness/raw/
+
+# Misc
+*.log

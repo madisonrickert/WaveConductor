@@ -918,7 +918,7 @@ fn clean_tree_passes() {
 
 #[test]
 fn home_dir_path_is_flagged() {
-    let (ok, out) = run_against("// path: /Users/madison/Developer/foo\n");
+    let (ok, out) = run_against("// path: /Users/alice/Developer/foo\n");
     assert!(!ok, "home-dir path should be flagged");
     assert!(out.contains("/Users/"), "report should mention the offending pattern: {out}");
 }

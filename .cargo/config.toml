@@ -1,0 +1,7 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[build]
+# Parallel frontend (rustc -Z threads=...) is nightly-only. Uncomment only when
+# building with a nightly override.
+# rustflags = ["-Z", "threads=8"]

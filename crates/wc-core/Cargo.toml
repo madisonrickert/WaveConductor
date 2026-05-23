@@ -1,0 +1,8 @@
+[package]
+name = "wc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Stub crate — implementation lands in Plan 2.

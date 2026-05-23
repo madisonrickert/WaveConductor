@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/waveconductor",
+    "crates/wc-core",
+    "crates/wc-sketches",
+    "xtask",
+]
+
+[workspace.package]
+version = "5.0.0-dev"
+edition = "2021"
+license = "MIT"
+authors = ["Madison Rickert <3495636+madisonrickert@users.noreply.github.com>"]
+repository = "https://github.com/madisonrickert/WaveConductor"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Core engine. Note: bevy_audio is deliberately omitted (spec §5.4 says we use
+# cpal+fundsp+rustfft directly, not bevy_audio). DefaultPlugins gracefully
+# skips AudioPlugin when the feature is absent.
+bevy = { version = "0.18", default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_pbr",
+    "bevy_core_pipeline",
+    "bevy_asset",
+    "default_font",
+    "x11",
+    "wayland",
+    "webgl2",
+    "tonemapping_luts",
+] }
+# UI
+bevy_egui = "0.30"
+bevy-inspector-egui = "0.27"
+# Input action mapping (added in Plan 2; declared here so workspace pins the version)
+leafwing-input-manager = "0.16"
+# Diagnostics & debug
+bevy_mod_debugdump = "0.13"
+# Errors & logging
+thiserror = "1"
+tracing = "0.1"
+# Serde stack (used by settings persistence in Plan 2)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Native config dirs
+dirs = "5"
+# xtask
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+regex = "1"
+tempfile = "3"
+# Workspace-internal crates
+wc-core = { path = "crates/wc-core" }
+wc-sketches = { path = "crates/wc-sketches" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+as_conversions = "warn"
+# Allowed pedantic lints (too noisy for game/sketch code):
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.dev]
+opt-level = 1
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
