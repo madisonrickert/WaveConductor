@@ -83,15 +83,16 @@ impl HandTrackingState {
 
 /// One raw frame from a [`super::provider::HandTrackingProvider`].
 ///
-/// Emitted as a `Messages<HandTrackingFrame>` event by
+/// Emitted as `Messages<HandTrackingFrame>` by
 /// [`crate::input::systems::poll_active_provider`]. Most systems consume the
 /// derived [`HandTrackingState`] resource instead; raw frames are useful for
 /// analytics, recording, and the lifecycle interaction-reset system.
 #[derive(Message, Debug, Clone)]
 pub struct HandTrackingFrame {
-    /// Active hands in this frame.
+    /// Hands tracked in this frame, in provider order. Empty when no hands
+    /// are present in the tracking volume.
     pub hands: SmallVec<[Hand; MAX_HANDS]>,
-    /// Timestamp of the frame (provider-relative clock).
+    /// Time the frame was captured by the provider (provider-relative clock).
     pub timestamp: Duration,
 }
 

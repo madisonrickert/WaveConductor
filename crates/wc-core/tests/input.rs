@@ -121,6 +121,47 @@ fn pinch_release_below_release_threshold() {
 }
 
 #[test]
+fn grab_crossing_threshold_presses_button() {
+    let mut app = test_app_with_mock(MockProvider::with_frames([
+        // Frame 1: grab below press threshold → not pressed.
+        frame([fake_hand(Chirality::Right, 0.0, 0.5)], 100),
+        // Frame 2: grab above press threshold → pressed.
+        frame([fake_hand(Chirality::Right, 0.0, 0.9)], 200),
+    ]));
+    app.update();
+    {
+        let buttons = app.world().resource::<ButtonInput<HandButton>>();
+        assert!(!buttons.pressed(HandButton::RightGrab));
+    }
+    app.update();
+    let buttons = app.world().resource::<ButtonInput<HandButton>>();
+    assert!(buttons.pressed(HandButton::RightGrab));
+    assert!(buttons.just_pressed(HandButton::RightGrab));
+}
+
+#[test]
+fn two_hand_frame_sets_both_sides() {
+    let mut app = test_app_with_mock(MockProvider::with_frames([frame(
+        [
+            fake_hand(Chirality::Left, 0.0, 0.0),
+            fake_hand(Chirality::Right, 0.0, 0.0),
+        ],
+        100,
+    )]));
+    app.update();
+    let state = app.world().resource::<HandTrackingState>();
+    assert_eq!(state.active_hand_count(), 2);
+    assert!(
+        state.left().is_some(),
+        "left() should find the Left chirality hand"
+    );
+    assert!(
+        state.right().is_some(),
+        "right() should find the Right chirality hand"
+    );
+}
+
+#[test]
 fn gesture_events_emitted_for_press_and_release() {
     let mut app = test_app_with_mock(MockProvider::with_frames([
         frame([fake_hand(Chirality::Left, 0.9, 0.0)], 100),

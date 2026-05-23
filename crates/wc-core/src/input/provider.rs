@@ -62,8 +62,13 @@ impl Default for ActiveProvider {
 }
 
 impl ActiveProvider {
-    /// Wrap a provider impl as the active provider. Calls [`HandTrackingProvider::start`] eagerly
-    /// and logs the result.
+    /// Wrap a provider impl as the active provider. Calls
+    /// [`HandTrackingProvider::start`] eagerly and logs the result.
+    ///
+    /// If `start` returns an error, the provider is still installed (so
+    /// `Res<ActiveProvider>` is always populated) but [`HandTrackingProvider::status`]
+    /// will report the provider's error state. Callers that need to confirm
+    /// readiness should check `provider.inner.status()` after construction.
     #[must_use]
     pub fn new<P: HandTrackingProvider>(mut provider: P) -> Self {
         if let Err(err) = provider.start() {
