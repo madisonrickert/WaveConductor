@@ -104,7 +104,7 @@ waveconductor/                                # repo root
 │   │       │   └── mock.rs                   # test-only
 │   │       ├── settings/                     # SettingDef, derive macro, store
 │   │       ├── lifecycle/                    # AppState, SketchActivity, idle, screensaver
-│   │       ├── math/                         # noise, easing, tuning
+│   │       ├── math/                         # noise (via `noise` crate), tuning; easing is bevy_math::curve native
 │   │       └── ui/                           # bevy-egui panels, status widgets
 │   └── wc-sketches/
 │       ├── Cargo.toml
@@ -253,6 +253,10 @@ For sketches that want a single "wherever the user is pointing" stream across mo
 
 A `wc-core/ui/` egui widget renders the `LeapStatusIndicator` equivalent, reading `HandTrackingStatus` from the active provider. The widget is the v4 indicator at feature parity.
 
+#### Keyboard shortcuts via `leafwing-input-manager`
+
+v4's keyboard shortcuts (`1`–`5` jump to sketch, `z`/`←` previous, `x`/`→` next, `Escape` home, `V` volume, `Shift+D` dev panel, `F11` fullscreen, `Alt+F4` quit) are bound declaratively via `leafwing-input-manager` rather than ad-hoc `ButtonInput<KeyCode>` checks. A `WaveConductorAction` enum (e.g. `NavigatePrev`, `NavigateNext`, `SelectSketch(u8)`, `ToggleVolume`, `ToggleDevPanel`, `ToggleFullscreen`, `Quit`) is bound to physical keys at startup; sketches and the lifecycle plugin read `Res<ActionState<WaveConductorAction>>` with the same idioms as `ButtonInput`. Bindings are configurable at runtime and persisted alongside other app-level settings.
+
 ### 5.4 Audio
 
 Audio runs off the Bevy thread. Two-way communication via lock-free ring buffers and an `AudioState` resource.
@@ -306,6 +310,7 @@ The `SketchSettings` derive macro emits:
 
 - `Default` impl based on the per-field `default` annotation.
 - `serde::Serialize` and `serde::Deserialize` impls.
+- `bevy_reflect::Reflect` impl, so settings are inspectable by any Reflect-based tool (including `bevy-inspector-egui`).
 - A runtime `SettingsDef` table (label, min, max, step, category, type hint, requires-restart flag) consumed by the egui panel.
 
 Persistence:
@@ -315,7 +320,10 @@ Persistence:
 
 No v4 migration. v5 ships with defaults on every platform on first launch.
 
-Panel: a `bevy-egui` window toggled by `Shift+D`. Renders rows per category — `User` shown by default, `Dev` requires the toggle. Writes back through the typed struct.
+Panels:
+
+- **User panel** — a `bevy-egui` window with curated labels and grouping. Renders only `category = User` fields. Writes back through the typed struct.
+- **Dev panel (Shift+D)** — uses `bevy-inspector-egui` to introspect any Reflect-derived settings resource (plus any other inspectable Bevy resource we choose to expose). Replaces the v4 ad-hoc dev panel with a strictly better tool. No custom UI to maintain.
 
 A `requires_restart` change fires a `SketchRestart` event; the lifecycle plugin transitions `OnExit → OnEnter` on the active sketch.
 
@@ -381,7 +389,7 @@ The harness:
 
 1. Launches v4 (Electron build) and v5 (native binary or web build) sequentially on the same machine.
 2. Drives both with the same scripted input scenario, e.g. `scenarios/festival-loop.toml`: home for 10 s → Line for 60 s with recorded Leap track → Cymatics for 60 s → idle for 5 min → Line for 60 s. v5 replays via `MockProvider`. v4 replays via a "perf mode" added to `electron/main.ts` ahead of cutover.
-3. Samples platform metrics every 1 s during the run: CPU% per process, RSS and virtual memory, GPU memory and utilization, package temperature (`powermetrics` on macOS behind `--with-thermal`, `OpenHardwareMonitor` on Windows, `lm-sensors` on Linux), frame timing (`FrameTimeDiagnosticsPlugin` for v5; `stats.js` injected into v4), audio output latency (RMS-to-RMS via a loopback device when available), energy and power draw.
+3. Samples metrics every 1 s during the run. The v5 side uses Bevy's built-in diagnostic plugins — `FrameTimeDiagnosticsPlugin` (frame timing), `EntityCountDiagnosticsPlugin` (entity count growth), `SystemInformationDiagnosticsPlugin` (CPU%, RSS) — exposed as `Res<DiagnosticsStore>` and sampled by the perf-harness driver. The v4 side uses `stats.js` injected into the renderer plus OS-level sampling. OS-level metrics common to both runs: package temperature (`powermetrics` on macOS behind `--with-thermal`, `OpenHardwareMonitor` on Windows, `lm-sensors` on Linux), GPU memory and utilization, audio output latency (RMS-to-RMS via a loopback device when available), energy and power draw.
 4. Generates a report:
    - `report.md` — human-readable, verdict per metric per phase.
    - `metrics.csv` — raw samples for downstream analysis.
@@ -438,6 +446,44 @@ A single dispatcher script under `xtask/` (its own workspace member) provides th
 - v4 binaries remain on the releases page (versioned `v4.x.y`); they are not removed.
 - No settings migration; v5 ships with defaults on every platform.
 - `bin/Ultraleap-Tracking-WS-*`, `scripts/leap-websocket.ts`, and the `electron/` directory delete during the rewrite. The external `UltraleapTrackingWebSocket` repo continues to exist independently for web users.
+
+### 5.12 Bevy-native and third-party plugin policy
+
+**Defer to Bevy-native APIs whenever they exist.** Custom code is reserved for what Bevy genuinely does not provide. Specifically:
+
+| Concern                                | Use                                                                                 |
+| -------------------------------------- | ----------------------------------------------------------------------------------- |
+| Mouse, touch, keyboard input           | `Res<ButtonInput<…>>`, `Res<Touches>`, `Res<AccumulatedMouseMotion/Scroll>` (§5.3)  |
+| Delta and elapsed time                 | `Res<Time>` — never `Instant::now()` or wall-clock timestamps in systems            |
+| Window dimensions and cursor position  | `Single<&Window>` reads; `window.cursor_position()` is already window-relative      |
+| Easing functions                       | `bevy_math::curve::EasingCurve` + `EaseFunction` (under the `curve` feature)        |
+| Schedule labels                        | `PreUpdate`, `Update`, `OnEnter`, `OnExit`, `InputSystems`                          |
+| Run conditions                         | `run_if(in_state(...))`, `input_just_pressed(...)`                                  |
+| Asset hot reload                       | `AssetPlugin::watch_for_changes` in dev                                             |
+| Frame timing / entity counts / sysinfo | `FrameTimeDiagnosticsPlugin`, `EntityCountDiagnosticsPlugin`, `SystemInformationDiagnosticsPlugin` — primary v5 telemetry for the perf harness |
+| Runtime reflection                     | `Reflect` derive on settings structs and any other data inspectable at runtime      |
+
+**Mature third-party plugins adopted in v5.0:**
+
+| Plugin                       | Purpose                                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `bevy-egui`                  | Settings UI panels (User category), in-app overlays                                                  |
+| `bevy-inspector-egui`        | Dev panel (Shift+D) — Reflect-based inspection of all settings and any other inspectable resource. Replaces the v4 ad-hoc dev panel. |
+| `leafwing-input-manager`     | Keyboard shortcuts (1–5, z/x, Escape, V, Shift+D, F11, Alt+F4) as declarative `ActionState` enums. Replaces ad-hoc `ButtonInput<KeyCode>` polling. v4's `react-hotkeys-hook` equivalent. |
+| `bevy_framepace`             | Deterministic frame pacing for multi-hour thermal stability. Spike during perf-audit; adopt if it helps the thermal goal. |
+| `bevy_mod_debugdump`         | Schedule inspection in integration tests (already in §5.8)                                           |
+
+**Considered and not adopted in v5.0:**
+
+| Plugin              | Why not                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `bevy_audio`        | One-shot SFX only; insufficient for real-time DSP synthesis (§5.4)                                      |
+| `bevy_kira_audio`   | Game audio engine (mixing, music, SFX); wrong shape for DSP synthesis. `cpal + fundsp + rustfft` is correct. |
+| `bevy_hanabi`       | Effect-graph DSL constrains physics. Custom WGSL compute shaders give exact control of `leapAttractorPower` and attractor decay. Per-sketch spike at port time — if a sketch's physics maps cleanly to hanabi, switch. |
+| `bevy_persistent`   | Too generic for our per-sketch + per-platform persistence needs. Direct `serde` + `dirs` (native) + `web-sys` (web) is ~30 LOC and exactly right. |
+| `bevy_tokio_tasks`  | Not needed in v5.0. Becomes relevant when MediaPipe lands (async ONNX inference); reconsider then.       |
+
+When evaluating future plugins, the bar is: *replaces meaningful custom code, is actively maintained on the Bevy minor we target, has no major-version churn imminent, and has at least one shipping production user.* Plugins that match all four are adopted; plugins that miss one or more are deferred.
 
 ## 6. Documentation and coding conventions
 
@@ -511,8 +557,10 @@ Expanded from the v4 doc-only convention into five sections.
 Open questions:
 
 - Specific Bevy minor to target for v5.0 (latest stable at branch start; locked thereafter).
-- Whether `bevy_hanabi` warrants reconsideration for any sketch versus hand-rolled compute particles. Default plan is hand-rolled; revisit if a sketch's port reveals a clean fit.
+- Whether `bevy_hanabi` warrants reconsideration for any sketch versus hand-rolled compute particles. Default plan is hand-rolled; revisit per sketch at port time.
+- Whether `bevy_framepace` measurably improves multi-hour thermal behavior. Spike during the perf audit; adopt if it does, skip if free-running already meets the bar.
 - Audio sample rate and buffer size defaults per platform; tuned during the audio plugin implementation.
+- Whether `leaprs` is current with the Ultraleap SDK we need; fall back to a thin custom LeapC FFI binding if not.
 
 ## 8. Appendix: per-sketch parity decisions
 
