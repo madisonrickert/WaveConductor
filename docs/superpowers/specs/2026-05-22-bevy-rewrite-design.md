@@ -96,9 +96,9 @@ waveconductor/                                # repo root
 │   │   └── src/
 │   │       ├── lib.rs                        # CorePlugin
 │   │       ├── audio/                        # cpal + fundsp + FFT, ring buffers
-│   │       ├── input/                        # InputProvider trait, providers
-│   │       │   ├── mouse.rs
-│   │       │   ├── touch.rs
+│   │       ├── input/                        # HandTrackingProvider trait + pointer merge
+│   │       │   ├── mod.rs                    # trait, HandTrackingState, HandGestureEvent
+│   │       │   ├── pointer.rs                # PointerState + pointer_merge_system
 │   │       │   ├── leap/                     # native LeapC via `leaprs`, cfg-gated
 │   │       │   ├── websocket/                # web target + native dev fallback
 │   │       │   └── mock.rs                   # test-only
@@ -167,10 +167,10 @@ pub enum SketchActivity {
 Each sketch plugin registers:
 
 - `init` system on `OnEnter(AppState::Foo)`. Spawns entities, builds DSP graph, sets up GPU resources, all tagged with a sketch marker component.
-- `update` system on `Update.run_if(in_state(AppState::Foo).and(in_state(SketchActivity::Active)))`. Reads `InputState`, mutates components, writes audio params, updates uniforms.
+- `update` system on `Update.run_if(in_state(AppState::Foo).and(in_state(SketchActivity::Active)))`. Reads Bevy native input resources and `HandTrackingState`, mutates components, writes audio params, updates uniforms.
 - `cleanup` system on `OnExit(AppState::Foo)`. Despawns by marker, releases GPU resources.
 
-Interaction events from any `InputProvider` reset an `InteractionTimer` resource. A `lifecycle` system in `wc-core` transitions `SketchActivity::Active → Idle` after the configured timeout (default 30 s) and shows the screensaver overlay after a second timeout. When idle, sketch update systems do not run; only interaction watchers do.
+Interaction from any source (mouse motion, mouse/keyboard button, touch, or hand presence in `HandTrackingState`) resets an `InteractionTimer` resource. A `lifecycle` system in `wc-core` transitions `SketchActivity::Active → Idle` after the configured timeout (default 30 s) and shows the screensaver overlay after a second timeout. When idle, sketch update systems do not run; only interaction watchers do.
 
 This makes the per-sketch idle hardening you implemented in v4 a scheduler invariant in v5. Verified in integration tests by inspecting the schedule with `bevy_mod_debugdump`.
 
@@ -178,25 +178,32 @@ Per-sketch parity decisions live in `crates/wc-sketches/src/<sketch>/PARITY.md`,
 
 ### 5.3 Input
 
+Mouse, touch, and keyboard are handled by Bevy's native input resources directly. No adapter layer. Sketches consume:
+
+- `Res<ButtonInput<MouseButton>>` — `pressed` / `just_pressed` / `just_released` per button, O(1) lookup, window-focus aware.
+- `Res<AccumulatedMouseMotion>`, `Res<AccumulatedMouseScroll>` — per-frame accumulated deltas.
+- `Events<MouseMotion>`, `Events<MouseWheel>`, `Events<MouseButtonInput>` — raw events via `MessageReader` when needed.
+- `Res<Touches>` — full active-touch tracker (`iter`, `iter_just_pressed`, `iter_just_released`, per-touch `position()`, `id()`).
+- `Res<ButtonInput<KeyCode>>` for keyboard, plus run-condition helpers like `input_just_pressed(KeyCode::Escape)` for declarative system gating.
+- Window cursor position via `window.cursor_position()`.
+
+This is the idiomatic Bevy way and matches how every Bevy app reads mouse, touch, and keyboard. Wrapping these in a custom adapter is pure ceremony — they are already abstracted over the OS input backends by Bevy.
+
+The only input modality Bevy does not natively know about is hand tracking. That gets a custom trait:
+
 ```rust
-pub trait InputProvider: Send + Sync + 'static {
-    fn start(&mut self) -> Result<(), InputError>;
+pub trait HandTrackingProvider: Send + Sync + 'static {
+    fn start(&mut self) -> Result<(), HandTrackingError>;
     fn stop(&mut self);
-    fn poll(&mut self, state: &mut InputState);
-    fn status(&self) -> InputStatus;
+    fn poll(&mut self, state: &mut HandTrackingState);
+    fn status(&self) -> HandTrackingStatus;
 }
 ```
 
-`InputState` is a shared Bevy `Resource` with optional sub-fields populated by whichever providers are active:
-
-- **Pointers**: position, button or pinch state, source tag (mouse, touch, hand-tracking).
-- **Hand frames**: 21-landmark per-hand data, palm normal, pinch strength, grab strength, timestamp. Only hand-tracking providers populate this.
-- **Discrete events queue**: click, tap, pinch-down, pinch-up, swipe.
+`Res<HandTrackingState>` mirrors the shape of `Res<Touches>`: a per-frame snapshot of active hands with convenience accessors — active hand count, per-hand 21-landmark data, palm normal, pinch strength, grab strength, timestamp. Discrete moments (pinch-down, pinch-up, swipe) are emitted as `Events<HandGestureEvent>`. This follows Bevy's split convention: continuous state in `Resource`s, discrete moments as `Event`s.
 
 Providers in v5.0:
 
-- `MouseProvider` — bridges Bevy mouse events into pointers and click events.
-- `TouchProvider` — bridges Bevy touch events into pointers and tap events.
 - `LeaprsProvider` — native only (`cfg(not(target_arch = "wasm32"))`), links LeapC via the `leaprs` crate. Direct device access. Replaces the `Ultraleap-Tracking-WS` binary, the WebSocket bridge, the port-6437 polling, and the IPC spawn/exit dance in `electron/main.ts`. Single process, microsecond latency.
 - `WebSocketProvider` — web target plus native dev fallback. Speaks the existing Ultraleap WS protocol on port 6437 so the existing external WS server keeps working on the web build.
 - `MockProvider` — test only. Plays back recorded `HandFrame` sequences for integration tests and perf-harness scenarios.
@@ -205,9 +212,13 @@ Future:
 
 - `MediaPipeProvider` — webcam-based hand tracking. Native via `ort` (ONNX Runtime) + MediaPipe Hands ONNX export. Web via JS interop with `@mediapipe/tasks-vision`, landmarks passed across the WASM boundary. Behind a Cargo feature flag.
 
-Provider selection is a startup decision read from app-level configuration (separate from per-sketch settings). Multiple providers run concurrently each frame and merge into `InputState`. Sketches that previously consumed both Leap and mouse (Line, Cymatics) read both transparently.
+Provider selection is a startup decision read from app-level configuration (separate from per-sketch settings). One hand-tracking provider runs at a time.
 
-A `wc-core/ui/` egui widget renders the `LeapStatusIndicator` equivalent, reading `InputStatus` from the active hand-tracking provider. The widget is the v4 indicator at feature parity.
+#### Optional unified pointer
+
+For sketches that want a single "wherever the user is pointing" stream across mouse, touch, and hand (the way v4's `BaseSketch.events` blended them), a thin `pointer_merge_system` writes a `Res<PointerState>` derived from Bevy's native input resources plus `HandTrackingState`. This is a merge convenience, not a provider abstraction. Sketches that only care about mouse read Bevy's native resources directly.
+
+A `wc-core/ui/` egui widget renders the `LeapStatusIndicator` equivalent, reading `HandTrackingStatus` from the active provider. The widget is the v4 indicator at feature parity.
 
 ### 5.4 Audio
 
@@ -280,7 +291,7 @@ A `requires_restart` change fires a `SketchRestart` event; the lifecycle plugin 
 - **Renderer**: wgpu auto-selects WebGPU where available, WebGL2 fallback otherwise. WebGL2 means no compute shaders. Particle sketches (Line, Dots, Flame) ship a CPU-side fallback path selected at startup by a runtime capability check on `Features::COMPUTE_SHADER`. Fragment-shader-only sketches (Cymatics, Waves) are unaffected.
 - **Bundle**: Bevy WASM is ~15–30 MB compressed. Accepted cost. `wasm-opt -Oz` in the release pipeline; gzip and brotli served from GitHub Pages.
 - **Audio**: cpal's WASM backend uses `web_sys` `AudioContext`. `AudioPlugin` API is identical across targets.
-- **Input on web**: `WebSocketProvider` for Leap (existing Ultraleap WS server continues to work), `MouseProvider` and `TouchProvider` always available. Mobile web is touch-only.
+- **Input on web**: `WebSocketProvider` for Leap (existing Ultraleap WS server continues to work). Mouse, touch, and keyboard are Bevy native and always available on web. Mobile web is touch + keyboard only.
 - **Hot reload**: dev iteration on web uses `trunk serve` with WGSL hot reload. Native dev uses `cargo run` with `bevy::asset::AssetPlugin::watch_for_changes` enabled.
 - **Routing**: a small JS shim on startup reads `window.location.hash`; a Bevy system maps the hash to `AppState`. Same UX as the v4 HashRouter.
 
