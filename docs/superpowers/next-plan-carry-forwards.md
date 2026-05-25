@@ -105,3 +105,15 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 43. **Test prerequisite comment ordering** in `update_sim_params_does_not_run_when_idle` (`line_lifecycle.rs:202-206`): the comment sits between the prereq assert and the `dt_before` capture; reads ambiguously. Move comment immediately before `let dt_before`.
 
 44. **`line_idle_veto` is private** (`crates/wc-sketches/src/line/mod.rs:135`). If a future unit test wants to assert against the function directly, it'll need `pub(crate)`. Flag for if and when that arises.
+
+## From Plan 7.5 Phase A review (2026-05-25)
+
+45. **Test-fidelity gap: `move_pointer` → `PointerState.primary` edge is bypassed via `seed_pointer`.** `crates/wc-core/src/input/pointer.rs::pointer_merge_system` reads `window.cursor_position()`, which is written by winit (not by any system that consumes `CursorMoved` messages). So synthesized `CursorMoved` events do not flow to `PointerState`. Two follow-up options: (a) refactor `pointer_merge_system` so a mouse-only branch consumes `CursorMoved` directly (production change), or (b) extend `move_pointer` to additionally call `window.set_physical_cursor_position(...)` and register `pointer_merge_system` (or a mouse-only variant) in `sketches_test_app`. Either fix lets `line_input.rs` drop the `seed_pointer` shortcut. Tag as **test-fidelity**, not blocker. Land alongside Plan 8 if convenient.
+
+46. **`move_pointer` rustdoc claims `PointerState` consumes via the merge system** — true in production, currently false in tests. Adjust the doc to note "consuming code must either register `pointer_merge_system` and update the Window, or seed PointerState directly (see `seed_pointer` in `line_input.rs`)." Resolves once #45 lands.
+
+47. **Hoist `seed_pointer` to `tests/common/`** if/when a second sketch needs it. Currently lives in `line_input.rs` only.
+
+48. **`#[path]` fragility** for the wc-sketches → wc-core `tests/common/input.rs` import is acknowledged in the module doc. No action; reminder for any future file move.
+
+49. **`enter_line()` runs 4 `app.update()` calls after `tap_key`** — 3 would likely suffice (1 fold + 1 leafwing tick + 1 nav handler + 1 OnEnter). Tune if test-time perf ever matters.
