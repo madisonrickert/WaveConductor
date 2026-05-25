@@ -23,3 +23,17 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 8. **Asset path config for release bundles.** `main.rs` currently sets `AssetPlugin.file_path = "../../assets"` so `cargo run -p waveconductor` finds the workspace-root `assets/` tree. macOS DMG / Windows portable exe / AppImage all bundle `assets/` next to the binary, so the release build needs the default `"assets"`. Use `cfg(debug_assertions)` (or a more sophisticated env-based switch) to pick the right path. Don't ship the dev-time relative path in a notarized release.
 
 9. **Gravity formula tuning + remove 1 Hz diagnostic log.** `simulate.wgsl` currently uses inverse-linear gravity (`G·radius/dist`) so particles are visible at default settings. This isn't tuned to v4 perceptual parity — the trail character, momentum, and equilibrium speed need a side-by-side review. Once the formula feels right, remove the 1 Hz `tracing::info!` in `update_sim_params::diag_timer`. PARITY.md verdict re-checked at that point.
+
+## From Plan 7 Phase 0 review (2026-05-25)
+
+10. **`LineRestartPending` cleanup is unsolved.** The trampoline marker can linger if a non-trampoline state change races the two-frame `Line→Home→Line` cycle (e.g. Escape pressed between trampoline phases). The naive cleanup spot — `OnExit(AppState::Line)` — breaks the trampoline itself because that exit *is* what the trampoline drives. Options: timestamp the marker and reap on `Last` after N frames, replace the global resource with a `Local` on the handler system so it auto-clears, or convert to a one-shot message. Land in Plan 8 alongside the renderer touch-ups; the current leak window is narrow and harmless (a stale resource that `set(Line)` no-ops against).
+
+11. **`NonZeroU64::new(...).expect(...)` in `compute.rs` should be a `const`.** Replacing with `const SIM_PARAMS_SIZE: NonZeroU64 = match NonZeroU64::new(...) { Some(n) => n, None => panic!("...") };` pushes the assertion to compile time and removes the runtime `#[allow(clippy::expect_used)]`. Pure improvement.
+
+12. **`extern crate self as wc_core`** in `crates/wc-core/src/lib.rs` is now justified only by future macro consumers. Either drop it now and reinstate when Plan 8's in-crate sketch lands, or tighten the `reason` to name a concrete blocker.
+
+13. **Restart-cycle `info!` logs in `line/mod.rs` should drop to `debug!`** once the trampoline is proven stable. They fire on every settings restart and are noise in release.
+
+14. **`LineComputeNode` trace messages** could become structured tags (`tracing::trace!(node = "LineComputeNode", "no pipeline yet")`) for cleaner log queries. Style-only.
+
+15. **Verify `groupedUpness` spelling in `PARITY.md`.** Currently used as a domain term; confirm it's not a typo for "groupedness" before Plan 9 picks it up as a Rust identifier.
