@@ -33,10 +33,10 @@ use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{self, RenderGraph, RenderLabel};
 use bevy::render::render_resource::{
     BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
-    BufferBindingType, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
+    Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CachedComputePipelineId,
     ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, ShaderStages,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::storage::{GpuShaderStorageBuffer, ShaderStorageBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
@@ -104,6 +104,12 @@ pub struct LinePipeline {
     pub bind_group_layout_descriptor: BindGroupLayoutDescriptor,
     /// Handle into Bevy's `PipelineCache`.
     pub pipeline_id: CachedComputePipelineId,
+    /// Persistent uniform buffer for `SimParams`.
+    ///
+    /// Allocated once at pipeline init with `UNIFORM | COPY_DST` and updated
+    /// each frame via `queue.write_buffer` — avoids a GPU buffer allocation
+    /// every frame that `create_buffer_with_data` would incur.
+    pub sim_params_buffer: Buffer,
 }
 
 /// Per-frame bind group built by [`prepare_bind_group`].
@@ -119,11 +125,12 @@ pub struct LineComputeBindGroup {
 ///
 /// This runs once when the render world is first set up. Runs in
 /// [`RenderStartup`] rather than via `FromWorld` because it needs
-/// `AssetServer` and `PipelineCache` as system params.
+/// `AssetServer`, `PipelineCache`, and `RenderDevice` as system params.
 fn init_line_pipeline(
     mut commands: Commands<'_, '_>,
     asset_server: Res<'_, AssetServer>,
     pipeline_cache: Res<'_, PipelineCache>,
+    render_device: Res<'_, RenderDevice>,
 ) {
     // Build the bind group layout descriptor manually with raw entries so we
     // don't depend on encase::ShaderType for SimParams (we use bytemuck instead).
@@ -165,20 +172,31 @@ fn init_line_pipeline(
         ..default()
     });
 
+    // Allocate the SimParams uniform buffer once. Each frame `prepare_bind_group`
+    // uploads new data via `queue.write_buffer` — no per-frame allocation.
+    let sim_params_buffer = render_device.create_buffer(&BufferDescriptor {
+        label: Some("line_sim_params_uniform"),
+        size: std::mem::size_of::<super::particle::SimParams>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     commands.insert_resource(LinePipeline {
         bind_group_layout_descriptor,
         pipeline_id,
+        sim_params_buffer,
     });
 }
 
 /// Builds the per-frame bind group for the compute dispatch.
 ///
-/// Writes [`SimParams`] into a transient uniform buffer (recreated each
-/// frame — small and stable). Retrieves the GPU particle buffer via
-/// `RenderAssets<GpuShaderStorageBuffer>`.
+/// Uploads [`SimParams`] into the persistent uniform buffer on
+/// [`LinePipeline`] via `queue.write_buffer` — no per-frame GPU allocation.
+/// Retrieves the GPU particle buffer via `RenderAssets<GpuShaderStorageBuffer>`.
 fn prepare_bind_group(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
+    render_queue: Res<'_, RenderQueue>,
     pipeline_cache: Res<'_, PipelineCache>,
     sim: Res<'_, LineSimParams>,
     buffers: Res<'_, RenderAssets<GpuShaderStorageBuffer>>,
@@ -191,12 +209,13 @@ fn prepare_bind_group(
         return;
     };
 
-    // Create a per-frame uniform buffer holding the SimParams bytes.
-    let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("line_sim_params_uniform"),
-        contents: bytemuck::bytes_of(&sim.params),
-        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-    });
+    // Upload current SimParams into the persistent uniform buffer.
+    // `write_buffer` is a staged copy — no allocation after init.
+    render_queue.0.write_buffer(
+        &pipeline.sim_params_buffer,
+        0,
+        bytemuck::bytes_of(&sim.params),
+    );
 
     // Retrieve the cached BindGroupLayout from the PipelineCache.
     let layout: BindGroupLayout =
@@ -208,7 +227,7 @@ fn prepare_bind_group(
         &[
             BindGroupEntry {
                 binding: 0,
-                resource: params_buffer.as_entire_binding(),
+                resource: pipeline.sim_params_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 1,

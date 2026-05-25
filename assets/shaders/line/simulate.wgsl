@@ -41,7 +41,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         p.velocity = p.velocity + to_attr * inv_dist * force * params.dt;
     }
 
-    // Apply drag (exponential decay approximation for small dt).
+    // Apply drag. `drag` is enforced 0..1 by LineSettings::drag (Rust side);
+    // the shader does not clamp here.
     p.velocity = p.velocity * (1.0 - params.drag * params.dt);
 
     // Euler integration.
