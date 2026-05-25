@@ -49,3 +49,23 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 19. **`test_app()` / `build_app()` duplication** between `crates/wc-core/tests/lifecycle.rs` and `crates/wc-core/tests/lifecycle_idle_veto.rs`. When the third test file lands, hoist a shared `common::lifecycle_app()` helper into `tests/common/mod.rs`.
 
 20. **Two stray "vetos" spellings in doc-comment prose** in `crates/wc-core/src/lifecycle/idle.rs` (lines 58 and 80). Field is now `vetoes`; prose should match for consistency.
+
+## From Plan 7 Phase B review (2026-05-25) — rolling into Phase C
+
+21. **Hoist v4 drag constants to named consts.** `crates/wc-sketches/src/line/systems.rs:238,244` embed `0.93075095702_f32` / `0.53913643334_f32` as inline literals. Replace with `const V4_PULLING_DRAG_CONSTANT: f32 = 0.93075095702;` / `const V4_INERTIAL_DRAG_CONSTANT: f32 = 0.53913643334;` / `const V4_FIXED_DT: f32 = 0.032;` at module scope. Eliminates duplicate `#[allow(...)]` blocks and surfaces v4-parity constants alongside `MOUSE_POWER_DECAY/FLOOR/PRESS`. Tests can assert by name.
+
+22. **Press-while-held re-asserts power every frame, masking decay.** `crates/wc-sketches/src/line/systems.rs:173-177` re-asserts `power = MOUSE_POWER_PRESS` every frame the button is held. v4 only re-asserts on mousemove events, so a stationary held mouse decays freely (asymptotes to floor=2). This port holds power near 9.2 while held. **Fix:** drop the held-branch re-assertion (`just_pressed` only); let decay alone govern held behavior. Update the comment to honestly describe the chosen semantics ("matches v4: only just-pressed sets power=10; held with stationary mouse decays to floor"). Reconcile the parity claim with the code.
+
+23. **`MouseAttractorState::Default` is hand-rolled.** `systems.rs:52-59` writes `power: 0.0, position: [0.0, 0.0]` manually. `#[derive(Default)]` would produce identical output and matches `Attractor`'s derive style. Field-doc comment for power can move from the Default impl to the struct field.
+
+24. **`1e-2` epsilon in `decay_mouse_attractor` is magic.** `systems.rs:192` uses `MOUSE_POWER_FLOOR + 1e-2` as the zero cutoff. Promote to `const MOUSE_POWER_DECAY_EPSILON: f32 = 1e-2;` or add an inline comment explaining the tolerance.
+
+25. **`Touches::iter().next().is_some()` needs a 1-line comment.** `systems.rs:162` — non-consuming iteration is correct but easy to second-guess. Add `// Any active touch counts as "held"; iter() is non-consuming.`
+
+26. **`update_sim_params` lacks unit tests for new fields.** A targeted test inserting `MouseAttractorState { power: 10.0, position: [5, 5] }` then asserting `sim.params.attractor_count == 1` and `sim.params.attractors[0].power == 10.0 * gravity_constant` would catch unintended drift. Add in Phase C alongside the CPU mirror tests.
+
+27. **Pre-split `systems.rs` into focused submodules** before Phase C extends it. Current file is 269 lines; Phase C adds Particle field initialization (~15 lines) and may add CPU mirror wiring. Recommended structure: `systems/spawn.rs`, `systems/mouse.rs`, `systems/sim_params.rs`, with `systems.rs` becoming a thin module root that re-exports.
+
+28. **`MAX_ATTRACTORS` GPU cost note.** `particle.rs:42` — when `MAX_ATTRACTORS` grows past ~16 (Plan 11+ Leap hands), the uniform buffer will get large. Add a `// TODO(plan-11): consider dynamic-sized storage buffer if MAX_ATTRACTORS > ~16`.
+
+29. **Update Plan 7 doc with the `_pad` arithmetic correction** for Tasks 15 and 16. The plan claims "eight scalars above total 36 bytes" but actual is 40, needing `[f32; 2]` pad (Rust) and `vec2<f32>` (WGSL), not the `[f32; 3]` / `vec3<f32>` shown. Implementer applied the correction; the plan doc should reflect reality so a future re-execution doesn't trip.
