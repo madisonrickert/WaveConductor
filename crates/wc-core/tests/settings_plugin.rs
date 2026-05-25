@@ -12,9 +12,11 @@
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use wc_core::settings::{
-    test_settings::TestSketchSettings, DevPanelVisible, RegisterSketchSettingsExt, SettingsPlugin,
-    SettingsRegistry, SketchRestart,
+    DevPanelVisible, RegisterSketchSettingsExt, SettingsPlugin, SettingsRegistry, SketchRestart,
 };
+
+mod common;
+use common::TestSketchSettings;
 
 fn make_app() -> App {
     // Isolate config dir so this test doesn't read the dev's real settings file.
@@ -180,7 +182,6 @@ fn full_app_schedule_runs_without_panicking() {
 #[test]
 fn autosave_fires_after_debounce_window() {
     use std::time::Duration;
-    use wc_core::settings::test_settings::TestSketchSettings;
 
     let mut app = make_app();
     app.update(); // baseline

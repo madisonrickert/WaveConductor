@@ -17,9 +17,11 @@
 use tempfile::TempDir;
 use wc_core::settings::{
     persistence::{self, CONFIG_DIR_ENV},
-    test_settings::TestSketchSettings,
     SketchSettings,
 };
+
+mod common;
+use common::TestSketchSettings;
 
 /// Set `CONFIG_DIR_ENV` to `dir` for the duration of the closure.
 ///

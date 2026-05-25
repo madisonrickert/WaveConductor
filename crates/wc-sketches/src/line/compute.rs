@@ -26,6 +26,7 @@
 )]
 
 use std::borrow::Cow;
+use std::num::NonZeroU64;
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -135,6 +136,17 @@ fn init_line_pipeline(
 ) {
     // Build the bind group layout descriptor manually with raw entries so we
     // don't depend on encase::ShaderType for SimParams (we use bytemuck instead).
+    //
+    // `SimParams` is a `#[repr(C)]` struct with several fields; its size is a
+    // compile-time constant that is statically non-zero, so this `expect` is
+    // an invariant assertion, not a runtime branch the caller can trip.
+    #[allow(
+        clippy::expect_used,
+        reason = "SimParams size is a non-zero compile-time constant; this asserts the invariant"
+    )]
+    let sim_params_size = NonZeroU64::new(std::mem::size_of::<super::particle::SimParams>() as u64)
+        .expect("SimParams must be non-zero-sized");
+
     let bind_group_layout_descriptor = BindGroupLayoutDescriptor::new(
         "line_compute_bgl",
         &[
@@ -145,7 +157,7 @@ fn init_line_pipeline(
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: Some(sim_params_size),
                 },
                 count: None,
             },
@@ -256,16 +268,17 @@ impl render_graph::Node for LineComputeNode {
         world: &World,
     ) -> Result<(), render_graph::NodeRunError> {
         let Some(bg) = world.get_resource::<LineComputeBindGroup>() else {
-            // No bind group — sketch not active or buffer not ready.
+            tracing::trace!("LineComputeNode: no bind group — sketch inactive or buffer not ready");
             return Ok(());
         };
         let Some(pipeline_res) = world.get_resource::<LinePipeline>() else {
+            tracing::trace!("LineComputeNode: no LinePipeline resource");
             return Ok(());
         };
         let pipeline_cache = world.resource::<PipelineCache>();
         let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id)
         else {
-            // Pipeline still compiling — skip this frame.
+            tracing::trace!("LineComputeNode: pipeline still compiling");
             return Ok(());
         };
 

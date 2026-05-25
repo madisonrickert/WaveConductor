@@ -75,21 +75,39 @@ fn remove_sim_params(mut commands: Commands<'_, '_>) {
 }
 
 /// Listens for `SketchRestart { storage_key == LineSettings::STORAGE_KEY }`
-/// and exits to `AppState::Home` so the `OnExit`/`OnEnter` handlers rebuild
-/// the sketch (including the resized storage buffer) cleanly.
+/// and forces a same-frame `Line → Home → Line` cycle so the `OnExit`/`OnEnter`
+/// systems rebuild the sketch with the new settings.
 ///
-/// The user re-enters the Line sketch via the home gallery. Automatic
-/// re-enter (no visible blank frame) is deferred to Plan 7.
+/// Uses a one-frame `LineRestartPending` resource as a self-clearing trampoline:
+/// on the frame the restart message arrives, we set `NextState::Home` *and*
+/// insert `LineRestartPending`. On the following frame's update, the resource is
+/// observed → `NextState::Line`, then the resource is removed.
 fn restart_on_settings_change(
     mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
     current: Res<'_, State<AppState>>,
     mut next: ResMut<'_, NextState<AppState>>,
+    mut commands: Commands<'_, '_>,
+    pending: Option<Res<'_, LineRestartPending>>,
 ) {
+    if pending.is_some() {
+        // Second frame: complete the cycle by re-entering Line.
+        next.set(AppState::Line);
+        commands.remove_resource::<LineRestartPending>();
+        tracing::info!("LineSettings restart cycle: re-entering Line");
+        return;
+    }
     let want_restart = events
         .read()
         .any(|e| e.storage_key == settings::LineSettings::STORAGE_KEY);
     if want_restart && **current == AppState::Line {
         next.set(AppState::Home);
-        tracing::info!("LineSettings::particle_count changed — exiting to Home");
+        commands.insert_resource(LineRestartPending);
+        tracing::info!("LineSettings changed — cycling Line via Home for one frame");
     }
 }
+
+/// Trampoline marker for the same-frame Line→Home→Line cycle. Inserted on the
+/// frame a restart is detected; the next frame's `restart_on_settings_change`
+/// observes it, transitions back to `Line`, and removes the resource.
+#[derive(Resource)]
+struct LineRestartPending;

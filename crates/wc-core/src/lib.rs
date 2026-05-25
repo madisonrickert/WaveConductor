@@ -6,6 +6,13 @@
 
 // Allow `::wc_core::...` paths to resolve inside this crate itself, which
 // the `#[derive(SketchSettings)]` macro emits for all trait implementations.
+// Unused inside the lib since `test_settings` moved to `tests/common/`, but
+// retained so any future in-crate use of the derive (Plan 8+ sketches owned
+// by wc-core) continues to compile without re-introducing the extern crate.
+#[allow(
+    unused_extern_crates,
+    reason = "kept for future in-crate macro consumers"
+)]
 extern crate self as wc_core;
 
 pub mod audio;

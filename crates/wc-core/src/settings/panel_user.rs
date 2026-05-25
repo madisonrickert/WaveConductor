@@ -199,6 +199,25 @@ fn render_number(
         ui.add(slider);
         return;
     }
+    if let Some(v) = field.try_downcast_mut::<i32>() {
+        let mut tmp = *v as i64;
+        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64)).text(label);
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        if ui.add(slider).changed() {
+            *v = tmp.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        }
+        return;
+    }
+    if let Some(v) = field.try_downcast_mut::<i64>() {
+        let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64)).text(label);
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        ui.add(slider);
+        return;
+    }
     ui.label(format!("(unsupported number type for {label})"));
 }
 
@@ -216,9 +235,19 @@ fn render_color(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: 
             ui.label(label);
             ui.color_edit_button_rgba_unmultiplied(v);
         });
-    } else {
-        ui.label(format!("(expected [f32; 4] for {label})"));
+        return;
     }
+    if let Some(v) = field.try_downcast_mut::<bevy::color::Color>() {
+        let mut rgba = v.to_srgba().to_f32_array();
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                *v = bevy::color::Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
+            }
+        });
+        return;
+    }
+    ui.label(format!("(expected [f32; 4] or Color for {label})"));
 }
 
 fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
@@ -229,6 +258,47 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &
         });
     } else {
         ui.label(format!("(expected String for {label})"));
+    }
+}
+
+/// Reflection branch for `Vec2` fields. Not yet reachable through the
+/// `#[setting(...)]` attribute (no `SettingKind` variant); added eagerly so
+/// the panel is ready when the next sketch needs it. The derive macro will
+/// gain a `kind = Vec2` parser when that sketch lands.
+#[allow(
+    dead_code,
+    reason = "preemptive support; reachable once `kind = Vec2` lands in the derive macro"
+)]
+fn render_vec2(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<bevy::math::Vec2>() {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(&mut v.x).prefix("x: "));
+            ui.add(egui::DragValue::new(&mut v.y).prefix("y: "));
+        });
+    } else {
+        ui.label(format!("(expected Vec2 for {label})"));
+    }
+}
+
+/// Reflection branch for `Vec3` fields. Not yet reachable through the
+/// `#[setting(...)]` attribute (no `SettingKind` variant); added eagerly so
+/// the panel is ready when the next sketch needs it. The derive macro will
+/// gain a `kind = Vec3` parser when that sketch lands.
+#[allow(
+    dead_code,
+    reason = "preemptive support; reachable once `kind = Vec3` lands in the derive macro"
+)]
+fn render_vec3(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<bevy::math::Vec3>() {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(&mut v.x).prefix("x: "));
+            ui.add(egui::DragValue::new(&mut v.y).prefix("y: "));
+            ui.add(egui::DragValue::new(&mut v.z).prefix("z: "));
+        });
+    } else {
+        ui.label(format!("(expected Vec3 for {label})"));
     }
 }
 

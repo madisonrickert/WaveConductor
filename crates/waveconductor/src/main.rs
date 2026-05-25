@@ -23,16 +23,11 @@ fn main() {
                     ..default()
                 })
                 .set(AssetPlugin {
-                    // Spec §5.1 keeps assets at the workspace root, not under
-                    // the binary crate. Bevy defaults to resolving `assets/`
-                    // against `CARGO_MANIFEST_DIR` (i.e., `crates/waveconductor/`),
-                    // which would miss `assets/shaders/line/*.wgsl` at the
-                    // repo root. Point the plugin two levels up.
-                    //
-                    // For release bundles (DMG / portable exe / AppImage) the
-                    // bundler copies `assets/` next to the binary, so a release
-                    // build will need a different config — addressed in the
-                    // distribution plan.
+                    // Dev builds: shaders live at the workspace root, two levels
+                    // above the binary crate. Release bundles: the bundler
+                    // copies `assets/` next to the binary, so the default
+                    // `"assets"` is correct.
+                    #[cfg(debug_assertions)]
                     file_path: "../../assets".into(),
                     ..default()
                 })

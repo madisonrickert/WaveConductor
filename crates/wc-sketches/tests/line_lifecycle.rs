@@ -58,6 +58,14 @@ fn build_app() -> App {
     // Insert the default here so update_sim_params doesn't panic.
     app.init_resource::<PointerState>();
 
+    // Single<&Window> needs an entity with a Window component. WindowPlugin
+    // creates one in production; tests use MinimalPlugins, so spawn one
+    // manually with a fixed resolution that matches the production default.
+    app.world_mut().spawn(Window {
+        resolution: (1280_u32, 720_u32).into(),
+        ..Default::default()
+    });
+
     // SettingsPlugin provides the settings registry + persistence.
     app.add_plugins(wc_core::settings::SettingsPlugin);
 
@@ -195,4 +203,42 @@ fn update_sim_params_does_not_run_when_idle() {
             "update_sim_params must not run while SketchActivity::Idle (dt changed)"
         );
     }
+}
+
+#[test]
+fn settings_restart_cycles_back_to_line() {
+    use wc_core::settings::SketchRestart;
+    use wc_core::settings::SketchSettings;
+    use wc_sketches::line::settings::LineSettings;
+
+    let mut app = build_app();
+    app.update();
+
+    // Enter Line and let OnEnter run.
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Line);
+    app.update();
+    app.update();
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line
+    );
+
+    // Emit a SketchRestart for LineSettings.
+    app.world_mut().write_message(SketchRestart {
+        storage_key: LineSettings::STORAGE_KEY,
+    });
+    app.update(); // restart handler sets NextState::Home + inserts pending
+    app.update(); // state transition processed → AppState::Home
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Home
+    );
+    app.update(); // restart handler sees pending → sets NextState::Line
+    app.update(); // state transition → AppState::Line
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line
+    );
 }

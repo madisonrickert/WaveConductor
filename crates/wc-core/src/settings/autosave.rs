@@ -91,3 +91,75 @@ pub fn tick(world: &mut World) {
         }
     }
 }
+
+/// Drains any pending debounce timers on `AppExit` and writes every queued
+/// settings type to disk. Without this, edits made in the <0.5 s window before
+/// shutdown are lost because [`tick`] never fires their saves.
+///
+/// Reads `MessageReader<AppExit>` and runs in `Update` (not `Last`) because
+/// Bevy's exit handling consumes `Update`'s schedule cycle.
+pub fn flush_on_exit(world: &mut World) {
+    let mut state = bevy::ecs::system::SystemState::<
+        bevy::prelude::MessageReader<'_, '_, bevy::app::AppExit>,
+    >::new(world);
+    let mut reader = state.get_mut(world);
+    let exiting = reader.read().next().is_some();
+    state.apply(world);
+    if !exiting {
+        return;
+    }
+    let keys: smallvec::SmallVec<[&'static str; 8]> = {
+        let mut s = world.resource_mut::<AutosaveState>();
+        let collected = s.pending.keys().copied().collect();
+        s.pending.clear();
+        collected
+    };
+    if keys.is_empty() {
+        return;
+    }
+    let snapshot: SaveSnapshot = world
+        .get_resource::<SettingsRegistry>()
+        .map(|r| {
+            r.entries
+                .iter()
+                .map(|e| (e.save_fn, e.storage_key))
+                .collect()
+        })
+        .unwrap_or_default();
+    for key in keys {
+        if let Some((save_fn, _)) = snapshot.iter().find(|(_, k)| *k == key) {
+            save_fn(world);
+            tracing::info!(%key, "settings saved (flush on AppExit)");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::app::AppExit;
+
+    #[test]
+    fn flush_on_exit_drains_pending_when_exit_emitted() {
+        let mut app = bevy::prelude::App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.init_resource::<AutosaveState>();
+        app.init_resource::<crate::settings::registry::SettingsRegistry>();
+
+        // Seed one pending key. We don't need a real save_fn here — with no
+        // matching registry entry, flush_on_exit logs "no save fn" and moves
+        // on. The key behavior under test is that `pending` is drained.
+        app.world_mut()
+            .resource_mut::<AutosaveState>()
+            .pending
+            .insert("synthetic-key", DEBOUNCE_SECS);
+
+        // Emit AppExit and run one update.
+        app.world_mut().write_message(AppExit::Success);
+        app.add_systems(bevy::prelude::Update, flush_on_exit);
+        app.update();
+
+        let state = app.world().resource::<AutosaveState>();
+        assert!(state.pending.is_empty(), "flush_on_exit must drain pending");
+    }
+}

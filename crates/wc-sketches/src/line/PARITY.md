@@ -4,12 +4,17 @@
 
 **Reference media:** v4 main branch, `src/sketches/line/screenshots/gravity4_cropped.png` and the festival-loop recording from `scenarios/festival-loop.toml` at Pi Party 2026-03 timestamp.
 
-**Approved deviations from v4:**
+**Plan progression toward parity:**
 
-- Particle initial layout is a centered grid (was: heatmap-sampled image at `src/sketches/line/heatmapSampler.ts`). Heatmap spawn deferred to Plan 7.
-- Particle color is velocity-magnitude-driven warm gradient (was: `starMaterial.ts` lookup). Acceptable under perceptual parity.
-- No audio-reactive scaling (was: FFT band coupling via `createAudioGroup`). Deferred to Plan 7.
-- WGSL compute kernel replaces CPU-side `particleSystem.ts`; numerics may diverge but character ("particles flow toward where you point, with momentum") is preserved.
+- **Plan 6 (shipped, tag `v5-line`)** — sketch scaffolding, single-attractor inverse-linear gravity, flat-color quads.
+- **Plan 7 (this plan, tag `v5-line-sim`)** — multi-attractor physics with dual drag, size-scaled gravity, mouse-power decay, `original_xy` + constrain-to-box, fade-in α, horizontal-line spawn with sawtooth jitter, `particle_density` setting.
+- **Plan 8 (tag `v5-line-render`)** — gravity-smear post-process shader, star sprite, attractor ring meshes.
+- **Plan 9 (tag `v5-line-audio`)** — fundsp-based synthesis, particle-stats coupling driving synth params and shader uniforms.
+- **Plan 10 (tag `v5-line-parity`)** — heatmap-image spawn, `gamma` setting, signed verdict.
+
+**Approved deviations from v4** (carried forward; verdict deferred until Plan 10):
+
 - Render uses vertex-index-driven quads (6 vertices per particle, triangle list mesh) rather than instanced quads. Visually identical; chosen because Bevy 0.18's `Material2d` path does not support N-instance single-entity draws without a custom render phase.
+- WGSL compute kernel replaces CPU-side `particleSystem.ts` for rendering; a parallel Rust CPU mirror runs the same math on the host (introduced in Plan 7) to feed `ParticleStats` in Plan 9 without a GPU readback stall. The two integrators may drift by ≤1% over long timescales due to floating-point order-of-operations differences; acceptable for groupedUpness and friends.
 
-**Verdict:** Plan 6 ships the architecture and the perceptual core. Visual character recheck scheduled after Plan 7 wires audio coupling and heatmap spawn.
+**Verdict:** pending (Plan 10).

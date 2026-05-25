@@ -29,7 +29,6 @@ pub mod event;
 pub mod panel_dev;
 pub mod persistence;
 pub mod registry;
-pub mod test_settings;
 pub mod trait_def;
 
 mod panel_user;
@@ -65,6 +64,7 @@ impl Plugin for SettingsPlugin {
                     registry::emit_restart_events,
                     autosave::detect_changes,
                     autosave::tick,
+                    autosave::flush_on_exit,
                 )
                     .chain(),
             );
