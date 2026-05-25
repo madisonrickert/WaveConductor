@@ -39,6 +39,8 @@ pub struct LinePlugin;
 
 impl Plugin for LinePlugin {
     fn build(&self, app: &mut App) {
+        use wc_core::lifecycle::RegisterIdleVetoExt;
+
         // Register LineSettings with the settings system (panel + persistence).
         app.register_sketch_settings::<settings::LineSettings>();
 
@@ -58,6 +60,11 @@ impl Plugin for LinePlugin {
         // Mouse attractor state (independent of sketch active/idle so the
         // attractor's decay continues during the screensaver-fade window).
         app.init_resource::<systems::MouseAttractorState>();
+        // Register an idle veto that keeps Line `Active` while the mouse
+        // attractor's power is still decaying — otherwise the sketch would
+        // transition to `Idle` mid-decay and the (gated) `decay_mouse_attractor`
+        // system would never finish releasing the pull.
+        app.register_idle_veto(line_idle_veto);
         app.init_resource::<sim_cpu::LineCpuMirror>();
         app.add_systems(
             Update,
@@ -124,3 +131,13 @@ fn restart_on_settings_change(
 /// observes it, transitions back to `Line`, and removes the resource.
 #[derive(Resource)]
 struct LineRestartPending;
+
+/// Idle veto for the Line sketch. Returns `true` while the mouse attractor's
+/// power is non-zero (i.e., still decaying) — keeps the sketch in
+/// `SketchActivity::Active` so [`systems::decay_mouse_attractor`] continues to
+/// fire until the attractor is fully released.
+fn line_idle_veto(world: &World) -> bool {
+    world
+        .get_resource::<systems::MouseAttractorState>()
+        .is_some_and(|s| s.power > 0.0)
+}
