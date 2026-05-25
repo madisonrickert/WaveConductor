@@ -31,14 +31,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var p = particles[idx];
 
     // Gravity toward the attractor.
+    //
+    // Inverse-linear pull rather than inverse-square: at screen-pixel scales
+    // (distances in the hundreds of px), inverse-square underflows to
+    // negligible acceleration with reasonable G values. The 1/dist falloff
+    // gives visible motion across the whole window while still preferring
+    // closer particles.
+    //
+    // `attractor_radius` defines the "core" — distance is clamped to at
+    // least `attractor_radius`, so force inside the radius is bounded and
+    // particles don't fling out due to a near-zero denominator.
     if (params.attractor_enabled > 0.5) {
         let to_attr = params.attractor_pos - p.position;
-        // Clamp denominator to attractor_radius^2 so force is bounded inside the radius.
-        let dist_sq = max(dot(to_attr, to_attr), params.attractor_radius * params.attractor_radius);
-        let inv_dist = 1.0 / sqrt(dist_sq);
-        // Gravitational acceleration = gravity_constant / dist^2, applied along the unit vector.
-        let force = params.gravity_constant * inv_dist * inv_dist;
-        p.velocity = p.velocity + to_attr * inv_dist * force * params.dt;
+        let raw_dist = length(to_attr);
+        let safe_dist = max(raw_dist, 0.001);
+        let effective_dist = max(raw_dist, params.attractor_radius);
+        let dir = to_attr / safe_dist;
+        // Acceleration ≈ gravity_constant * attractor_radius / dist (px/s²).
+        // The attractor_radius factor keeps the units in "px/s²" regardless
+        // of how the user tunes radius vs gravity_constant.
+        let acceleration = params.gravity_constant * params.attractor_radius / effective_dist;
+        p.velocity = p.velocity + dir * acceleration * params.dt;
     }
 
     // Apply drag. `drag` is enforced 0..1 by LineSettings::drag (Rust side);

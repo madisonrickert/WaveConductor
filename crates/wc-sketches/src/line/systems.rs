@@ -130,6 +130,7 @@ pub fn update_sim_params(
     pointer: Res<'_, PointerState>,
     windows: Query<'_, '_, &Window>,
     mut sim: ResMut<'_, LineSimParams>,
+    mut diag_timer: Local<'_, f32>,
 ) {
     let (attractor_pos, attractor_enabled) = match pointer.primary {
         Some(cursor_window) => {
@@ -158,4 +159,19 @@ pub fn update_sim_params(
         attractor_enabled,
         _pad: 0.0,
     };
+
+    // Diagnostic: once per second, log the pointer state and computed
+    // attractor params so failures are observable in the console. Remove
+    // when visual tuning is locked in (tracked as a Plan 7 carry-forward).
+    *diag_timer += time.delta_secs();
+    if *diag_timer >= 1.0 {
+        *diag_timer = 0.0;
+        tracing::info!(
+            pointer_primary = ?pointer.primary,
+            pointer_source = ?pointer.source,
+            attractor_pos = ?attractor_pos,
+            attractor_enabled,
+            "line sim params (1Hz)"
+        );
+    }
 }
