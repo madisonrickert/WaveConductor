@@ -26,7 +26,8 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
-use wc_core::input::pointer::PointerState;
+use wc_core::input::pointer::{pointer_merge_system, PointerState};
+use wc_core::input::state::HandTrackingState;
 use wc_sketches::line::LinePlugin;
 
 /// Build a sketches-test app: standard wc-core lifecycle harness plus
@@ -68,9 +69,29 @@ pub fn sketches_test_app() -> App {
     app.add_plugins(bevy::mesh::MeshPlugin);
     app.init_asset::<ShaderStorageBuffer>();
 
-    // PointerState is normally registered by wc_core::input::InputPlugin.
-    // Insert the default here so update_sim_params doesn't panic.
+    // PointerState + HandTrackingState are normally registered by
+    // `wc_core::input::HandTrackingPlugin`; the sketches-test harness does not
+    // pull that plugin in, so initialize the two resources `pointer_merge_system`
+    // depends on manually here.
     app.init_resource::<PointerState>();
+    app.init_resource::<HandTrackingState>();
+
+    // `CursorMoved` is normally registered by `bevy::window::WindowPlugin`,
+    // which the MinimalPlugins-based harness does not include. Register it
+    // explicitly so synthetic `CursorMoved` messages from
+    // `common::input::move_pointer` actually land in a channel
+    // `pointer_merge_system`'s `MessageReader` can read.
+    app.add_message::<bevy::window::CursorMoved>();
+
+    // Install the production pointer-merge system so synthetic `CursorMoved`
+    // messages from `common::input::move_pointer` reach `PointerState` —
+    // Plan 8 Phase 0 (carry-forwards #45/#46) extended this system to read
+    // `CursorMoved` for the mouse-source path. Without it, the test harness
+    // would have to seed `PointerState` directly, bypassing production logic.
+    app.add_systems(
+        PreUpdate,
+        pointer_merge_system.in_set(bevy::input::InputSystems),
+    );
 
     // Single<&Window> needs an entity with a Window component. WindowPlugin
     // creates one in production; tests use MinimalPlugins, so spawn one

@@ -102,21 +102,27 @@ pub fn release_left(app: &mut App) {
 /// Move the pointer to `(x, y)` in window pixel coordinates (top-left origin,
 /// +y down).
 ///
-/// Writes both `CursorMoved` (which `PointerState` consumes via the merge
-/// system) and `MouseMotion` (which Bevy's idle-detection consumes). Pass the
-/// previous position via `from` so the motion delta is correct; if unknown,
-/// the caller can pass `Vec2::ZERO`.
+/// Writes `CursorMoved` (which Plan 8 Phase 0 wired into
+/// `pointer_merge_system`'s mouse-source path) and `MouseMotion` (which
+/// Bevy's idle-detection consumes), and updates `Window::cursor_position`
+/// so subsequent ticks without a fresh `CursorMoved` still observe the
+/// pointer (matches winit's persistent cursor position in production).
+/// `from` supplies the previous position so the motion delta is correct;
+/// pass `Vec2::ZERO` if unknown.
 pub fn move_pointer(app: &mut App, x: f32, y: f32, from: Vec2) {
-    let window = primary_window(app);
+    let window_entity = primary_window(app);
     let position = Vec2::new(x, y);
     let delta = position - from;
     app.world_mut().write_message(CursorMoved {
-        window,
+        window: window_entity,
         position,
         delta: Some(delta),
     });
     if delta != Vec2::ZERO {
         app.world_mut().write_message(MouseMotion { delta });
+    }
+    if let Some(mut window) = app.world_mut().get_mut::<Window>(window_entity) {
+        window.set_cursor_position(Some(position));
     }
 }
 

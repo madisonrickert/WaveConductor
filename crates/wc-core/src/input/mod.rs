@@ -75,6 +75,14 @@ impl Plugin for HandTrackingPlugin {
             // Messages
             .add_message::<HandTrackingFrame>()
             .add_message::<HandGestureEvent>()
+            // `pointer_merge_system` reads `CursorMoved` (Plan 8 Phase 0
+            // closed the test-fidelity gap by wiring it into the mouse-source
+            // path). In production `WindowPlugin` registers this message;
+            // re-register defensively so harnesses that bring this plugin in
+            // without `WindowPlugin` (the wc-core integration tests) don't
+            // trip Bevy's "message not initialized" runtime validator.
+            // `add_message` is idempotent when the message is already registered.
+            .add_message::<bevy::window::CursorMoved>()
             // PreUpdate systems, chained, under the same InputSystems set Bevy
             // uses for its own input systems. This means downstream Update
             // systems can use `.after(InputSystems)` to see fresh state.

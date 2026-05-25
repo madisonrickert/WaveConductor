@@ -31,6 +31,7 @@ pub use systems::LineRoot;
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
 use wc_core::lifecycle::state::AppState;
+use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
 use wc_core::sketch::{despawn_with, sketch_active};
 
@@ -39,8 +40,6 @@ pub struct LinePlugin;
 
 impl Plugin for LinePlugin {
     fn build(&self, app: &mut App) {
-        use wc_core::lifecycle::RegisterIdleVetoExt;
-
         // Register LineSettings with the settings system (panel + persistence).
         app.register_sketch_settings::<settings::LineSettings>();
 

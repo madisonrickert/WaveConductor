@@ -1,11 +1,10 @@
 //! End-to-end input integration tests for the Line sketch.
 //!
 //! Synthesizes keyboard, mouse, and touch events via `common::input`
-//! helpers and asserts on the resulting state without bypassing any
-//! production code path other than seeding [`PointerState`] (the
-//! `sketches_test_app` harness does not include `pointer_merge_system`,
-//! so we set the pointer directly so `update_mouse_attractor` can
-//! observe a non-`None` cursor).
+//! helpers and asserts on the resulting state. Plan 8 Phase 0 wired
+//! `pointer_merge_system` to consume `CursorMoved` messages, so the
+//! harness runs the merge system and synthetic events flow end-to-end —
+//! no resource-poking shortcuts.
 
 #![allow(
     clippy::expect_used,
@@ -13,13 +12,12 @@
 )]
 
 mod common;
-use common::input::{press_left, release_left, tap_key};
+use common::input::{move_pointer, press_left, release_left, tap_key};
 use common::{arm_idle_timeline, sketches_test_app};
 
 use bevy::input::keyboard::KeyCode;
 use bevy::math::Vec2;
 use bevy::prelude::*;
-use wc_core::input::pointer::{PointerSource, PointerState};
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_sketches::line::compute::LineSimParams;
 use wc_sketches::line::systems::MouseAttractorState;
@@ -47,26 +45,15 @@ fn enter_line(app: &mut App) {
     );
 }
 
-/// Place the pointer at a fixed window-space position so
-/// `update_mouse_attractor` observes `pointer.primary == Some(...)` on the
-/// next frame. `sketches_test_app()` does not run `pointer_merge_system`,
-/// so we set `PointerState` directly. Production code consumes
-/// `PointerState` whether it was produced by the merge system or inserted
-/// by hand, so this exercises the same downstream path.
-fn seed_pointer(app: &mut App, x: f32, y: f32) {
-    app.world_mut().insert_resource(PointerState {
-        primary: Some(Vec2::new(x, y)),
-        source: PointerSource::Mouse,
-    });
-}
-
 #[test]
 fn left_press_activates_mouse_attractor() {
     let mut app = sketches_test_app();
     app.update();
     enter_line(&mut app);
 
-    seed_pointer(&mut app, 640.0, 360.0);
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    // One update folds CursorMoved into PointerState via pointer_merge_system.
+    app.update();
 
     let before = app.world().resource::<MouseAttractorState>().power;
     // Bit-for-bit equality with 0.0: MouseAttractorState::default() seeds power
@@ -95,7 +82,8 @@ fn sim_params_records_one_attractor_after_press() {
     app.update();
     enter_line(&mut app);
 
-    seed_pointer(&mut app, 640.0, 360.0);
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    app.update();
 
     press_left(&mut app);
     app.update();
@@ -116,7 +104,8 @@ fn release_starts_attractor_decay() {
     app.update();
     enter_line(&mut app);
 
-    seed_pointer(&mut app, 640.0, 360.0);
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    app.update();
 
     press_left(&mut app);
     app.update();
@@ -140,7 +129,8 @@ fn decay_holds_active_via_idle_veto() {
     app.update();
     enter_line(&mut app);
 
-    seed_pointer(&mut app, 640.0, 360.0);
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    app.update();
 
     press_left(&mut app);
     app.update();

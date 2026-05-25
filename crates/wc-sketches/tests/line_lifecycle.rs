@@ -15,7 +15,18 @@ use common::{arm_idle_timeline, sketches_test_app};
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
+use wc_sketches::line::systems::{MOUSE_POWER_DECAY, MOUSE_POWER_FLOOR};
 use wc_sketches::line::{settings::LineSettings, LineRoot};
+
+/// Initial seeded power for the gravity-scaling lifecycle test.
+const SEEDED_MOUSE_POWER: f32 = 10.0;
+
+/// Expected post-decay power after one tick of `decay_mouse_attractor`:
+/// `floor + (power - floor) * decay`. Derived from the same v4 constants the
+/// production decay system uses, so the test follows tuning changes
+/// automatically.
+const EXPECTED_POST_DECAY_POWER: f32 =
+    MOUSE_POWER_FLOOR + (SEEDED_MOUSE_POWER - MOUSE_POWER_FLOOR) * MOUSE_POWER_DECAY;
 
 #[test]
 fn line_settings_resource_inserted() {
@@ -165,57 +176,6 @@ fn update_sim_params_does_not_run_when_idle() {
 }
 
 #[test]
-fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
-    use wc_sketches::line::compute::LineSimParams;
-    use wc_sketches::line::settings::LineSettings;
-    use wc_sketches::line::systems::MouseAttractorState;
-
-    let mut app = sketches_test_app();
-    app.update();
-
-    // Enter Line so the gated `update_sim_params` chain starts firing.
-    app.world_mut()
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::Line);
-    app.update();
-    app.update();
-
-    // Seed an active mouse attractor: power=10 at (5,5).
-    app.world_mut().insert_resource(MouseAttractorState {
-        power: 10.0,
-        position: [5.0, 5.0],
-    });
-
-    // The chain is ordered (update_mouse_attractor → decay_mouse_attractor →
-    // update_sim_params). decay does NOT zero the power on a single tick
-    // because it only steps `floor + (power - floor) * 0.9`; from 10 that
-    // lands at 9.2, still well above the floor+epsilon cutoff. The post-decay
-    // power is what update_sim_params sees, so compute the expected value.
-    let gravity = app.world().resource::<LineSettings>().gravity_constant;
-    let post_decay_power = wc_sketches::line::systems::MOUSE_POWER_FLOOR
-        + (10.0 - wc_sketches::line::systems::MOUSE_POWER_FLOOR)
-            * wc_sketches::line::systems::MOUSE_POWER_DECAY;
-    let expected_attractor_power = post_decay_power * gravity;
-
-    app.update();
-
-    let sim = app
-        .world()
-        .get_resource::<LineSimParams>()
-        .expect("LineSimParams should be inserted by spawn_line");
-    assert_eq!(
-        sim.params.attractor_count, 1,
-        "active mouse should populate one attractor slot"
-    );
-    assert!(
-        (sim.params.attractors[0].power - expected_attractor_power).abs() < 1e-4,
-        "attractor[0].power should equal post-decay mouse power * gravity_constant; got {} expected {}",
-        sim.params.attractors[0].power,
-        expected_attractor_power
-    );
-}
-
-#[test]
 fn idle_veto_keeps_line_active_during_attractor_decay() {
     use wc_sketches::line::systems::MouseAttractorState;
 
@@ -256,6 +216,56 @@ fn idle_veto_keeps_line_active_during_attractor_decay() {
         *activity.get(),
         SketchActivity::Active,
         "Line should stay Active while mouse attractor is still decaying"
+    );
+}
+
+#[test]
+fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
+    use wc_sketches::line::compute::LineSimParams;
+    use wc_sketches::line::settings::LineSettings;
+    use wc_sketches::line::systems::MouseAttractorState;
+
+    let mut app = sketches_test_app();
+    app.update();
+
+    // Enter Line so the gated `update_sim_params` chain starts firing.
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Line);
+    app.update();
+    app.update();
+
+    // Seed an active mouse attractor at (5, 5) with the test-fixed starting
+    // power. `EXPECTED_POST_DECAY_POWER` (module scope) computes the post-tick
+    // value from the same v4 constants the production code uses.
+    app.world_mut().insert_resource(MouseAttractorState {
+        power: SEEDED_MOUSE_POWER,
+        position: [5.0, 5.0],
+    });
+
+    // The chain is ordered (update_mouse_attractor → decay_mouse_attractor →
+    // update_sim_params). decay does NOT zero the power on a single tick
+    // because it only steps `floor + (power - floor) * decay`; from 10 that
+    // lands well above the floor+epsilon cutoff. The post-decay power is what
+    // update_sim_params sees.
+    let gravity = app.world().resource::<LineSettings>().gravity_constant;
+    let expected_attractor_power = EXPECTED_POST_DECAY_POWER * gravity;
+
+    app.update();
+
+    let sim = app
+        .world()
+        .get_resource::<LineSimParams>()
+        .expect("LineSimParams should be inserted by spawn_line");
+    assert_eq!(
+        sim.params.attractor_count, 1,
+        "active mouse should populate one attractor slot"
+    );
+    assert!(
+        (sim.params.attractors[0].power - expected_attractor_power).abs() < 1e-4,
+        "attractor[0].power should equal post-decay mouse power * gravity_constant; got {} expected {}",
+        sim.params.attractors[0].power,
+        expected_attractor_power
     );
 }
 
