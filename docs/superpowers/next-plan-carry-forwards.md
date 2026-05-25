@@ -91,3 +91,17 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 37. **Visual verification of horizontal-line spawn is deferred.** Implementer confirmed binary boots and lifecycle test passes but couldn't click into `AppState::Line` from the harness. Madison or a manual session needs to verify five horizontal strands at mid-Y are visible and respond to click-drag before the v5-line-sim tag.
 
 38. **`mid_y = 0.0_f32` in `spawn.rs:57` could become a setting** if Plan 11+ moves the Line camera off-center. Note for that point.
+
+## From Plan 7 Phase E review (2026-05-25)
+
+39. **Duplicated `arm_idle_timeline` pattern** between `crates/wc-sketches/tests/line_lifecycle.rs:183-193,324-334` and `crates/wc-core/tests/lifecycle_idle_veto.rs:44-60`. Hoist a shared helper into `tests/common/` once Plan 7.5 lands the test harness.
+
+40. **`idle_veto_keeps_line_active_during_attractor_decay` is not adjacent to** `update_sim_params_does_not_run_when_idle` in `line_lifecycle.rs`. Group the two veto-aware tests together for readability.
+
+41. **`use wc_core::lifecycle::RegisterIdleVetoExt;` is buried inside `LinePlugin::build`** (`crates/wc-sketches/src/line/mod.rs:42`). Hoist to the file's top `use` block for consistency with other crate-level imports.
+
+42. **`MouseAttractorState.power` field doc** (`crates/wc-sketches/src/line/systems/mouse.rs:20`) doesn't note that `line_idle_veto` consumes it. A one-line cross-reference would shorten future rename-discovery.
+
+43. **Test prerequisite comment ordering** in `update_sim_params_does_not_run_when_idle` (`line_lifecycle.rs:202-206`): the comment sits between the prereq assert and the `dt_before` capture; reads ambiguously. Move comment immediately before `let dt_before`.
+
+44. **`line_idle_veto` is private** (`crates/wc-sketches/src/line/mod.rs:135`). If a future unit test wants to assert against the function directly, it'll need `pub(crate)`. Flag for if and when that arises.
