@@ -6,16 +6,30 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Per-particle state. Position + velocity in 2D world-space (centered on origin).
+/// Per-particle state. Position + velocity in 2D world-space (centered on
+/// origin), plus the original spawn position (for constrain-to-box reset) and
+/// the fade-in α.
 ///
-/// 16-byte aligned (4 × f32), matching the WGSL `struct Particle` layout.
+/// 32-byte aligned (8 × f32, the trailing `_pad` brings the struct to a
+/// 16-byte multiple) — see the WGSL `struct Particle` in `simulate.wgsl` and
+/// `render.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Particle {
-    /// World-space X/Y position.
+    /// World-space X/Y position (current).
     pub position: [f32; 2],
     /// X/Y velocity in world units per second.
     pub velocity: [f32; 2],
+    /// Spawn position; OOB particles teleport here.
+    pub original_xy: [f32; 2],
+    /// Fade-in alpha, ramps 0 → 1 over `SimParams.fade_duration` seconds.
+    pub alpha: f32,
+    /// Padding to keep the struct multiple-of-16 aligned for WGSL storage rules.
+    #[allow(
+        clippy::pub_underscore_fields,
+        reason = "GPU struct layout padding must be pub for bytemuck"
+    )]
+    pub _pad: f32,
 }
 
 /// One gravitational attractor — position in world space + power (force scale).
@@ -39,6 +53,7 @@ pub struct Attractor {
 
 /// Maximum simultaneous attractors. Index 0 is the mouse; indices 1..=N are
 /// reserved for future Leap-tracked hands (Plan 11+).
+// TODO(plan-11): consider dynamic-sized storage buffer if MAX_ATTRACTORS > ~16
 pub const MAX_ATTRACTORS: usize = 8;
 
 /// Compute kernel uniforms pushed every frame.

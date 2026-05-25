@@ -1,17 +1,15 @@
 // Line particle render — one quad per particle, driven by vertex_index.
 //
-// The mesh is a flat triangle list with particle_count * 6 vertices
-// (all positions are zero — we don't use them). The vertex shader uses
-// @builtin(vertex_index) to locate the particle and compute the quad corner.
-//
-// Particle storage buffer at @group(2) @binding(0)
-// (group 2 = material group in Bevy's Material2d pipeline).
+// Particle storage buffer at @group(2) @binding(0) (Bevy Material2d convention).
 
 #import bevy_sprite::mesh2d_view_bindings::view
 
 struct Particle {
     position: vec2<f32>,
     velocity: vec2<f32>,
+    original_xy: vec2<f32>,
+    alpha: f32,
+    _pad: f32,
 };
 
 @group(2) @binding(0) var<storage, read> particles: array<Particle>;
@@ -19,13 +17,12 @@ struct Particle {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) brightness: f32,
+    @location(1) alpha: f32,
 };
 
 // Half-size of each quad in world units.
 const QUAD_HALF: f32 = 1.5;
 
-// Corner offsets for a CCW triangle list (two triangles per quad).
-// Vertices 0,1,2 → first triangle; 3,4,5 → second triangle.
 fn quad_corner(corner: u32) -> vec2<f32> {
     switch corner {
         case 0u: { return vec2<f32>(-QUAD_HALF, -QUAD_HALF); }
@@ -52,11 +49,12 @@ fn vertex(
     var out: VertexOutput;
     out.clip_position = view.clip_from_world * world_pos;
     out.brightness = clamp(length(p.velocity) * 0.005, 0.05, 1.0);
+    out.alpha = p.alpha;
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let b = in.brightness;
-    return vec4<f32>(b, b * 0.85, b * 0.6, 1.0);
+    return vec4<f32>(b, b * 0.85, b * 0.6, in.alpha);
 }

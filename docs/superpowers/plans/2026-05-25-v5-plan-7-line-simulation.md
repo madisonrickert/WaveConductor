@@ -1121,13 +1121,14 @@ pub struct SimParams {
     /// Upper world-space bounds (x_max, y_max).
     pub constrain_max: [f32; 2],
     /// Padding to bring the header to a 16-byte boundary before the array.
-    /// The eight scalars above total 36 bytes; we need 12 more to reach 48 (a
-    /// multiple of 16) so the `attractors` array begins aligned.
+    /// The header above totals 40 bytes (six 4-byte scalars plus two 8-byte
+    /// `vec2`s); we need 8 more to reach 48 (a multiple of 16) so the
+    /// `attractors` array begins aligned.
     #[allow(
         clippy::pub_underscore_fields,
         reason = "GPU struct layout padding must be pub for bytemuck"
     )]
-    pub _pad: [f32; 3],
+    pub _pad: [f32; 2],
     /// Attractor list. Entries `[0..attractor_count]` are live; the rest are
     /// zero-power and ignored.
     pub attractors: [Attractor; MAX_ATTRACTORS],
@@ -1190,7 +1191,7 @@ struct SimParams {
     fade_duration: f32,
     constrain_min: vec2<f32>,
     constrain_max: vec2<f32>,
-    _pad: vec3<f32>,
+    _pad: vec2<f32>,
     attractors: array<Attractor, MAX_ATTRACTORS>,
 };
 

@@ -23,6 +23,7 @@ pub mod compute;
 pub mod material;
 pub mod particle;
 pub mod settings;
+pub mod sim_cpu;
 pub mod systems;
 
 pub use systems::LineRoot;
@@ -57,12 +58,14 @@ impl Plugin for LinePlugin {
         // Mouse attractor state (independent of sketch active/idle so the
         // attractor's decay continues during the screensaver-fade window).
         app.init_resource::<systems::MouseAttractorState>();
+        app.init_resource::<sim_cpu::LineCpuMirror>();
         app.add_systems(
             Update,
             (
                 systems::update_mouse_attractor,
                 systems::decay_mouse_attractor,
                 systems::update_sim_params,
+                sim_cpu::step_cpu_mirror,
             )
                 .chain()
                 .run_if(sketch_active(AppState::Line)),
@@ -77,9 +80,11 @@ impl Plugin for LinePlugin {
 ///
 /// Drops the `LineSimParams` resource so its `Handle<ShaderStorageBuffer>`
 /// clone is freed and the GPU storage buffer's ref-count reaches zero,
-/// releasing VRAM on each Enter/Exit cycle.
+/// releasing VRAM on each Enter/Exit cycle. Also drops the CPU mirror so its
+/// per-particle `Vec` is freed and re-seeded fresh by the next `spawn_line`.
 fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<compute::LineSimParams>();
+    commands.remove_resource::<sim_cpu::LineCpuMirror>();
 }
 
 /// Listens for `SketchRestart { storage_key == LineSettings::STORAGE_KEY }`

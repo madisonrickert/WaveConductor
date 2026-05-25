@@ -206,6 +206,57 @@ fn update_sim_params_does_not_run_when_idle() {
 }
 
 #[test]
+fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
+    use wc_sketches::line::compute::LineSimParams;
+    use wc_sketches::line::settings::LineSettings;
+    use wc_sketches::line::systems::MouseAttractorState;
+
+    let mut app = build_app();
+    app.update();
+
+    // Enter Line so the gated `update_sim_params` chain starts firing.
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Line);
+    app.update();
+    app.update();
+
+    // Seed an active mouse attractor: power=10 at (5,5).
+    app.world_mut().insert_resource(MouseAttractorState {
+        power: 10.0,
+        position: [5.0, 5.0],
+    });
+
+    // The chain is ordered (update_mouse_attractor → decay_mouse_attractor →
+    // update_sim_params). decay does NOT zero the power on a single tick
+    // because it only steps `floor + (power - floor) * 0.9`; from 10 that
+    // lands at 9.2, still well above the floor+epsilon cutoff. The post-decay
+    // power is what update_sim_params sees, so compute the expected value.
+    let gravity = app.world().resource::<LineSettings>().gravity_constant;
+    let post_decay_power = wc_sketches::line::systems::MOUSE_POWER_FLOOR
+        + (10.0 - wc_sketches::line::systems::MOUSE_POWER_FLOOR)
+            * wc_sketches::line::systems::MOUSE_POWER_DECAY;
+    let expected_attractor_power = post_decay_power * gravity;
+
+    app.update();
+
+    let sim = app
+        .world()
+        .get_resource::<LineSimParams>()
+        .expect("LineSimParams should be inserted by spawn_line");
+    assert_eq!(
+        sim.params.attractor_count, 1,
+        "active mouse should populate one attractor slot"
+    );
+    assert!(
+        (sim.params.attractors[0].power - expected_attractor_power).abs() < 1e-4,
+        "attractor[0].power should equal post-decay mouse power * gravity_constant; got {} expected {}",
+        sim.params.attractors[0].power,
+        expected_attractor_power
+    );
+}
+
+#[test]
 fn settings_restart_cycles_back_to_line() {
     use wc_core::settings::SketchRestart;
     use wc_core::settings::SketchSettings;
