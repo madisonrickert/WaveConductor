@@ -16,6 +16,9 @@
     reason = "Test fixtures may be unused by some integration test binaries."
 )]
 
+#[path = "../../../wc-core/tests/common/input.rs"]
+pub mod input;
+
 use std::time::Duration;
 
 use bevy::asset::AssetPlugin;
