@@ -1,5 +1,10 @@
 //! Shared fixtures for `wc-core` integration tests.
 //!
+//! Each integration test in `tests/*.rs` is its own crate; `tests/common/`
+//! is the canonical Rust pattern for sharing helpers among them. Submodules
+//! here may go unused by some integration binaries — `#[allow(dead_code)]`
+//! at the module level keeps `cargo test` happy.
+//!
 //! `TestSketchSettings` is a small, varied settings struct that touches every
 //! `SettingKind` so panel renderers and persistence can be tested in isolation
 //! against a stable target. Lives in `tests/common/` (not `src/`) so it does
@@ -9,6 +14,8 @@
     dead_code,
     reason = "test fixtures may be referenced from only some integration tests"
 )]
+
+pub mod app;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

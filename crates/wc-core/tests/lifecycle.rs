@@ -11,26 +11,12 @@
 // no active integration coverage. If you're modifying `reset_on_interaction`,
 // also verify the input test re-enables cleanly.
 
-use std::time::Duration;
+mod common;
+use common::app::{arm_idle_timeline, lifecycle_test_app};
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::*;
-use wc_core::lifecycle::{
-    idle::InteractionTimer,
-    state::{AppState, SketchActivity},
-    LifecyclePlugin,
-};
-
-fn test_app() -> App {
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    // StatesPlugin is required for the StateTransition schedule used by init_state / add_sub_state.
-    // MinimalPlugins does not include it; DefaultPlugins does.
-    app.add_plugins(bevy::state::app::StatesPlugin);
-    app.add_plugins(bevy::input::InputPlugin); // Needed for ButtonInput resources used by leafwing.
-    app.add_plugins(LifecyclePlugin);
-    app
-}
+use wc_core::lifecycle::state::{AppState, SketchActivity};
 
 /// Helper: inject a physical key press into the world, run one update tick,
 /// then inject a key release. This mirrors leafwing's own test patterns for
@@ -48,7 +34,7 @@ fn press_key(app: &mut App, key: KeyCode) {
 
 #[test]
 fn defaults_to_home_state() {
-    let mut app = test_app();
+    let mut app = lifecycle_test_app();
     app.update();
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
@@ -58,7 +44,7 @@ fn defaults_to_home_state() {
 
 #[test]
 fn select_line_transitions_into_line_state() {
-    let mut app = test_app();
+    let mut app = lifecycle_test_app();
     app.update();
     press_key(&mut app, KeyCode::Digit1);
     // Pending transitions resolve on the next update tick.
@@ -71,7 +57,7 @@ fn select_line_transitions_into_line_state() {
 
 #[test]
 fn navigate_home_returns_to_home() {
-    let mut app = test_app();
+    let mut app = lifecycle_test_app();
     app.update();
     press_key(&mut app, KeyCode::Digit2); // Select Flame
     app.update();
@@ -89,7 +75,7 @@ fn navigate_home_returns_to_home() {
 
 #[test]
 fn next_and_prev_cycle_through_sketches() {
-    let mut app = test_app();
+    let mut app = lifecycle_test_app();
     app.update();
     // Home → next (X key) → Line
     press_key(&mut app, KeyCode::KeyX);
@@ -125,14 +111,7 @@ fn next_and_prev_cycle_through_sketches() {
 
 #[test]
 fn idle_transitions_after_threshold() {
-    let mut app = test_app();
-    // Configure a short idle threshold so the test is fast.
-    app.world_mut()
-        .resource_mut::<InteractionTimer>()
-        .idle_threshold = Duration::from_millis(50);
-    app.world_mut()
-        .resource_mut::<InteractionTimer>()
-        .screensaver_threshold = Duration::from_millis(50);
+    let mut app = lifecycle_test_app();
 
     // Navigate to Line sketch so SketchActivity sub-state activates.
     app.update();
@@ -147,31 +126,22 @@ fn idle_transitions_after_threshold() {
         SketchActivity::Active,
     );
 
-    // Advance time in controlled steps so `idle_for` crosses the 50 ms
-    // threshold without relying on wall-clock duration.
-    //
-    // Strategy: record `now` as the interaction baseline, then switch to
-    // ManualDuration(80 ms) so each subsequent update advances elapsed by
-    // 80 ms, making `idle_for = 80 ms > 50 ms` on the very next frame.
+    // Arm the idle timeline: shrinks `idle_threshold` to 50 ms, sets
+    // `screensaver_threshold` far enough out to avoid overshoot, marks the
+    // interaction timer at `now`, and installs
+    // `TimeUpdateStrategy::ManualDuration(80 ms)` so each subsequent update
+    // advances elapsed time deterministically.
     //
     // NOTE: In Bevy 0.18, `Time<()>` (the generic clock) is overwritten each
     // frame by `update_virtual_time` which derives it from `Time<Virtual>` and
     // `Time<Real>`. Direct `Time::advance_by` is therefore NOT the right way to
-    // control elapsed time in tests. Instead we use `TimeUpdateStrategy::ManualDuration`
-    // to configure how much the `Time<Real>` advances each frame; virtual time
-    // follows suit via `update_virtual_time`.
+    // control elapsed time in tests; `arm_idle_timeline` uses the correct
+    // `TimeUpdateStrategy::ManualDuration` pattern.
     //
     // Because `reset_on_interaction` now calls `.read()` (not `.is_empty()`),
     // the cursor advances past the already-processed release event, so the
     // timer is not disturbed during the "idle" updates below.
-    {
-        let now = app.world().resource::<Time>().elapsed();
-        app.world_mut().resource_mut::<InteractionTimer>().mark(now);
-    }
-    app.world_mut()
-        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_millis(80),
-        ));
+    arm_idle_timeline(&mut app);
 
     // Two updates: first queues the Idle transition, second resolves it.
     app.update(); // advance_activity: idle_for(80 ms) > 50 ms → NextState(Idle) queued

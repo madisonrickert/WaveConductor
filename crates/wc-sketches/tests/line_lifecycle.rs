@@ -10,72 +10,16 @@
     reason = "expect with a clear message is appropriate in test code"
 )]
 
-use bevy::asset::AssetPlugin;
+mod common;
+use common::{arm_idle_timeline, sketches_test_app};
+
 use bevy::prelude::*;
-use bevy::render::storage::ShaderStorageBuffer;
-use bevy::state::app::StatesPlugin;
-use wc_core::input::pointer::PointerState;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
-use wc_sketches::line::{settings::LineSettings, LinePlugin, LineRoot};
-
-fn build_app() -> App {
-    // Point config at a per-test temp dir so we don't stomp persisted settings.
-    let dir = std::env::temp_dir().join(format!("wc-line-lifecycle-{}", std::process::id()));
-    // SAFETY: test-only mutation of env var. Rust 1.80+ requires unsafe.
-    #[allow(
-        unsafe_code,
-        reason = "env mutation is safe in single-threaded test setup"
-    )]
-    unsafe {
-        std::env::set_var("WAVECONDUCTOR_CONFIG_DIR", &dir);
-    }
-
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(bevy::input::InputPlugin);
-    app.add_plugins(AssetPlugin::default());
-    app.add_plugins(StatesPlugin);
-
-    // LifecyclePlugin owns AppState / SketchActivity registration, the
-    // InteractionTimer + IdleVetoes resources consulted by advance_activity,
-    // the InputManagerPlugin for WaveConductorAction, the default input map,
-    // and the ActionState resource. Including it here gives the Phase E veto
-    // test a realistic idle pipeline (advance_activity runs end-to-end) while
-    // continuing to satisfy the other tests' resource expectations.
-    app.add_plugins(wc_core::lifecycle::LifecyclePlugin);
-
-    // Register Mesh as an asset (MeshPlugin) and ShaderStorageBuffer
-    // so spawn_line can call `meshes.add(...)` / `buffers.add(...)`.
-    // The render-world uploads are no-ops without RenderApp.
-    app.add_plugins(bevy::mesh::MeshPlugin);
-    app.init_asset::<ShaderStorageBuffer>();
-
-    // PointerState is normally registered by wc_core::input::InputPlugin.
-    // Insert the default here so update_sim_params doesn't panic.
-    app.init_resource::<PointerState>();
-
-    // Single<&Window> needs an entity with a Window component. WindowPlugin
-    // creates one in production; tests use MinimalPlugins, so spawn one
-    // manually with a fixed resolution that matches the production default.
-    app.world_mut().spawn(Window {
-        resolution: (1280_u32, 720_u32).into(),
-        ..Default::default()
-    });
-
-    // SettingsPlugin provides the settings registry + persistence.
-    app.add_plugins(wc_core::settings::SettingsPlugin);
-
-    // LinePlugin registers LineSettings, Material2dPlugin (gracefully no-ops
-    // render setup without RenderApp), LineComputePlugin (same), and wires
-    // OnEnter / OnExit systems.
-    app.add_plugins(LinePlugin);
-
-    app
-}
+use wc_sketches::line::{settings::LineSettings, LineRoot};
 
 #[test]
 fn line_settings_resource_inserted() {
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update();
 
     let settings = app
@@ -91,7 +35,7 @@ fn line_settings_resource_inserted() {
 
 #[test]
 fn enter_line_spawns_root_marker() {
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update(); // initialize resources
 
     // Transition to AppState::Line.
@@ -114,7 +58,7 @@ fn enter_line_spawns_root_marker() {
 
 #[test]
 fn exit_line_despawns_root_marker() {
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update();
 
     // Enter Line.
@@ -152,11 +96,9 @@ fn exit_line_despawns_root_marker() {
 
 #[test]
 fn update_sim_params_does_not_run_when_idle() {
-    use std::time::Duration;
-    use wc_core::lifecycle::idle::InteractionTimer;
     use wc_sketches::line::compute::LineSimParams;
 
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update();
 
     // Enter Line and let a couple frames run so LineSimParams is populated.
@@ -175,22 +117,12 @@ fn update_sim_params_does_not_run_when_idle() {
         .power = 0.0;
 
     // Drive `advance_activity` to transition SketchActivity → Idle via the
-    // ManualDuration time pattern. `LifecyclePlugin` re-evaluates the target
-    // activity each frame, so manually setting `NextState::Idle` would be
-    // overwritten on the next update. Instead, shrink the idle threshold and
-    // mark interaction at t=now, then step elapsed past the threshold with
-    // `TimeUpdateStrategy::ManualDuration`.
-    {
-        let mut timer = app.world_mut().resource_mut::<InteractionTimer>();
-        timer.idle_threshold = Duration::from_millis(50);
-        timer.screensaver_threshold = Duration::from_secs(60);
-    }
-    let now = app.world().resource::<Time>().elapsed();
-    app.world_mut().resource_mut::<InteractionTimer>().mark(now);
-    app.world_mut()
-        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_millis(80),
-        ));
+    // shared `arm_idle_timeline` helper (shrinks idle threshold, marks
+    // interaction at `now`, installs `TimeUpdateStrategy::ManualDuration`).
+    // `LifecyclePlugin` re-evaluates the target activity each frame, so
+    // manually setting `NextState::Idle` would be overwritten on the next
+    // update — stepping elapsed past the threshold is the correct path.
+    arm_idle_timeline(&mut app);
     // Two updates: first queues the Idle transition, second resolves it.
     app.update();
     app.update();
@@ -238,7 +170,7 @@ fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
     use wc_sketches::line::settings::LineSettings;
     use wc_sketches::line::systems::MouseAttractorState;
 
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update();
 
     // Enter Line so the gated `update_sim_params` chain starts firing.
@@ -285,11 +217,9 @@ fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
 
 #[test]
 fn idle_veto_keeps_line_active_during_attractor_decay() {
-    use std::time::Duration;
-    use wc_core::lifecycle::idle::InteractionTimer;
     use wc_sketches::line::systems::MouseAttractorState;
 
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update();
 
     // Enter Line. LinePlugin registers the veto in build().
@@ -311,27 +241,10 @@ fn idle_veto_keeps_line_active_during_attractor_decay() {
     app.world_mut().resource_mut::<MouseAttractorState>().power = 5.0;
 
     // Shrink the idle threshold and arm `TimeUpdateStrategy::ManualDuration` so
-    // each `app.update()` advances elapsed time deterministically.
-    //
-    // NOTE: In Bevy 0.18, `Time::advance_by` on the generic `Time<()>` clock is
-    // overwritten every frame by `update_virtual_time`. The plan's literal test
-    // body uses `Time::advance_by`, but it's a no-op here for the same reason
-    // documented in `crates/wc-core/tests/lifecycle.rs::idle_transitions_after_threshold`
-    // and `crates/wc-core/tests/lifecycle_idle_veto.rs::arm_idle_timeline`.
-    // The correct adaptation is `TimeUpdateStrategy::ManualDuration` plus
-    // marking interaction at the current elapsed time so `idle_for` measures
-    // from a known origin.
-    {
-        let mut timer = app.world_mut().resource_mut::<InteractionTimer>();
-        timer.idle_threshold = Duration::from_millis(50);
-        timer.screensaver_threshold = Duration::from_secs(60);
-    }
-    let now = app.world().resource::<Time>().elapsed();
-    app.world_mut().resource_mut::<InteractionTimer>().mark(now);
-    app.world_mut()
-        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_millis(80),
-        ));
+    // each `app.update()` advances elapsed time deterministically. See
+    // `arm_idle_timeline` for the Bevy 0.18 quirk this works around
+    // (`Time::advance_by` is overwritten by `update_virtual_time`).
+    arm_idle_timeline(&mut app);
 
     // Two updates: first would queue the Idle transition (idle_for ≈ 80 ms > 50 ms),
     // but the veto suppresses it; second resolves any pending state transitions.
@@ -352,7 +265,7 @@ fn settings_restart_cycles_back_to_line() {
     use wc_core::settings::SketchSettings;
     use wc_sketches::line::settings::LineSettings;
 
-    let mut app = build_app();
+    let mut app = sketches_test_app();
     app.update();
 
     // Enter Line and let OnEnter run.
