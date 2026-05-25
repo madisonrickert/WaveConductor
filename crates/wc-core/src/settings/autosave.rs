@@ -130,6 +130,8 @@ pub fn flush_on_exit(world: &mut World) {
         if let Some((save_fn, _)) = snapshot.iter().find(|(_, k)| *k == key) {
             save_fn(world);
             tracing::info!(%key, "settings saved (flush on AppExit)");
+        } else {
+            tracing::warn!(%key, "flush_on_exit: pending key has no save_fn in registry");
         }
     }
 }
