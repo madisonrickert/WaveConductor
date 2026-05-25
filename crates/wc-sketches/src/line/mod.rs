@@ -54,10 +54,18 @@ impl Plugin for LinePlugin {
             (despawn_with::<LineRoot>, remove_sim_params),
         );
 
-        // Per-frame sim update, gated to active state only.
+        // Mouse attractor state (independent of sketch active/idle so the
+        // attractor's decay continues during the screensaver-fade window).
+        app.init_resource::<systems::MouseAttractorState>();
         app.add_systems(
             Update,
-            systems::update_sim_params.run_if(sketch_active(AppState::Line)),
+            (
+                systems::update_mouse_attractor,
+                systems::decay_mouse_attractor,
+                systems::update_sim_params,
+            )
+                .chain()
+                .run_if(sketch_active(AppState::Line)),
         );
 
         // Restart listener: exits to Home when particle_count changes.
