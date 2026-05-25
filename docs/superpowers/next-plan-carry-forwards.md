@@ -79,3 +79,15 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 32. **Brittleness of `update_sim_params_writes_mouse_attractor_with_gravity_scaling`** (`crates/wc-sketches/tests/line_lifecycle.rs:230-256`). Hard-codes the post-decay power value (9.2) without naming it. Promote to `const EXPECTED_POST_DECAY_POWER: f32 = MOUSE_POWER_FLOOR + (MOUSE_POWER_PRESS - MOUSE_POWER_FLOOR) * MOUSE_POWER_DECAY;` so the dependency on system order is explicit.
 
 33. **`step_one` rustdoc** should note its hot-path role (`crates/wc-sketches/src/line/sim_cpu.rs:39`): "Pure function, allocation-free; called once per particle per frame from `step_cpu_mirror`."
+
+## From Plan 7 Phase D review (2026-05-25)
+
+34. **`LineSettings` module doc should mention serde forward-compat.** `crates/wc-sketches/src/line/settings.rs:1-14` explains *why* `drag`/`attractor_radius` were dropped but doesn't tell a maintainer that existing user TOML with those keys still deserializes cleanly. A future engineer might add `#[serde(deny_unknown_fields)]` and break upgrades from v5-line.
+
+35. **`line_settings_resource_inserted` test assertion is weaker than before.** `crates/wc-sketches/tests/line_lifecycle.rs:90` checks `particle_density > 0.0`. Tighten to `>= 0.1` (the documented min) so a future typo dropping the default below the floor is caught.
+
+36. **Commit message `ba515e8` has a stale "drag moves to Dev" claim.** Plan doc Task 26 Step 2 said that, but the implementation removed `drag` entirely. The in-tree settings doc is correct; only the commit message lies. Patch the plan doc for any future re-execution (commits are immutable).
+
+37. **Visual verification of horizontal-line spawn is deferred.** Implementer confirmed binary boots and lifecycle test passes but couldn't click into `AppState::Line` from the harness. Madison or a manual session needs to verify five horizontal strands at mid-Y are visible and respond to click-drag before the v5-line-sim tag.
+
+38. **`mid_y = 0.0_f32` in `spawn.rs:57` could become a setting** if Plan 11+ moves the Line camera off-center. Note for that point.
