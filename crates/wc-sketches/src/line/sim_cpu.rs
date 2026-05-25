@@ -1,7 +1,7 @@
 //! CPU-side particle integrator — a parallel implementation of the WGSL
 //! kernel in `assets/shaders/line/simulate.wgsl`.
 //!
-//! Used by Plan 9's [`ParticleStats`] computation as a readable source for
+//! Used by Plan 9's `ParticleStats` computation (not yet introduced) as a readable source for
 //! per-particle velocities (avoiding a GPU readback stall). The GPU sim
 //! remains authoritative for rendering; the two integrators run independently
 //! and may drift by ≤1% due to floating-point order-of-operations, which is
