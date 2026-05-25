@@ -117,3 +117,11 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 48. **`#[path]` fragility** for the wc-sketches → wc-core `tests/common/input.rs` import is acknowledged in the module doc. No action; reminder for any future file move.
 
 49. **`enter_line()` runs 4 `app.update()` calls after `tap_key`** — 3 would likely suffice (1 fold + 1 leafwing tick + 1 nav handler + 1 OnEnter). Tune if test-time perf ever matters.
+
+## From Plan 8 Phase 0 review (2026-05-25)
+
+50. **`EXPECTED_POST_DECAY_POWER` uses local `SEEDED_MOUSE_POWER`** instead of production `MOUSE_POWER_PRESS`. Both happen to be `10.0` today; if tuning changes one, the test won't track. Replace with the production const for full coupling.
+
+51. **`SIM_PARAMS_SIZE`'s `as u64` cast** is an unavoidable const-context wart (`u64::try_from(usize)` isn't const-stable). Add `#[allow(clippy::cast_possible_truncation, reason = "size_of fits in u64 on all supported targets")]` or a one-line comment explaining the constraint.
+
+52. **`cursor_moved_reader.read().last()` discards intermediate positions silently.** Intentional (we want "newest wins" for pointer position, not motion path) but the comment in `pointer_merge_system` could explicitly note this design choice.
