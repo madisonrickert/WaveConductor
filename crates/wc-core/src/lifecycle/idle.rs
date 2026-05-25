@@ -7,7 +7,9 @@
 //!   (mouse, keyboard, touch) is observed.
 //! - [`advance_activity`] reads the timer each frame and transitions
 //!   [`crate::lifecycle::state::SketchActivity`] through
-//!   `Active → Idle → Screensaver` as the elapsed time crosses thresholds.
+//!   `Active → Idle → Screensaver` as the elapsed time crosses thresholds,
+//!   unless a sketch-registered [`IdleVetoFn`] (via [`IdleVetoes`]) overrides
+//!   the decision to keep the sketch `Active`.
 
 use std::time::Duration;
 
@@ -53,6 +55,52 @@ impl InteractionTimer {
     }
 }
 
+/// Function pointer type for idle vetos. Receives a read-only `World` reference;
+/// returning `true` keeps the sketch in `SketchActivity::Active` regardless of
+/// elapsed idle time.
+pub type IdleVetoFn = fn(&World) -> bool;
+
+/// List of registered veto callbacks. [`advance_activity`] consults this list
+/// before transitioning out of `Active`; any veto returning `true` overrides
+/// the timeout-based decision.
+///
+/// Sketches register their veto in `Plugin::build` via
+/// [`RegisterIdleVetoExt::register_idle_veto`].
+#[derive(Resource, Default)]
+pub struct IdleVetoes {
+    /// Registered veto callbacks.
+    pub vetos: Vec<IdleVetoFn>,
+}
+
+/// Returns `true` if any registered veto fires for the current world state.
+fn any_veto_active(world: &World) -> bool {
+    let Some(vetos) = world.get_resource::<IdleVetoes>() else {
+        return false;
+    };
+    vetos.vetos.iter().any(|f| f(world))
+}
+
+/// Extension trait that adds `register_idle_veto` to Bevy's [`App`].
+pub trait RegisterIdleVetoExt {
+    /// Register a closure that returns `true` while the sketch should stay
+    /// `Active` regardless of the idle timer.
+    ///
+    /// Registrations accumulate; multiple sketches can each contribute a veto.
+    /// Vetoes are not auto-removed when a sketch exits — they read `World`
+    /// and gracefully return `false` if their resources are absent.
+    fn register_idle_veto(&mut self, veto: IdleVetoFn) -> &mut Self;
+}
+
+impl RegisterIdleVetoExt for App {
+    fn register_idle_veto(&mut self, veto: IdleVetoFn) -> &mut Self {
+        let mut vetos = self
+            .world_mut()
+            .get_resource_or_insert_with(IdleVetoes::default);
+        vetos.vetos.push(veto);
+        self
+    }
+}
+
 /// Resets [`InteractionTimer`] whenever any input event is observed.
 ///
 /// Reads mouse, keyboard, touch, and hand-tracking message streams. A hand
@@ -83,29 +131,37 @@ pub fn reset_on_interaction(
 }
 
 /// Reads [`InteractionTimer`] and transitions [`SketchActivity`] when the
-/// configured thresholds are crossed.
+/// configured thresholds are crossed, unless a registered [`IdleVetoFn`]
+/// in [`IdleVetoes`] keeps the sketch `Active`.
 ///
-/// Skips cleanly when `SketchActivity` doesn't exist (i.e. when `AppState` is
-/// `Home`): the sub-state resource is absent outside sketch states, so both
-/// params are wrapped in `Option` to avoid system-param validation failures.
-pub fn advance_activity(
-    time: Res<'_, Time>,
-    timer: Res<'_, InteractionTimer>,
-    current: Option<Res<'_, State<SketchActivity>>>,
-    next: Option<ResMut<'_, NextState<SketchActivity>>>,
-) {
-    let (Some(current), Some(mut next)) = (current, next) else {
-        return; // Not in a sketch state; nothing to do.
-    };
-    let idle = timer.idle_for(time.elapsed());
-    let target = if idle >= timer.screensaver_threshold + timer.idle_threshold {
+/// Runs as an exclusive system (`world: &mut World`) so the veto callbacks can
+/// read arbitrary world state — Bevy 0.18 does not accept `&World` as a regular
+/// system parameter alongside `Res<...>`. Skips cleanly when `SketchActivity`
+/// doesn't exist (i.e. when `AppState` is `Home`): the sub-state resource is
+/// absent outside sketch states.
+pub fn advance_activity(world: &mut World) {
+    let now = world.resource::<Time>().elapsed();
+    let timer = world.resource::<InteractionTimer>().clone();
+    let idle = timer.idle_for(now);
+    let timeout_target = if idle >= timer.screensaver_threshold + timer.idle_threshold {
         SketchActivity::Screensaver
     } else if idle >= timer.idle_threshold {
         SketchActivity::Idle
     } else {
         SketchActivity::Active
     };
-    if *current.get() != target {
+    let target = if timeout_target != SketchActivity::Active && any_veto_active(world) {
+        SketchActivity::Active
+    } else {
+        timeout_target
+    };
+    let Some(current) = world.get_resource::<State<SketchActivity>>() else {
+        return; // Not in a sketch state; nothing to do.
+    };
+    if *current.get() == target {
+        return;
+    }
+    if let Some(mut next) = world.get_resource_mut::<NextState<SketchActivity>>() {
         next.set(target);
     }
 }

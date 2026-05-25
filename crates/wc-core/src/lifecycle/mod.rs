@@ -22,6 +22,8 @@ pub mod nav;
 pub mod screensaver;
 pub mod state;
 
+pub use idle::RegisterIdleVetoExt;
+
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::*;
 
@@ -42,6 +44,7 @@ impl Plugin for LifecyclePlugin {
             .init_resource::<ActionState<actions::WaveConductorAction>>()
             // Idle / interaction tracking
             .init_resource::<idle::InteractionTimer>()
+            .init_resource::<idle::IdleVetoes>()
             // Register HandTrackingFrame message so reset_on_interaction can
             // read it. If HandTrackingPlugin is also present, Bevy deduplicates
             // the registration; registering here ensures lifecycle tests that do
