@@ -37,3 +37,15 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 14. **`LineComputeNode` trace messages** could become structured tags (`tracing::trace!(node = "LineComputeNode", "no pipeline yet")`) for cleaner log queries. Style-only.
 
 15. **Verify `groupedUpness` spelling in `PARITY.md`.** Currently used as a domain term; confirm it's not a typo for "groupedness" before Plan 9 picks it up as a Rust identifier.
+
+## From Plan 7 Phase A review (2026-05-25)
+
+16. **`InteractionTimer::clone()` in `advance_activity` deserves an inline comment.** `crates/wc-core/src/lifecycle/idle.rs:144` — the clone is required to release the immutable resource borrow before `any_veto_active` reads other world state, but the source reads as gratuitous without a one-line explanation.
+
+17. **Drop the unused `expect_used` allow** at the top of `crates/wc-core/tests/lifecycle_idle_veto.rs` (currently no `.expect()` in the file body). Re-add narrowly when actually needed.
+
+18. **`advance_activity` early-return on `Home`** runs the timer/veto compute before checking whether `SketchActivity` exists. Negligible cost, but inverting the check would skip the `InteractionTimer.clone()` in `Home` state.
+
+19. **`test_app()` / `build_app()` duplication** between `crates/wc-core/tests/lifecycle.rs` and `crates/wc-core/tests/lifecycle_idle_veto.rs`. When the third test file lands, hoist a shared `common::lifecycle_app()` helper into `tests/common/mod.rs`.
+
+20. **Two stray "vetos" spellings in doc-comment prose** in `crates/wc-core/src/lifecycle/idle.rs` (lines 58 and 80). Field is now `vetoes`; prose should match for consistency.
