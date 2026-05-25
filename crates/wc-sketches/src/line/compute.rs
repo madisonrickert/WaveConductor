@@ -11,8 +11,8 @@
 //!   `BindGroupLayoutDescriptor` + `CachedComputePipelineId`.
 //! - `prepare_bind_group` runs in [`RenderSystems::PrepareBindGroups`] and
 //!   builds the per-frame [`LineComputeBindGroup`].
-//! - [`LineComputeNode`] dispatches the compute pass; it lives in the main
-//!   render graph and edges before [`bevy::render::graph::CameraDriverLabel`].
+//! - `LineComputeNode` (private) dispatches the compute pass; it lives in the
+//!   main render graph and edges before [`bevy::render::graph::CameraDriverLabel`].
 //!
 //! # Bind group layout (matches `simulate.wgsl`)
 //!
@@ -112,7 +112,8 @@ pub struct LinePipeline {
     pub sim_params_buffer: Buffer,
 }
 
-/// Per-frame bind group built by [`prepare_bind_group`].
+/// Per-frame bind group built by the `prepare_bind_group` system (private to
+/// this module) and consumed by `LineComputeNode` during graph execution.
 #[derive(Resource)]
 pub struct LineComputeBindGroup {
     /// Bind group with `SimParams` uniform (binding 0) and particle buffer (binding 1).

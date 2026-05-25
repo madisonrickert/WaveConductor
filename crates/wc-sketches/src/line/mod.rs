@@ -15,7 +15,7 @@
 //!    [`material::LineMaterial`] and draws a quad per particle via the
 //!    vertex-index-driven `assets/shaders/line/render.wgsl`.
 //! 5. `OnExit(AppState::Line)` runs `despawn_with::<LineRoot>` and
-//!    [`remove_sim_params`] to free the entity tree and drop the
+//!    `remove_sim_params` to free the entity tree and drop the
 //!    `LineSimParams` resource so its `Handle<ShaderStorageBuffer>` clone is
 //!    released, allowing the GPU storage buffer ref-count to reach zero.
 
