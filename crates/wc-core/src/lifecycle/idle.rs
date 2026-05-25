@@ -58,6 +58,10 @@ impl InteractionTimer {
 /// Function pointer type for idle vetos. Receives a read-only `World` reference;
 /// returning `true` keeps the sketch in `SketchActivity::Active` regardless of
 /// elapsed idle time.
+///
+/// Must be a plain `fn`, not a closure — captures are unsupported so that
+/// `IdleVetoes` remains a cheap value resource without `Arc<dyn Fn>` overhead.
+/// Read sketch state inside the function via `world.get_resource::<...>()`.
 pub type IdleVetoFn = fn(&World) -> bool;
 
 /// List of registered veto callbacks. [`advance_activity`] consults this list
@@ -69,15 +73,22 @@ pub type IdleVetoFn = fn(&World) -> bool;
 #[derive(Resource, Default)]
 pub struct IdleVetoes {
     /// Registered veto callbacks.
-    pub vetos: Vec<IdleVetoFn>,
+    vetoes: Vec<IdleVetoFn>,
+}
+
+impl IdleVetoes {
+    /// Iterate registered vetos. Internal helper for `any_veto_active`.
+    fn iter(&self) -> impl Iterator<Item = &IdleVetoFn> {
+        self.vetoes.iter()
+    }
 }
 
 /// Returns `true` if any registered veto fires for the current world state.
 fn any_veto_active(world: &World) -> bool {
-    let Some(vetos) = world.get_resource::<IdleVetoes>() else {
+    let Some(vetoes) = world.get_resource::<IdleVetoes>() else {
         return false;
     };
-    vetos.vetos.iter().any(|f| f(world))
+    vetoes.iter().any(|f| f(world))
 }
 
 /// Extension trait that adds `register_idle_veto` to Bevy's [`App`].
@@ -93,10 +104,10 @@ pub trait RegisterIdleVetoExt {
 
 impl RegisterIdleVetoExt for App {
     fn register_idle_veto(&mut self, veto: IdleVetoFn) -> &mut Self {
-        let mut vetos = self
+        let mut vetoes = self
             .world_mut()
             .get_resource_or_insert_with(IdleVetoes::default);
-        vetos.vetos.push(veto);
+        vetoes.vetoes.push(veto);
         self
     }
 }
