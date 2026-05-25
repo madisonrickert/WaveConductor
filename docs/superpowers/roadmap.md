@@ -15,8 +15,8 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 5 | Settings (Reflect-based, persistence, dev/user panels, derive macro) | ✅ shipped | `v5-settings` |
 | 6 | Line skeleton + sketch scaffolding pattern | ✅ shipped | `v5-line` |
 | 7 | Line simulation parity + idle veto hook | ✅ shipped | `v5-line-sim` |
-| 7.5 | Test harness: synthetic input + shared `tests/common/` | ⏳ next | `v5-test-harness` |
-| 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | planned | `v5-line-render` |
+| 7.5 | Test harness: synthetic input + shared `tests/common/` | ✅ shipped | `v5-test-harness` |
+| 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | ⏳ next | `v5-line-render` |
 | 9 | Line audio + reactivity coupling | planned | `v5-line-audio` |
 | 10 | Line polish + PARITY.md sign-off | planned | `v5-line-parity` |
 | 11+ | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
