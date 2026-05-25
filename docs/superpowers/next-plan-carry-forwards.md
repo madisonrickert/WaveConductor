@@ -69,3 +69,13 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 28. **`MAX_ATTRACTORS` GPU cost note.** `particle.rs:42` — when `MAX_ATTRACTORS` grows past ~16 (Plan 11+ Leap hands), the uniform buffer will get large. Add a `// TODO(plan-11): consider dynamic-sized storage buffer if MAX_ATTRACTORS > ~16`.
 
 29. **Update Plan 7 doc with the `_pad` arithmetic correction** for Tasks 15 and 16. The plan claims "eight scalars above total 36 bytes" but actual is 40, needing `[f32; 2]` pad (Rust) and `vec2<f32>` (WGSL), not the `[f32; 3]` / `vec3<f32>` shown. Implementer applied the correction; the plan doc should reflect reality so a future re-execution doesn't trip.
+
+## From Plan 7 Phase C review (2026-05-25)
+
+30. **`_held` is dead code** in `crates/wc-sketches/src/line/systems/mouse.rs:53-54`. Computed every frame, immediately discarded. Either delete the computation and replace with a comment ("touches.iter() and mouse_buttons.pressed() are intentionally not read"), or keep with `#[allow(unused_variables, reason = "Plan 11 hand-tracking will read this")]`.
+
+31. **Weak directional assertion in `one_attractor_pulls_particle`** (`crates/wc-sketches/src/line/sim_cpu.rs:127-145`). Only checks `velocity[0] > 0.0`. A numeric assertion comparing to `power * size_scale * dt` (for an x-axis-aligned attractor) would catch a force-formula regression directly.
+
+32. **Brittleness of `update_sim_params_writes_mouse_attractor_with_gravity_scaling`** (`crates/wc-sketches/tests/line_lifecycle.rs:230-256`). Hard-codes the post-decay power value (9.2) without naming it. Promote to `const EXPECTED_POST_DECAY_POWER: f32 = MOUSE_POWER_FLOOR + (MOUSE_POWER_PRESS - MOUSE_POWER_FLOOR) * MOUSE_POWER_DECAY;` so the dependency on system order is explicit.
+
+33. **`step_one` rustdoc** should note its hot-path role (`crates/wc-sketches/src/line/sim_cpu.rs:39`): "Pure function, allocation-free; called once per particle per frame from `step_cpu_mirror`."
