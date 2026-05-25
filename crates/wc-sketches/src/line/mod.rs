@@ -71,7 +71,7 @@ impl Plugin for LinePlugin {
                 .run_if(sketch_active(AppState::Line)),
         );
 
-        // Restart listener: exits to Home when particle_count changes.
+        // Restart listener: cycles Line → Home → Line when particle_density changes.
         app.add_systems(Update, restart_on_settings_change);
     }
 }

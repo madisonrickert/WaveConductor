@@ -1,10 +1,11 @@
 //! `OnEnter(AppState::Line)` spawn system.
 //!
-//! Allocates the particle storage buffer with the initial grid layout, builds
-//! a flat quad mesh (`particle_count × 6` vertices for the vertex-index-driven
-//! render shader), spawns the render entity under [`LineRoot`], inserts
-//! [`crate::line::compute::LineSimParams`] for the render world, and seeds the
-//! CPU mirror with the same particle state for Plan 9's `ParticleStats`.
+//! Allocates the particle storage buffer with the initial horizontal-line
+//! layout, builds a flat quad mesh (`count × 6` vertices for the
+//! vertex-index-driven render shader), spawns the render entity under
+//! [`LineRoot`], inserts [`crate::line::compute::LineSimParams`] for the
+//! render world, and seeds the CPU mirror with the same particle state for
+//! Plan 9's `ParticleStats`.
 
 #![allow(
     clippy::as_conversions,
@@ -34,36 +35,50 @@ pub struct LineRoot;
 
 /// `OnEnter(AppState::Line)`.
 ///
-/// Allocates the particle storage buffer with an initial grid layout,
-/// constructs a flat quad mesh (`particle_count × 6` vertices for the
-/// vertex-index-driven render shader), spawns the render entity under
-/// [`LineRoot`], inserts [`LineSimParams`] for the render world to extract
-/// each frame, and seeds the CPU mirror with the same particle state.
+/// Allocates the particle storage buffer with a horizontal-line layout at
+/// mid-Y (five-strand sawtooth Y-jitter), constructs a flat quad mesh
+/// (`count × 6` vertices for the vertex-index-driven render shader), spawns
+/// the render entity under [`LineRoot`], inserts [`LineSimParams`] for the
+/// render world to extract each frame, and seeds the CPU mirror with the
+/// same particle state.
+///
+/// The particle count is derived from `settings.particle_density × window.width`
+/// (v4 parity: `particleDensity = 10` per canvas-pixel of width yields ~12,800
+/// particles at 1280px), clamped to `[100, 100_000]` so a sudden resize spike
+/// does not catastrophically allocate.
 pub fn spawn_line(
     mut commands: Commands<'_, '_>,
     settings: Res<'_, LineSettings>,
+    window: Single<'_, '_, &Window>,
     mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
     mut materials: ResMut<'_, Assets<LineMaterial>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
 ) {
-    let count = settings.particle_count.max(1);
+    let w = window.width();
+    let half_w = w * 0.5;
+    let mid_y = 0.0_f32; // window-centered world
 
-    // Initial state: particles arranged in a square grid centered on origin.
-    // sqrt().ceil() of a positive number is always non-negative; cast is safe.
+    // v4 particleDensity = 10 per canvas-pixel of width. Derive count from
+    // density × width, clamping to a sane range (avoids massive resize spikes).
     #[allow(
         clippy::cast_sign_loss,
-        reason = "sqrt+ceil of positive u32→f32 is always ≥0"
+        clippy::cast_possible_truncation,
+        reason = "density × width is positive and bounded by clamp"
     )]
-    let side = (count as f32).sqrt().ceil() as u32;
-    let spacing = 4.0_f32;
+    let count = ((settings.particle_density * w).round() as u32).clamp(100, 100_000);
+
     let mut initial: Vec<Particle> = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let x = (i % side) as f32 - (side as f32 * 0.5);
-        let y = (i / side) as f32 - (side as f32 * 0.5);
+        // Evenly space across the window width, centered on origin.
+        let x = (i as f32 / count as f32) * w - half_w;
+        // v4: subtle sawtooth Y-jitter `((i % 5) - 2) * 2` so particles sit on
+        // five stacked horizontal strands rather than a single line.
+        let jitter_strand = (i % 5) as f32 - 2.0;
+        let y = mid_y + jitter_strand * 2.0;
         initial.push(Particle {
-            position: [x * spacing, y * spacing],
+            position: [x, y],
             velocity: [0.0, 0.0],
-            original_xy: [x * spacing, y * spacing],
+            original_xy: [x, y],
             alpha: 0.0,
             _pad: 0.0,
         });
@@ -81,7 +96,7 @@ pub fn spawn_line(
         particles: particles_handle.clone(),
     });
 
-    // Build a flat mesh with particle_count * 6 vertices (all at origin).
+    // Build a flat mesh with `count * 6` vertices (all at origin).
     // The vertex shader derives particle position + quad corner from
     // @builtin(vertex_index), so the mesh only needs to exist to trigger
     // the draw call — its vertex data is unused.

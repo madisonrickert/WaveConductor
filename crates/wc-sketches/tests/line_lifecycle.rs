@@ -87,9 +87,9 @@ fn line_settings_resource_inserted() {
         .get_resource::<LineSettings>()
         .expect("LineSettings should be inserted by LinePlugin");
     assert!(
-        settings.particle_count >= 100,
-        "particle_count should default to at least 100, got {}",
-        settings.particle_count
+        settings.particle_density > 0.0,
+        "particle_density should default > 0, got {}",
+        settings.particle_density
     );
 }
 
