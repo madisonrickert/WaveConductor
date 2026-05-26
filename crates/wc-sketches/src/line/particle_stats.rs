@@ -40,7 +40,59 @@
 
 use bevy::prelude::*;
 
+use super::settings::LineSettings;
 use super::systems::mouse::{MouseAttractorState, MOUSE_POWER_FLOOR};
+
+/// User-configurable envelope rates, derived from [`LineSettings`].
+///
+/// The four time-constants that shape the audio envelope live in
+/// `LineSettings` as ms / s for human readability; this struct converts them
+/// to lerp rates (`1 / time_constant`) once per frame so `step_envelope`
+/// stays a pure function. Defaults reproduce the hand-tuned constants from
+/// before settings exposure (Plan 11 Phase F).
+#[derive(Debug, Clone, Copy)]
+pub struct EnvelopeRates {
+    /// Rising-edge lerp rate for `grouped_upness`. Derived from
+    /// [`LineSettings::synth_attack_ms`].
+    pub grouped_upness_attack: f32,
+    /// Falling-edge lerp rate for `grouped_upness`. Derived from
+    /// [`LineSettings::synth_release_ms`].
+    pub grouped_upness_release: f32,
+    /// Rising-edge lerp rate for the pad evolution envelope. Derived from
+    /// [`LineSettings::synth_evolution_attack_s`].
+    pub evolution_attack: f32,
+    /// Falling-edge lerp rate for the pad evolution envelope. Derived from
+    /// [`LineSettings::synth_evolution_release_s`].
+    pub evolution_release: f32,
+}
+
+impl Default for EnvelopeRates {
+    /// Defaults match the hand-tuned constants from before settings
+    /// exposure. Anyone calling `step_envelope` from a test or stand-alone
+    /// context gets the same envelope shape Madison signed off on.
+    fn default() -> Self {
+        Self {
+            grouped_upness_attack: 1000.0 / 40.0,   // 40 ms → 25 Hz
+            grouped_upness_release: 1000.0 / 670.0, // 670 ms → ~1.5 Hz
+            evolution_attack: 1.0 / 4.0,            // 4 s → 0.25 Hz
+            evolution_release: 1.0 / 6.0,           // 6 s → ~0.17 Hz
+        }
+    }
+}
+
+impl EnvelopeRates {
+    /// Convert the human-facing time constants in [`LineSettings`] to lerp
+    /// rates. Guards against zero / negative times (which would produce
+    /// infinite or NaN rates) by clamping at 1 ms / 0.1 s minimums.
+    pub fn from_settings(settings: &LineSettings) -> Self {
+        Self {
+            grouped_upness_attack: 1000.0 / settings.synth_attack_ms.max(1.0),
+            grouped_upness_release: 1000.0 / settings.synth_release_ms.max(1.0),
+            evolution_attack: 1.0 / settings.synth_evolution_attack_s.max(0.1),
+            evolution_release: 1.0 / settings.synth_evolution_release_s.max(0.1),
+        }
+    }
+}
 
 /// Statistics over the current particle population.
 ///
@@ -94,17 +146,19 @@ pub struct ParticleStats {
 pub fn update_particle_stats(
     mouse: Res<'_, MouseAttractorState>,
     time: Res<'_, Time>,
+    settings: Res<'_, LineSettings>,
     mut stats: ResMut<'_, ParticleStats>,
 ) {
-    step_envelope(&mut stats, mouse.power, time.delta_secs());
+    let rates = EnvelopeRates::from_settings(&settings);
+    step_envelope(&mut stats, mouse.power, time.delta_secs(), &rates);
 }
 
 /// Pure-function step: advance the envelope state by one frame of `dt` seconds
-/// given the current attractor `power`. Extracted from `update_particle_stats`
-/// so unit tests can drive the same math without a Bevy `World` / `Res` /
-/// `ResMut` setup. Production code only ever calls this through the system
-/// wrapper above.
-pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
+/// given the current attractor `power` and the configurable envelope `rates`.
+/// Extracted from `update_particle_stats` so unit tests can drive the same
+/// math without a Bevy `World` / `Res` / `ResMut` setup. Production code only
+/// ever calls this through the system wrapper above.
+pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32, rates: &EnvelopeRates) {
     // Normalised attractor activity in [0, 1]. Drives all downstream envelopes.
     //
     // Divide by `MOUSE_POWER_FLOOR` (not `MOUSE_POWER_PRESS`) so excitement
@@ -142,9 +196,9 @@ pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
     // capture showed lagged v4's actual envelope by ~80 ms — audibly off.
     let target_grouped = excitement.powf(GROUPED_UPNESS_CURVE_EXPONENT) * GROUPED_UPNESS_PEAK;
     let grouped_rate = if target_grouped > stats.grouped_upness {
-        GROUPED_UPNESS_ATTACK_RATE
+        rates.grouped_upness_attack
     } else {
-        GROUPED_UPNESS_RELEASE_RATE
+        rates.grouped_upness_release
     };
     stats.grouped_upness = lerp(
         stats.grouped_upness,
@@ -218,9 +272,9 @@ pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
     // fully bloom (via evolution).
     let target_evolution = (stats.grouped_upness / GROUPED_UPNESS_PEAK).clamp(0.0, 1.0);
     let evolution_rate = if target_evolution > stats.evolution {
-        EVOLUTION_ATTACK_RATE
+        rates.evolution_attack
     } else {
-        EVOLUTION_RELEASE_RATE
+        rates.evolution_release
     };
     stats.evolution = lerp(
         stats.evolution,
@@ -246,37 +300,15 @@ const ATTACK_RATE_FAST: f32 = 8.0;
 /// for velocity to halve; this rate matches that decay shape.
 const RELEASE_RATE_SLOW: f32 = 1.5;
 
-/// Attack rate for `grouped_upness` (rising edge — target > current).
-/// 50 Hz = ~20 ms time constant. Press onset is *immediately* audible at this
-/// rate, addressing v4's "mushy onset" calibration weakness. Per the senior
-/// audio review's `follow(τ_attack=0.020)` recommendation.
-const GROUPED_UPNESS_ATTACK_RATE: f32 = 50.0;
-
-/// Release rate for `grouped_upness` (falling edge — target < current).
-/// 1.5 Hz = ~670 ms time constant. Pad-style gentle release tail; the voice
-/// fades over ~2 seconds instead of v4's ~500 ms snap. Asymmetry with
-/// [`GROUPED_UPNESS_ATTACK_RATE`] is ~33× (20 ms attack / 670 ms release) —
-/// typical pad ratio.
-const GROUPED_UPNESS_RELEASE_RATE: f32 = 1.5;
-
 /// Exponent of the perceptual loudness curve applied to `excitement` before
 /// it scales `grouped_upness`. Sub-linear (0.6 < 1.0): low excitement maps to
 /// proportionally higher `grouped_upness`, matching the ear's logarithmic
 /// loudness response (Stevens' power law). Pressing feels louder sooner; full
 /// excitement still hits the same peak ([`GROUPED_UPNESS_PEAK`]).
+///
+/// Not user-tunable — the curve shape is a perceptual fixed law, not a
+/// flavor knob.
 const GROUPED_UPNESS_CURVE_EXPONENT: f32 = 0.6;
-
-/// Attack rate for the pad evolution envelope (rising edge). ~0.25 Hz =
-/// ~4 s time constant. Slow attack is the pad-synthesis signature: voice
-/// volume swells in fast (via [`GROUPED_UPNESS_ATTACK_RATE`]) but the
-/// filter / modulator depth take seconds to fully bloom — the patch
-/// *develops* over the press rather than landing at a fixed character.
-const EVOLUTION_ATTACK_RATE: f32 = 0.25;
-
-/// Release rate for the pad evolution envelope (falling edge). ~0.17 Hz =
-/// ~6 s time constant. Slower than attack so the texture lingers after
-/// the press ends, the way a pad's filter envelope decays slowly.
-const EVOLUTION_RELEASE_RATE: f32 = 0.17;
 
 /// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned
 /// against the v4 reference capture (2026-05-26): v4's `groupedUpness`

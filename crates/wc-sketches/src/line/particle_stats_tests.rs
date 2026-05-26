@@ -22,8 +22,8 @@
 )]
 
 use super::{
-    step_envelope, ParticleStats, ENTROPY_FLOOR, FLAT_RATIO_BASELINE, FLAT_RATIO_MIN,
-    GROUPED_UPNESS_PEAK, SPREAD_BASELINE, SPREAD_MIN,
+    step_envelope, EnvelopeRates, ParticleStats, ENTROPY_FLOOR, FLAT_RATIO_BASELINE,
+    FLAT_RATIO_MIN, GROUPED_UPNESS_PEAK, SPREAD_BASELINE, SPREAD_MIN,
 };
 use crate::line::systems::mouse::MOUSE_POWER_PRESS;
 
@@ -42,8 +42,9 @@ const _: () = assert!(
 /// `update_particle_stats` system applies in production.
 fn run_frames(n: u32, dt: f32, mouse_power: f32, initial: ParticleStats) -> ParticleStats {
     let mut stats = initial;
+    let rates = EnvelopeRates::default();
     for _ in 0..n {
-        step_envelope(&mut stats, mouse_power, dt);
+        step_envelope(&mut stats, mouse_power, dt, &rates);
     }
     stats
 }

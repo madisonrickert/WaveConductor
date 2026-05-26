@@ -194,6 +194,7 @@ pub fn drive_audio_and_shader(
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     mut post: ResMut<'_, LinePostParams>,
     mouse: Res<'_, super::systems::mouse::MouseAttractorState>,
+    settings: Res<'_, super::settings::LineSettings>,
     mut log_state: Local<'_, AudioLogState>,
 ) {
     // --- TEMPORARY: Plan 11 audio comparison instrumentation (matches v4) ---
@@ -267,7 +268,9 @@ pub fn drive_audio_and_shader(
             AudioCommand::SetLineParam {
                 key: "volume",
                 // Threshold + scale: silent below 0.05, scaled ×5 above.
-                value: (stats.grouped_upness - 0.05).max(0.0) * 5.0,
+                // Then multiplied by the user-configurable volume trim from
+                // `LineSettings::synth_volume_scale` (default 1.0).
+                value: (stats.grouped_upness - 0.05).max(0.0) * 5.0 * settings.synth_volume_scale,
             },
         );
         // **Pad evolution envelope** — drives the slow modulator-depth growth

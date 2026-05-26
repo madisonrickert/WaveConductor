@@ -38,6 +38,17 @@
 //! - **`spawn_template`** — optional PNG path whose luminance × alpha weights
 //!   the particle spawn density (empty = horizontal-line layout). Shown as a
 //!   Browse… file picker in the user panel (Plan 11 Phase C).
+//! - **`synth_volume_scale`** — master output gain trim for the synth voice.
+//!   1.0 = unchanged. Lower values reduce kiosk loudness without touching
+//!   system volume.
+//! - **`synth_attack_ms`** — voice envelope attack time. Smaller = snappier
+//!   press response; larger = slower swell-in.
+//! - **`synth_release_ms`** — voice envelope release tail length. Smaller =
+//!   abrupt cutoff on release; larger = long pad tail.
+//! - **`synth_evolution_attack_s`** — how slowly the pad texture blooms over
+//!   a sustained press. Dev-only knob.
+//! - **`synth_evolution_release_s`** — how slowly the pad texture fades after
+//!   release. Dev-only knob.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -87,6 +98,42 @@ pub struct LineSettings {
     )]
     #[serde(default)]
     pub spawn_template: String,
+
+    /// Master output gain trim for the synth voice. `1.0` = unchanged.
+    /// Applied as a final multiplier on the `volume` audio param so kiosk
+    /// loudness can be balanced without touching system volume.
+    #[setting(default = 1.0_f32, min = 0.0_f32, max = 2.0_f32, step = 0.05_f32, category = User)]
+    #[serde(default = "default_synth_volume_scale")]
+    pub synth_volume_scale: f32,
+
+    /// Voice envelope attack time in milliseconds. Smaller = snappier press
+    /// onset; larger = slower swell-in. Internally converts to an envelope
+    /// lerp rate of `1000 / attack_ms`.
+    #[setting(default = 40.0_f32, min = 5.0_f32, max = 200.0_f32, step = 5.0_f32, category = User)]
+    #[serde(default = "default_synth_attack_ms")]
+    pub synth_attack_ms: f32,
+
+    /// Voice envelope release tail length in milliseconds. Smaller = abrupt
+    /// cutoff; larger = long pad tail. Internally converts to an envelope
+    /// lerp rate of `1000 / release_ms`.
+    #[setting(default = 670.0_f32, min = 100.0_f32, max = 3000.0_f32, step = 50.0_f32, category = User)]
+    #[serde(default = "default_synth_release_ms")]
+    pub synth_release_ms: f32,
+
+    /// Pad evolution attack time (seconds). The texture / filter envelope
+    /// blooms over this period during a sustained press. Larger values =
+    /// more dramatic "patch develops" character. Dev-only knob.
+    #[setting(default = 4.0_f32, min = 0.5_f32, max = 10.0_f32, step = 0.5_f32, category = Dev)]
+    #[serde(default = "default_synth_evolution_attack_s")]
+    pub synth_evolution_attack_s: f32,
+
+    /// Pad evolution release time (seconds). The texture / filter envelope
+    /// fades over this period after release. Should generally be longer than
+    /// [`Self::synth_release_ms`] so the voice goes silent while the
+    /// modulators are still alive. Dev-only knob.
+    #[setting(default = 6.0_f32, min = 1.0_f32, max = 15.0_f32, step = 0.5_f32, category = Dev)]
+    #[serde(default = "default_synth_evolution_release_s")]
+    pub synth_evolution_release_s: f32,
 }
 
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
@@ -102,6 +149,26 @@ fn default_gravity_constant() -> f32 {
 
 fn default_gamma() -> f32 {
     1.0
+}
+
+fn default_synth_volume_scale() -> f32 {
+    1.0
+}
+
+fn default_synth_attack_ms() -> f32 {
+    40.0
+}
+
+fn default_synth_release_ms() -> f32 {
+    670.0
+}
+
+fn default_synth_evolution_attack_s() -> f32 {
+    4.0
+}
+
+fn default_synth_evolution_release_s() -> f32 {
+    6.0
 }
 
 #[cfg(test)]
