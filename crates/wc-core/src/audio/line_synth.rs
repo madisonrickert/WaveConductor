@@ -161,6 +161,58 @@ const NOISE_DRIFT_HZ: f32 = 0.041;
 /// over its 24 s cycle.
 const NOISE_DRIFT_DEPTH_HZ: f32 = 200.0;
 
+// --- Per-oscillator detune drift ---
+//
+// Each of the three oscillators (square @ 160, saw @ 320, saw @ 80) gets a
+// slow sine-LFO frequency modulation at a co-prime rate. ±10 cents of detune
+// at each oscillator's nominal frequency. Beats between harmonics produce
+// the classic analog-synth "alive" character — the voice never sits perfectly
+// in tune, harmonics phase against each other on long timescales.
+
+/// LFO rate for oscillator #1 (square @ 160 Hz). Period ≈ 52.6 s. Co-prime
+/// with the other two oscillators' drift rates.
+const OSC1_DRIFT_HZ: f32 = 0.019;
+
+/// Detune depth for oscillator #1 in Hz. ±10 cents at 160 Hz = ±0.926 Hz.
+const OSC1_DRIFT_DEPTH_HZ: f32 = 0.93;
+
+/// LFO rate for oscillator #2 (saw @ 320 Hz). Period ≈ 32.3 s.
+const OSC2_DRIFT_HZ: f32 = 0.031;
+
+/// Detune depth for oscillator #2 in Hz. ±10 cents at 320 Hz = ±1.85 Hz.
+const OSC2_DRIFT_DEPTH_HZ: f32 = 1.85;
+
+/// LFO rate for oscillator #3 (saw @ 80 Hz). Period ≈ 18.9 s.
+const OSC3_DRIFT_HZ: f32 = 0.053;
+
+/// Detune depth for oscillator #3 in Hz. ±10 cents at 80 Hz = ±0.463 Hz.
+const OSC3_DRIFT_DEPTH_HZ: f32 = 0.46;
+
+// --- Breath depth meta-modulation ---
+
+/// Sine LFO rate for breath depth swell. Period ≈ 30 s — slow enough to feel
+/// intentional, fast enough to perceive within a typical 1-minute interaction.
+const BREATH_DEPTH_LFO_HZ: f32 = 0.033;
+
+/// Amplitude of the breath-depth swell. With [`BREATH_DEPTH`] = 0.15, this
+/// makes the effective depth swing between 0.10 and 0.20 — sometimes more
+/// breath, sometimes calmer.
+const BREATH_DEPTH_LFO: f32 = 0.05;
+
+// --- Bandpass Q modulation ---
+
+/// Lowpass cutoff for the brown-noise generator that modulates bandpass Q.
+/// 0.5 Hz means Q wanders over ~1–3 second timescales — slower than the
+/// LFO-driven cutoff wobble, faster than the slow drift LFO. Sits in the
+/// "filter character morphs" perceptual band.
+const BANDPASS_Q_LOWPASS_HZ: f32 = 0.5;
+
+/// Q modulation depth. With [`BANDPASS_Q`] = 2.18, Q wanders roughly
+/// `2.18 ± 0.4` (1.78–2.58). At Q=1.78 the bandpass is broader, mellower; at
+/// Q=2.58 it's narrower, more ringing. Two independent brown-noise modulators
+/// drive the two bandpass stages so the cascade isn't perfectly in lockstep.
+const BANDPASS_Q_DEPTH: f32 = 0.4;
+
 /// Voice graph for the Line sketch.
 ///
 /// Owns a `Box<dyn AudioUnit>` plus a handful of [`Shared`] parameter
@@ -215,8 +267,24 @@ impl LineSynth {
         // ----- Oscillator voice mix -----
         //
         // v4: square @ 160 * 0.30 + saw @ 320 * 0.30 + saw @ 80 * 0.90.
-        // We sum into a mono signal and scale by `source_gain = volume / 6`.
-        let osc_mix = (square_hz(160.0) * 0.30) + (saw_hz(320.0) * 0.30) + (saw_hz(80.0) * 0.90);
+        //
+        // **Per-oscillator detune drift** (Plan 11 Phase F "more organic"
+        // pass): each oscillator's frequency is modulated by a slow sine LFO
+        // at a co-prime rate (52 s, 32 s, 19 s periods). Depth is ±10 cents,
+        // which produces audible beating between harmonics — the classic
+        // analog-synth "alive" character. The three LFO rates never align
+        // (their periods are mutually irrational ratios) so the detune
+        // pattern doesn't loop audibly over the kiosk runtime.
+        //
+        // 10 cents in Hz: `f × (2^(10/1200) - 1) ≈ f × 0.00578`. So:
+        //   160 Hz → ±0.93 Hz; 320 Hz → ±1.85 Hz; 80 Hz → ±0.46 Hz.
+        let osc1_freq = dc(160.0) + sine_hz::<f32>(OSC1_DRIFT_HZ) * OSC1_DRIFT_DEPTH_HZ;
+        let osc2_freq = dc(320.0) + sine_hz::<f32>(OSC2_DRIFT_HZ) * OSC2_DRIFT_DEPTH_HZ;
+        let osc3_freq = dc(80.0) + sine_hz::<f32>(OSC3_DRIFT_HZ) * OSC3_DRIFT_DEPTH_HZ;
+        let osc1 = osc1_freq >> square();
+        let osc2 = osc2_freq >> saw();
+        let osc3 = osc3_freq >> saw();
+        let osc_mix = osc1 * 0.30 + osc2 * 0.30 + osc3 * 0.90;
 
         // Source gain: `volume * (1/6)`, smoothed by `follow(0.016)` to
         // match v4's `setTargetAtTime(…, 0.016)` exponential approach.
@@ -229,7 +297,14 @@ impl LineSynth {
         // motion that v4's particle dynamics produced for free.
         let source_gain_base = (var(&volume) * SOURCE_GAIN_SCALE) >> follow(PARAM_SMOOTHING_S);
         let breath = brown::<f32>() >> lowpass_hz::<f32>(BREATH_LOWPASS_HZ, BREATH_LOWPASS_Q);
-        let source_gain = source_gain_base * (1.0 + breath * BREATH_DEPTH);
+        // **Breath depth meta-modulation**: instead of a constant ±15% depth,
+        // depth itself swells slowly between BREATH_DEPTH ± BREATH_DEPTH_LFO.
+        // Sometimes the voice is more "alive" (deeper breath), sometimes
+        // calmer (shallower breath). Period 30 s — slow enough to feel
+        // intentional, fast enough to perceive over a 1-minute interaction.
+        let breath_depth =
+            dc(BREATH_DEPTH) + sine_hz::<f32>(BREATH_DEPTH_LFO_HZ) * BREATH_DEPTH_LFO;
+        let source_gain = source_gain_base * (1.0 + breath * breath_depth);
 
         // ----- Noise voice -----
         //
@@ -292,8 +367,20 @@ impl LineSynth {
         let bp_cutoff2 = bp_base2 + bp_lfo2 + bp_slow_drift2;
 
         let voice = osc_mix * source_gain;
-        let bp1 = (voice | bp_cutoff | dc(BANDPASS_Q)) >> bandpass::<f64>();
-        let bp2 = (bp1 | bp_cutoff2 | dc(BANDPASS_Q)) >> bandpass::<f64>();
+        // **Bandpass Q modulation**: instead of a fixed Q=2.18, Q drifts via a
+        // brown-noise generator lowpassed at 0.5 Hz. Q ranges roughly
+        // `BANDPASS_Q ± BANDPASS_Q_DEPTH` (1.78–2.58). The filter's character
+        // morphs between softer (low Q, broad band) and more ringing (high Q,
+        // narrow band) over slow timescales. Independent brown noise per
+        // bandpass stage so the two never perfectly track.
+        let bp_q1 = dc(BANDPASS_Q)
+            + (brown::<f32>() >> lowpass_hz::<f32>(BANDPASS_Q_LOWPASS_HZ, BREATH_LOWPASS_Q))
+                * BANDPASS_Q_DEPTH;
+        let bp_q2 = dc(BANDPASS_Q)
+            + (brown::<f32>() >> lowpass_hz::<f32>(BANDPASS_Q_LOWPASS_HZ, BREATH_LOWPASS_Q))
+                * BANDPASS_Q_DEPTH;
+        let bp1 = (voice | bp_cutoff | bp_q1) >> bandpass::<f64>();
+        let bp2 = (bp1 | bp_cutoff2 | bp_q2) >> bandpass::<f64>();
 
         // ----- Mix + post-process -----
         //
