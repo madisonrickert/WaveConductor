@@ -8,8 +8,15 @@
 //!
 //! 1. **Audio params** — four `SetLineParam` commands per frame, pushed onto
 //!    the lock-free [`wc_core::audio::ring::AudioCommandSender`] ring:
-//!    - `lfo_freq = flat_ratio` — modulates the LFO speed off the cloud's
-//!      aspect ratio. A flat (wide) cloud → faster LFO.
+//!    - `lfo_freq = bandpass_freq × 0.06` — modulation **depth** in Hz for the
+//!      bandpass LFO. v4 sets the LFO oscillator's gain (depth) as
+//!      `lfoGain.gain = lfoFreq × 0.06` where lfoFreq tracks bandpass freq;
+//!      v5's [`wc_core::audio::line_synth::LineSynth`] routes the `lfo_freq`
+//!      param key directly to the LFO depth multiplier (the oscillator rate
+//!      is hardcoded at 8.66 Hz). Plan 11 Phase F tuning: passing the depth
+//!      derived from current bandpass cutoff reproduces v4's audible wobble
+//!      (11–67 Hz depth across the press cycle) — the previous constant 1.0
+//!      from `flat_ratio` was sub-quarter-tone and inaudible.
 //!    - `bandpass_freq = 222.0 / normalized_entropy` (when entropy is non-zero)
 //!      — entropy-driven filter cutoff; less entropy → higher cutoff.
 //!    - `noise_freq = 2000.0 * normalized_variance_length` — spreading the
@@ -45,6 +52,15 @@ use wc_core::audio::ring::AudioCommandSender;
 use super::particle_stats::ParticleStats;
 use super::post_process::LinePostParams;
 
+/// v4's `lfoGain.gain.setTargetAtTime(freq * 0.06, …)` constant.
+///
+/// The LFO modulation depth tracks the bandpass cutoff so the wobble's
+/// musical interval stays consistent as the cutoff sweeps — at 222 Hz cutoff
+/// the depth is ~13 Hz (≈ minor second), at 1110 Hz cutoff the depth is
+/// ~67 Hz (≈ minor sixth). Pinning this to the v4 constant avoids re-deriving
+/// it whenever the bandpass formula changes.
+const LFO_DEPTH_OVER_CUTOFF: f32 = 0.06;
+
 /// `Update` system that closes the audio-reactivity loop.
 ///
 /// Reads [`ParticleStats`] (written earlier in the same frame by
@@ -72,22 +88,30 @@ pub fn drive_audio_and_shader(
     // device). When `AudioCommandSender` is absent, skip the audio writes and
     // still update the shader uniforms below.
     if let Some(mut audio_cmd) = audio_cmd {
-        push_audio(
-            &mut audio_cmd,
-            AudioCommand::SetLineParam {
-                key: "lfo_freq",
-                value: stats.flat_ratio,
-            },
-        );
         // v4 guards bandpass against division-by-zero on `normalizedEntropy == 0`
         // (which happens when all particles share a position, e.g. first frame).
-        // Skip the command in that case — the audio thread keeps the last value.
+        // Skip the bandpass + lfo_depth commands together in that case — both
+        // depend on the same denominator, and the audio thread keeps the last
+        // values. The lfo_depth derives from bandpass_freq directly, matching
+        // v4's `lfoGain.gain = bandpassFreq × 0.06`.
         if stats.normalized_entropy != 0.0 {
+            let bandpass_freq = 222.0 / stats.normalized_entropy;
             push_audio(
                 &mut audio_cmd,
                 AudioCommand::SetLineParam {
                     key: "bandpass_freq",
-                    value: 222.0 / stats.normalized_entropy,
+                    value: bandpass_freq,
+                },
+            );
+            push_audio(
+                &mut audio_cmd,
+                AudioCommand::SetLineParam {
+                    key: "lfo_freq",
+                    // v4 parity: LFO modulation depth tracks bandpass cutoff.
+                    // The `lfo_freq` key in LineSynth is routed to LFO depth
+                    // (oscillator rate is hardcoded at 8.66 Hz). 0.06 is v4's
+                    // `lfoGain.gain = freq × 0.06` constant.
+                    value: bandpass_freq * LFO_DEPTH_OVER_CUTOFF,
                 },
             );
         }

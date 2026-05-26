@@ -123,12 +123,23 @@ pub fn update_particle_stats(
 
     // variance_length: high at rest (particles spread along the horizontal spawn
     // line), drops during press (cluster forms around attractor). Mapped so
-    // 1.0 = full spread, 0.2 = tight cluster.
+    // 1.0 = full spread, SPREAD_MIN = tight cluster.
+    //
+    // Asymmetric attack/release: clumping on press happens fast (in v4 the
+    // particles clump within ~0.2-0.3 s of the gravity well's activation),
+    // while re-spreading after release follows the same slow inertial decay
+    // as `average_vel`. Note the inverted direction: variance *decreases* on
+    // press, so the "attack" branch fires when target < current.
     let target_variance = SPREAD_BASELINE - excitement * (SPREAD_BASELINE - SPREAD_MIN);
+    let variance_rate = if target_variance < stats.variance_length {
+        ATTACK_RATE_FAST
+    } else {
+        RELEASE_RATE_SLOW
+    };
     stats.variance_length = lerp(
         stats.variance_length,
         target_variance,
-        (RELEASE_RATE_SLOW * dt).min(1.0),
+        (variance_rate * dt).min(1.0),
     );
 
     // Normalised stats derive from variance_length. v4 used per-axis math here;
@@ -168,10 +179,13 @@ const RELEASE_RATE_SLOW: f32 = 1.5;
 const GROUPED_UPNESS_RATE: f32 = 3.0;
 
 /// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned to
-/// v4's observed sustained-press range (~0.5-0.8). The downstream synth
-/// volume formula is `max(grouped_upness - 0.05, 0) * 5`, so this cap of 0.7
-/// produces a volume peak of ~3.25.
-const GROUPED_UPNESS_PEAK: f32 = 0.7;
+/// v4's observed sustained-press range. v4's `groupedUpness` peaks roughly in
+/// `[0.5, 1.0]` during normal sustained press, with brief excursions toward
+/// 1.5+ on very tight, fast clusters. The downstream synth volume formula is
+/// `max(grouped_upness - 0.05, 0) * 5`, so this cap of 0.9 produces a volume
+/// peak of `4.25` — reclaims the upper dynamic range that the initial 0.7
+/// value clipped off the synth's most expressive moments.
+const GROUPED_UPNESS_PEAK: f32 = 0.9;
 
 /// `variance_length` at rest (no attractor activity). Particles spread across
 /// the canvas; normalised to 1.0 as the "fully spread" baseline.
@@ -179,9 +193,11 @@ const SPREAD_BASELINE: f32 = 1.0;
 
 /// `variance_length` at sustained-press peak excitement = 1.0. Particles
 /// tightly clustered around the attractor. The downstream noise filter cutoff
-/// formula is `2000 * normalized_variance_length`, so this floor of 0.2
-/// produces a cutoff of 400 Hz at peak clustering.
-const SPREAD_MIN: f32 = 0.2;
+/// formula is `2000 * normalized_variance_length`, so this floor of 0.1
+/// produces a cutoff of 200 Hz at peak clustering — matches v4's noise
+/// lowpass floor (`normalizedVarianceLength → ~0.1` at tightest clustering,
+/// noise filter cutoff → ~200 Hz).
+const SPREAD_MIN: f32 = 0.1;
 
 #[cfg(test)]
 #[path = "particle_stats_tests.rs"]
