@@ -24,6 +24,7 @@ pub mod auto_fade;
 pub mod blur;
 pub mod buttons;
 pub mod frame;
+pub mod picker;
 pub mod style;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
@@ -41,6 +42,7 @@ impl Plugin for WaveConductorUiPlugin {
             blur::BackdropBlurPlugin,
             auto_fade::AutoFadePlugin,
             buttons::OverlayButtonsPlugin,
+            picker::SketchPickerPlugin,
         ));
     }
 }
