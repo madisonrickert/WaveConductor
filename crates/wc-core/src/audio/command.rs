@@ -8,7 +8,7 @@
 //! Note on `SetLineParam`'s `&'static str`: keeping the enum `Copy` requires
 //! the parameter key to be `Copy`. A `&'static str` (string literal) is `Copy`
 //! and zero-allocation; senders write keys like `"volume"` or `"bandpass_freq"`
-//! directly. See [`super::dsp::LineSynth`] for the legal key set.
+//! directly. See [`super::line_synth::LineSynth`] for the legal key set.
 
 /// Commands the main thread sends to the audio thread.
 ///
@@ -34,7 +34,7 @@ pub enum AudioCommand {
     RemoveLineSynth,
     /// Set a named parameter on the Line synth. `key` is a `&'static str` to
     /// keep this variant `Copy` (the audio ring is lock-free and allocation-
-    /// free; we cannot pass an owned `String`); see [`super::dsp::LineSynth`]
+    /// free; we cannot pass an owned `String`); see [`super::line_synth::LineSynth`]
     /// for the legal set. Unknown keys are logged via `tracing::warn!` and
     /// dropped silently — the DSP host must never panic on a stale key.
     SetLineParam {
