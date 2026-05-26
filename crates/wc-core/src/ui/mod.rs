@@ -24,6 +24,8 @@ pub mod auto_fade;
 pub mod blur;
 pub mod style;
 
+pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
+
 /// Umbrella plugin for the overlay UI surface.
 pub struct WaveConductorUiPlugin;
 
