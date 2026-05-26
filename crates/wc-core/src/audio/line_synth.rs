@@ -416,9 +416,9 @@ impl LineSynth {
         // can't `Clone` an `An` node, but we can clone the `Shared` handle
         // and rebuild a new modulation summer.
         let bp_base_stage2 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
-        let bp_stage2_lfo_unscaled =
-            ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
-                * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
+        let bp_stage2_lfo_unscaled = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S))
+            >> sine::<f64>())
+            * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
         let evolution_scale_lfo2 = dc(EVOLUTION_BASE) + var(&evolution) * EVOLUTION_DELTA;
         let bp_stage2_lfo = bp_stage2_lfo_unscaled * evolution_scale_lfo2;
         let bp_stage2_drift = sine_hz::<f32>(BANDPASS_DRIFT_HZ) * BANDPASS_DRIFT_DEPTH_HZ;
