@@ -125,3 +125,11 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 51. **`SIM_PARAMS_SIZE`'s `as u64` cast** is an unavoidable const-context wart (`u64::try_from(usize)` isn't const-stable). Add `#[allow(clippy::cast_possible_truncation, reason = "size_of fits in u64 on all supported targets")]` or a one-line comment explaining the constraint.
 
 52. **`cursor_moved_reader.read().last()` discards intermediate positions silently.** Intentional (we want "newest wins" for pointer position, not motion path) but the comment in `pointer_merge_system` could explicitly note this design choice.
+
+## From Plan 8 Phase C (2026-05-25)
+
+53. **Post-process runs in every state, not just `AppState::Line`.** Plan 9's audio-driven `g_constant` modulation will produce a degenerate result when not in Line (no particles, no rings → smear of background), but a tighter gate would be either: (a) `add_render_graph_edges` conditional on `AppState`, or (b) zero `g_constant` outside Line. Option (b) is one-liner in `update_sim_params`. Land in Plan 9 or Plan 10.
+
+54. **Per-frame uniform-buffer allocation in `LinePostProcessNode::run`.** Currently `create_buffer_with_data` allocates 32 bytes each frame. Compute pipeline solved this with a persistent buffer + `queue.write_buffer`; mirror that pattern. Out of hot-path principle per AGENTS.md. Plan 9 follow-up.
+
+55. **Visual verification of gravity-smear pending.** Implementer confirmed boot-without-panic and clippy/test green, but couldn't click into Line and drag from inside the agent session. Madison should manually verify chromatic-smear is visible on press+drag.
