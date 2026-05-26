@@ -23,6 +23,7 @@ pub mod attractor_visuals;
 pub mod compute;
 pub mod material;
 pub mod particle;
+pub mod post_process;
 pub mod settings;
 pub mod sim_cpu;
 pub mod systems;
@@ -49,6 +50,9 @@ impl Plugin for LinePlugin {
 
         // Wire the compute pipeline.
         app.add_plugins(compute::LineComputePlugin);
+
+        // Wire the gravity-smear post-process render-graph node.
+        app.add_plugins(post_process::LinePostProcessPlugin);
 
         // Lifecycle: spawn on enter, despawn on exit.
         app.add_systems(OnEnter(AppState::Line), systems::spawn_line);

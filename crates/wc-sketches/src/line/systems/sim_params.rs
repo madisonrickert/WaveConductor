@@ -18,6 +18,7 @@ use bevy::prelude::*;
 
 use crate::line::compute::LineSimParams;
 use crate::line::particle::{Attractor, SimParams, MAX_ATTRACTORS};
+use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::mouse::MouseAttractorState;
 
@@ -61,6 +62,7 @@ pub fn update_sim_params(
     window: Single<'_, '_, &Window>,
     mouse: Res<'_, MouseAttractorState>,
     mut sim: ResMut<'_, LineSimParams>,
+    mut post: ResMut<'_, LinePostParams>,
 ) {
     // --- Attractor list -------------------------------------------------
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
@@ -103,4 +105,22 @@ pub fn update_sim_params(
         _pad: [0.0; 2],
         attractors,
     };
+
+    // --- Gravity-smear post-process uniforms ---------------------------
+    //
+    // The post-process shader works in window-pixel space (matches v4's
+    // `gl_FragCoord.xy` reference). Particles live in world space centred at
+    // the origin (+y up) — convert the mouse position back to window-pixel
+    // coords (top-left origin, +y down) for `iMouse`.
+    post.i_resolution = [w, h];
+    post.i_mouse = [
+        mouse.position[0] + w * 0.5,
+        h - (mouse.position[1] + h * 0.5),
+    ];
+    post.i_mouse_factor = 1.0 / 15.0;
+    post.i_global_time = time.elapsed_secs();
+    // Plan 9 will modulate this with `groupedUpness * triangleWave(t/5000) * 15000`.
+    post.g_constant = 5000.0;
+    // Plan 8 Phase D wires `LineSettings.gamma`; Phase C ships the v4 default.
+    post.gamma = 1.0;
 }
