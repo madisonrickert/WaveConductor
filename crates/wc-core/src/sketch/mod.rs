@@ -12,7 +12,9 @@
 //!    `SketchActivity::Active`.
 
 pub mod cleanup;
+pub mod manifest;
 pub mod scheduling;
 
 pub use cleanup::despawn_with;
+pub use manifest::{RegisterSketchManifestExt, SketchManifest, SketchManifestEntry};
 pub use scheduling::sketch_active;
