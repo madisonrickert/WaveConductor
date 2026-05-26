@@ -270,6 +270,16 @@ pub fn drive_audio_and_shader(
                 value: (stats.grouped_upness - 0.05).max(0.0) * 5.0,
             },
         );
+        // **Pad evolution envelope** — drives the slow modulator-depth growth
+        // and filter-cutoff opening inside LineSynth. Stats-side has the
+        // ~4 s / ~6 s asymmetric follow; we just forward the value.
+        push_audio(
+            &mut audio_cmd,
+            AudioCommand::SetLineParam {
+                key: "evolution",
+                value: stats.evolution,
+            },
+        );
     } // end if let Some(audio_cmd)
 
     // --- Shader modulation (v4 LineSketch.step()) ---

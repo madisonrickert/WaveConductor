@@ -76,6 +76,14 @@ pub struct ParticleStats {
     /// `average_vel` divided by canvas width. Approximated from
     /// `average_vel`.
     pub normalized_average_vel: f32,
+    /// **Pad evolution envelope** — slow follow on press state (~4 s
+    /// attack, ~6 s release). Ranges `[0, 1]`. Drives modulator-depth
+    /// growth + filter-cutoff opening in the `LineSynth` DSP graph so the
+    /// patch develops dramatically over a sustained press, the classic
+    /// pad-synthesis "filter envelope" technique. Not in v4 (v4 has no
+    /// equivalent — the patch character is constant per press); v5
+    /// improvement.
+    pub evolution: f32,
 }
 
 /// Per-frame approximated CPU audio control signals.
@@ -201,6 +209,24 @@ pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
         ((stats.variance_length - SPREAD_MIN) / (SPREAD_BASELINE - SPREAD_MIN)).clamp(0.0, 1.0);
     stats.flat_ratio =
         FLAT_RATIO_MIN + variance_normalised * (FLAT_RATIO_BASELINE - FLAT_RATIO_MIN);
+
+    // **Evolution envelope** — slow follow on grouped_upness, normalised to
+    // [0, 1]. ~4 s attack, ~6 s release. Drives modulator-depth growth +
+    // filter-cutoff opening in the LineSynth DSP graph. The asymmetric rate
+    // is what makes the patch *develop* over a held press: voice swells in
+    // fast (via grouped_upness), but the texture/filter take seconds to
+    // fully bloom (via evolution).
+    let target_evolution = (stats.grouped_upness / GROUPED_UPNESS_PEAK).clamp(0.0, 1.0);
+    let evolution_rate = if target_evolution > stats.evolution {
+        EVOLUTION_ATTACK_RATE
+    } else {
+        EVOLUTION_RELEASE_RATE
+    };
+    stats.evolution = lerp(
+        stats.evolution,
+        target_evolution,
+        (evolution_rate * dt).min(1.0),
+    );
 }
 
 /// Linear interpolation. `t` is clamped to [0, 1] by the caller before this is
@@ -237,6 +263,18 @@ const GROUPED_UPNESS_RELEASE_RATE: f32 = 6.7;
 /// loudness response (Stevens' power law). Pressing feels louder sooner; full
 /// excitement still hits the same peak ([`GROUPED_UPNESS_PEAK`]).
 const GROUPED_UPNESS_CURVE_EXPONENT: f32 = 0.6;
+
+/// Attack rate for the pad evolution envelope (rising edge). ~0.25 Hz =
+/// ~4 s time constant. Slow attack is the pad-synthesis signature: voice
+/// volume swells in fast (via [`GROUPED_UPNESS_ATTACK_RATE`]) but the
+/// filter / modulator depth take seconds to fully bloom — the patch
+/// *develops* over the press rather than landing at a fixed character.
+const EVOLUTION_ATTACK_RATE: f32 = 0.25;
+
+/// Release rate for the pad evolution envelope (falling edge). ~0.17 Hz =
+/// ~6 s time constant. Slower than attack so the texture lingers after
+/// the press ends, the way a pad's filter envelope decays slowly.
+const EVOLUTION_RELEASE_RATE: f32 = 0.17;
 
 /// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned
 /// against the v4 reference capture (2026-05-26): v4's `groupedUpness`

@@ -213,6 +213,31 @@ const BANDPASS_Q_LOWPASS_HZ: f32 = 0.5;
 /// drive the two bandpass stages so the cascade isn't perfectly in lockstep.
 const BANDPASS_Q_DEPTH: f32 = 0.4;
 
+// --- Evolution envelope (pad-synthesis "patch develops over time") ---
+//
+// `evolution` is a Shared driven from CPU side (audio_coupling sends a slow
+// follow on `grouped_upness`). It rises over ~4 s on press, decays over ~6 s
+// on release, ranging 0..1. Used to scale modulator depths and add to the
+// bandpass cutoff so the patch evolves dramatically over a held press —
+// the classic pad-synthesis filter envelope.
+
+/// Modulator-depth scaling at evolution = 0. Modulators don't go silent at
+/// rest — they stay at 30% of nominal so the press onset still has texture.
+/// Combined with `EVOLUTION_DELTA`, total scale ranges 0.3 (rest) to 1.0
+/// (full development).
+const EVOLUTION_BASE: f32 = 0.3;
+
+/// Modulator-depth growth from evolution = 0 to 1. With `EVOLUTION_BASE = 0.3`
+/// and `EVOLUTION_DELTA = 0.7`, total scale ranges 0.3..1.0.
+const EVOLUTION_DELTA: f32 = 0.7;
+
+/// Bandpass cutoff opening, in Hz, at evolution = 1.0. The filter cutoff is
+/// `bandpass_freq_param + (evolution × CUTOFF_OPEN_HZ)`. At rest the cutoff
+/// sits at the param value (driven by particle stats). Over a held press,
+/// the cutoff opens by up to this amount, producing the classic pad "filter
+/// swell" effect.
+const CUTOFF_OPEN_HZ: f32 = 200.0;
+
 /// Voice graph for the Line sketch.
 ///
 /// Owns a `Box<dyn AudioUnit>` plus a handful of [`Shared`] parameter
@@ -241,6 +266,15 @@ pub struct LineSynth {
     /// Source-mix master volume. Multiplied through `SOURCE_GAIN_SCALE` and
     /// `NOISE_GAIN_SCALE` to feed the two voice paths.
     volume: Shared,
+    /// **Evolution envelope** — drives the modulator-depth growth that makes
+    /// the patch develop over a sustained press (pad synthesis technique).
+    /// Slow follow on press state: ~4 s attack, ~6 s release. Range \[0, 1\].
+    /// Scales LFO depth, Q modulation depth, breath depth, and adds to the
+    /// bandpass cutoff. At evolution = 0, modulators are at a minimal
+    /// baseline; at 1.0, full dramatic depth. See
+    /// [`crate::audio::line_synth::EVOLUTION_BASE`] /
+    /// [`crate::audio::line_synth::EVOLUTION_DELTA`] for the scaling shape.
+    evolution: Shared,
 }
 
 impl LineSynth {
@@ -252,6 +286,7 @@ impl LineSynth {
         "lfo_freq",
         "lfo_rate_hz",
         "volume",
+        "evolution",
     ];
 
     /// Build the voice graph for a given output `sample_rate`. Allocates;
@@ -263,6 +298,7 @@ impl LineSynth {
         let lfo_rate = shared(DEFAULT_LFO_RATE_HZ);
         let lfo_depth = shared(DEFAULT_LFO_DEPTH);
         let volume = shared(DEFAULT_VOLUME);
+        let evolution = shared(0.0);
 
         // ----- Oscillator voice mix -----
         //
@@ -297,22 +333,32 @@ impl LineSynth {
         // motion that v4's particle dynamics produced for free.
         let source_gain_base = (var(&volume) * SOURCE_GAIN_SCALE) >> follow(PARAM_SMOOTHING_S);
         let breath = brown::<f32>() >> lowpass_hz::<f32>(BREATH_LOWPASS_HZ, BREATH_LOWPASS_Q);
-        // **Breath depth meta-modulation**: instead of a constant ±15% depth,
-        // depth itself swells slowly between BREATH_DEPTH ± BREATH_DEPTH_LFO.
-        // Sometimes the voice is more "alive" (deeper breath), sometimes
-        // calmer (shallower breath). Period 30 s — slow enough to feel
-        // intentional, fast enough to perceive over a 1-minute interaction.
-        let breath_depth =
+        // **Breath depth meta-modulation + evolution scaling**: breath depth
+        // is `(baseline + LFO swell) × evolution_scale`, where
+        // `evolution_scale = EVOLUTION_BASE + EVOLUTION_DELTA × evolution`.
+        // At evolution=0 (silence or onset), breath is at EVOLUTION_BASE
+        // (30%) of nominal. At evolution=1.0 (full developed press), breath
+        // is at 100%. Combined with the 30 s LFO swell on the baseline,
+        // breath has both short-term (LFO) and long-term (envelope) shape.
+        let breath_depth_signal =
             dc(BREATH_DEPTH) + sine_hz::<f32>(BREATH_DEPTH_LFO_HZ) * BREATH_DEPTH_LFO;
-        let source_gain = source_gain_base * (1.0 + breath * breath_depth);
+        let evolution_scale_breath = dc(EVOLUTION_BASE) + var(&evolution) * EVOLUTION_DELTA;
+        let source_gain =
+            source_gain_base * (1.0 + breath * breath_depth_signal * evolution_scale_breath);
 
         // ----- Noise voice -----
         //
         // v4 chain: white -> noiseSourceGain -> noiseFilter (lowpass, var
         // freq) -> noiseShelf (lowshelf 2200Hz, +8dB) -> noiseGain (1.0).
-        // We collapse `noiseGain` into the multiplicative `noise_gain`
-        // since both are linear; v4's `noiseSourceGain` and `noiseGain`
-        // multiply cleanly.
+        //
+        // **v5 improvement** (Plan 11 Phase F): replace v4's white noise
+        // with pink noise (`pink::<f64>()`), and drop the lowshelf boost
+        // from +8 dB to +3 dB. Pink has a -3 dB/octave roll-off, producing a
+        // more musical "air" spectrum than white's flat-by-design hiss. The
+        // reduced shelf boost stops the 0–2200 Hz band from piling up; v4's
+        // +8 dB shelf made the noise voice sound crushed and honky in the
+        // low-mid (Madison's feedback). Net effect: noise reads as breath /
+        // wind rather than as filtered hiss.
         let noise_gain = (var(&volume) * NOISE_GAIN_SCALE) >> follow(PARAM_SMOOTHING_S);
         // Noise cutoff base + a very slow drift LFO (~24 s period, ±200 Hz)
         // so the noise voice's formant character wanders over long timescales.
@@ -325,9 +371,9 @@ impl LineSynth {
         // `bandpass<f64>()` takes (audio, freq, Q) inputs; same shape for
         // `lowpass<f64>()`. Build the noise lowpass with dynamic cutoff:
         //   (white | noise_cutoff | const(NOISE_LOWPASS_Q)) >> lowpass()
-        let noise_path = (white() | noise_cutoff | dc(NOISE_LOWPASS_Q))
+        let noise_path = (pink::<f64>() | noise_cutoff | dc(NOISE_LOWPASS_Q))
             >> lowpass::<f64>()
-            >> lowshelf_hz::<f64>(2200.0, 1.0, db_amp(8.0));
+            >> lowshelf_hz::<f64>(2200.0, 1.0, db_amp(3.0));
         let noise_voice = noise_path * noise_gain;
 
         // ----- LFO -----
@@ -346,11 +392,20 @@ impl LineSynth {
         // The slow drift gives the filter long-form motion that doesn't loop
         // audibly (Plan 11 Phase F option B). Period chosen co-prime with
         // NOISE_DRIFT_HZ so the two filters' wanderings never align.
+        // Bandpass cutoff composition:
+        //   base + (LFO × evolution_scale) + slow_drift + (evolution × CUTOFF_OPEN_HZ)
+        //
+        // The last term is the **filter envelope**: cutoff opens by up to
+        // CUTOFF_OPEN_HZ during sustained press, then slowly closes. Classic
+        // pad-synthesis "swell" — the filter blooms over 4 s during attack,
+        // staying open as long as the press is held.
         let bp_base = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
-        let bp_lfo = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
+        let bp_lfo_raw = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
             * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
+        let evolution_scale_lfo1 = dc(EVOLUTION_BASE) + var(&evolution) * EVOLUTION_DELTA;
+        let bp_lfo = bp_lfo_raw * evolution_scale_lfo1;
         let bp_slow_drift = sine_hz::<f32>(BANDPASS_DRIFT_HZ) * BANDPASS_DRIFT_DEPTH_HZ;
-        let bp_cutoff = bp_base + bp_lfo + bp_slow_drift;
+        let bp_cutoff = bp_base + bp_lfo + bp_slow_drift + var(&evolution) * CUTOFF_OPEN_HZ;
 
         // ----- Bandpass cascade -----
         //
@@ -360,25 +415,34 @@ impl LineSynth {
         // The second bandpass needs its own copy of the cutoff signal — we
         // can't `Clone` an `An` node, but we can clone the `Shared` handle
         // and rebuild a new modulation summer.
-        let bp_base2 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
-        let bp_lfo2 = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
-            * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
-        let bp_slow_drift2 = sine_hz::<f32>(BANDPASS_DRIFT_HZ) * BANDPASS_DRIFT_DEPTH_HZ;
-        let bp_cutoff2 = bp_base2 + bp_lfo2 + bp_slow_drift2;
+        let bp_base_stage2 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
+        let bp_stage2_lfo_unscaled =
+            ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
+                * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
+        let evolution_scale_lfo2 = dc(EVOLUTION_BASE) + var(&evolution) * EVOLUTION_DELTA;
+        let bp_stage2_lfo = bp_stage2_lfo_unscaled * evolution_scale_lfo2;
+        let bp_stage2_drift = sine_hz::<f32>(BANDPASS_DRIFT_HZ) * BANDPASS_DRIFT_DEPTH_HZ;
+        let bp_cutoff2 =
+            bp_base_stage2 + bp_stage2_lfo + bp_stage2_drift + var(&evolution) * CUTOFF_OPEN_HZ;
 
         let voice = osc_mix * source_gain;
-        // **Bandpass Q modulation**: instead of a fixed Q=2.18, Q drifts via a
-        // brown-noise generator lowpassed at 0.5 Hz. Q ranges roughly
-        // `BANDPASS_Q ± BANDPASS_Q_DEPTH` (1.78–2.58). The filter's character
-        // morphs between softer (low Q, broad band) and more ringing (high Q,
-        // narrow band) over slow timescales. Independent brown noise per
-        // bandpass stage so the two never perfectly track.
+        // **Bandpass Q modulation × evolution**: Q drifts via brown-noise, but
+        // the *modulation depth* itself grows with evolution. At press onset
+        // (evolution → 0), Q is steady at BANDPASS_Q — voice has a clean,
+        // focused character. As the press develops (evolution → 1), Q drift
+        // grows to full ±BANDPASS_Q_DEPTH, morphing the filter's character
+        // from soft to ringing on its own. Independent brown noise per stage
+        // so the cascade isn't perfectly locked.
+        let evolution_scale_q1 = dc(EVOLUTION_BASE) + var(&evolution) * EVOLUTION_DELTA;
+        let evolution_scale_q2 = dc(EVOLUTION_BASE) + var(&evolution) * EVOLUTION_DELTA;
         let bp_q1 = dc(BANDPASS_Q)
             + (brown::<f32>() >> lowpass_hz::<f32>(BANDPASS_Q_LOWPASS_HZ, BREATH_LOWPASS_Q))
-                * BANDPASS_Q_DEPTH;
+                * BANDPASS_Q_DEPTH
+                * evolution_scale_q1;
         let bp_q2 = dc(BANDPASS_Q)
             + (brown::<f32>() >> lowpass_hz::<f32>(BANDPASS_Q_LOWPASS_HZ, BREATH_LOWPASS_Q))
-                * BANDPASS_Q_DEPTH;
+                * BANDPASS_Q_DEPTH
+                * evolution_scale_q2;
         let bp1 = (voice | bp_cutoff | bp_q1) >> bandpass::<f64>();
         let bp2 = (bp1 | bp_cutoff2 | bp_q2) >> bandpass::<f64>();
 
@@ -428,6 +492,7 @@ impl LineSynth {
             lfo_rate,
             lfo_depth,
             volume,
+            evolution,
         }
     }
 
@@ -447,6 +512,7 @@ impl LineSynth {
             // FM rather than amplitude modulation.
             "lfo_rate_hz" => self.lfo_rate.set(value.clamp(0.1, 20.0)),
             "volume" => self.volume.set(value.max(0.0)),
+            "evolution" => self.evolution.set(value.clamp(0.0, 1.0)),
             other => {
                 tracing::warn!(key = other, value, "dropping unknown SetLineParam key");
             }
@@ -468,6 +534,7 @@ impl core::fmt::Debug for LineSynth {
             .field("lfo_rate", &self.lfo_rate.value())
             .field("lfo_depth", &self.lfo_depth.value())
             .field("volume", &self.volume.value())
+            .field("evolution", &self.evolution.value())
             .finish_non_exhaustive()
     }
 }
