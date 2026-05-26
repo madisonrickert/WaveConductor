@@ -19,16 +19,17 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | ✅ shipped | `v5-line-render` |
 | 9 | Line audio + reactivity coupling | ✅ shipped | `v5-line-audio` |
 | 10 | Line polish + heatmap spawn + soak harness | 🟡 shipped, parity gaps deferred to Plan 11 | — |
-| 11 | Line parity completion (rings, touch/hand activation, file picker, code sign-off) | 🟡 code shipped, manual gates open | `v5-line-parity` |
+| 11 | Line parity completion (rings, touch/hand activation, file picker, audio re-tune) | ✅ code shipped | — (tag deferred) |
 | 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ⏳ Line parity gate | `v5-overlay-ui` |
 | 11.6 | Hand-tracking provider + Leap manual verification | ⏳ Line parity gate | `v5-leap-verified` |
+| 11.7 | Final `PARITY.md` sign-off + tag (after 11.5 + 11.6) | ⏳ closing step | `v5-line-parity` |
 | 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
 
 > **Line is most of the way there.** Plans 7–10 carried the sketch from scaffolding through multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph, the audio↔visual reactivity coupling, the heatmap-image spawn template, and the AGENTS.md-required 8-hour soak harness. The first hands-on run on 2026-05-25 surfaced parity gaps that don't fit cleanly inside Plan 10's "polish" scope and so deferred to Plan 11: rotationally-symmetric attractor `Annulus` rings (no visible spin), no touch / hand-tracking pathway to attractor press, no file picker for `spawn_template`, and the manual side-by-side sign-off that flips `PARITY.md` from "PENDING" to a real PASS. Plan 11 closes those and earns the `v5-line-parity` tag. The architectural pattern established here — per-sketch plugin under `wc-sketches`, settings via the `wc-core` registry, `OnEnter`/`OnExit` lifecycle, audio reactivity via `AudioCommand`, a `PARITY.md` per module closing with a tagged verdict — generalizes cleanly to Flame, Dots, Cymatics, and Waves (Plan 12+).
 >
-> **Two manual gates still stand between Line and "shipped":** Plan 11.5 (overlay UI parity — the v4 button chrome, settings panel styling, nav, and auto-fade) and Plan 11.6 (hand-tracking provider + on-hardware Leap verification — the kiosk install's primary input modality). Plan 11 produces the `v5-line-parity` tag on the *code path*; 11.5 and 11.6 close the surface around it. No Plan-12 sketch port begins until both have landed.
+> **Three steps still stand between Line and "shipped":** Plan 11.5 (overlay UI parity — the v4 button chrome, settings panel styling, nav, and auto-fade), Plan 11.6 (hand-tracking provider + on-hardware Leap verification — the kiosk install's primary input modality), and Plan 11.7 (the closing side-by-side capture, `PARITY.md` sign-off, and `v5-line-parity` tag). Plan 11 shipped the code; the tag is held until 11.7 because a capture against a build still missing the UI and Leap path wouldn't carry weight. No Plan-12 sketch port begins until 11.7 lands.
 
-## Line parity (Plans 7–11.6)
+## Line parity (Plans 7–11.7)
 
 The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the post-process shader, audio synthesis, and visual sign-off are all still ahead. Four plans bring v5 Line to functional and perceptual parity with v4.
 
@@ -121,28 +122,30 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
 
 **Outcome:** Plan 10 shipped the heatmap-image spawn, the 8-hour soak harness, and the Phase-0 carry-forward drain. The first manual run (2026-05-25) surfaced four parity gaps that the implementation pass alone couldn't catch — they require eyes-on testing or out-of-scope features — and so deferred to Plan 11 rather than being shoehorned into Plan 10's "polish" scope.
 
-### Plan 11 — Line parity completion
+### Plan 11 — Line parity completion (code-complete)
 
-**Goal:** Close the gaps surfaced by the Plan 10 hands-on run, sign `PARITY.md`, and tag `v5-line-parity`.
+**Goal:** Close the code gaps surfaced by the Plan 10 hands-on run. The `PARITY.md` sign-off and the `v5-line-parity` tag move to the dedicated final step after 11.5 and 11.6 land — there's no value capturing a "PASS" verdict against a build that's still missing the overlay UI and on-hardware Leap operation.
 
 **Scope:**
 
-- **Attractor ring rotation visibility.** Replace `bevy::math::primitives::Annulus` (rotationally symmetric — perfect circle, no visible spin) with a low-segment polygonal ring mesh (likely `RegularPolygon` with 6–8 sides, or a custom mesh with stroked-line geometry) so the per-frame `(10 - idx) / 20 * power` rotation is perceivable. Cross-check against v4's `src/sketches/line/index.ts` attractor visual code — if v4 uses Three.js `RingGeometry(inner, outer, thetaSegments=6)`, port that exact geometry.
-- **Touch and hand-tracking attractor activation.** `update_mouse_attractor` currently reads `Res<ButtonInput<MouseButton>>::just_pressed(Left)` only. The pointer-merge layer already routes touch and hand-source positions, but neither can trigger press. Add: `Res<Touches>` for `TouchPhase::Started`/`Ended` events, and a hand-tracking gesture (pinch? fist closure? closeness threshold?) for synthetic press. Critical for the kiosk touchscreen install.
-- **`rfd`-based file picker** for `spawn_template`. Replace the free-text input with a "Browse…" button that opens a native file dialog (`rfd::FileDialog::new().add_filter("Image", &["png"])`). New `SettingCategory::FilePath { extensions: &[&str] }` variant; renderer adds the button alongside the text field. ~30 LOC + the `rfd = "0.15"` dep.
+- **Attractor ring rotation visibility.** Replace `bevy::math::primitives::Annulus` (rotationally symmetric — perfect circle, no visible spin) with a low-segment polygonal ring mesh so the per-frame `(10 - idx) / 20 * power` rotation is perceivable. ✅ Shipped — implementation evolved through a v4-faithful 32-segment ring with `abs(cos(phi))` X-scale modulation, and then on Madison's call became a v5 multi-axis gyroscope (rings split across X/Y/Z gimbals with desynchronised rates) as an approved deviation. Sign-off step records this as an intentional v5 design choice, not a parity failure.
+- **Touch and hand-tracking attractor activation.** `update_mouse_attractor` currently reads `Res<ButtonInput<MouseButton>>::just_pressed(Left)` only. The pointer-merge layer already routes touch and hand-source positions, but neither can trigger press. Add: `Res<Touches>` for `TouchPhase::Started`/`Ended` events, and a hand-tracking pinch gesture (≥ `PINCH_PRESS_THRESHOLD`) for synthetic press. ✅ Shipped — the hand-tracking path is feature-gated on `hand-tracking-gestures` and runs against synthetic input only until Plan 11.6 lands the real `LeaprsProvider`.
+- **`rfd`-based file picker** for `spawn_template`. Replace the free-text input with a "Browse…" button that opens a native file dialog (`rfd::FileDialog::new().add_filter("Image", &["png"])`). New `SettingKind::FilePath { extensions: &[&str] }` variant; renderer adds the button alongside the text field. ~30 LOC + the `rfd = "0.15"` dep.
 - **Per-field `#[serde(default)]` on `LineSettings`** so adding a new field (e.g. `gamma` in Plan 8) doesn't make existing persisted TOML fail the whole-section deserialize and silently revert all sibling values to defaults. Apply the same pattern to other settings structs preemptively.
-- **Manual side-by-side parity capture.** Madison runs v5 (`cargo run -p waveconductor`) against v4 (`npm run dev` on the v4 `main` branch) at 1280×720, captures matching idle, mid-press, and mid-decay states, and signs the `PARITY.md` verdict from PENDING → PASS. The pinned v4 reference commit goes in the verdict.
 - **Heatmap-spawn end-to-end verification.** Spot-check with at least one real PNG (probably `assets/sketches/line/star.png` and a hand-picked photograph) plus a deliberately-wrong path to exercise the horizontal-line fallback. Currently only unit-tested.
+- **Audio character re-tune (Phase F).** Originally framed as a polish pass; in practice grew into a multi-voice pad-instrument redesign — stochastic generative DSP layers, per-voice envelopes, configurable synth attack/release/volume knobs in `LineSettings`, and the universal "audio reads CPU inputs" coupling pattern (see [below](#universal-audio-coupling-pattern-codified-during-plan-11-phase-f)). ✅ Shipped.
+- **Settings-panel pointer isolation.** New [`EguiPointerCaptured`](../../crates/wc-core/src/settings/pointer_capture.rs) resource gates the Line mouse handler's press edge on whether `bevy_egui::EguiWantsInput` owns the pointer this frame, so clicks inside the Settings panel no longer spawn a stray attractor under the slider. ✅ Shipped — also benefits Plan 11.5's chrome work.
 
 **Out of scope (handed to dedicated parity gates):**
 
 - Plan 8's known-deferred items (post-process gating outside `AppState::Line`, per-frame uniform-buffer reuse) — fold into the next render-graph work that touches the area.
 - **Hand-tracking provider implementation** (no `HandTrackingState` writer exists yet — pure stub from Plan 3). Plan 11 ships the gesture-edge handling behind the `hand-tracking-gestures` feature flag, tested with synthetic input only; the real `LeaprsProvider` and on-hardware verification land in **Plan 11.6** as a Line parity gate.
 - **Overlay UI chrome** (translucent buttons, settings panel styling, nav, auto-fade) — kept out of the sketch scope and landed as **Plan 11.5**, the other Line parity gate.
+- **Manual side-by-side `PARITY.md` sign-off and `v5-line-parity` tag** — moved to the final step after 11.6 lands. The capture only makes sense against a build with the overlay UI and Leap operation in place.
 
-**Est. effort:** 2–3 days.
+**Est. effort:** Shipped. Final breakdown: ~5 days (Phases A–D, the subagent-driven code passes) + ~3 days (Phase F, the audio re-tune that grew well past its original scope).
 
-**Total Line code parity:** ~20–29 days from Plan 7 start to `v5-line-parity` tag. Plans 11.5 and 11.6 add another ~5–9 days of manual-gate work before Line is considered fully shipped.
+**Total Line code parity:** ~20–29 days from Plan 7 start to Plan 11 code-complete. Plans 11.5 and 11.6 add another ~5–9 days of manual-gate work, and the final sign-off step closes the loop with the `v5-line-parity` tag.
 
 ### Plan 11.5 — Overlay UI parity (Line parity gate)
 
@@ -187,6 +190,23 @@ The second of the two manual gates between Plan 11's code-complete tag and Line 
 **Est. effort:** 2–4 days. Risk lives in (1) `leaprs` crate ergonomics — last-touched several years ago, may need patching — and (2) the projection calibration against actual kiosk mounting.
 
 **Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time of writing.
+
+### Plan 11.7 — Final Line `PARITY.md` sign-off + `v5-line-parity` tag
+
+The closing step of the Line workstream. Runs once 11.5 (overlay UI) and 11.6 (Leap verification) are both shipped — the capture only carries weight against a build that has all the surface a v4 user sees.
+
+**Scope:**
+
+- **Manual side-by-side parity capture.** Madison runs v5 (`cargo run -p waveconductor`) against v4 (`npm run dev` on the v4 worktree, branch pinned at a recorded commit hash) at 1280×720. Matching idle, mid-press, and mid-decay states captured at both. Mouse, touch, and Leap pinch are each exercised. Audio is captured (system audio recording) so the v5 pad-instrument character can be diffed against v4's synth.
+- **Approved-deviation roll-up.** `crates/wc-sketches/src/line/PARITY.md` records the v5-only divergences as approved deviations, not parity failures:
+  - **Multi-axis gyroscope** attractor visual replaces v4's tilted single-ring rotation. Deliberate v5 design choice (Madison-directed) — improves silhouette legibility and reads as more "alive."
+  - **Pad-instrument synth** with stochastic LFOs, pink-noise breath, and configurable attack/release replaces v4's stricter envelope. Documents the universal "audio reads CPU inputs" coupling pattern.
+  - **Heatmap-image spawn** accepts `png`, `jpg`, `jpeg`, `webp` rather than `png` only (v4).
+  - Each deviation linked to the commit that landed it.
+- **`PARITY.md` verdict** flipped from PENDING → PASS. Pinned v4 reference commit recorded. Capture artifacts (screenshots + audio) checked into `docs/parity/line/` or linked from `PARITY.md`.
+- **Tag `v5-line-parity`** on `rewrite/bevy` at the verdict commit. Push to origin.
+
+**Est. effort:** 0.5–1 day. Mostly mechanical capture work — the substance lives in 11, 11.5, and 11.6.
 
 ## Beyond Line
 
