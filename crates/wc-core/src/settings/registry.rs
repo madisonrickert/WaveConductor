@@ -5,6 +5,8 @@
 //! pointers. The panels and persistence systems iterate the list and call
 //! through the pointers without knowing the concrete type.
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy::reflect::{FromType, GetTypeRegistration, TypePath};
 
@@ -20,8 +22,9 @@ pub struct RegisteredSettings {
     /// and as the discriminator on `SketchRestart` messages.
     pub storage_key: &'static str,
     /// Cached `S::settings_def()` so panel renderers don't reallocate per
-    /// frame.
-    pub def: Vec<SettingDef>,
+    /// frame. Held as `Arc<[…]>` so the per-frame UI walker can snapshot it
+    /// with a refcount bump instead of a `Vec` clone.
+    pub def: Arc<[SettingDef]>,
     /// Persist the current value of the registered resource by reading it
     /// from `world` and calling `persistence::save`.
     pub save_fn: fn(&World),
@@ -46,6 +49,12 @@ pub struct SettingsRegistry {
 /// Hidden resource: previous-frame snapshot of each settings type.
 ///
 /// Used by the requires-restart diff function. Stored separately per `S`.
+///
+/// `PreviousSnapshot` and the change-detection path in
+/// [`diff_requires_restart_fn`] clone `S` whenever a change is observed. This
+/// is cheap for the small, flat `SketchSettings` types we have today; if a
+/// future variant grows an owned `Vec` or `HashMap` field, switch the
+/// snapshot to `Arc<S>` so the per-frame clone stays a refcount bump.
 #[derive(Resource, Debug, Clone)]
 pub struct PreviousSnapshot<S: SketchSettings>(pub S);
 
@@ -147,16 +156,14 @@ impl RegisterSketchSettingsExt for App {
 
         let mut registry = self
             .world_mut()
-            .get_resource_or_insert_with(SettingsRegistry::default)
-            .clone();
+            .get_resource_or_insert_with(SettingsRegistry::default);
         registry.entries.push(RegisteredSettings {
             storage_key: S::STORAGE_KEY,
-            def: S::settings_def(),
+            def: Arc::from(S::settings_def()),
             save_fn: save_fn::<S>,
             is_changed_fn: is_changed_fn::<S>,
             diff_requires_restart_fn: diff_requires_restart_fn::<S>,
         });
-        self.insert_resource(registry);
         self
     }
 }

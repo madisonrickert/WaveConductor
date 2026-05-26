@@ -64,6 +64,9 @@ fn draw_dev_panel(world: &mut World) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    // `EguiContext` is `Arc<Mutex<…>>` internally, so `.clone()` is a refcount
+    // bump. Cloning here lets us release the `EguiContexts` SystemParam borrow
+    // before handing `world` to `ui_for_world` inside the `show` closure.
     let ctx = ctx.clone();
     state.apply(world);
 

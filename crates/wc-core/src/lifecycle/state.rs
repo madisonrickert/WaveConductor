@@ -38,45 +38,38 @@ impl AppState {
         !matches!(self, Self::Home)
     }
 
-    /// The next sketch in [`Self::SKETCH_ORDER`]; wraps around. Returns `Self::Line`
+    /// The next sketch in the cycle; wraps around. Returns `Self::Line`
     /// when called on `Home`.
+    ///
+    /// The cycle is encoded as an exhaustive `match` so that any new
+    /// `AppState` variant becomes a compile error here, instead of silently
+    /// wrapping to the first sketch at runtime. The
+    /// `next_prev_cycle_matches_sketch_order` test cross-checks the match
+    /// arms against [`Self::SKETCH_ORDER`].
     #[must_use]
     pub fn next_sketch(self) -> Self {
-        if self == Self::Home {
-            return Self::SKETCH_ORDER[0];
+        match self {
+            Self::Home | Self::Waves => Self::Line,
+            Self::Line => Self::Flame,
+            Self::Flame => Self::Dots,
+            Self::Dots => Self::Cymatics,
+            Self::Cymatics => Self::Waves,
         }
-        let idx = Self::SKETCH_ORDER
-            .iter()
-            .position(|s| *s == self)
-            .unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "AppState variant {self:?} is missing from SKETCH_ORDER"
-                );
-                0
-            });
-        Self::SKETCH_ORDER[(idx + 1) % Self::SKETCH_ORDER.len()]
     }
 
-    /// The previous sketch in [`Self::SKETCH_ORDER`]; wraps around. Returns the last
+    /// The previous sketch in the cycle; wraps around. Returns the last
     /// sketch when called on `Home`.
+    ///
+    /// See [`Self::next_sketch`] for why this is an exhaustive `match`.
     #[must_use]
     pub fn prev_sketch(self) -> Self {
-        if self == Self::Home {
-            return Self::SKETCH_ORDER[Self::SKETCH_ORDER.len() - 1];
+        match self {
+            Self::Home | Self::Line => Self::Waves,
+            Self::Flame => Self::Line,
+            Self::Dots => Self::Flame,
+            Self::Cymatics => Self::Dots,
+            Self::Waves => Self::Cymatics,
         }
-        let idx = Self::SKETCH_ORDER
-            .iter()
-            .position(|s| *s == self)
-            .unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "AppState variant {self:?} is missing from SKETCH_ORDER"
-                );
-                0
-            });
-        let len = Self::SKETCH_ORDER.len();
-        Self::SKETCH_ORDER[(idx + len - 1) % len]
     }
 }
 
@@ -121,6 +114,29 @@ mod tests {
         assert!(!AppState::Home.is_sketch());
         for s in AppState::SKETCH_ORDER {
             assert!(s.is_sketch(), "{s:?} should be a sketch");
+        }
+    }
+
+    /// Guard against drift between the [`AppState::SKETCH_ORDER`] iteration
+    /// constant and the `next_sketch`/`prev_sketch` match arms. If a new
+    /// sketch variant is added, both the const array and the match arms
+    /// must be updated; this test verifies they agree.
+    #[test]
+    fn next_prev_cycle_matches_sketch_order() {
+        let order = AppState::SKETCH_ORDER;
+        for (i, &state) in order.iter().enumerate() {
+            let expected_next = order[(i + 1) % order.len()];
+            let expected_prev = order[(i + order.len() - 1) % order.len()];
+            assert_eq!(
+                state.next_sketch(),
+                expected_next,
+                "next_sketch arm for {state:?} drifted from SKETCH_ORDER"
+            );
+            assert_eq!(
+                state.prev_sketch(),
+                expected_prev,
+                "prev_sketch arm for {state:?} drifted from SKETCH_ORDER"
+            );
         }
     }
 }

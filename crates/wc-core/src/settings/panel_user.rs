@@ -23,12 +23,19 @@
     reason = "egui sliders use f32/i64 widget ranges; bounds-checked against SettingDef metadata"
 )]
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy::reflect::ReflectMut;
 use bevy_egui::{egui, EguiContexts};
+use smallvec::SmallVec;
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
+
+/// Inline stack snapshot of registered settings storage keys. Sized for the
+/// expected case of ≤8 settings types per app; spills to the heap above that.
+type KeySnapshot = SmallVec<[&'static str; 8]>;
 
 /// Plugin assembly hook called by [`super::SettingsPlugin::build`].
 ///
@@ -45,8 +52,9 @@ fn draw_user_panel(world: &mut World) {
         return;
     }
     // Snapshot the storage keys we need to iterate so the registry resource
-    // stays unborrowed while we mutate per-type resources.
-    let keys: Vec<&'static str> = world
+    // stays unborrowed while we mutate per-type resources. SmallVec keeps the
+    // common ≤8-types case on the stack.
+    let keys: KeySnapshot = world
         .get_resource::<SettingsRegistry>()
         .map(|r| r.entries.iter().map(|e| e.storage_key).collect())
         .unwrap_or_default();
@@ -60,6 +68,9 @@ fn draw_user_panel(world: &mut World) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    // `EguiContext` is an `Arc<Mutex<…>>` internally, so `.clone()` is a
+    // refcount bump. Cloning here lets us release the `EguiContexts` SystemParam
+    // borrow before the `show` closure re-enters `World` to render each section.
     let ctx = ctx.clone();
     state.apply(world);
 
@@ -78,12 +89,16 @@ fn draw_user_panel(world: &mut World) {
 /// settings type whose `STORAGE_KEY` matches; uses reflection to
 /// read/write fields without static type knowledge.
 fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'static str) {
-    // Find the entry's defs (still a borrow of the resource; copy out).
-    let defs: Vec<SettingDef> = world
+    // Snapshot the entry's defs as an Arc handle so the registry resource
+    // stays unborrowed while we re-enter `world` for reflection. Cloning an
+    // `Arc<[SettingDef]>` is a refcount bump, not a Vec copy.
+    let defs: Arc<[SettingDef]> = match world
         .get_resource::<SettingsRegistry>()
         .and_then(|r| r.entries.iter().find(|e| e.storage_key == storage_key))
-        .map(|e| e.def.clone())
-        .unwrap_or_default();
+    {
+        Some(entry) => Arc::clone(&entry.def),
+        None => return,
+    };
     if defs.iter().all(|d| d.category != SettingsCategory::User) {
         return;
     }
@@ -120,7 +135,7 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
             return;
         };
         // Deref `Mut<dyn Reflect>` to get `&mut dyn Reflect`.
-        render_user_fields_via_reflect(&mut *reflect_mut, &defs, ui);
+        render_user_fields_via_reflect(&mut *reflect_mut, defs.as_ref(), ui);
     });
 }
 
