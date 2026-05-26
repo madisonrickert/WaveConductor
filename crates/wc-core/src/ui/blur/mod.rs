@@ -53,14 +53,43 @@ pub struct BackdropBlurTexture {
     /// Backing GPU texture. Kept alive so the view remains valid.
     pub texture: Texture,
     /// View into [`texture`](BackdropBlurTexture::texture); bound as the
-    /// render attachment for blur passes and as the sampled texture for
-    /// the composite paint callback.
+    /// render attachment for the final blur upsample pass and as the sampled
+    /// texture for the composite paint callback.
     pub view: TextureView,
-    /// Bilinear clamp-to-edge sampler for the blur texture.
+    /// Bilinear clamp-to-edge sampler shared across all Kawase passes and
+    /// the composite callback.
     pub sampler: Sampler,
     /// Physical half-resolution at which the texture was allocated.
     /// `ensure_blur_texture` uses this to skip reallocation when unchanged.
     pub extent: UVec2,
+}
+
+/// Intermediate scratch textures for the dual-Kawase downsample/upsample chain.
+///
+/// Allocated alongside [`BackdropBlurTexture`] in [`ensure_blur_texture`].
+/// Three levels: half, quarter, and eighth of the primary viewport's
+/// physical resolution.
+///
+/// The private `_*_tex` fields hold the [`Texture`] objects to keep the GPU
+/// resources alive while the views remain valid.
+#[derive(Resource)]
+pub struct BackdropBlurScratch {
+    /// View into the half-resolution intermediate texture.
+    pub half_view: TextureView,
+    /// View into the quarter-resolution intermediate texture.
+    pub quarter_view: TextureView,
+    /// View into the eighth-resolution intermediate texture.
+    pub eighth_view: TextureView,
+    /// Physical size of the half-resolution scratch texture.
+    pub half_extent: UVec2,
+    /// Physical size of the quarter-resolution scratch texture.
+    pub quarter_extent: UVec2,
+    /// Physical size of the eighth-resolution scratch texture.
+    pub eighth_extent: UVec2,
+    // Hold textures alive so their views remain valid.
+    _half_tex: Texture,
+    _quarter_tex: Texture,
+    _eighth_tex: Texture,
 }
 
 /// Plugin assembly for the backdrop-blur feature.
@@ -68,15 +97,16 @@ pub struct BackdropBlurTexture {
 /// Inserts [`BackdropBlurEnabled`] into the main world and wires the
 /// [`ExtractResourcePlugin`] so the render app sees the toggle each frame.
 /// Also registers [`ensure_blur_texture`] in the render app so the
-/// half-resolution [`BackdropBlurTexture`] is allocated on first frame and
-/// resized on window-resize events.
+/// half-resolution [`BackdropBlurTexture`] and [`BackdropBlurScratch`] are
+/// allocated on first frame and resized on window-resize events.
 pub struct BackdropBlurPlugin;
 
 impl BackdropBlurPlugin {
-    /// Wires render-sub-app systems. Called from [`Plugin::build`].
+    /// Wires render-sub-app systems and the render graph node.
     ///
-    /// Returns early without error if no `RenderApp` is present (e.g. in
-    /// headless tests that don't load `RenderPlugin`).
+    /// Called from [`Plugin::build`]. Returns early without error if no
+    /// `RenderApp` is present (e.g. headless tests that don't load
+    /// `RenderPlugin`).
     fn setup_render_app(app: &mut App) {
         // In Bevy 0.18, get_sub_app_mut returns Option<&mut SubApp>.
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -86,6 +116,8 @@ impl BackdropBlurPlugin {
             Render,
             ensure_blur_texture.in_set(RenderSystems::PrepareResources),
         );
+        node::setup_render_systems(render_app);
+        node::setup_render_graph(render_app);
     }
 }
 
@@ -98,9 +130,8 @@ impl Plugin for BackdropBlurPlugin {
 
     /// Initialise render-app resources that depend on `PipelineCache` and
     /// `AssetServer` being fully set up. Called after all `build` methods
-    /// complete, matching the pattern used by [`LinePostProcessPlugin`].
-    ///
-    /// [`LinePostProcessPlugin`]: crate::line::post_process::LinePostProcessPlugin
+    /// complete, matching the pattern used by
+    /// [`LinePostProcessPlugin`](crate::line::post_process::LinePostProcessPlugin).
     fn finish(&self, app: &mut App) {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -109,16 +140,22 @@ impl Plugin for BackdropBlurPlugin {
     }
 }
 
-/// Allocate or reallocate the half-resolution blur texture in the render world.
+/// Allocate or reallocate the half-resolution blur texture and scratch textures
+/// in the render world.
 ///
 /// Reads the primary window's physical size, halves each dimension (minimum
 /// 1 px), and skips reallocation when the existing [`BackdropBlurTexture`]
-/// already matches. On (re)allocation, creates a new `Rgba8UnormSrgb` texture
-/// with `RENDER_ATTACHMENT | TEXTURE_BINDING` usages and a bilinear
-/// clamp-to-edge sampler, then inserts it as a resource.
+/// already matches. On (re)allocation, creates:
+/// - [`BackdropBlurTexture`] at 1/2 resolution (final blur output).
+/// - [`BackdropBlurScratch`] with textures at 1/2, 1/4, and 1/8 resolution
+///   (intermediate Kawase chain stages).
 ///
-/// Runs in [`RenderSystems::PrepareResources`] so it is ready before any
-/// bind-group build pass.
+/// All textures use `Rgba8UnormSrgb` format with `RENDER_ATTACHMENT |
+/// TEXTURE_BINDING` usages. The shared sampler on [`BackdropBlurTexture`] is
+/// bilinear clamp-to-edge.
+///
+/// Runs in [`RenderSystems::PrepareResources`] so resources are ready before
+/// any bind-group creation.
 ///
 /// # Window in the render world
 ///
@@ -149,6 +186,47 @@ pub(super) fn ensure_blur_texture(
         }
     }
 
+    // Helper: create one scratch texture at the given dimensions.
+    let make_scratch = |dim: UVec2, label: &'static str| -> (Texture, TextureView) {
+        let tex = device.create_texture(&TextureDescriptor {
+            label: Some(label),
+            size: Extent3d {
+                width: dim.x.max(1),
+                height: dim.y.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&TextureViewDescriptor::default());
+        (tex, view)
+    };
+
+    let quarter = UVec2::new((physical.x / 4).max(1), (physical.y / 4).max(1));
+    let eighth = UVec2::new((physical.x / 8).max(1), (physical.y / 8).max(1));
+
+    // Scratch textures (intermediate Kawase chain stages).
+    let (half_tex, half_view) = make_scratch(half, "backdrop_blur_scratch_half");
+    let (quarter_tex, quarter_view) = make_scratch(quarter, "backdrop_blur_scratch_quarter");
+    let (eighth_tex, eighth_view) = make_scratch(eighth, "backdrop_blur_scratch_eighth");
+
+    commands.insert_resource(BackdropBlurScratch {
+        half_view,
+        quarter_view,
+        eighth_view,
+        half_extent: half,
+        quarter_extent: quarter,
+        eighth_extent: eighth,
+        _half_tex: half_tex,
+        _quarter_tex: quarter_tex,
+        _eighth_tex: eighth_tex,
+    });
+
+    // Final output texture.
     let descriptor = TextureDescriptor {
         label: Some("backdrop_blur_texture"),
         size: Extent3d {
