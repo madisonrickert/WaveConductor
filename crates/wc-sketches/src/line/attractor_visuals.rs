@@ -21,6 +21,10 @@
 //!
 //! ## Geometry
 //!
+//! - Polygonal ring with [`RING_SEGMENTS`] = 6 segments. v4 uses 32-segment
+//!   smooth annuli but tilts the parent group 0.8 rad on X so Y-rotation is
+//!   visibly elliptical. This 2D port can't tilt, so a 6-segment polygon
+//!   gives the rotation a legible corner to spin around — see Plan 11 § A.
 //! - Inner radius: 15 world units.
 //! - Outer radius: 18 world units.
 //! - Per-ring scale: `1 + (i / 10)^2 * 2` (outer rings progressively larger).
@@ -31,7 +35,6 @@
 //! - Color: v4 `#C5E2CC` ≈ `Color::srgb(0.77, 0.886, 0.8)`.
 
 use bevy::color::Color;
-use bevy::math::primitives::Annulus;
 use bevy::prelude::*;
 use bevy::sprite_render::ColorMaterial;
 
@@ -82,6 +85,68 @@ const ROTATION_SPEED_DIVISOR: f32 = 20.0;
 /// (which render at z=0) so the rings appear underneath the star sprites.
 const VISUAL_Z: f32 = -1.0;
 
+/// Number of segments around each ring. Six is the smallest count that still
+/// reads as a "ring" (a circle) at typical viewing distances but is angular
+/// enough that the per-frame rotation is visibly perceivable. v4 uses 32 with
+/// a 3D tilt; we use 6 to compensate for the lack of 3D in this 2D port.
+///
+/// Carry-forward #56 (PARITY.md verdict §1) is the source-of-record for the
+/// rotation-visibility motivation.
+const RING_SEGMENTS: u32 = 6;
+
+/// Build a flat polygonal ring mesh as an indexed triangle list.
+///
+/// Vertices alternate inner / outer around the ring at evenly-spaced angles
+/// (`segments` segments → `2 × segments` vertices). The triangle list links
+/// each pair `(inner_i, outer_i, outer_{i+1})` and `(inner_i, outer_{i+1},
+/// inner_{i+1})` so the ring is two strips of triangles closing on itself.
+///
+/// Built once at sketch entry; all 10 rings of an attractor visual share this
+/// mesh handle and use per-entity `Transform::scale` to size themselves.
+///
+/// Returns a `Mesh` with `Float32x3` positions and indexed topology. No
+/// normals or UVs — the ring material is a flat `ColorMaterial`.
+fn build_polygonal_ring_mesh(inner_radius: f32, outer_radius: f32, segments: u32) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+
+    let n = segments;
+    // usize::try_from is infallible on all targets (u32 ≤ usize on 32-bit+).
+    let n_usize = usize::try_from(n).unwrap_or(0);
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(2 * n_usize);
+    for i in 0..n {
+        #[allow(
+            clippy::as_conversions,
+            clippy::cast_precision_loss,
+            reason = "i ∈ 0..segments (≤ 16 in practice); u32→f32 round-trip is lossless"
+        )]
+        let angle = (i as f32) / (n as f32) * std::f32::consts::TAU;
+        let (s, c) = angle.sin_cos();
+        // Convention used by tests: even index i → inner, odd index → outer.
+        positions.push([c * inner_radius, s * inner_radius, 0.0]);
+        positions.push([c * outer_radius, s * outer_radius, 0.0]);
+    }
+
+    let mut indices: Vec<u32> = Vec::with_capacity(6 * n_usize);
+    for i in 0..n {
+        let inner_i = 2 * i;
+        let outer_i = 2 * i + 1;
+        let inner_next = 2 * ((i + 1) % n);
+        let outer_next = 2 * ((i + 1) % n) + 1;
+        // Two triangles per segment forming a quad slice of the ring.
+        indices.extend_from_slice(&[inner_i, outer_i, outer_next]);
+        indices.extend_from_slice(&[inner_i, outer_next, inner_next]);
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 /// Spawn the 10-ring visual for the (single) mouse attractor when its power
 /// becomes positive and no visual already exists.
 ///
@@ -112,10 +177,11 @@ pub fn spawn_attractor_visual(
 
     // One mesh + one material shared across all 10 rings of this visual.
     // Per-ring `Transform` carries the index-dependent scale.
-    let mesh_handle = meshes.add(Mesh::from(Annulus::new(
+    let mesh_handle = meshes.add(build_polygonal_ring_mesh(
         RING_INNER_RADIUS,
         RING_OUTER_RADIUS,
-    )));
+        RING_SEGMENTS,
+    ));
     let material_handle = materials.add(ColorMaterial::from(ATTRACTOR_RING_COLOR));
 
     let parent = commands
@@ -207,5 +273,56 @@ pub fn despawn_attractor_visual(
     }
     for entity in &visuals {
         commands.entity(entity).despawn();
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "expect/panic/as-cast with a clear message is appropriate in test code"
+)]
+mod tests {
+    use super::*;
+    use bevy::mesh::PrimitiveTopology;
+
+    #[test]
+    fn polygonal_ring_has_2n_vertices_and_2n_triangles() {
+        let n: u32 = 6;
+        let mesh = build_polygonal_ring_mesh(RING_INNER_RADIUS, RING_OUTER_RADIUS, n);
+        assert_eq!(mesh.primitive_topology(), PrimitiveTopology::TriangleList);
+        // 2n vertices (one inner + one outer per segment).
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("position attribute");
+        let n_usize = usize::try_from(n).expect("n fits in usize");
+        if let bevy::mesh::VertexAttributeValues::Float32x3(pos) = positions {
+            assert_eq!(pos.len(), 2 * n_usize);
+        } else {
+            panic!("position attribute must be Float32x3");
+        }
+        // 2n triangles → 6n indices (3 per triangle).
+        let indices = mesh.indices().expect("indexed mesh");
+        assert_eq!(indices.len(), 6 * n_usize);
+    }
+
+    #[test]
+    fn polygonal_ring_first_outer_vertex_is_on_outer_radius() {
+        let mesh = build_polygonal_ring_mesh(15.0, 18.0, 6);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("position attribute");
+        if let bevy::mesh::VertexAttributeValues::Float32x3(pos) = positions {
+            // Convention used by build_polygonal_ring_mesh:
+            // vertex 0 = inner radius at angle 0; vertex 1 = outer at angle 0.
+            let inner = pos[0];
+            let outer = pos[1];
+            let inner_len = (inner[0] * inner[0] + inner[1] * inner[1]).sqrt();
+            let outer_len = (outer[0] * outer[0] + outer[1] * outer[1]).sqrt();
+            assert!((inner_len - 15.0).abs() < 1e-4);
+            assert!((outer_len - 18.0).abs() < 1e-4);
+        }
     }
 }
