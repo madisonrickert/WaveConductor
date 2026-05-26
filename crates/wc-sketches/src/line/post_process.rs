@@ -72,14 +72,16 @@ pub struct LinePostParams {
     pub i_mouse_factor: f32,
     /// Elapsed wall-clock seconds since app start.
     pub i_global_time: f32,
-    /// Gravity constant `G` used by the smear ray-march. Plan 9 will modulate
-    /// this with audio + a triangle wave; Phase C ships a constant placeholder.
+    /// Gravity constant `G` used by the smear ray-march. Modulated each
+    /// frame in Line by [`crate::line::audio_coupling::drive_audio_and_shader`]
+    /// with a triangle-wave envelope × `(groupedUpness + 0.5) × 15000`.
     ///
     /// Default is `0.0` so the post-process is visually no-op outside
     /// `AppState::Line`. `update_sim_params` (gated by `sketch_active(Line)`)
-    /// writes a non-zero value each frame in Line; `remove_sim_params` resets
-    /// to default on `OnExit(Line)` so the next state doesn't inherit the
-    /// last in-Line value.
+    /// writes a placeholder value each frame; `drive_audio_and_shader`
+    /// overrides it with the ParticleStats-driven envelope.
+    /// `remove_sim_params` resets to default on `OnExit(Line)` so the next
+    /// state doesn't inherit the last in-Line value.
     pub g_constant: f32,
     /// Per-channel gamma curve applied as the final step of the post-process.
     pub gamma: f32,

@@ -117,9 +117,15 @@ pub fn update_sim_params(
         mouse.position[0] + w * 0.5,
         h - (mouse.position[1] + h * 0.5),
     ];
+    // Placeholder defaults for `i_mouse_factor` and `g_constant` — the
+    // gated `Update` chain runs `audio_coupling::drive_audio_and_shader`
+    // immediately after this system and overrides both fields with the
+    // ParticleStats-driven values. The defaults here only become visible if
+    // the coupling system is disabled (it never is during normal Line play),
+    // but writing sane defaults keeps the resource self-consistent if the
+    // chain ever re-orders.
     post.i_mouse_factor = 1.0 / 15.0;
     post.i_global_time = time.elapsed_secs();
-    // Plan 9 will modulate this with `groupedUpness * triangleWave(t/5000) * 15000`.
     post.g_constant = 5000.0;
     post.gamma = settings.gamma;
 }

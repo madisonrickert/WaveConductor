@@ -20,9 +20,11 @@
 //!    released, allowing the GPU storage buffer ref-count to reach zero.
 
 pub mod attractor_visuals;
+pub mod audio_coupling;
 pub mod compute;
 pub mod material;
 pub mod particle;
+pub mod particle_stats;
 pub mod post_process;
 pub mod settings;
 pub mod sim_cpu;
@@ -54,11 +56,20 @@ impl Plugin for LinePlugin {
         // Wire the gravity-smear post-process render-graph node.
         app.add_plugins(post_process::LinePostProcessPlugin);
 
-        // Lifecycle: spawn on enter, despawn on exit.
-        app.add_systems(OnEnter(AppState::Line), systems::spawn_line);
+        // Lifecycle: spawn on enter, despawn on exit. Audio lifecycle joins
+        // the same `OnEnter`/`OnExit` schedules — `enter_line_audio` builds
+        // the synth voice graph on the audio thread; `exit_line_audio` tears
+        // it down so VRAM/audio resources are released between sketch entries
+        // (project performance rule: per-sketch resources are owned by an
+        // entity tagged with the sketch's marker component, despawned on
+        // `OnExit` to release resources).
+        app.add_systems(
+            OnEnter(AppState::Line),
+            (systems::spawn_line, enter_line_audio),
+        );
         app.add_systems(
             OnExit(AppState::Line),
-            (despawn_with::<LineRoot>, remove_sim_params),
+            (despawn_with::<LineRoot>, remove_sim_params, exit_line_audio),
         );
 
         // Mouse attractor state (independent of sketch active/idle so the
@@ -70,6 +81,7 @@ impl Plugin for LinePlugin {
         // system would never finish releasing the pull.
         app.register_idle_veto(line_idle_veto);
         app.init_resource::<sim_cpu::LineCpuMirror>();
+        app.init_resource::<particle_stats::ParticleStats>();
         app.add_systems(
             Update,
             (
@@ -77,6 +89,12 @@ impl Plugin for LinePlugin {
                 systems::decay_mouse_attractor,
                 systems::update_sim_params,
                 sim_cpu::step_cpu_mirror,
+                particle_stats::update_particle_stats,
+                // `drive_audio_and_shader` reads `ParticleStats` and overrides
+                // the placeholder `g_constant` + `i_mouse_factor` written by
+                // `update_sim_params` earlier in this chain. The `.chain()`
+                // ordering below makes the override deterministic.
+                audio_coupling::drive_audio_and_shader,
                 attractor_visuals::spawn_attractor_visual,
                 attractor_visuals::animate_attractor_visual,
                 attractor_visuals::despawn_attractor_visual,
@@ -155,4 +173,40 @@ fn line_idle_veto(world: &World) -> bool {
     world
         .get_resource::<systems::MouseAttractorState>()
         .is_some_and(|s| s.power > 0.0)
+}
+
+/// `OnEnter(AppState::Line)` — push `AddLineSynth` so the audio thread builds
+/// the Line synth voice graph.
+///
+/// Idempotent on the audio side: if a synth already exists (e.g. from a
+/// dropped tear-down), the audio thread's `AddLineSynth` handler is a no-op.
+/// Drops the command silently with a `warn` if the ring is full — the synth
+/// will be re-tried on the next sketch entry.
+fn enter_line_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    // The audio engine isn't started in headless integration tests (no cpal
+    // device). Skip cleanly when the sender isn't present.
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::AddLineSynth) {
+        tracing::warn!("audio command ring full on Line entry; AddLineSynth dropped");
+    }
+}
+
+/// `OnExit(AppState::Line)` — push `RemoveLineSynth` so the audio thread tears
+/// down the Line synth voice graph and frees its DSP allocations.
+///
+/// Idempotent on the audio side: if no synth is active, the audio thread's
+/// `RemoveLineSynth` handler is a no-op.
+fn exit_line_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::RemoveLineSynth) {
+        tracing::warn!("audio command ring full on Line exit; RemoveLineSynth dropped");
+    }
 }
