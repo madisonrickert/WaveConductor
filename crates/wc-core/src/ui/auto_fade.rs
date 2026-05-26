@@ -102,7 +102,13 @@ impl Plugin for AutoFadePlugin {
         // Register as a settings type so the existing dev-panel
         // reflection walker surfaces the three knobs automatically.
         app.register_sketch_settings::<OverlayUiSettings>();
-        app.add_systems(Update, (update_opacity_target, lerp_opacity).chain());
+        app.add_systems(
+            Update,
+            (
+                (update_opacity_target, lerp_opacity).chain(),
+                sync_backdrop_blur_enabled,
+            ),
+        );
     }
 }
 
@@ -143,7 +149,33 @@ pub fn lerp_opacity(
     opacity.current = opacity.current.clamp(0.0, 1.0);
 }
 
+/// Propagate the user-facing `OverlayUiSettings::backdrop_blur_enabled`
+/// checkbox into the render-world toggle [`crate::ui::blur::BackdropBlurEnabled`].
+///
+/// The blur render-graph node reads the extracted form of that resource each
+/// frame; this system keeps the two in sync so toggling the checkbox in the
+/// dev panel takes effect on the next frame. The
+/// [`bevy::render::extract_resource::ExtractResourcePlugin`] for
+/// `BackdropBlurEnabled` runs after `Update`, so writes made here are picked
+/// up in the same frame's render pass.
+///
+/// The resource is wrapped in `Option` so this system is a no-op in headless
+/// contexts (tests, CI) where [`crate::ui::blur::BackdropBlurPlugin`] is not
+/// loaded and the resource does not exist.
+pub fn sync_backdrop_blur_enabled(
+    settings: Res<'_, OverlayUiSettings>,
+    mut enabled: Option<ResMut<'_, crate::ui::blur::BackdropBlurEnabled>>,
+) {
+    if let Some(ref mut e) = enabled {
+        e.0 = settings.backdrop_blur_enabled;
+    }
+}
+
 #[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    reason = "comparing exact 0.0 / 1.0 constants that are set by assignment, not by arithmetic"
+)]
 mod tests {
     use super::*;
     use bevy::time::TimeUpdateStrategy;
@@ -192,6 +224,35 @@ mod tests {
         assert_eq!(
             target, 0.0,
             "opacity target should be 0 after 60 s of idle (threshold = 30 s), elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn sync_backdrop_blur_enabled_mirrors_settings_to_resource() {
+        let mut app = make_app();
+        // BackdropBlurEnabled is normally inserted by BackdropBlurPlugin; in
+        // this minimal test we init it directly so the sync system has a target.
+        app.init_resource::<crate::ui::blur::BackdropBlurEnabled>();
+        app.add_systems(Update, sync_backdrop_blur_enabled);
+
+        // Start with blur disabled via settings.
+        app.world_mut()
+            .resource_mut::<OverlayUiSettings>()
+            .backdrop_blur_enabled = false;
+        app.update();
+        assert!(
+            !app.world().resource::<crate::ui::blur::BackdropBlurEnabled>().0,
+            "BackdropBlurEnabled should be false when settings has false"
+        );
+
+        // Flip the setting on.
+        app.world_mut()
+            .resource_mut::<OverlayUiSettings>()
+            .backdrop_blur_enabled = true;
+        app.update();
+        assert!(
+            app.world().resource::<crate::ui::blur::BackdropBlurEnabled>().0,
+            "BackdropBlurEnabled should be true when settings has true"
         );
     }
 

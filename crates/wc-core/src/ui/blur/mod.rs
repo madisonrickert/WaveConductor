@@ -32,8 +32,10 @@ use bevy::window::PrimaryWindow;
 
 /// Master toggle for the backdrop-blur node. Lives in the main world.
 ///
-/// Default `true`. The dev panel's `OverlayUiSettings::backdrop_blur_enabled`
-/// mirror flips this each frame.
+/// Default `true`. [`crate::ui::auto_fade::sync_backdrop_blur_enabled`] runs
+/// each `Update` and writes `OverlayUiSettings::backdrop_blur_enabled` into
+/// this resource, so toggling the dev-panel checkbox takes effect on the next
+/// rendered frame.
 #[derive(Resource, Debug, Clone, Copy, ExtractResource)]
 pub struct BackdropBlurEnabled(pub bool);
 
