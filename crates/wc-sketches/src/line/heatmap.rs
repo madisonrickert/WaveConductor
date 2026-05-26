@@ -48,8 +48,10 @@ const MAX_SAMPLE_DIM: u32 = 256;
 /// caller in `crate::line::systems::spawn::spawn_line` for the canonical
 /// conversion.
 ///
-/// On any error or a fully-zero weight grid, falls back to
-/// [`fallback_line`] so the sketch still renders something.
+/// On any error or a fully-zero weight grid, falls back to the
+/// private `fallback_line` helper (horizontal mid-line + sawtooth
+/// jitter, matching the v5-line-sim baseline spawn) so the sketch
+/// still renders something.
 pub fn sample_from_heatmap(path: &Path, canvas_w: f32, canvas_h: f32, count: usize) -> Vec<Vec2> {
     match try_sample_from_heatmap(path, canvas_w, canvas_h, count) {
         Ok(positions) => positions,
