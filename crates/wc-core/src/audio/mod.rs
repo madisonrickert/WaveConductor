@@ -41,6 +41,7 @@
 pub mod command;
 pub mod dsp;
 pub mod engine;
+pub mod line_synth;
 pub mod nav;
 pub mod ring;
 pub mod state;

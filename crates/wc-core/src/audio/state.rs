@@ -44,6 +44,9 @@ pub struct AudioState {
     /// Whether output is muted. When `true`, the DSP host overrides
     /// [`Self::volume`] with `0.0`.
     pub muted: bool,
+    /// Whether the Line synth is currently active on the audio thread.
+    /// Mirrors `LineSynthActivated` / `LineSynthDeactivated` messages.
+    pub line_synth_active: bool,
     /// Most recent error from the audio thread, if any.
     pub last_error: Option<String>,
 }
@@ -56,6 +59,7 @@ impl Default for AudioState {
             channels: 0,
             volume: 1.0,
             muted: false,
+            line_synth_active: false,
             last_error: None,
         }
     }
@@ -93,6 +97,12 @@ pub fn pump_audio_messages(
             }
             AudioMessage::MutedApplied(m) => {
                 state.muted = m;
+            }
+            AudioMessage::LineSynthActivated => {
+                state.line_synth_active = true;
+            }
+            AudioMessage::LineSynthDeactivated => {
+                state.line_synth_active = false;
             }
         }
     }

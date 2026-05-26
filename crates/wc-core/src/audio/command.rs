@@ -1,9 +1,14 @@
 //! Commands (main → audio) and messages (audio → main).
 //!
 //! Both flow through `rtrb` ring buffers. The audio thread never allocates or
-//! blocks, so message payloads are kept small and `Copy` where possible
-//! (`AudioMessage::Errored` carries a `String` because errors are rare and
-//! we accept the allocation when they occur).
+//! blocks **per buffer**, so message payloads are kept small and `Copy` where
+//! possible (`AudioMessage::Errored` carries a `String` because errors are rare
+//! and we accept the allocation when they occur).
+//!
+//! Note on `SetLineParam`'s `&'static str`: keeping the enum `Copy` requires
+//! the parameter key to be `Copy`. A `&'static str` (string literal) is `Copy`
+//! and zero-allocation; senders write keys like `"volume"` or `"bandpass_freq"`
+//! directly. See [`super::dsp::LineSynth`] for the legal key set.
 
 /// Commands the main thread sends to the audio thread.
 ///
@@ -15,6 +20,29 @@ pub enum AudioCommand {
     SetMasterVolume(f32),
     /// Set the muted flag. `true` overrides volume with zero output.
     SetMuted(bool),
+    /// Build and activate the Line sketch's synth voice graph. Idempotent: a
+    /// second `AddLineSynth` while one is active is a no-op.
+    ///
+    /// The DSP graph is constructed on the audio thread the first time this
+    /// command lands. Construction allocates (boxed graph nodes, parameter
+    /// `Arc`s). This is a one-shot cost at sketch activation, not a per-buffer
+    /// allocation, so it is acceptable on the audio thread.
+    AddLineSynth,
+    /// Stop the Line synth. Idempotent: a second `RemoveLineSynth` while no
+    /// synth is active is a no-op. Drops the graph and its associated
+    /// allocations.
+    RemoveLineSynth,
+    /// Set a named parameter on the Line synth. `key` is a `&'static str` to
+    /// keep this variant `Copy` (the audio ring is lock-free and allocation-
+    /// free; we cannot pass an owned `String`); see [`super::dsp::LineSynth`]
+    /// for the legal set. Unknown keys are logged via `tracing::warn!` and
+    /// dropped silently — the DSP host must never panic on a stale key.
+    SetLineParam {
+        /// Parameter identifier. Must be a `'static` string literal.
+        key: &'static str,
+        /// New target value. Range and meaning depend on `key`.
+        value: f32,
+    },
 }
 
 /// Messages the audio thread sends back to the main thread.
@@ -39,4 +67,10 @@ pub enum AudioMessage {
     VolumeApplied(f32),
     /// Sent after the audio thread applies a `SetMuted` command.
     MutedApplied(bool),
+    /// Sent after the audio thread applies an `AddLineSynth` command and
+    /// successfully constructed the synth graph. Lets the main thread mirror
+    /// activation state for UI.
+    LineSynthActivated,
+    /// Sent after the audio thread applies a `RemoveLineSynth` command.
+    LineSynthDeactivated,
 }

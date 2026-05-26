@@ -118,11 +118,21 @@ fn build_engine() -> Result<BuiltEngine, EngineBuildError> {
             // Drain commands.
             while let Ok(cmd) = cmd_consumer.pop() {
                 dsp.apply(cmd);
+                // Plan 9 SetLineParam is fire-and-forget on the main side; we
+                // omit an echo to keep per-frame param sweeps off the message
+                // ring (which is bounded and would otherwise drop them).
                 let echo = match cmd {
-                    AudioCommand::SetMasterVolume(_) => AudioMessage::VolumeApplied(dsp.volume()),
-                    AudioCommand::SetMuted(m) => AudioMessage::MutedApplied(m),
+                    AudioCommand::SetMasterVolume(_) => {
+                        Some(AudioMessage::VolumeApplied(dsp.volume()))
+                    }
+                    AudioCommand::SetMuted(m) => Some(AudioMessage::MutedApplied(m)),
+                    AudioCommand::AddLineSynth => Some(AudioMessage::LineSynthActivated),
+                    AudioCommand::RemoveLineSynth => Some(AudioMessage::LineSynthDeactivated),
+                    AudioCommand::SetLineParam { .. } => None,
                 };
-                let _ = msg_producer.push(echo);
+                if let Some(msg) = echo {
+                    let _ = msg_producer.push(msg);
+                }
             }
             // Render.
             dsp.render(output);
