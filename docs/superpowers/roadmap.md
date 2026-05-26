@@ -20,6 +20,7 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 9 | Line audio + reactivity coupling | ✅ shipped | `v5-line-audio` |
 | 10 | Line polish + heatmap spawn + soak harness | 🟡 shipped, parity gaps deferred to Plan 11 | — |
 | 11 | Line parity completion (rings, touch/hand activation, file picker, sign-off) | ⏳ next | `v5-line-parity` |
+| 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | future | `v5-overlay-ui` |
 | 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
 
 > **Line is most of the way there.** Plans 7–10 carried the sketch from scaffolding through multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph, the audio↔visual reactivity coupling, the heatmap-image spawn template, and the AGENTS.md-required 8-hour soak harness. The first hands-on run on 2026-05-25 surfaced parity gaps that don't fit cleanly inside Plan 10's "polish" scope and so deferred to Plan 11: rotationally-symmetric attractor `Annulus` rings (no visible spin), no touch / hand-tracking pathway to attractor press, no file picker for `spawn_template`, and the manual side-by-side sign-off that flips `PARITY.md` from "PENDING" to a real PASS. Plan 11 closes those and earns the `v5-line-parity` tag. The architectural pattern established here — per-sketch plugin under `wc-sketches`, settings via the `wc-core` registry, `OnEnter`/`OnExit` lifecycle, audio reactivity via `AudioCommand`, a `PARITY.md` per module closing with a tagged verdict — generalizes cleanly to Flame, Dots, Cymatics, and Waves (Plan 12+).
@@ -177,6 +178,25 @@ Implications per sketch:
 - **Future post-v4 sketches**: design with this pattern from day one. If you need a per-particle reduction for audio, that's a smell — derive from inputs instead.
 
 The synthesis registration shape established for Line (`AudioCommand::AddLineSynth` / `RemoveLineSynth` + per-synth-param messages over a lock-free ring) is the right pattern; future sketches add their own `Add<Sketch>Synth` variants with sketch-specific param keys.
+
+## Plan 11.5 — Overlay UI parity
+
+Lands between Plan 11 (Line tagged) and Plan 12 (next sketch port). Plan 11.5 ports v4's overlay UI surface — the chrome that sits on top of every sketch, not the sketch itself — so the next sketch port can plug into a finished UI shell instead of inheriting Line's bare-bones controls.
+
+**Scope:**
+
+- **Translucent buttons** matching v4's visual style — likely `bevy_egui` with custom `Visuals` (background tint, border radius, alpha) tuned to v4. Buttons share a single style applied across nav + settings + sketch-specific affordances.
+- **Settings panel** — extends Plan 5's existing `bevy_egui` panel with the v4 visual style. Replaces the default-egui-frame look with translucent backdrop + matching button styling. The Plan 5 reflection-driven widget set stays; only the chrome changes.
+- **Navigation buttons** — sketch-picker, fullscreen toggle, settings open/close, info/about. Match v4's icon set + placement.
+- **Auto-fading UI** — overlay UI fades out after N seconds of pointer inactivity, fades back in on any pointer event. Matches v4's kiosk-friendly behavior. Coupled to the existing `InteractionTimer` (Plan 2) and a new `UiOpacity` resource animated by an `Update` system.
+
+**Reference:** match v4's overlay UI style exactly. Reference media lives in `.worktrees/v4/src/` — locate the overlay components and styling there before designing.
+
+**Why now:** Doing this before the next sketch port means Plans 12+ can wire their sketch-specific buttons into a finished UI shell instead of inheriting Line's minimal placeholder. Doing it after every sketch would mean re-touching each one to retrofit the chrome.
+
+**Est. effort:** 3–5 days. Most of the cost is matching v4's pixel/animation feel rather than the underlying state machine.
+
+**Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time.
 
 ## Pre-release tier
 
