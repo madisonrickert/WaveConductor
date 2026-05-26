@@ -9,7 +9,7 @@
 - **Plan 6 (shipped, tag `v5-line`)** — sketch scaffolding, single-attractor inverse-linear gravity, flat-color quads.
 - **Plan 7 (shipped, tag `v5-line-sim`)** — multi-attractor physics with dual drag, size-scaled gravity, mouse-power decay, `original_xy` + constrain-to-box, fade-in α, horizontal-line spawn with sawtooth jitter, `particle_density` setting.
 - **Plan 8 (shipped, tag `v5-line-render`)** — gravity-smear post-process shader, star sprite, attractor ring meshes, `gamma` setting.
-- **Plan 9 (tag `v5-line-audio`)** — fundsp-based synthesis, particle-stats coupling driving synth params and shader uniforms.
+- **Plan 9 (shipped, tag `v5-line-audio`)** — fundsp-based synthesis (bandpass cascade + LFO + noise + master gain mixed with looped `line_background.ogg`), `ParticleStats` CPU reduction over `LineCpuMirror`, coupling system writing per-frame `SetLineParam` (lfo_freq/bandpass_freq/noise_freq/volume) and overriding `LinePostParams.g_constant` + `i_mouse_factor` from groupedUpness × triangle-wave.
 - **Plan 10 (tag `v5-line-parity`)** — heatmap-image spawn, signed verdict.
 
 **Approved deviations from v4** (carried forward; verdict deferred until Plan 10):
