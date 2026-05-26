@@ -19,13 +19,16 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | ✅ shipped | `v5-line-render` |
 | 9 | Line audio + reactivity coupling | ✅ shipped | `v5-line-audio` |
 | 10 | Line polish + heatmap spawn + soak harness | 🟡 shipped, parity gaps deferred to Plan 11 | — |
-| 11 | Line parity completion (rings, touch/hand activation, file picker, sign-off) | ⏳ next | `v5-line-parity` |
-| 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | future | `v5-overlay-ui` |
+| 11 | Line parity completion (rings, touch/hand activation, file picker, code sign-off) | 🟡 code shipped, manual gates open | `v5-line-parity` |
+| 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ⏳ Line parity gate | `v5-overlay-ui` |
+| 11.6 | Hand-tracking provider + Leap manual verification | ⏳ Line parity gate | `v5-leap-verified` |
 | 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
 
 > **Line is most of the way there.** Plans 7–10 carried the sketch from scaffolding through multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph, the audio↔visual reactivity coupling, the heatmap-image spawn template, and the AGENTS.md-required 8-hour soak harness. The first hands-on run on 2026-05-25 surfaced parity gaps that don't fit cleanly inside Plan 10's "polish" scope and so deferred to Plan 11: rotationally-symmetric attractor `Annulus` rings (no visible spin), no touch / hand-tracking pathway to attractor press, no file picker for `spawn_template`, and the manual side-by-side sign-off that flips `PARITY.md` from "PENDING" to a real PASS. Plan 11 closes those and earns the `v5-line-parity` tag. The architectural pattern established here — per-sketch plugin under `wc-sketches`, settings via the `wc-core` registry, `OnEnter`/`OnExit` lifecycle, audio reactivity via `AudioCommand`, a `PARITY.md` per module closing with a tagged verdict — generalizes cleanly to Flame, Dots, Cymatics, and Waves (Plan 12+).
+>
+> **Two manual gates still stand between Line and "shipped":** Plan 11.5 (overlay UI parity — the v4 button chrome, settings panel styling, nav, and auto-fade) and Plan 11.6 (hand-tracking provider + on-hardware Leap verification — the kiosk install's primary input modality). Plan 11 produces the `v5-line-parity` tag on the *code path*; 11.5 and 11.6 close the surface around it. No Plan-12 sketch port begins until both have landed.
 
-## Line parity (Plans 7–11)
+## Line parity (Plans 7–11.6)
 
 The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the post-process shader, audio synthesis, and visual sign-off are all still ahead. Four plans bring v5 Line to functional and perceptual parity with v4.
 
@@ -131,14 +134,59 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
 - **Manual side-by-side parity capture.** Madison runs v5 (`cargo run -p waveconductor`) against v4 (`npm run dev` on the v4 `main` branch) at 1280×720, captures matching idle, mid-press, and mid-decay states, and signs the `PARITY.md` verdict from PENDING → PASS. The pinned v4 reference commit goes in the verdict.
 - **Heatmap-spawn end-to-end verification.** Spot-check with at least one real PNG (probably `assets/sketches/line/star.png` and a hand-picked photograph) plus a deliberately-wrong path to exercise the horizontal-line fallback. Currently only unit-tested.
 
-**Out of scope (deferred to Plan 12+):**
+**Out of scope (handed to dedicated parity gates):**
 
 - Plan 8's known-deferred items (post-process gating outside `AppState::Line`, per-frame uniform-buffer reuse) — fold into the next render-graph work that touches the area.
-- Hand-tracking provider implementation (no `HandTrackingState` writer exists yet — pure stub from Plan 3). Plan 11's gesture handling can be wired up behind a feature flag and tested with synthetic input until the Leap / Mediapipe provider lands.
+- **Hand-tracking provider implementation** (no `HandTrackingState` writer exists yet — pure stub from Plan 3). Plan 11 ships the gesture-edge handling behind the `hand-tracking-gestures` feature flag, tested with synthetic input only; the real `LeaprsProvider` and on-hardware verification land in **Plan 11.6** as a Line parity gate.
+- **Overlay UI chrome** (translucent buttons, settings panel styling, nav, auto-fade) — kept out of the sketch scope and landed as **Plan 11.5**, the other Line parity gate.
 
 **Est. effort:** 2–3 days.
 
-**Total Line parity:** ~20–29 days from Plan 7 start to `v5-line-parity` tag.
+**Total Line code parity:** ~20–29 days from Plan 7 start to `v5-line-parity` tag. Plans 11.5 and 11.6 add another ~5–9 days of manual-gate work before Line is considered fully shipped.
+
+### Plan 11.5 — Overlay UI parity (Line parity gate)
+
+One of the two manual gates that stand between Plan 11's code-complete tag and Line being declared truly shipped. Plan 11.5 ports v4's overlay UI surface — the chrome that sits on top of every sketch, not the sketch itself — so the kiosk install presents the v4 visual language and the next sketch port can plug into a finished UI shell instead of inheriting Line's bare-bones controls.
+
+**Scope:**
+
+- **Translucent buttons** matching v4's visual style — likely `bevy_egui` with custom `Visuals` (background tint, border radius, alpha) tuned to v4. Buttons share a single style applied across nav + settings + sketch-specific affordances.
+- **Settings panel** — extends Plan 5's existing `bevy_egui` panel with the v4 visual style. Replaces the default-egui-frame look with translucent backdrop + matching button styling. The Plan 5 reflection-driven widget set stays; only the chrome changes. Plan 11 already landed the [`EguiPointerCaptured`](../../crates/wc-core/src/settings/pointer_capture.rs) gate so the new chrome doesn't double-trigger sketch interaction.
+- **Navigation buttons** — sketch-picker, fullscreen toggle, settings open/close, info/about. Match v4's icon set + placement.
+- **Auto-fading UI** — overlay UI fades out after N seconds of pointer inactivity, fades back in on any pointer event. Matches v4's kiosk-friendly behavior. Coupled to the existing `InteractionTimer` (Plan 2) and a new `UiOpacity` resource animated by an `Update` system.
+
+**Reference:** match v4's overlay UI style exactly. Reference media lives in `.worktrees/v4/src/` — locate the overlay components and styling there before designing.
+
+**Why a parity gate:** Madison's first hands-on run after Plan 11 surfaced that the UI surface is still missing relative to v4 — without it, the kiosk install doesn't pass the "looks like v4" bar. Doing this before the next sketch port also means Plans 12+ wire into a finished UI shell instead of inheriting Line's minimal placeholder; doing it after every sketch would mean re-touching each one to retrofit the chrome.
+
+**Est. effort:** 3–5 days. Most of the cost is matching v4's pixel/animation feel rather than the underlying state machine.
+
+**Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time.
+
+### Plan 11.6 — Hand-tracking provider + Leap manual verification (Line parity gate)
+
+The second of the two manual gates between Plan 11's code-complete tag and Line shipping. Plan 11 wired the gesture-edge handling (pinch press / release, [`LastPinchState`](../../crates/wc-sketches/src/line/systems/mouse.rs) per-chirality) behind the `hand-tracking-gestures` feature, but tested it with synthetic input only. The kiosk install's primary input modality is the Leap Motion Controller, so Line cannot ship to the pi-party deployment until on-hardware operation is verified end-to-end.
+
+**Scope:**
+
+- **`LeaprsProvider` real implementation** — replace the [`LeaprsProvider`](../../crates/wc-core/src/input/providers/leap_native.rs) stub (currently returns `HandTrackingStatus::Disconnected` and logs a warning). Add `leaprs` crate dep (`LeapC` bindings); wire `start` / `stop` / `poll` to actually open the connection and emit `HandTrackingFrame` messages each frame.
+- **Provider selection at startup** — the binary's `ActiveProvider` selection needs a runtime toggle (env var, CLI flag, or build-time feature). When Leap is available, the binary inserts `LeaprsProvider`; otherwise falls back to the mock provider. The `hand-tracking-gestures` feature should pull in the real provider by default.
+- **Hands-on Leap testing** — on Madison's Leap hardware, verify:
+  - Pinch above [`PINCH_PRESS_THRESHOLD`](../../crates/wc-sketches/src/line/systems/mouse.rs) (0.85) spawns an attractor at the projected hand position.
+  - Releasing the pinch zeros the attractor.
+  - Holding the pinch holds the attractor and the audio voice tracks the held envelope.
+  - Two hands → two attractors. Multi-attractor physics already supports N=8; the gesture path needs to feed both `left()` and `right()` simultaneously without one stomping the other.
+- **Hand-position projection.** The `HandTrackingState` carries the hand's 3D position in Leap-space coordinates. Plan 11.6 picks a projection to world-space pixels (likely a top-down ortho mapping calibrated against the Leap's mounting position above the kiosk). Document the projection so the parity capture can reproduce it.
+- **Soak test on Leap input** — re-run the 8-hour soak harness with synthetic hand-tracking events to verify no leaks in the new provider path. The real Leap hardware soak can wait for the pi-party deployment dress rehearsal.
+
+**Out of scope:**
+
+- **Mediapipe / webcam fallback provider** — kiosk targets Leap exclusively. Mediapipe is a future hand-tracking option if Madison wants to demo on a laptop without the Leap controller, but not a parity gate.
+- **In-air gestures beyond pinch** (grab, swipe, point) — Line uses pinch only. Future sketches that need richer gestures will extend `HandGestureEvent` and the gesture-detection systems.
+
+**Est. effort:** 2–4 days. Risk lives in (1) `leaprs` crate ergonomics — last-touched several years ago, may need patching — and (2) the projection calibration against actual kiosk mounting.
+
+**Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time of writing.
 
 ## Beyond Line
 
@@ -178,25 +226,6 @@ Implications per sketch:
 - **Future post-v4 sketches**: design with this pattern from day one. If you need a per-particle reduction for audio, that's a smell — derive from inputs instead.
 
 The synthesis registration shape established for Line (`AudioCommand::AddLineSynth` / `RemoveLineSynth` + per-synth-param messages over a lock-free ring) is the right pattern; future sketches add their own `Add<Sketch>Synth` variants with sketch-specific param keys.
-
-## Plan 11.5 — Overlay UI parity
-
-Lands between Plan 11 (Line tagged) and Plan 12 (next sketch port). Plan 11.5 ports v4's overlay UI surface — the chrome that sits on top of every sketch, not the sketch itself — so the next sketch port can plug into a finished UI shell instead of inheriting Line's bare-bones controls.
-
-**Scope:**
-
-- **Translucent buttons** matching v4's visual style — likely `bevy_egui` with custom `Visuals` (background tint, border radius, alpha) tuned to v4. Buttons share a single style applied across nav + settings + sketch-specific affordances.
-- **Settings panel** — extends Plan 5's existing `bevy_egui` panel with the v4 visual style. Replaces the default-egui-frame look with translucent backdrop + matching button styling. The Plan 5 reflection-driven widget set stays; only the chrome changes.
-- **Navigation buttons** — sketch-picker, fullscreen toggle, settings open/close, info/about. Match v4's icon set + placement.
-- **Auto-fading UI** — overlay UI fades out after N seconds of pointer inactivity, fades back in on any pointer event. Matches v4's kiosk-friendly behavior. Coupled to the existing `InteractionTimer` (Plan 2) and a new `UiOpacity` resource animated by an `Update` system.
-
-**Reference:** match v4's overlay UI style exactly. Reference media lives in `.worktrees/v4/src/` — locate the overlay components and styling there before designing.
-
-**Why now:** Doing this before the next sketch port means Plans 12+ can wire their sketch-specific buttons into a finished UI shell instead of inheriting Line's minimal placeholder. Doing it after every sketch would mean re-touching each one to retrofit the chrome.
-
-**Est. effort:** 3–5 days. Most of the cost is matching v4's pixel/animation feel rather than the underlying state machine.
-
-**Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time.
 
 ## Pre-release tier
 
