@@ -22,9 +22,12 @@ use bevy::prelude::*;
 
 pub mod auto_fade;
 pub mod blur;
+pub mod frame;
 pub mod style;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
+pub use frame::{backdrop_blur_frame, FrameOptions};
+pub use style::OverlayStyle;
 
 /// Umbrella plugin for the overlay UI surface.
 pub struct WaveConductorUiPlugin;
