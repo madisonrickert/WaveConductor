@@ -389,14 +389,17 @@ fn particle_stats_rise_on_press_and_decay_on_release() {
         "expected grouped_upness > 0.3 after 1s sustained press; got {peak_grouped}",
     );
 
-    // Release: power = 0 immediately (Phase E behavior). Envelope decays.
+    // Release: power = 0 immediately (Phase E behavior). The pad-style
+    // grouped_upness release is intentionally slow (~670 ms time constant),
+    // so we let 4 seconds (240 frames) elapse to reach near-silence.
     release_left(&mut app);
-    for _ in 0..60 {
+    for _ in 0..240 {
         app.update();
     }
     let post_release = app.world().resource::<ParticleStats>().grouped_upness;
+    let decay_floor = peak_grouped * 0.05;
     assert!(
-        post_release < 0.2,
-        "expected grouped_upness < 0.2 after 1s release decay; got {post_release}",
+        post_release < decay_floor,
+        "expected grouped_upness < 5% of peak ({decay_floor:.4}) after 4s release; got {post_release}",
     );
 }

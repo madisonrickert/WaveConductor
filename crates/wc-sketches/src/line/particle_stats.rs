@@ -253,9 +253,11 @@ const RELEASE_RATE_SLOW: f32 = 1.5;
 const GROUPED_UPNESS_ATTACK_RATE: f32 = 50.0;
 
 /// Release rate for `grouped_upness` (falling edge — target < current).
-/// 6.7 Hz = ~150 ms time constant. Tail decays cleanly without clicking;
-/// matches v4's natural particle-drag decay rate.
-const GROUPED_UPNESS_RELEASE_RATE: f32 = 6.7;
+/// 1.5 Hz = ~670 ms time constant. Pad-style gentle release tail; the voice
+/// fades over ~2 seconds instead of v4's ~500 ms snap. Asymmetry with
+/// [`GROUPED_UPNESS_ATTACK_RATE`] is ~33× (20 ms attack / 670 ms release) —
+/// typical pad ratio.
+const GROUPED_UPNESS_RELEASE_RATE: f32 = 1.5;
 
 /// Exponent of the perceptual loudness curve applied to `excitement` before
 /// it scales `grouped_upness`. Sub-linear (0.6 < 1.0): low excitement maps to

@@ -99,10 +99,14 @@ fn grouped_upness_decays_after_release() {
         "prerequisite: press must raise grouped_upness"
     );
 
-    let released = run_frames(60, 1.0 / 60.0, 0.0, pressed);
+    // The pad-style release uses a slow ~670 ms time constant, so we let it
+    // run for 4 s (240 frames at 60 Hz) and check the value has dropped
+    // below 5% of peak — i.e., the envelope is cleanly trending toward zero.
+    let released = run_frames(240, 1.0 / 60.0, 0.0, pressed);
+    let decay_floor = pressed.grouped_upness * 0.05;
     assert!(
-        released.grouped_upness < 0.2,
-        "expected decay after release; got {}",
+        released.grouped_upness < decay_floor,
+        "expected decay below 5% of peak ({decay_floor:.4}); got {}",
         released.grouped_upness,
     );
 }
