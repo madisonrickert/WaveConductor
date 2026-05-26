@@ -36,3 +36,8 @@ Thumbs.db
 
 # Misc
 *.log
+
+# Claude Code / agent tooling (per-machine state, not part of the Rust build)
+.claude/
+.agents/
+skills-lock.json
