@@ -14,6 +14,7 @@
 use bevy::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use super::background::{decode_to_interleaved_f32, resample_and_remix, BackgroundSampleAsset};
 use super::command::{AudioCommand, AudioMessage};
 use super::dsp::DspHost;
 use super::ring::{AudioCommandSender, AudioMessageReceiver, RING_CAPACITY};
@@ -36,7 +37,16 @@ pub struct AudioStream {
 /// app continues to run silently; sketches that don't depend on audio remain
 /// functional.
 pub fn start_audio_engine(world: &mut World) {
-    match build_engine() {
+    // Pull the encoded background asset out of the world (if the binary
+    // crate inserted one). We move the bytes out and discard the resource
+    // so the encoded buffer is not retained on the heap once we have the
+    // decoded PCM. `take_resource` removes-if-present and returns Option.
+    let encoded_bytes = world
+        .remove_resource::<BackgroundSampleAsset>()
+        .map(|asset| asset.bytes)
+        .unwrap_or_default();
+
+    match build_engine(&encoded_bytes) {
         Ok(built) => {
             // sender and receiver wrap rtrb::Producer/Consumer which are Send
             // but not Sync, so they are installed as non-send resources.
@@ -82,7 +92,7 @@ enum EngineBuildError {
     PlayStream(#[from] cpal::PlayStreamError),
 }
 
-fn build_engine() -> Result<BuiltEngine, EngineBuildError> {
+fn build_engine(encoded_background: &[u8]) -> Result<BuiltEngine, EngineBuildError> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -92,13 +102,51 @@ fn build_engine() -> Result<BuiltEngine, EngineBuildError> {
     let channels = supported.channels();
     let config: cpal::StreamConfig = supported.into();
 
+    // Decode the background sample on the main thread before the cpal
+    // callback starts. We catch and log decode errors here rather than
+    // failing the engine: spec invariant is that audio always starts, even
+    // if individual sketch assets are missing.
+    let background_pcm = if encoded_background.is_empty() {
+        tracing::info!(
+            "no BackgroundSampleAsset present; engine will start without a background mix"
+        );
+        Vec::new()
+    } else {
+        match decode_to_interleaved_f32(encoded_background) {
+            Ok(decoded) => {
+                let src_frames = decoded.frame_count();
+                let src_rate = decoded.sample_rate;
+                let src_channels = decoded.channels;
+                let resampled =
+                    resample_and_remix(&decoded.pcm, src_channels, src_rate, channels, sample_rate);
+                tracing::info!(
+                    src_rate,
+                    src_channels,
+                    src_frames,
+                    dst_rate = sample_rate,
+                    dst_channels = channels,
+                    dst_frames = resampled.len() / usize::from(channels.max(1)),
+                    "decoded background sample for audio engine"
+                );
+                resampled
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "background sample decode failed; engine will start without a background mix"
+                );
+                Vec::new()
+            }
+        }
+    };
+
     // Ring buffers. Producer for commands goes to main thread; consumer to
     // audio callback. Producer for messages goes to audio callback; consumer
     // to main thread.
     let (cmd_producer, mut cmd_consumer) = rtrb::RingBuffer::<AudioCommand>::new(RING_CAPACITY);
     let (mut msg_producer, msg_consumer) = rtrb::RingBuffer::<AudioMessage>::new(RING_CAPACITY);
 
-    let mut dsp = DspHost::new(sample_rate, channels);
+    let mut dsp = DspHost::new(sample_rate, channels, background_pcm);
 
     // Announce that the stream is up; the main thread's pump system will pick
     // this up and set AudioStatus::Running.

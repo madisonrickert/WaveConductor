@@ -20,6 +20,7 @@ leafwing-input-manager = { workspace = true }
 rtrb = { workspace = true }
 rustfft = { workspace = true }
 smallvec = { workspace = true }
+symphonia = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 wc-core-macros.workspace = true

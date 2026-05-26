@@ -38,6 +38,12 @@
 //! is exposed via [`LineSynth::KNOWN_KEYS`] (kept in lockstep with the
 //! `match` arm in [`LineSynth::set_param`]) so callers and tests can
 //! reference the canonical list.
+//!
+//! Note: [`super::dsp::DspHost::apply`] intercepts the
+//! `"background_volume"` key *before* forwarding to the synth, because the
+//! background-sample mix is host-level state (Plan 9 Phase B), not a
+//! voice-graph parameter. `background_volume` therefore does **not**
+//! appear in [`LineSynth::KNOWN_KEYS`].
 
 use fundsp::prelude::*;
 

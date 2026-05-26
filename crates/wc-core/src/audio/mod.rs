@@ -38,6 +38,7 @@
 //! defaults to a graph that emits zeros. Sketches in Plan 6+ will add their
 //! own DSP graphs via `AudioCommand::AddSynth` (added when needed).
 
+pub mod background;
 pub mod command;
 pub mod dsp;
 pub mod engine;
