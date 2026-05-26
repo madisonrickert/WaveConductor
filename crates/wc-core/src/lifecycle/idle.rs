@@ -55,7 +55,7 @@ impl InteractionTimer {
     }
 }
 
-/// Function pointer type for idle vetos. Receives a read-only `World` reference;
+/// Function pointer type for idle vetoes. Receives a read-only `World` reference;
 /// returning `true` keeps the sketch in `SketchActivity::Active` regardless of
 /// elapsed idle time.
 ///
@@ -77,7 +77,7 @@ pub struct IdleVetoes {
 }
 
 impl IdleVetoes {
-    /// Iterate registered vetos. Internal helper for `any_veto_active`.
+    /// Iterate registered vetoes. Internal helper for `any_veto_active`.
     fn iter(&self) -> impl Iterator<Item = &IdleVetoFn> {
         self.vetoes.iter()
     }

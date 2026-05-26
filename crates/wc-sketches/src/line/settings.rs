@@ -7,11 +7,23 @@
 //! fixed v4 constants and made the force constant-magnitude (no radius
 //! needed), so both fields are dropped.
 //!
+//! ## Serde forward-compatibility
+//!
+//! Existing user TOML written by earlier v5 builds with `drag` /
+//! `attractor_radius` keys still deserializes cleanly: serde's default is to
+//! ignore unknown fields, and we intentionally do **not** set
+//! `#[serde(deny_unknown_fields)]`. A future maintainer adding that attribute
+//! would break upgrades from v5-line; leave it off so dropped knobs don't
+//! invalidate persisted user settings.
+//!
 //! - **`particle_density`** — particles per canvas-pixel of width. v4 uses 10
 //!   (so a 1280px window has ~12,800 particles). Restart on change (the
 //!   compute pipeline rebuilds its storage buffer).
 //! - **`gravity_constant`** — strength of the pull toward attractors (v4
 //!   `GRAVITY_CONSTANT`, default 280).
+//! - **`gamma`** — per-channel gamma curve on the post-process pass.
+//! - **`spawn_template`** — optional PNG path whose luminance × alpha weights
+//!   the particle spawn density (empty = horizontal-line layout).
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

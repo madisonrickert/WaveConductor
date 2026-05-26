@@ -16,7 +16,9 @@ use wc_core::input::pointer::PointerState;
 /// down to `power < floor + epsilon`, then zero.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct MouseAttractorState {
-    /// Current power. `0.0` = inactive.
+    /// Current power. `0.0` = inactive. Also read by `line_idle_veto` (in
+    /// `crate::line::mod`) to keep the sketch `Active` while the attractor
+    /// is still decaying.
     pub power: f32,
     /// World-space position (followed every frame the cursor moves).
     pub position: [f32; 2],

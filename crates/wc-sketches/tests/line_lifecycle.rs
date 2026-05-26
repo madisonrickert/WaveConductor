@@ -35,9 +35,12 @@ fn line_settings_resource_inserted() {
         .world()
         .get_resource::<LineSettings>()
         .expect("LineSettings should be inserted by LinePlugin");
+    // Tighter than `> 0.0`: the documented min on the `#[setting]` attribute
+    // is `0.1`; a future typo dropping the default below the floor is caught
+    // here rather than silently passing.
     assert!(
-        settings.particle_density > 0.0,
-        "particle_density should default > 0, got {}",
+        settings.particle_density >= 0.1,
+        "particle_density should default >= 0.1 (the documented min), got {}",
         settings.particle_density
     );
 }

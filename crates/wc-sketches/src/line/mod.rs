@@ -146,7 +146,9 @@ fn restart_on_settings_change(
         // Second frame: complete the cycle by re-entering Line.
         next.set(AppState::Line);
         commands.remove_resource::<LineRestartPending>();
-        tracing::info!("LineSettings restart cycle: re-entering Line");
+        // `debug!` rather than `info!` — the trampoline has been stable since
+        // Plan 7; firing on every settings restart is noise in release builds.
+        tracing::debug!("LineSettings restart cycle: re-entering Line");
         return;
     }
     let want_restart = events
@@ -155,7 +157,7 @@ fn restart_on_settings_change(
     if want_restart && **current == AppState::Line {
         next.set(AppState::Home);
         commands.insert_resource(LineRestartPending);
-        tracing::info!("LineSettings changed — cycling Line via Home for one frame");
+        tracing::debug!("LineSettings changed — cycling Line via Home for one frame");
     }
 }
 
