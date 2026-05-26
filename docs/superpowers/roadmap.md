@@ -18,8 +18,10 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 7.5 | Test harness: synthetic input + shared `tests/common/` | ✅ shipped | `v5-test-harness` |
 | 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | ✅ shipped | `v5-line-render` |
 | 9 | Line audio + reactivity coupling | ✅ shipped | `v5-line-audio` |
-| 10 | Line polish + PARITY.md sign-off | ⏳ next | `v5-line-parity` |
-| 11+ | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
+| 10 | Line polish + PARITY.md sign-off | ✅ shipped | `v5-line-parity` |
+| 11 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | ⏳ next | — |
+
+> **Line is done.** v5 has its first fully-parity-validated sketch. Plans 7–10 carried the line sketch from scaffolding through multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph, the audio↔visual reactivity coupling, the heatmap-image spawn template, and the AGENTS.md-required 8-hour soak harness — with `PARITY.md` signed pending Madison's perceptual side-by-side. The pattern established here generalizes to Flame, Dots, Cymatics, and Waves: per-sketch plugin under `wc-sketches`, settings via the `wc-core` registry, `OnEnter`/`OnExit` lifecycle, audio reactivity via `AudioCommand`, and a `PARITY.md` per module that closes with a tagged verdict.
 
 ## Line parity (Plans 7–10)
 
