@@ -119,13 +119,29 @@ pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
     };
     stats.average_vel = lerp(stats.average_vel, target_vel, (vel_rate * dt).min(1.0));
 
-    // grouped_upness: lags average_vel slightly (clustering follows acceleration).
-    // Peak value tuned to v4's typical sustained-press range (~0.5-0.8).
-    let target_grouped = excitement * GROUPED_UPNESS_PEAK;
+    // grouped_upness: the load-bearing audio scalar (synth volume + shader G).
+    //
+    // **Perceptual curve**: target = excitement^0.6. Sub-linear so the volume
+    // rises faster at low excitement and saturates near peak — matches how the
+    // ear perceives loudness (Stevens' power law for sound). Addresses v4's
+    // "onset feels mushy" calibration weakness; pressing now feels louder
+    // sooner.
+    //
+    // **Asymmetric attack/release**: 50 Hz attack (~20 ms time constant) so
+    // the press is *immediately* audible; 6.7 Hz release (~150 ms time
+    // constant) so the tail decays cleanly without clicking. The previous
+    // symmetric 3 Hz rate produced a slow ramp-up that the v4 comparison
+    // capture showed lagged v4's actual envelope by ~80 ms — audibly off.
+    let target_grouped = excitement.powf(GROUPED_UPNESS_CURVE_EXPONENT) * GROUPED_UPNESS_PEAK;
+    let grouped_rate = if target_grouped > stats.grouped_upness {
+        GROUPED_UPNESS_ATTACK_RATE
+    } else {
+        GROUPED_UPNESS_RELEASE_RATE
+    };
     stats.grouped_upness = lerp(
         stats.grouped_upness,
         target_grouped,
-        (GROUPED_UPNESS_RATE * dt).min(1.0),
+        (grouped_rate * dt).min(1.0),
     );
 
     // variance_length: high at rest (particles spread along the horizontal spawn
@@ -204,9 +220,23 @@ const ATTACK_RATE_FAST: f32 = 8.0;
 /// for velocity to halve; this rate matches that decay shape.
 const RELEASE_RATE_SLOW: f32 = 1.5;
 
-/// Attack rate for `grouped_upness`. Slightly slower than `average_vel`
-/// because clustering follows acceleration.
-const GROUPED_UPNESS_RATE: f32 = 3.0;
+/// Attack rate for `grouped_upness` (rising edge — target > current).
+/// 50 Hz = ~20 ms time constant. Press onset is *immediately* audible at this
+/// rate, addressing v4's "mushy onset" calibration weakness. Per the senior
+/// audio review's `follow(τ_attack=0.020)` recommendation.
+const GROUPED_UPNESS_ATTACK_RATE: f32 = 50.0;
+
+/// Release rate for `grouped_upness` (falling edge — target < current).
+/// 6.7 Hz = ~150 ms time constant. Tail decays cleanly without clicking;
+/// matches v4's natural particle-drag decay rate.
+const GROUPED_UPNESS_RELEASE_RATE: f32 = 6.7;
+
+/// Exponent of the perceptual loudness curve applied to `excitement` before
+/// it scales `grouped_upness`. Sub-linear (0.6 < 1.0): low excitement maps to
+/// proportionally higher `grouped_upness`, matching the ear's logarithmic
+/// loudness response (Stevens' power law). Pressing feels louder sooner; full
+/// excitement still hits the same peak ([`GROUPED_UPNESS_PEAK`]).
+const GROUPED_UPNESS_CURVE_EXPONENT: f32 = 0.6;
 
 /// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned
 /// against the v4 reference capture (2026-05-26): v4's `groupedUpness`

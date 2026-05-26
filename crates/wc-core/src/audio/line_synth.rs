@@ -120,6 +120,47 @@ const HIGHSHELF_ATTENUATION_DB: f32 = -6.0;
 /// gentle shelf slope). fundsp's `highshelf_hz` takes a Q parameter.
 const HIGHSHELF_Q: f32 = 1.0;
 
+// --- Plan 11 Phase F option B: generative DSP layer ---
+//
+// Replaces v4's particle-driven within-press swing with three time-varying
+// generators inside the DSP graph: brown noise breath on voice gain, slow
+// drift LFO on bandpass cutoff, slow drift LFO on noise lowpass cutoff.
+// The drift LFO periods are chosen co-prime so the two filters' wanderings
+// never align audibly (least common multiple ≈ 14 hours).
+
+/// Lowpass cutoff for brown-noise breath modulator. 6 Hz keeps the modulation
+/// in the "breath" range (0.5–2 Hz perceived wander), slow enough to read as
+/// the voice breathing rather than amplitude tremolo.
+const BREATH_LOWPASS_HZ: f32 = 6.0;
+
+/// Q for the breath lowpass — 0.7 = no resonance, gentle slope.
+const BREATH_LOWPASS_Q: f32 = 0.7;
+
+/// Breath modulation depth (fraction of source gain). `±0.15` produces
+/// source gain swings of `[0.85, 1.15]` of nominal — audible motion without
+/// dipping toward silence or distorting on peaks.
+const BREATH_DEPTH: f32 = 0.15;
+
+/// Slow drift LFO frequency for the bandpass cutoff (~77 s period). At this
+/// rate, one cycle takes longer than any single press; the modulation reads
+/// as long-term filter wander rather than as a perceptible cycle.
+const BANDPASS_DRIFT_HZ: f32 = 0.013;
+
+/// Slow drift LFO amplitude for the bandpass cutoff. ±25 Hz on a center that
+/// ranges 220–555 Hz is enough to hear but small enough not to dominate the
+/// envelope-driven sweep.
+const BANDPASS_DRIFT_DEPTH_HZ: f32 = 25.0;
+
+/// Slow drift LFO frequency for the noise lowpass cutoff (~24 s period).
+/// Co-prime with [`BANDPASS_DRIFT_HZ`] so the two filter wanderings never
+/// align audibly over realistic listening windows.
+const NOISE_DRIFT_HZ: f32 = 0.041;
+
+/// Slow drift LFO amplitude for the noise lowpass cutoff. ±200 Hz on a center
+/// that ranges 900–2000 Hz rotates the noise "formant" position perceptibly
+/// over its 24 s cycle.
+const NOISE_DRIFT_DEPTH_HZ: f32 = 200.0;
+
 /// Voice graph for the Line sketch.
 ///
 /// Owns a `Box<dyn AudioUnit>` plus a handful of [`Shared`] parameter
@@ -179,7 +220,16 @@ impl LineSynth {
 
         // Source gain: `volume * (1/6)`, smoothed by `follow(0.016)` to
         // match v4's `setTargetAtTime(…, 0.016)` exponential approach.
-        let source_gain = (var(&volume) * SOURCE_GAIN_SCALE) >> follow(PARAM_SMOOTHING_S);
+        //
+        // **Organic breath modulation** (Plan 11 Phase F option B): the gain
+        // is multiplied by `1 + breath × BREATH_DEPTH` where `breath` is
+        // brown noise lowpassed at 6 Hz. The result is a slow 0.5–2 Hz
+        // wandering of perceived loudness, gated by the gain itself (source
+        // gain = 0 → modulation is silent). Adds the within-press "alive"
+        // motion that v4's particle dynamics produced for free.
+        let source_gain_base = (var(&volume) * SOURCE_GAIN_SCALE) >> follow(PARAM_SMOOTHING_S);
+        let breath = brown::<f32>() >> lowpass_hz::<f32>(BREATH_LOWPASS_HZ, BREATH_LOWPASS_Q);
+        let source_gain = source_gain_base * (1.0 + breath * BREATH_DEPTH);
 
         // ----- Noise voice -----
         //
@@ -189,7 +239,13 @@ impl LineSynth {
         // since both are linear; v4's `noiseSourceGain` and `noiseGain`
         // multiply cleanly.
         let noise_gain = (var(&volume) * NOISE_GAIN_SCALE) >> follow(PARAM_SMOOTHING_S);
-        let noise_cutoff = var(&noise_freq) >> follow(PARAM_SMOOTHING_S);
+        // Noise cutoff base + a very slow drift LFO (~24 s period, ±200 Hz)
+        // so the noise voice's formant character wanders over long timescales.
+        // Period chosen co-prime with the bandpass drift (Plan 11 Phase F
+        // option B) so the two never align audibly — kiosk-friendly.
+        let noise_cutoff_base = var(&noise_freq) >> follow(PARAM_SMOOTHING_S);
+        let noise_slow_drift = sine_hz::<f32>(NOISE_DRIFT_HZ) * NOISE_DRIFT_DEPTH_HZ;
+        let noise_cutoff = noise_cutoff_base + noise_slow_drift;
 
         // `bandpass<f64>()` takes (audio, freq, Q) inputs; same shape for
         // `lowpass<f64>()`. Build the noise lowpass with dynamic cutoff:
@@ -210,10 +266,16 @@ impl LineSynth {
         // with both `lfo_rate` and `lfo_depth` driven from `Shared` handles
         // updated by the coupling system. Use `sine` (variable-rate, takes
         // frequency from input) rather than `sine_hz` (constant rate).
+        // Bandpass cutoff = follow(bandpass_freq) + LFO depth modulation
+        //                   + very slow drift LFO (~77 s period, ±25 Hz).
+        // The slow drift gives the filter long-form motion that doesn't loop
+        // audibly (Plan 11 Phase F option B). Period chosen co-prime with
+        // NOISE_DRIFT_HZ so the two filters' wanderings never align.
         let bp_base = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
         let bp_lfo = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
             * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
-        let bp_cutoff = bp_base + bp_lfo;
+        let bp_slow_drift = sine_hz::<f32>(BANDPASS_DRIFT_HZ) * BANDPASS_DRIFT_DEPTH_HZ;
+        let bp_cutoff = bp_base + bp_lfo + bp_slow_drift;
 
         // ----- Bandpass cascade -----
         //
@@ -226,7 +288,8 @@ impl LineSynth {
         let bp_base2 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
         let bp_lfo2 = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
             * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
-        let bp_cutoff2 = bp_base2 + bp_lfo2;
+        let bp_slow_drift2 = sine_hz::<f32>(BANDPASS_DRIFT_HZ) * BANDPASS_DRIFT_DEPTH_HZ;
+        let bp_cutoff2 = bp_base2 + bp_lfo2 + bp_slow_drift2;
 
         let voice = osc_mix * source_gain;
         let bp1 = (voice | bp_cutoff | dc(BANDPASS_Q)) >> bandpass::<f64>();
