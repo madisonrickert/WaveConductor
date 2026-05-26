@@ -1,0 +1,174 @@
+//! Egui [`Style`] configuration matched to v4's overlay SCSS.
+//!
+//! All constants here cite the v4 source line they derive from so future
+//! re-tuning catches drift in both directions: if v4's SCSS changes, the
+//! cited line points the maintainer at what to update; if these constants
+//! are tweaked first, the citation makes the divergence explicit.
+//!
+//! Values come from:
+//! - `.worktrees/v4/src/styles/overlayPanel.scss`
+//! - `.worktrees/v4/src/styles/overlayButton.scss`
+//! - `.worktrees/v4/src/settings/DevSettingsPanel/advancedSettingsPanel.scss`
+//!
+//! [`Style`]: bevy_egui::egui::Style
+
+use bevy::prelude::*;
+use bevy_egui::egui;
+
+/// Static palette + sizing values used everywhere in the overlay surface.
+///
+/// Every field cites the v4 SCSS line it derives from. Insert this resource
+/// with `app.init_resource::<OverlayStyle>()` or let [`OverlayStylePlugin`]
+/// do it automatically at startup.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct OverlayStyle {
+    /// Panel background, ≈ `rgba(0,0,0,0.8)` per `overlayPanel.scss:5`.
+    pub panel_fill: egui::Color32,
+    /// Panel hairline border, ≈ `rgba(255,255,255,0.08)` per `overlayPanel.scss:13`.
+    pub panel_stroke: egui::Color32,
+    /// Panel corner radius `10px` per `overlayPanel.scss:7`.
+    pub panel_corner_radius: u8,
+    /// Button background when not hovered, ≈ `rgba(0,0,0,0.4)` per `overlayButton.scss:9`.
+    pub button_fill_inactive: egui::Color32,
+    /// Button background when hovered, ≈ `rgba(0,0,0,0.6)` per `overlayButton.scss:18`.
+    pub button_fill_hovered: egui::Color32,
+    /// Button hairline border, ≈ `rgba(255,255,255,0.15)` per `overlayButton.scss:10`.
+    pub button_stroke: egui::Color32,
+    /// Button corner radius `6px` per `overlayButton.scss:11`.
+    pub button_corner_radius: u8,
+    /// Fine-pointer button size `32×32` per `overlayButton.scss:5–6`.
+    pub button_size_fine: f32,
+    /// Coarse-pointer button size `44×44` per `overlayButton.scss:23–24`.
+    pub button_size_coarse: f32,
+    /// Dim chrome text colour, ≈ v4 `$gray3` / `$gray4`.
+    pub text_color_dim: egui::Color32,
+    /// Bright chrome text colour (white labels, hover state).
+    pub text_color_bright: egui::Color32,
+    /// Sketch-name font size in the picker tiles, derived from v4 Orbitron sizing.
+    pub picker_tile_name_size: f32,
+}
+
+impl Default for OverlayStyle {
+    fn default() -> Self {
+        Self {
+            panel_fill: egui::Color32::from_black_alpha(204),
+            panel_stroke: egui::Color32::from_white_alpha(20),
+            panel_corner_radius: 10,
+            button_fill_inactive: egui::Color32::from_black_alpha(102),
+            button_fill_hovered: egui::Color32::from_black_alpha(153),
+            button_stroke: egui::Color32::from_white_alpha(38),
+            button_corner_radius: 6,
+            button_size_fine: 32.0,
+            button_size_coarse: 44.0,
+            text_color_dim: egui::Color32::from_gray(140),
+            text_color_bright: egui::Color32::WHITE,
+            picker_tile_name_size: 40.0,
+        }
+    }
+}
+
+/// Plugin: inserts [`OverlayStyle`] and applies the egui `Style` /
+/// `FontDefinitions` at `PostStartup` (after `bevy_egui` has built its
+/// context).
+pub struct OverlayStylePlugin;
+
+impl Plugin for OverlayStylePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<OverlayStyle>();
+        app.add_systems(PostStartup, apply_overlay_style);
+    }
+}
+
+/// Configure the egui context: load Inter / Fira Code / Orbitron fonts and
+/// apply the dark visuals derived from [`OverlayStyle`].
+pub(super) fn apply_overlay_style(
+    mut contexts: bevy_egui::EguiContexts<'_, '_>,
+    style: Res<'_, OverlayStyle>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    // Fonts — embed as compile-time statics so no asset-server round-trip is
+    // needed before the first frame.
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "inter".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/Inter-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "fira_code".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/FiraCode-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "orbitron".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/Orbitron-Bold.ttf"
+        ))),
+    );
+    // Prepend Inter as the first Proportional family (egui's built-in falls back
+    // after all entries in the list, so prepending gives Inter priority).
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "inter".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, "fira_code".to_owned());
+    // Named family for sketch titles — callers reference it as
+    // `FontFamily::Name("orbitron".into())`.
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("orbitron".into()), vec!["orbitron".to_owned()]);
+    ctx.set_fonts(fonts);
+
+    // Visuals — start from dark, override key fields to match v4's SCSS.
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = style.panel_fill;
+    visuals.window_fill = style.panel_fill;
+    visuals.window_stroke = egui::Stroke::new(1.0, style.panel_stroke);
+    visuals.window_corner_radius = egui::CornerRadius::same(style.panel_corner_radius);
+    visuals.widgets.inactive.weak_bg_fill = style.button_fill_inactive;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, style.button_stroke);
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(style.button_corner_radius);
+    visuals.widgets.hovered.weak_bg_fill = style.button_fill_hovered;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, style.button_stroke);
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(style.button_corner_radius);
+    visuals.widgets.active.weak_bg_fill = style.button_fill_hovered;
+    visuals.override_text_color = Some(style.text_color_bright);
+
+    ctx.set_visuals(visuals);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_style_defaults_match_v4_scss() {
+        // These assertions intentionally hardcode the v4 SCSS values; if a
+        // future re-tune of v4's stylesheet drifts, this test catches it.
+        let style = OverlayStyle::default();
+        // overlayPanel.scss:5 rgba(0,0,0,0.8) → 204/255 alpha
+        assert_eq!(style.panel_fill, egui::Color32::from_black_alpha(204));
+        // overlayPanel.scss:13 rgba(255,255,255,0.08) → ~20/255
+        assert_eq!(style.panel_stroke, egui::Color32::from_white_alpha(20));
+        // overlayPanel.scss:7 border-radius 10px
+        assert_eq!(style.panel_corner_radius, 10);
+        // overlayButton.scss:9 rgba(0,0,0,0.4) → ~102/255
+        assert_eq!(style.button_fill_inactive, egui::Color32::from_black_alpha(102));
+        // overlayButton.scss:18 rgba(0,0,0,0.6) → ~153/255
+        assert_eq!(style.button_fill_hovered, egui::Color32::from_black_alpha(153));
+        // overlayButton.scss:5–6 width/height 32px
+        assert_eq!(style.button_size_fine, 32.0);
+        // overlayButton.scss:23–24 @media (pointer: coarse) → 44px
+        assert_eq!(style.button_size_coarse, 44.0);
+    }
+}

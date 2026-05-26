@@ -20,11 +20,13 @@
 
 use bevy::prelude::*;
 
+pub mod style;
+
 /// Umbrella plugin for the overlay UI surface.
 pub struct WaveConductorUiPlugin;
 
 impl Plugin for WaveConductorUiPlugin {
-    fn build(&self, _app: &mut App) {
-        // Sub-plugins land in subsequent tasks.
+    fn build(&self, app: &mut App) {
+        app.add_plugins(style::OverlayStylePlugin);
     }
 }
