@@ -22,6 +22,7 @@
 pub mod attractor_visuals;
 pub mod audio_coupling;
 pub mod compute;
+pub mod heatmap;
 pub mod material;
 pub mod particle;
 pub mod particle_stats;

@@ -5910,7 +5910,9 @@ version = "5.0.0-dev"
 dependencies = [
  "bevy",
  "bytemuck",
+ "image",
  "leafwing-input-manager",
+ "rand",
  "serde",
  "tracing",
  "wc-core",

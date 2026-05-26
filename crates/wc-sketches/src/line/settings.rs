@@ -53,4 +53,12 @@ pub struct LineSettings {
     /// post-process. v4 default = 1.0.
     #[setting(default = 1.0_f32, min = 0.1_f32, max = 4.0_f32, step = 0.1_f32, category = User)]
     pub gamma: f32,
+
+    /// Path to a PNG file whose luminance × alpha drives particle spawn density.
+    /// Empty string = use the default horizontal-line layout. Relative paths
+    /// resolve against the process current directory; absolute paths are
+    /// honored as-is. v4 default = "" (no template). Restart on change so
+    /// `spawn_line` re-runs with the new sampler.
+    #[setting(default = String::new(), ty = Text, category = User, requires_restart)]
+    pub spawn_template: String,
 }

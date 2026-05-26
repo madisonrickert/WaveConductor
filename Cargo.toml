@@ -75,6 +75,13 @@ quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 # GPU struct alignment helpers (used by Line sketch particle/uniform buffers)
 bytemuck = { version = "1", features = ["derive"] }
+# Image decode (Plan 10 Phase A): Line sketch's heatmap-image spawn template
+# decodes a user-supplied PNG. Already a transitive dep via Bevy; declared
+# here so the heatmap module can depend on it directly.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Random sampling (Plan 10 Phase A): CDF inversion sampler for the heatmap
+# spawn. Already a transitive dep; declared here for a direct dependency edge.
+rand = "0.9"
 # JSON for the wasm localStorage path
 serde_json = "1"
 # wasm-only web bindings (used by settings persistence on web targets)
