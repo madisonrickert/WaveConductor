@@ -22,10 +22,19 @@
 )]
 
 use super::{
-    step_envelope, ParticleStats, ENTROPY_FLOOR, FLAT_RATIO_BASELINE, FLAT_RATIO_PEAK,
+    step_envelope, ParticleStats, ENTROPY_FLOOR, FLAT_RATIO_BASELINE, FLAT_RATIO_MIN,
     GROUPED_UPNESS_PEAK, SPREAD_BASELINE, SPREAD_MIN,
 };
 use crate::line::systems::mouse::MOUSE_POWER_PRESS;
+
+/// Compile-time invariant: `ENTROPY_FLOOR` must be ≤ `SPREAD_MIN`, otherwise
+/// `normalized_entropy` would clamp above `variance_length` and decouple
+/// from the noise-filter envelope. Lives at module scope (not inside a test
+/// body) to satisfy `clippy::items_after_statements`.
+const _: () = assert!(
+    ENTROPY_FLOOR <= SPREAD_MIN,
+    "ENTROPY_FLOOR must be ≤ SPREAD_MIN so the floor is inactive in steady state"
+);
 
 /// Advance `ParticleStats` through `n` frames of `dt` seconds each, with
 /// the given `mouse_power`. Returns the final stats. Calls the production
@@ -111,50 +120,75 @@ fn variance_length_drops_on_press() {
     );
 }
 
-/// `flat_ratio` ranges between [`FLAT_RATIO_BASELINE`] (rest, slow LFO) and
-/// [`FLAT_RATIO_PEAK`] (sustained press, moderate-tremolo LFO). Drives the
-/// LFO oscillator rate via `lfo_rate_hz`.
+/// `flat_ratio` is derived from `variance_length`: high variance (spread
+/// cloud, rest or post-release) → high `flat_ratio` near
+/// [`FLAT_RATIO_BASELINE`] (slow LFO); low variance (clustered, peak press)
+/// → low `flat_ratio` near [`FLAT_RATIO_MIN`] (faster LFO). This indirect
+/// derivation produces v4's signature post-release-elevated LFO behavior
+/// for free, since `variance_length` has an asymmetric attack (fast
+/// clumping, slow recovery).
 #[test]
-fn flat_ratio_scales_with_excitement() {
-    let at_rest = run_frames(10, 1.0 / 60.0, 0.0, ParticleStats::default());
+fn flat_ratio_inversely_tracks_variance_length() {
+    // At rest, variance_length defaults to 0 (uninitialised). After a few
+    // frames of zero-power input it stays at zero. Per the formula
+    // `(variance - SPREAD_MIN) / (BASELINE - SPREAD_MIN)` clamped, that
+    // gives variance_normalised = 0 → flat_ratio = FLAT_RATIO_MIN. After
+    // the variance envelope has time to climb to baseline, flat_ratio rises
+    // toward FLAT_RATIO_BASELINE.
+    //
+    // We run 600 frames of zero-input so variance_length asymptotes to
+    // SPREAD_BASELINE = 1.0, which maps to flat_ratio = FLAT_RATIO_BASELINE.
+    // Seed variance to baseline so the test mirrors steady-state rest.
+    let stats = ParticleStats {
+        variance_length: SPREAD_BASELINE,
+        ..ParticleStats::default()
+    };
+    let at_rest = run_frames(600, 1.0 / 60.0, 0.0, stats);
     assert!(
-        (at_rest.flat_ratio - FLAT_RATIO_BASELINE).abs() < 1e-5,
-        "expected flat_ratio = {FLAT_RATIO_BASELINE} at rest; got {}",
+        (at_rest.flat_ratio - FLAT_RATIO_BASELINE).abs() < 1e-3,
+        "expected flat_ratio ≈ {FLAT_RATIO_BASELINE} when variance at baseline; got {}",
         at_rest.flat_ratio,
     );
 
-    // After enough sustained press to asymptote, flat_ratio reaches PEAK.
+    // After sustained press, variance asymptotes to SPREAD_MIN → flat_ratio
+    // hits FLAT_RATIO_MIN.
     let on_press = run_frames(600, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
     assert!(
-        (on_press.flat_ratio - FLAT_RATIO_PEAK).abs() < 1e-5,
-        "expected flat_ratio = {FLAT_RATIO_PEAK} on sustained press; got {}",
+        (on_press.flat_ratio - FLAT_RATIO_MIN).abs() < 1e-3,
+        "expected flat_ratio ≈ {FLAT_RATIO_MIN} on sustained press; got {}",
         on_press.flat_ratio,
     );
 }
 
-/// `normalized_entropy` is `variance_length` clamped at [`ENTROPY_FLOOR`], so
-/// the downstream bandpass cutoff (`222 / normalized_entropy`) caps at v4's
-/// typical peak (~1110 Hz at `ENTROPY_FLOOR = 0.2`). Below the floor,
-/// `normalized_variance_length` (used for the noise filter) keeps tracking
-/// `variance_length` so the noise lowpass can still sweep down to v4's floor.
+/// `normalized_entropy` and `normalized_variance_length` both track
+/// `variance_length` directly. v4 reference capture (2026-05-26) shows their
+/// runtime means are within ~1% of each other; treating them as one envelope
+/// is well within perceptual tolerance.
+///
+/// [`ENTROPY_FLOOR`] is kept as a safety floor against future tuning that
+/// might drop [`SPREAD_MIN`] below it, but with `SPREAD_MIN = 0.45 >
+/// ENTROPY_FLOOR = 0.4` it never fires in practice — the assertion confirms
+/// the floor is *at most* an unreachable cap, not an active clamp.
 #[test]
-fn normalised_entropy_clamps_at_floor_while_variance_keeps_dropping() {
+fn normalised_entropy_tracks_variance_length() {
     let result = run_frames(600, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
-    // After long sustained press, variance_length reaches SPREAD_MIN (0.1).
+    // After long sustained press, variance_length asymptotes to SPREAD_MIN.
     assert!(
         (result.variance_length - SPREAD_MIN).abs() < 1e-3,
         "expected variance_length ≈ {SPREAD_MIN} on sustained press; got {}",
         result.variance_length,
     );
-    // normalized_entropy floors at ENTROPY_FLOOR (0.2), NOT variance_length (0.1).
-    assert!(
-        (result.normalized_entropy - ENTROPY_FLOOR).abs() < 1e-5,
-        "expected normalized_entropy = {ENTROPY_FLOOR} (floored); got {}",
-        result.normalized_entropy,
+    // ENTROPY_FLOOR ≤ SPREAD_MIN invariant is enforced at module load via
+    // a `const _: () = assert!(...)` at the top of this file. Here we just
+    // confirm the runtime consequence: entropy tracks variance_length
+    // directly at peak press.
+    assert_eq!(
+        result.normalized_entropy, result.variance_length,
+        "normalized_entropy should match variance_length when ENTROPY_FLOOR is inactive",
     );
-    // normalized_variance_length still tracks variance_length (noise floor).
+    // normalized_variance_length tracks variance_length identically.
     assert_eq!(
         result.normalized_variance_length, result.variance_length,
-        "normalized_variance_length should track variance_length without floor",
+        "normalized_variance_length should track variance_length",
     );
 }

@@ -96,17 +96,17 @@ fn audio_log_csv(
     stats: &ParticleStats,
     time: &Time,
     mouse: &super::systems::mouse::MouseAttractorState,
-    state: &mut AudioLogState,
+    log: &mut AudioLogState,
 ) {
     use std::io::Write;
 
-    if !state.init_attempted {
-        state.init_attempted = true;
+    if !log.init_attempted {
+        log.init_attempted = true;
         if let Ok(path) = std::env::var("WC_AUDIO_LOG") {
             match std::fs::File::create(&path) {
                 Ok(f) => {
                     tracing::info!(?path, "audio log enabled");
-                    state.file = Some(f);
+                    log.file = Some(f);
                 }
                 Err(err) => {
                     tracing::warn!(?err, ?path, "WC_AUDIO_LOG set but file open failed");
@@ -114,28 +114,31 @@ fn audio_log_csv(
             }
         }
     }
-    let Some(file) = state.file.as_mut() else {
+    let Some(file) = log.file.as_mut() else {
         return;
     };
     let active_now = stats.grouped_upness > 0.001 || mouse.power > 0.0;
     if active_now {
-        state.tail_frames_remaining = 180;
+        log.tail_frames_remaining = 180;
     }
-    if !active_now && state.tail_frames_remaining == 0 {
+    if !active_now && log.tail_frames_remaining == 0 {
         return;
     }
     let now = time.elapsed_secs();
-    if !state.header_emitted {
+    if !log.header_emitted {
         let _ = writeln!(
             file,
             "t,power,avgVel,varLen,flatRatio,normEntropy,normVarLen,normAvgVel,groupedUpness,bpFreq,noiseFreq,volume,lfoRate,lfoDepth"
         );
-        state.header_emitted = true;
-        state.start_secs = now;
+        log.header_emitted = true;
+        log.start_secs = now;
     }
-    let t = now - state.start_secs;
+    let t = now - log.start_secs;
     let power = mouse.power;
-    let bp_freq = if stats.normalized_entropy != 0.0 {
+    // `normalized_entropy` is always non-negative (variance_length is
+    // non-negative, max(ENTROPY_FLOOR) preserves that). `> 0.0` is the
+    // clippy-clean way to write the div-by-zero guard.
+    let bp_freq = if stats.normalized_entropy > 0.0 {
         222.0 / stats.normalized_entropy
     } else {
         f32::NAN
@@ -160,7 +163,7 @@ fn audio_log_csv(
         stats.grouped_upness,
     );
     if !active_now {
-        state.tail_frames_remaining = state.tail_frames_remaining.saturating_sub(1);
+        log.tail_frames_remaining = log.tail_frames_remaining.saturating_sub(1);
     }
 }
 

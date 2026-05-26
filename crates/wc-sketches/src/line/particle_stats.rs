@@ -155,25 +155,36 @@ pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
     // v4's noise lowpass floor.
     stats.normalized_variance_length = stats.variance_length;
 
-    // normalized_entropy needs a HIGHER floor than variance_length: the
-    // downstream bandpass cutoff is `222 / normalized_entropy`. v4's typical
-    // peak `normalizedEntropy ≈ 0.2` gives bandpass ≈ 1110 Hz; allowing
-    // normalized_entropy to drop to SPREAD_MIN = 0.1 would give 2220 Hz —
-    // letting too many high frequencies through (Madison's manual-test
-    // feedback). Clamp at ENTROPY_FLOOR so the bandpass cutoff caps at v4's
-    // typical peak.
+    // normalized_entropy tracks variance_length directly. v4 reference capture
+    // (2026-05-26) shows `normalizedEntropy` and `normalizedVarianceLength`
+    // have near-identical means during press (0.78 vs 0.79) with floors
+    // 0.40 and 0.45 respectively. Since `variance_length` floors at
+    // [`SPREAD_MIN`] = 0.45, `normalized_entropy` also bottoms at 0.45 →
+    // bandpass cutoff cap = 222 / 0.45 ≈ 493 Hz, close to v4's observed max
+    // of 554 Hz. The [`ENTROPY_FLOOR`] guard is still applied as a safety
+    // floor against future tuning that drops variance_length lower.
     stats.normalized_entropy = stats.variance_length.max(ENTROPY_FLOOR);
 
     // normalized_average_vel follows average_vel directly.
     stats.normalized_average_vel = stats.average_vel;
 
-    // flat_ratio: drives the LFO oscillator rate via `lfo_rate_hz`. v4 sets
-    // this to the cloud's `varianceX / varianceY` (typically 1-3 Hz during
-    // sustained press, with brief excursions higher during horizontal mouse
-    // motion). Without per-particle state we approximate as a mild excitement
-    // sweep: 1 Hz at rest (slow LFO breathing), 3 Hz at peak press (moderate
-    // tremolo character) — keeps the LFO in v4's perceptual range.
-    stats.flat_ratio = FLAT_RATIO_BASELINE + excitement * (FLAT_RATIO_PEAK - FLAT_RATIO_BASELINE);
+    // flat_ratio: drives the LFO oscillator rate via `lfo_rate_hz`. v4's
+    // `flatRatio` is the cloud's `varianceX / varianceY` — high when the
+    // cloud is spread (rest or post-release relaxation), low when tightly
+    // clustered (peak press). v4 capture (2026-05-26) shows mean ≈ 3.58
+    // during press and mean ≈ 6.96 during the release tail; the LFO stays
+    // elevated *after* release because the cloud's stretched-then-relaxing
+    // shape produces a high aspect ratio for several seconds.
+    //
+    // Approximate by tying `flat_ratio` directly to `variance_length`'s
+    // envelope: high variance → high flat_ratio → slow-to-medium LFO; low
+    // variance → low flat_ratio → faster LFO. Variance's asymmetric
+    // attack/release (fast clumping on press, slow recovery after release)
+    // gives flat_ratio the right post-release elevated character "for free."
+    let variance_normalised =
+        ((stats.variance_length - SPREAD_MIN) / (SPREAD_BASELINE - SPREAD_MIN)).clamp(0.0, 1.0);
+    stats.flat_ratio =
+        FLAT_RATIO_MIN + variance_normalised * (FLAT_RATIO_BASELINE - FLAT_RATIO_MIN);
 }
 
 /// Linear interpolation. `t` is clamped to [0, 1] by the caller before this is
@@ -197,45 +208,54 @@ const RELEASE_RATE_SLOW: f32 = 1.5;
 /// because clustering follows acceleration.
 const GROUPED_UPNESS_RATE: f32 = 3.0;
 
-/// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned to
-/// v4's observed sustained-press range. v4's `groupedUpness` peaks roughly in
-/// `[0.5, 1.0]` during normal sustained press, with brief excursions toward
-/// 1.5+ on very tight, fast clusters. The downstream synth volume formula is
-/// `max(grouped_upness - 0.05, 0) * 5`, so this cap of 0.9 produces a volume
-/// peak of `4.25` — reclaims the upper dynamic range that the initial 0.7
-/// value clipped off the synth's most expressive moments.
-const GROUPED_UPNESS_PEAK: f32 = 0.9;
+/// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned
+/// against the v4 reference capture (2026-05-26): v4's `groupedUpness`
+/// during sustained press swings 0.55–2.59 with brief excursions higher,
+/// mean ≈ 1.4, peak ≈ 2.5. The downstream synth volume formula is
+/// `max(grouped_upness - 0.05, 0) * 5`, so this cap of 2.5 produces a
+/// volume peak of `12.25` — matching v4's observed peak (12.68). Earlier
+/// values of 0.7 and 0.9 capped volume far below v4's expressive range.
+///
+/// **Approved perceptual deviation:** v4's `groupedUpness` swings widely
+/// *within* a single press because it tracks actual particle dynamics
+/// (clustering, cursor motion). Our excitement-driven envelope produces
+/// only the smooth attack/release shape, not the within-press jitter.
+/// Documented in `PARITY.md`.
+const GROUPED_UPNESS_PEAK: f32 = 2.5;
 
 /// `variance_length` at rest (no attractor activity). Particles spread across
 /// the canvas; normalised to 1.0 as the "fully spread" baseline.
 const SPREAD_BASELINE: f32 = 1.0;
 
-/// `variance_length` at sustained-press peak excitement = 1.0. Particles
-/// tightly clustered around the attractor. The downstream noise filter cutoff
-/// formula is `2000 * normalized_variance_length`, so this floor of 0.1
-/// produces a cutoff of 200 Hz at peak clustering — matches v4's noise
-/// lowpass floor (`normalizedVarianceLength → ~0.1` at tightest clustering,
-/// noise filter cutoff → ~200 Hz).
-const SPREAD_MIN: f32 = 0.1;
+/// `variance_length` at sustained-press peak excitement = 1.0. v4 reference
+/// capture (2026-05-26) shows `normalizedVarianceLength` floors at ~0.45
+/// during tight press, not the ~0.1 Opus-extrapolation suggested. The
+/// downstream noise filter cutoff is `2000 * normalized_variance_length`,
+/// so this floor of 0.45 produces a cutoff of 900 Hz at peak clustering —
+/// matches v4's noise floor (901 Hz min during press).
+const SPREAD_MIN: f32 = 0.45;
 
 /// Lower clamp for `normalized_entropy`. The bandpass cutoff formula is
-/// `222 / normalized_entropy`, so this floor of 0.2 caps the cutoff at
-/// `222 / 0.2 = 1110 Hz`, matching v4's typical peak. Without the clamp,
-/// `normalized_entropy` could drop to [`SPREAD_MIN`] = 0.1 and push the
-/// bandpass to 2220 Hz — audibly too bright vs v4.
-const ENTROPY_FLOOR: f32 = 0.2;
+/// `222 / normalized_entropy`. v4 reference capture (2026-05-26) shows
+/// `normalizedEntropy` min ≈ 0.40 during press (bandpass max ≈ 555 Hz).
+/// This floor of 0.4 caps the v5 bandpass at 555 Hz, matching v4. Earlier
+/// floor of 0.2 capped at 1110 Hz — twice v4's actual peak, audibly bright.
+const ENTROPY_FLOOR: f32 = 0.4;
 
-/// `flat_ratio` at rest (excitement = 0). v4's `flatRatio` is the cloud's
-/// `varianceX / varianceY`; at rest the synth is silent so the exact value
-/// doesn't audibly matter, but a low value here keeps the LFO rate in slow-
-/// breathing territory (1 Hz) for the moment volume crosses the silence
-/// threshold on press.
-const FLAT_RATIO_BASELINE: f32 = 1.0;
+/// `flat_ratio` at rest and during the post-release tail. v4 reference
+/// capture (2026-05-26) shows `flatRatio` mean ≈ 6.96 *after release* (the
+/// elongated cloud relaxes slowly), versus mean ≈ 3.58 *during press*. The
+/// LFO rate stays elevated on the audio tail. We approximate by tying
+/// `flat_ratio` to `variance_length`: high variance (spread cloud, rest or
+/// recovering) → high `flat_ratio` → slow-to-medium LFO breathing; low
+/// variance (clustered, peak press) → low `flat_ratio` → faster LFO.
+const FLAT_RATIO_BASELINE: f32 = 7.0;
 
-/// `flat_ratio` at peak press (excitement = 1). Drives the LFO oscillator
-/// rate to 3 Hz — middle of v4's typical sustained-press range (1-3 Hz).
-/// Higher than this starts to sound like tremolo rather than a slow LFO.
-const FLAT_RATIO_PEAK: f32 = 3.0;
+/// `flat_ratio` at peak press. v4 reference capture shows `flatRatio` min
+/// during press ≈ 1.0 (centered cluster). Setting min slightly above v4 (3.0)
+/// keeps the LFO in audible-breathing territory at peak press; below ~1 Hz
+/// becomes a single-cycle-per-second sweep rather than perceived LFO.
+const FLAT_RATIO_MIN: f32 = 3.0;
 
 #[cfg(test)]
 #[path = "particle_stats_tests.rs"]
