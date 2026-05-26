@@ -4,10 +4,10 @@
 //! each variant up in the [`SketchManifest`] resource, and renders one
 //! tile per cell of a 3×2 grid:
 //!
-//! - **Registered** sketch → [`render_active_tile`]: solid dark-blue
-//!   placeholder background (Task 17 swaps in the screenshot via
-//!   `EguiUserTextures`), Orbitron name overlay with gradient fade.
-//!   Clickable; sets `NextState<AppState>` to the entry's target state.
+//! - **Registered** sketch → [`render_active_tile`]: screenshot background
+//!   via `EguiUserTextures`, Orbitron name overlay with gradient fade,
+//!   sheen-on-hover sweep. Clickable; sets `NextState<AppState>` to the
+//!   entry's target state.
 //! - **Unregistered** sketch → [`render_placeholder_tile`]: dark fill,
 //!   greyed sketch name in Orbitron, "Coming soon" subtitle. Inert.
 //!
@@ -17,8 +17,10 @@
 //!
 //! `draw_sketch_picker` runs in [`bevy_egui::EguiPrimaryContextPass`] gated
 //! on [`AppState::Home`]. It reads [`SketchManifest`] (optional — absent
-//! before any sketch plugin registers itself) and, on tile click, sets
-//! [`NextState<AppState>`] to the entry's target state.
+//! before any sketch plugin registers itself), registers each entry's
+//! screenshot handle with [`bevy_egui::EguiUserTextures`] to obtain an
+//! [`egui::TextureId`], and on tile click sets [`NextState<AppState>`] to
+//! the entry's target state.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
@@ -52,6 +54,10 @@ const PLACEHOLDER_FILL: egui::Color32 = egui::Color32::from_rgb(20, 26, 32);
 /// then re-read resources without borrow-checker conflicts (same pattern as
 /// `draw_home_button` in `buttons.rs`). Skips silently when the egui plugin
 /// is absent (e.g., `MinimalPlugins` test harness).
+///
+/// Registers each active tile's screenshot handle with
+/// [`bevy_egui::EguiUserTextures`] before entering the egui closure, so the
+/// closure only holds snapshotted `egui::TextureId`s (no live world borrows).
 pub fn draw_sketch_picker(world: &mut World) {
     // Skip when EguiPlugin is absent (MinimalPlugins tests).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
@@ -71,29 +77,35 @@ pub fn draw_sketch_picker(world: &mut World) {
 
     let style = *world.resource::<OverlayStyle>();
 
-    // Snapshot which states are registered so we can look them up inside the
-    // closure without holding a borrow on the manifest resource.
-    let registered: Vec<AppState> = world
-        .get_resource::<SketchManifest>()
-        .map(|m| {
-            AppState::SKETCH_ORDER
-                .iter()
-                .filter(|&&s| m.get(s).is_some())
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
+    // Snapshot active tile metadata: (state, display_name, texture_id).
+    // EguiUserTextures::add_image is called here — before the egui closure —
+    // so the world borrow is released before we build the UI.
+    let active_tiles: Vec<(AppState, &'static str, egui::TextureId)> = {
+        let manifest = world.get_resource::<SketchManifest>();
+        let entries: Vec<(AppState, &'static str, bevy::asset::AssetId<Image>)> = manifest
+            .map(|m| {
+                AppState::SKETCH_ORDER
+                    .iter()
+                    .filter_map(|&s| {
+                        m.get(s).map(|e| (e.state, e.display_name, e.screenshot.id()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Release manifest borrow before accessing EguiUserTextures.
+        entries
+            .into_iter()
+            .map(|(state, name, asset_id)| {
+                let texture_id = world
+                    .resource_mut::<bevy_egui::EguiUserTextures>()
+                    .add_image(bevy_egui::EguiTextureHandle::Weak(asset_id));
+                (state, name, texture_id)
+            })
+            .collect()
+    };
 
-    // Also snapshot the display names for registered entries.
-    let display_names: Vec<(&'static str, AppState)> = world
-        .get_resource::<SketchManifest>()
-        .map(|m| {
-            AppState::SKETCH_ORDER
-                .iter()
-                .filter_map(|&s| m.get(s).map(|e| (e.display_name, e.state)))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Snapshot which states are active for placeholder detection.
+    let active_states: Vec<AppState> = active_tiles.iter().map(|(s, _, _)| *s).collect();
 
     let mut clicked_state: Option<AppState> = None;
 
@@ -110,18 +122,18 @@ pub fn draw_sketch_picker(world: &mut World) {
                 .spacing(egui::vec2(0.0, 0.0))
                 .show(ui, |ui| {
                     for (idx, &state) in AppState::SKETCH_ORDER.iter().enumerate() {
-                        let is_active = registered.contains(&state);
+                        let is_active = active_states.contains(&state);
                         ui.allocate_ui(tile_size, |ui| {
                             if is_active {
-                                // Find the display name for this state.
-                                let name = display_names
-                                    .iter()
-                                    .find(|(_, s)| *s == state)
-                                    .map_or("?", |(n, _)| *n);
-                                if let Some(target) =
-                                    render_active_tile(ui, &style, state, name, tile_size)
+                                // Find the snapshotted entry for this state.
+                                if let Some(&(_, name, texture_id)) =
+                                    active_tiles.iter().find(|(s, _, _)| *s == state)
                                 {
-                                    clicked_state = Some(target);
+                                    if let Some(target) = render_active_tile(
+                                        ui, &style, state, name, tile_size, texture_id,
+                                    ) {
+                                        clicked_state = Some(target);
+                                    }
                                 }
                             } else {
                                 render_placeholder_tile(ui, &style, state, tile_size);
@@ -146,9 +158,10 @@ pub fn draw_sketch_picker(world: &mut World) {
 
 /// Render a registered sketch tile.
 ///
-/// For now paints a solid dark-blue placeholder rect (Task 17 will swap in
-/// the screenshot via `EguiUserTextures`). Paints the sketch name in Orbitron
-/// at the bottom-left with a gradient fade up from the tile floor.
+/// Paints the sketch screenshot as the tile background using the provided
+/// [`egui::TextureId`] (registered from the manifest's `Handle<Image>` via
+/// [`bevy_egui::EguiUserTextures::add_image`]). Overlays the Orbitron name
+/// with a gradient fade, then animates a sheen sweep on hover.
 ///
 /// Returns `Some(state)` when the tile is clicked.
 fn render_active_tile(
@@ -157,15 +170,32 @@ fn render_active_tile(
     state: AppState,
     name: &str,
     tile_size: egui::Vec2,
+    texture_id: egui::TextureId,
 ) -> Option<AppState> {
     let (rect, response) = ui.allocate_exact_size(tile_size, egui::Sense::click());
 
-    // TODO Task 17: paint screenshot via EguiUserTextures::add_image lookup.
-    // Dark-blue placeholder distinguishes active tiles from "Coming soon" ones.
-    ui.painter()
-        .rect_filled(rect, egui::CornerRadius::ZERO, egui::Color32::from_rgb(8, 30, 50));
+    // Paint the screenshot as the tile background.
+    // UV rect covers the full texture (0,0)→(1,1); tint is WHITE (no colour
+    // modification). Before the asset finishes loading egui renders a solid
+    // colour placeholder determined by the context's missing-texture policy.
+    ui.painter().image(
+        texture_id,
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
 
     paint_tile_name(ui, style, rect, name, style.text_color_bright);
+
+    // Sheen-on-hover: animate progress [0, 1] over 0.5 s using egui's built-in
+    // bool animator. Skip the mesh entirely when progress is zero to avoid
+    // painting a zero-alpha strip every frame.
+    let hover_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id, response.hovered(), 0.5);
+    if hover_t > 0.0 {
+        paint_sheen(ui, rect, hover_t);
+    }
 
     if response.clicked() {
         Some(state)
@@ -200,6 +230,67 @@ fn render_placeholder_tile(
         egui::FontId::new(14.0, egui::FontFamily::Proportional),
         style.text_color_dim,
     );
+}
+
+/// Paint a diagonal sheen sweep across the tile, parametrized by
+/// `progress ∈ (0, 1]`.
+///
+/// Reproduces v4's `homePage.scss:155–164` hover highlight: a vertical
+/// band that sweeps from left-of-tile to right-of-tile as `progress` rises
+/// from 0 to 1. The band is 60% of the tile width and uses four colour
+/// stops (transparent → dim white → bright white → transparent) painted
+/// as three adjacent quads via an `epaint::Mesh`.
+///
+/// The gradient runs vertically (same colour at top and bottom of each
+/// column), giving a flat translucent strip rather than a true rotated
+/// gradient — close enough to v4 and avoids shader dependencies.
+fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, progress: f32) {
+    let painter = ui.painter();
+
+    // The sheen band is 60% of the tile width. It starts fully off-left
+    // at progress=0 and finishes fully off-right at progress=1, so the
+    // visible highlight sweeps across the tile.
+    let sheen_width = rect.width() * 0.6;
+    let half = sheen_width * 0.5;
+    let travel = rect.width() + sheen_width; // total distance band travels
+    let center_x = (rect.left() - half) + travel * progress;
+
+    let top = rect.top();
+    let bottom = rect.bottom();
+
+    // Four X positions form three quads. Colour stops match v4:
+    //   transparent → rgba(255,255,255,0.13) → rgba(255,255,255,0.5) → transparent
+    let xs: [f32; 4] = [
+        center_x - half,
+        center_x - half * 0.333,
+        center_x + half * 0.333,
+        center_x + half,
+    ];
+    let colors: [egui::Color32; 4] = [
+        egui::Color32::TRANSPARENT,
+        egui::Color32::from_white_alpha(33),  // ≈ 0.13 × 255
+        egui::Color32::from_white_alpha(128), // ≈ 0.5 × 255
+        egui::Color32::TRANSPARENT,
+    ];
+
+    // Build an 8-vertex mesh: 2 rows (top, bottom) × 4 columns = 8 vertices,
+    // 3 quads × 2 triangles each = 6 triangles.
+    //
+    // Vertex layout: column i contributes vertices 2*i (top) and 2*i+1 (bottom).
+    let mut mesh = egui::epaint::Mesh::default();
+    for (&x, &color) in xs.iter().zip(colors.iter()) {
+        mesh.colored_vertex(egui::pos2(x, top), color);
+        mesh.colored_vertex(egui::pos2(x, bottom), color);
+    }
+    // Wire up the 3 quads with 6 triangles. Vertex pairs are (0,1), (2,3), (4,5), (6,7).
+    for col in 0_u32..3 {
+        let base = col * 2;
+        // Two triangles forming the quad between column col and column col+1.
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base + 1, base + 3, base + 2);
+    }
+
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Paint the Orbitron sketch name at the bottom-left with a gradient
