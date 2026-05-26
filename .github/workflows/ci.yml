@@ -3,12 +3,20 @@ name: CI
 on:
   push:
     branches: [main, rewrite/bevy]
+    tags: ["v*"]
   pull_request:
     branches: [main, rewrite/bevy]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Disable incremental compilation in CI: each run is one-shot, so the
+  # incremental metadata is dead weight that also bloats rust-cache.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
@@ -69,26 +77,45 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  # Linux tests run on every push/PR for fast feedback.
+  test-linux:
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.89.0
       - uses: Swatinem/rust-cache@v2
+      # mold linker: drop-in replacement for ld that's 3-10x faster on Bevy's
+      # dep tree. Linux-only; macOS uses ld64 and Windows uses link.exe.
+      - uses: rui314/setup-mold@v1
       - name: Install Linux build deps for Bevy
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features
+
+  # Cross-platform tests run only on main pushes and release tags. PR feedback
+  # comes from Linux; macOS/Windows catch portability regressions before release.
+  test-cross-platform:
+    name: test (${{ matrix.os }})
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
