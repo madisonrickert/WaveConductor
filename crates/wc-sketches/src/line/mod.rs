@@ -45,7 +45,7 @@ use bevy::sprite_render::Material2dPlugin;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
-use wc_core::sketch::{despawn_with, sketch_active};
+use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
 
 /// Plugin that registers the Line sketch.
 pub struct LinePlugin;
@@ -54,6 +54,9 @@ impl Plugin for LinePlugin {
     fn build(&self, app: &mut App) {
         // Register LineSettings with the settings system (panel + persistence).
         app.register_sketch_settings::<settings::LineSettings>();
+
+        // Register the picker-tile manifest entry (async screenshot load).
+        register_line_manifest(app);
 
         // Register the Material2d for LineMaterial.
         app.add_plugins(Material2dPlugin::<material::LineMaterial>::default());
@@ -114,6 +117,26 @@ impl Plugin for LinePlugin {
         // Restart listener: cycles Line → Home → Line when particle_density changes.
         app.add_systems(Update, restart_on_settings_change);
     }
+}
+
+/// Register Line's picker-tile metadata into [`wc_core::sketch::SketchManifest`].
+///
+/// Factored out of [`LinePlugin::build`] so it is independently unit-testable
+/// without `LinePlugin`'s rendering dependencies (`Material2dPlugin`,
+/// `LineComputePlugin`, `LinePostProcessPlugin` all require a full `RenderApp`
+/// that `MinimalPlugins` does not provide).
+///
+/// The `AssetServer` load is async; the picker renders the tile as soon as the
+/// image asset finishes loading. Before then the tile shows the dark placeholder
+/// fill defined in `OverlayStyle`.
+pub(crate) fn register_line_manifest(app: &mut App) {
+    let asset_server = app.world().resource::<AssetServer>();
+    let screenshot = asset_server.load("sketches/line/screenshot.png");
+    app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
+        state: AppState::Line,
+        display_name: "Line",
+        screenshot,
+    });
 }
 
 /// `OnExit(AppState::Line)` companion to [`systems::spawn_line`].
@@ -220,5 +243,33 @@ fn exit_line_audio(
     };
     if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::RemoveLineSynth) {
         tracing::warn!("audio command ring full on Line exit; RemoveLineSynth dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wc_core::sketch::SketchManifest;
+
+    /// Verifies that `register_line_manifest` appends an entry for
+    /// `AppState::Line` with the correct display name.
+    ///
+    /// Uses the free-function path rather than constructing the full
+    /// `LinePlugin` because `LinePlugin::build` adds rendering plugins that
+    /// require a real `RenderApp` — unavailable in headless unit tests.
+    #[test]
+    fn register_line_manifest_appends_entry() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        // `ImagePlugin` registers `Image` as an asset type so `AssetServer`
+        // can allocate a `Handle<Image>` for the screenshot path.
+        app.add_plugins(bevy::image::ImagePlugin::default());
+        register_line_manifest(&mut app);
+        let manifest = app.world().resource::<SketchManifest>();
+        let entry = manifest
+            .get(AppState::Line)
+            .expect("Line manifest entry should be registered");
+        assert_eq!(entry.display_name, "Line");
     }
 }
