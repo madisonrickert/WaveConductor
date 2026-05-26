@@ -12,6 +12,10 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+hand-tracking-gestures = ["wc-core/hand-tracking-gestures"]
+
 [dependencies]
 bevy.workspace = true
 wc-core.workspace = true
@@ -23,3 +27,6 @@ leafwing-input-manager.workspace = true
 # Line heatmap-image spawn (Plan 10 Phase A): PNG decode + CDF inversion.
 image.workspace = true
 rand.workspace = true
+
+[dev-dependencies]
+smallvec.workspace = true

@@ -5744,6 +5744,7 @@ dependencies = [
  "leafwing-input-manager",
  "rand",
  "serde",
+ "smallvec",
  "tracing",
  "wc-core",
  "wc-core-macros",

@@ -216,3 +216,81 @@ fn power_zero_lets_state_transition_to_idle() {
         "with veto inactive and idle threshold crossed, state should become Idle"
     );
 }
+
+#[test]
+fn touch_press_activates_mouse_attractor() {
+    use common::input::{move_pointer, touch_start};
+
+    let mut app = sketches_test_app();
+    app.update();
+    enter_line(&mut app);
+
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    app.update();
+
+    let pre = app.world().resource::<MouseAttractorState>().power;
+    #[allow(
+        clippy::float_cmp,
+        reason = "bit-for-bit baseline check: default power must be exactly 0.0"
+    )]
+    {
+        assert_eq!(pre, 0.0, "attractor inactive before any input");
+    }
+
+    touch_start(&mut app, 1, 640.0, 360.0);
+    app.update();
+
+    let post = app.world().resource::<MouseAttractorState>().power;
+    // `decay_mouse_attractor` runs in the same `.chain()` as
+    // `update_mouse_attractor`, so power decays one tick from MOUSE_POWER_PRESS
+    // before we can read it. Any non-zero value confirms the press fired.
+    assert!(
+        post > 0.0,
+        "expected non-zero attractor power after touch_start; got {post}"
+    );
+}
+
+#[cfg(feature = "hand-tracking-gestures")]
+#[test]
+fn hand_pinch_activates_mouse_attractor() {
+    use bevy::math::Vec3;
+    use std::time::Duration;
+    use wc_core::input::hand::{Chirality, Hand, LANDMARK_COUNT};
+    use wc_core::input::state::{HandTrackingFrame, HandTrackingState};
+    use wc_sketches::line::systems::mouse::PINCH_PRESS_THRESHOLD;
+
+    let mut app = sketches_test_app();
+    app.update();
+    enter_line(&mut app);
+
+    let landmarks = [Vec3::ZERO; LANDMARK_COUNT];
+    let hand = Hand {
+        id: 1,
+        chirality: Chirality::Right,
+        palm_position: Vec3::ZERO,
+        palm_normal: Vec3::Y,
+        palm_velocity: Vec3::ZERO,
+        pinch_strength: PINCH_PRESS_THRESHOLD + 0.05,
+        grab_strength: 0.0,
+        landmarks,
+    };
+
+    let frame = HandTrackingFrame {
+        hands: smallvec::smallvec![hand],
+        timestamp: Duration::from_millis(0),
+    };
+    app.world_mut()
+        .resource_mut::<HandTrackingState>()
+        .ingest(&frame);
+
+    app.update();
+
+    let post = app.world().resource::<MouseAttractorState>().power;
+    // `decay_mouse_attractor` runs in the same `.chain()` as
+    // `update_mouse_attractor`, so power decays one tick from MOUSE_POWER_PRESS
+    // before we can read it. Any non-zero value confirms the pinch press fired.
+    assert!(
+        post > 0.0,
+        "expected non-zero attractor power after hand pinch edge; got {post}"
+    );
+}

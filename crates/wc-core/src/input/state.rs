@@ -70,9 +70,13 @@ impl HandTrackingState {
         self.timestamp
     }
 
-    /// Replace the state with the contents of a frame. Called only by the
-    /// `update_hand_tracking_state` system; not part of the public API.
-    pub(crate) fn ingest(&mut self, frame: &HandTrackingFrame) {
+    /// Replace the state with the contents of a frame.
+    ///
+    /// Production write path is [`crate::input::systems::update_hand_tracking_state`]
+    /// (driven from `Messages<HandTrackingFrame>`). Promoted to `pub` in Plan 11
+    /// so integration tests can synthesize hand frames without a fake provider —
+    /// see `crates/wc-sketches/tests/line_input.rs::hand_pinch_activates_mouse_attractor`.
+    pub fn ingest(&mut self, frame: &HandTrackingFrame) {
         self.hands.clear();
         for hand in &frame.hands {
             self.hands.push(hand.clone());

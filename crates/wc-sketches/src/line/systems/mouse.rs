@@ -35,25 +35,71 @@ pub const MOUSE_POWER_PRESS: f32 = 10.0;
 /// Floor + one centipower; arbitrary cutoff small enough to be invisible.
 pub const MOUSE_POWER_DECAY_EPSILON: f32 = 1e-2;
 
-/// Tracks pointer button transitions and updates [`MouseAttractorState`].
+/// Pinch strength at which a hand counts as "pressed" (analogous to a finger
+/// touching the screen). Leap Motion's `pinch_strength` ranges `[0, 1]`; this
+/// threshold gives a comfortable "pinched" pose without false-triggering on
+/// half-closed hands.
+#[cfg(feature = "hand-tracking-gestures")]
+pub const PINCH_PRESS_THRESHOLD: f32 = 0.85;
+
+/// Tracks last-frame pinch state per chirality so we can detect press *edges*
+/// (transition from below-threshold to above), not just "is currently
+/// pinched." Without edge detection, holding a pinched fist would re-trigger
+/// `MOUSE_POWER_PRESS` every frame (the bug Plan 7 Phase C fixed for mouse).
+#[cfg(feature = "hand-tracking-gestures")]
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct LastPinchState {
+    /// Was the left hand above [`PINCH_PRESS_THRESHOLD`] last frame?
+    pub left_pinched: bool,
+    /// Was the right hand above [`PINCH_PRESS_THRESHOLD`] last frame?
+    pub right_pinched: bool,
+}
+
+/// Tracks pointer-button-equivalent transitions across mouse, touch, and
+/// (under the `hand-tracking-gestures` feature) tracked-hand pinch, and
+/// updates [`MouseAttractorState`].
 ///
-/// Matches v4: only `just_pressed` sets `power = MOUSE_POWER_PRESS`. Held with
-/// a stationary mouse decays to floor; mousemove just updates position. The
-/// previous behavior of re-asserting `power = MOUSE_POWER_PRESS` every frame
-/// the button was held masked the decay system and is intentionally removed.
+/// Matches v4's `pointerdown`/`pointerup`: only the rising edge of "any
+/// source pressed" sets `power = MOUSE_POWER_PRESS`. Held with a stationary
+/// input decays to floor; positional updates just move the attractor.
+///
+/// Hand-tracking gesture (feature-gated, since `HandTrackingState` has no
+/// writer until Plan 12+ lands a provider): pinch strength ≥
+/// [`PINCH_PRESS_THRESHOLD`] = 0.85 counts as pressed. [`LastPinchState`]
+/// tracks per-chirality edges so a held pinch doesn't re-trigger every frame.
 pub fn update_mouse_attractor(
     pointer: Res<'_, PointerState>,
     mouse_buttons: Res<'_, bevy::input::ButtonInput<bevy::input::mouse::MouseButton>>,
     touches: Res<'_, bevy::input::touch::Touches>,
+    #[cfg(feature = "hand-tracking-gestures")] hands: Res<
+        '_,
+        wc_core::input::state::HandTrackingState,
+    >,
+    #[cfg(feature = "hand-tracking-gestures")] mut last_pinch: ResMut<'_, LastPinchState>,
     window: Single<'_, '_, &Window>,
     mut state: ResMut<'_, MouseAttractorState>,
 ) {
-    let just_pressed = mouse_buttons.just_pressed(bevy::input::mouse::MouseButton::Left)
-        || touches.iter_just_pressed().next().is_some();
-    // Any active touch counts as "held"; iter() is non-consuming.
-    // (Held is read for future signal hooks but no longer affects power.)
-    let _held = mouse_buttons.pressed(bevy::input::mouse::MouseButton::Left)
-        || touches.iter().next().is_some();
+    let mouse_just_pressed = mouse_buttons.just_pressed(bevy::input::mouse::MouseButton::Left);
+    let touch_just_pressed = touches.iter_just_pressed().next().is_some();
+
+    #[cfg(feature = "hand-tracking-gestures")]
+    let hand_just_pressed = {
+        let right_now = hands
+            .right()
+            .is_some_and(|h| h.pinch_strength >= PINCH_PRESS_THRESHOLD);
+        let left_now = hands
+            .left()
+            .is_some_and(|h| h.pinch_strength >= PINCH_PRESS_THRESHOLD);
+        let right_edge = right_now && !last_pinch.right_pinched;
+        let left_edge = left_now && !last_pinch.left_pinched;
+        last_pinch.right_pinched = right_now;
+        last_pinch.left_pinched = left_now;
+        right_edge || left_edge
+    };
+    #[cfg(not(feature = "hand-tracking-gestures"))]
+    let hand_just_pressed = false;
+
+    let just_pressed = mouse_just_pressed || touch_just_pressed || hand_just_pressed;
 
     if let Some(cursor_window) = pointer.primary {
         let w = window.width();

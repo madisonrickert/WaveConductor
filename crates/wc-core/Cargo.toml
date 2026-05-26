@@ -12,6 +12,13 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# Enables HandTrackingState consumers (sketch gesture detection). Disabled by
+# default until a provider lands — turning this on with no provider means the
+# consumer reads an always-empty `HandTrackingState` and is a no-op.
+hand-tracking-gestures = []
+
 [dependencies]
 bevy = { workspace = true }
 cpal = { workspace = true }
