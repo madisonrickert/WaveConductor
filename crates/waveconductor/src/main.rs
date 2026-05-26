@@ -12,16 +12,32 @@ use wc_sketches::SketchesPlugin;
 
 /// Relative path to the Line sketch's background sample, resolved against
 /// the cwd the binary was launched in. `cargo run -p waveconductor` runs
-/// from `crates/waveconductor`, so the dev build needs to climb two
-/// directories; release bundles ship `assets/` next to the binary.
+/// In debug builds we resolve against `CARGO_MANIFEST_DIR` (the binary
+/// crate's directory at compile time) so the path works regardless of the
+/// shell's cwd when `cargo run -p waveconductor` is invoked. Release bundles
+/// ship `assets/` next to the binary, so the cwd-relative path is correct
+/// there.
+///
+/// Bevy's `AssetPlugin.file_path = "../../assets"` works by a separate
+/// mechanism: Bevy's `FileAssetReader` already resolves against
+/// `CARGO_MANIFEST_DIR` in debug builds. `std::fs::read` does not, hence
+/// the explicit `concat!`.
 #[cfg(debug_assertions)]
-const LINE_BACKGROUND_PATH: &str = "../../assets/sketches/line/line_background.ogg";
+const LINE_BACKGROUND_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/sketches/line/line_background.ogg"
+);
 #[cfg(not(debug_assertions))]
 const LINE_BACKGROUND_PATH: &str = "assets/sketches/line/line_background.ogg";
 
 fn main() {
     init_tracing();
     App::new()
+        // v4 Line renders against a black background; Bevy defaults to gray.
+        // Setting the clear color globally is the simplest way to match —
+        // future sketches can override per-state via `OnEnter`/`OnExit` if
+        // they want a different backdrop.
+        .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(load_line_background())
         .add_plugins((
             DefaultPlugins

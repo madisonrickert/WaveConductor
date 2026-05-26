@@ -30,6 +30,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_sprite_render",
     "bevy_mesh",
     "bevy_asset",
+    "png",
     "default_font",
     "x11",
     "wayland",
