@@ -11,9 +11,9 @@
 //! [`overlay_icon_button`] reads [`OverlayStyle`] constants and the egui
 //! animation clock to produce a hover-animated, alpha-scaled button widget.
 //! Task 14 adds `SettingsPanelVisible`, `LastSettingsPanelRect`,
-//! `draw_home_button`, and `draw_settings_button`. Task 15 adds the volume
-//! button. This module provides the shared primitive, touch-detection
-//! resource, and all draw systems.
+//! `draw_home_button`, and `draw_settings_button`. Task 15 adds `VolumeMuted`,
+//! `draw_volume_button`, and `sync_volume_muted`. This module provides the
+//! shared primitive, touch-detection resource, and all draw systems.
 
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::egui;
 
+use crate::audio::command::AudioCommand;
+use crate::audio::state::AudioState;
 use crate::lifecycle::state::AppState;
 use super::auto_fade::UiOpacity;
 use super::style::OverlayStyle;
@@ -61,14 +63,19 @@ impl Plugin for OverlayButtonsPlugin {
         app.init_resource::<LastTouchAt>();
         app.init_resource::<SettingsPanelVisible>();
         app.init_resource::<LastSettingsPanelRect>();
+        app.init_resource::<VolumeMuted>();
         // Register the message type if it isn't already present (idempotent).
         // `bevy::input::InputPlugin` handles this in production; tests that
         // use `MinimalPlugins` need explicit registration.
         app.add_message::<TouchInput>();
         app.add_systems(Update, update_pointer_coarse);
+        // Keep VolumeMuted in sync with the audio thread's echo so the button
+        // icon always reflects the authoritative mute state (the keyboard
+        // shortcut `v` toggles audio independently of the UI button).
+        app.add_systems(PreUpdate, sync_volume_muted);
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            (draw_home_button, draw_settings_button),
+            (draw_home_button, draw_settings_button, draw_volume_button),
         );
     }
 }
@@ -328,6 +335,107 @@ fn scale_color_alpha(color: egui::Color32, mul: f32) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
+/// Local mirror of mute state. Flipped on each volume-button click and
+/// synced from [`crate::audio::state::AudioState::muted`] each `PreUpdate`
+/// so the icon stays accurate when mute is toggled via the `v` keyboard
+/// shortcut as well as via the button.
+///
+/// The audio ring is the authoritative consumer; this resource exists so the
+/// button icon doesn't re-read the audio engine each frame.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct VolumeMuted(pub bool);
+
+/// `PreUpdate` system that keeps [`VolumeMuted`] in sync with
+/// [`AudioState::muted`].
+///
+/// Runs after [`crate::audio::state::pump_audio_messages`] has drained the
+/// audio→main message ring, so `AudioState::muted` reflects the latest echo
+/// from the audio thread. This ensures the button icon tracks the `v`
+/// keyboard shortcut as well as direct button clicks.
+pub(crate) fn sync_volume_muted(
+    audio_state: Option<Res<'_, AudioState>>,
+    mut muted: ResMut<'_, VolumeMuted>,
+) {
+    if let Some(state) = audio_state {
+        muted.0 = state.muted;
+    }
+}
+
+/// Top-right volume button. Toggles mute; icon flips between
+/// [`egui_phosphor::regular::SPEAKER_HIGH`] and
+/// [`egui_phosphor::regular::SPEAKER_X`].
+///
+/// Runs in [`bevy_egui::EguiPrimaryContextPass`]. Position is
+/// `(window_width - 12 - size - 8 - size, 12)` so it sits 8 px left of the
+/// Settings button. Button size scales with [`PointerCoarse`]
+/// (32 px fine / 44 px coarse).
+///
+/// On click: flips [`VolumeMuted`] and pushes
+/// [`AudioCommand::SetMuted`] to the audio ring. Ring-full failures are
+/// silently dropped — the audio thread is severely backlogged in that case
+/// and will process the eventual echo correctly.
+pub fn draw_volume_button(world: &mut World) {
+    // Skip when EguiPlugin is absent (MinimalPlugins tests).
+    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+        return;
+    }
+
+    // Read window width; fall back to 1280 if no primary window is present yet.
+    let window_width = {
+        let mut q = world.query_filtered::<&Window, With<PrimaryWindow>>();
+        q.single(world).map(Window::width).unwrap_or(1280.0)
+    };
+
+    let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
+        bevy::ecs::system::SystemState::new(world);
+    let mut contexts = state_param.get_mut(world);
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let ctx = ctx.clone();
+    state_param.apply(world);
+
+    let style = *world.resource::<OverlayStyle>();
+    let opacity = world.resource::<UiOpacity>().current;
+    let coarse = world.resource::<PointerCoarse>().0;
+    let muted = world.resource::<VolumeMuted>().0;
+    let size = if coarse { style.button_size_coarse } else { style.button_size_fine };
+
+    // Volume sits just left of Settings, with an 8 px gap between them.
+    let pos_x = window_width - 12.0 - size - 8.0 - size;
+
+    let mut clicked = false;
+    egui::Area::new(egui::Id::new("wc-volume-button"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(pos_x, 12.0))
+        .show(&ctx, |ui| {
+            let icon = if muted {
+                egui_phosphor::regular::SPEAKER_X
+            } else {
+                egui_phosphor::regular::SPEAKER_HIGH
+            };
+            let response = overlay_icon_button(ui, &style, icon, size, opacity);
+            if response.clicked() {
+                clicked = true;
+            }
+        });
+
+    if clicked {
+        // Flip the local mirror first so the icon updates this frame without
+        // waiting for the audio-thread echo.
+        let new_muted = !muted;
+        if let Some(mut volume_muted) = world.get_resource_mut::<VolumeMuted>() {
+            volume_muted.0 = new_muted;
+        }
+        // Push the command to the audio ring. Ring-full failure is non-fatal.
+        if let Some(mut sender) =
+            world.get_non_send_resource_mut::<crate::audio::ring::AudioCommandSender>()
+        {
+            let _ = sender.push(AudioCommand::SetMuted(new_muted));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +514,26 @@ mod tests {
             app.update();
         }
         assert!(!app.world().resource::<PointerCoarse>().0);
+    }
+
+    #[test]
+    fn volume_muted_defaults_false() {
+        let app = make_app();
+        assert!(!app.world().resource::<VolumeMuted>().0);
+    }
+
+    #[test]
+    fn sync_volume_muted_follows_audio_state() {
+        let mut app = make_app();
+        // Insert a mock AudioState with muted = true.
+        app.world_mut().insert_resource(AudioState {
+            muted: true,
+            ..AudioState::default()
+        });
+        app.update();
+        assert!(
+            app.world().resource::<VolumeMuted>().0,
+            "VolumeMuted should mirror AudioState::muted after update"
+        );
     }
 }
