@@ -15,6 +15,7 @@
 )]
 
 use bevy::asset::RenderAssetUsages;
+use bevy::image::Image;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
@@ -50,6 +51,7 @@ pub fn spawn_line(
     mut commands: Commands<'_, '_>,
     settings: Res<'_, LineSettings>,
     window: Single<'_, '_, &Window>,
+    asset_server: Res<'_, AssetServer>,
     mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
     mut materials: ResMut<'_, Assets<LineMaterial>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
@@ -92,8 +94,16 @@ pub fn spawn_line(
         RenderAssetUsages::RENDER_WORLD,
     ));
 
+    // Star sprite for the particle quads (ported from v4's
+    // `src/materials/starMaterial/star.png`). Loaded via `AssetServer` so
+    // Bevy's image loader (`ImagePlugin`, included in `DefaultPlugins`)
+    // decodes the PNG into a GPU texture asynchronously; the bind group
+    // becomes valid once the asset finishes loading.
+    let star_texture: Handle<Image> = asset_server.load("sketches/line/star.png");
+
     let material_handle = materials.add(LineMaterial {
         particles: particles_handle.clone(),
+        star_texture,
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

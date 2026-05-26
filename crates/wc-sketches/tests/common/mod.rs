@@ -22,6 +22,7 @@ pub mod input;
 use std::time::Duration;
 
 use bevy::asset::AssetPlugin;
+use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::state::app::StatesPlugin;
@@ -68,6 +69,16 @@ pub fn sketches_test_app() -> App {
     // The render-world uploads are no-ops without RenderApp.
     app.add_plugins(bevy::mesh::MeshPlugin);
     app.init_asset::<ShaderStorageBuffer>();
+
+    // Plan 8 Phase A: `spawn_line` now loads `star.png` via `AssetServer`.
+    // `ImagePlugin` is provided by `DefaultPlugins` in production; the
+    // MinimalPlugins-based test harness has to register the `Image` asset
+    // type explicitly so `Handle<Image>` allocation in `asset_server.load(...)`
+    // doesn't panic. The image file is never actually decoded in tests (no
+    // image-format loaders are registered) — the bind group sees an empty
+    // handle, which is fine because `MaterialPlugin` is also a render-world
+    // no-op without `RenderApp`.
+    app.init_asset::<Image>();
 
     // PointerState + HandTrackingState are normally registered by
     // `wc_core::input::HandTrackingPlugin`; the sketches-test harness does not
