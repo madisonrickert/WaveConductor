@@ -88,6 +88,19 @@ pub fn drive_audio_and_shader(
     // device). When `AudioCommandSender` is absent, skip the audio writes and
     // still update the shader uniforms below.
     if let Some(mut audio_cmd) = audio_cmd {
+        // LFO oscillator rate. v4 sets `sourceLfoFreq.setTargetAtTime(flatRatio, …)`
+        // every frame in `index.ts::step()`. Typical 1–3 Hz during sustained
+        // press, slower for a roughly-circular cloud, faster during left-right
+        // mouse motion. `lfo_rate_hz` drives the variable-rate sine in
+        // `LineSynth`'s bandpass modulation. (The historically-named `lfo_freq`
+        // key still drives LFO depth — see below.)
+        push_audio(
+            &mut audio_cmd,
+            AudioCommand::SetLineParam {
+                key: "lfo_rate_hz",
+                value: stats.flat_ratio,
+            },
+        );
         // v4 guards bandpass against division-by-zero on `normalizedEntropy == 0`
         // (which happens when all particles share a position, e.g. first frame).
         // Skip the bandpass + lfo_depth commands together in that case — both
@@ -109,8 +122,8 @@ pub fn drive_audio_and_shader(
                     key: "lfo_freq",
                     // v4 parity: LFO modulation depth tracks bandpass cutoff.
                     // The `lfo_freq` key in LineSynth is routed to LFO depth
-                    // (oscillator rate is hardcoded at 8.66 Hz). 0.06 is v4's
-                    // `lfoGain.gain = freq × 0.06` constant.
+                    // (oscillator rate is the separate `lfo_rate_hz` key above).
+                    // 0.06 is v4's `lfoGain.gain = freq × 0.06` constant.
                     value: bandpass_freq * LFO_DEPTH_OVER_CUTOFF,
                 },
             );

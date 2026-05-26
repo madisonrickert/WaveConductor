@@ -8,8 +8,11 @@
 //!
 //! These tests cover the envelope-approximation behavior introduced in Plan 11
 //! Phase F: that `grouped_upness` rises on press and decays on release, that
-//! `variance_length` drops on press and recovers after release, and that
-//! constants remain in their documented ranges.
+//! `variance_length` drops on press and recovers after release, that
+//! `flat_ratio` varies between its baseline and peak with excitement, and that
+//! `normalized_entropy` is clamped above its floor. The tests call the
+//! `step_envelope` pure function directly so the math stays in one place
+//! (production wraps it through the Bevy system in `update_particle_stats`).
 
 #![allow(
     clippy::float_cmp,
@@ -19,45 +22,19 @@
 )]
 
 use super::{
-    lerp, ParticleStats, ATTACK_RATE_FAST, GROUPED_UPNESS_PEAK, GROUPED_UPNESS_RATE,
-    RELEASE_RATE_SLOW, SPREAD_BASELINE, SPREAD_MIN,
+    step_envelope, ParticleStats, ENTROPY_FLOOR, FLAT_RATIO_BASELINE, FLAT_RATIO_PEAK,
+    GROUPED_UPNESS_PEAK, SPREAD_BASELINE, SPREAD_MIN,
 };
 use crate::line::systems::mouse::MOUSE_POWER_PRESS;
 
 /// Advance `ParticleStats` through `n` frames of `dt` seconds each, with
-/// the given `mouse_power`. Returns the final stats.
+/// the given `mouse_power`. Returns the final stats. Calls the production
+/// `step_envelope` directly so the test sees the same envelope math the
+/// `update_particle_stats` system applies in production.
 fn run_frames(n: u32, dt: f32, mouse_power: f32, initial: ParticleStats) -> ParticleStats {
     let mut stats = initial;
-    let excitement = (mouse_power / MOUSE_POWER_PRESS).clamp(0.0, 1.0);
-
     for _ in 0..n {
-        // Replicate the envelope math from update_particle_stats.
-        let target_vel = excitement;
-        let vel_rate = if target_vel > stats.average_vel {
-            ATTACK_RATE_FAST
-        } else {
-            RELEASE_RATE_SLOW
-        };
-        stats.average_vel = lerp(stats.average_vel, target_vel, (vel_rate * dt).min(1.0));
-
-        let target_grouped = excitement * GROUPED_UPNESS_PEAK;
-        stats.grouped_upness = lerp(
-            stats.grouped_upness,
-            target_grouped,
-            (GROUPED_UPNESS_RATE * dt).min(1.0),
-        );
-
-        let target_variance = SPREAD_BASELINE - excitement * (SPREAD_BASELINE - SPREAD_MIN);
-        stats.variance_length = lerp(
-            stats.variance_length,
-            target_variance,
-            (RELEASE_RATE_SLOW * dt).min(1.0),
-        );
-
-        stats.normalized_entropy = stats.variance_length;
-        stats.normalized_variance_length = stats.variance_length;
-        stats.normalized_average_vel = stats.average_vel;
-        stats.flat_ratio = 1.0;
+        step_envelope(&mut stats, mouse_power, dt);
     }
     stats
 }
@@ -66,7 +43,6 @@ fn run_frames(n: u32, dt: f32, mouse_power: f32, initial: ParticleStats) -> Part
 /// stay near zero when starting from the default (zero) state.
 #[test]
 fn at_rest_grouped_upness_stays_near_zero() {
-    // Start from zero, run 60 frames at 60 Hz with no press.
     let result = run_frames(60, 1.0 / 60.0, 0.0, ParticleStats::default());
     assert!(
         result.grouped_upness < 0.01,
@@ -96,7 +72,6 @@ fn sustained_press_raises_grouped_upness() {
 /// never exceeding it by more than floating-point rounding.
 #[test]
 fn grouped_upness_is_bounded_by_peak_constant() {
-    // Very long press — enough to asymptote.
     let result = run_frames(600, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
     assert!(
         result.grouped_upness <= GROUPED_UPNESS_PEAK + 1e-5,
@@ -109,14 +84,12 @@ fn grouped_upness_is_bounded_by_peak_constant() {
 /// After release, `grouped_upness` must decay back below 0.2 within 60 frames.
 #[test]
 fn grouped_upness_decays_after_release() {
-    // First press for 60 frames to build it up.
     let pressed = run_frames(60, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
     assert!(
         pressed.grouped_upness > 0.3,
         "prerequisite: press must raise grouped_upness"
     );
 
-    // Then release for 60 frames.
     let released = run_frames(60, 1.0 / 60.0, 0.0, pressed);
     assert!(
         released.grouped_upness < 0.2,
@@ -138,26 +111,50 @@ fn variance_length_drops_on_press() {
     );
 }
 
-/// `flat_ratio` is always exactly 1.0 (circular-cloud approximation).
+/// `flat_ratio` ranges between [`FLAT_RATIO_BASELINE`] (rest, slow LFO) and
+/// [`FLAT_RATIO_PEAK`] (sustained press, moderate-tremolo LFO). Drives the
+/// LFO oscillator rate via `lfo_rate_hz`.
 #[test]
-fn flat_ratio_is_always_one() {
+fn flat_ratio_scales_with_excitement() {
     let at_rest = run_frames(10, 1.0 / 60.0, 0.0, ParticleStats::default());
-    assert_eq!(at_rest.flat_ratio, 1.0, "flat_ratio at rest");
+    assert!(
+        (at_rest.flat_ratio - FLAT_RATIO_BASELINE).abs() < 1e-5,
+        "expected flat_ratio = {FLAT_RATIO_BASELINE} at rest; got {}",
+        at_rest.flat_ratio,
+    );
 
-    let on_press = run_frames(10, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
-    assert_eq!(on_press.flat_ratio, 1.0, "flat_ratio on press");
+    // After enough sustained press to asymptote, flat_ratio reaches PEAK.
+    let on_press = run_frames(600, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
+    assert!(
+        (on_press.flat_ratio - FLAT_RATIO_PEAK).abs() < 1e-5,
+        "expected flat_ratio = {FLAT_RATIO_PEAK} on sustained press; got {}",
+        on_press.flat_ratio,
+    );
 }
 
-/// `normalized_entropy` and `normalized_variance_length` always track `variance_length`.
+/// `normalized_entropy` is `variance_length` clamped at [`ENTROPY_FLOOR`], so
+/// the downstream bandpass cutoff (`222 / normalized_entropy`) caps at v4's
+/// typical peak (~1110 Hz at `ENTROPY_FLOOR = 0.2`). Below the floor,
+/// `normalized_variance_length` (used for the noise filter) keeps tracking
+/// `variance_length` so the noise lowpass can still sweep down to v4's floor.
 #[test]
-fn normalised_fields_track_variance_length() {
-    let result = run_frames(30, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
-    assert_eq!(
-        result.normalized_entropy, result.variance_length,
-        "normalized_entropy should equal variance_length",
+fn normalised_entropy_clamps_at_floor_while_variance_keeps_dropping() {
+    let result = run_frames(600, 1.0 / 60.0, MOUSE_POWER_PRESS, ParticleStats::default());
+    // After long sustained press, variance_length reaches SPREAD_MIN (0.1).
+    assert!(
+        (result.variance_length - SPREAD_MIN).abs() < 1e-3,
+        "expected variance_length ≈ {SPREAD_MIN} on sustained press; got {}",
+        result.variance_length,
     );
+    // normalized_entropy floors at ENTROPY_FLOOR (0.2), NOT variance_length (0.1).
+    assert!(
+        (result.normalized_entropy - ENTROPY_FLOOR).abs() < 1e-5,
+        "expected normalized_entropy = {ENTROPY_FLOOR} (floored); got {}",
+        result.normalized_entropy,
+    );
+    // normalized_variance_length still tracks variance_length (noise floor).
     assert_eq!(
         result.normalized_variance_length, result.variance_length,
-        "normalized_variance_length should equal variance_length",
+        "normalized_variance_length should track variance_length without floor",
     );
 }

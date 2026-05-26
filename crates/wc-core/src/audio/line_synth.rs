@@ -70,8 +70,13 @@ const DEFAULT_LFO_DEPTH: f32 = 0.0;
 /// drives params.
 const DEFAULT_VOLUME: f32 = 0.0;
 
-/// LFO frequency in Hz. v4 uses `8.66 Hz` literally; we hard-code the same.
-const LFO_FREQUENCY_HZ: f32 = 8.66;
+/// Default LFO rate (Hz) before the coupling system overrides it. v4
+/// initialises `sourceLfo.frequency` to `8.66` but immediately overrides
+/// it every frame in `index.ts::step()` with `flatRatio` (the cloud's
+/// width/height ratio, typically 1–3 Hz during sustained press). We seed
+/// the default at v4's typical sustained value so the LFO sounds correct
+/// even before the coupling system runs.
+const DEFAULT_LFO_RATE_HZ: f32 = 1.0;
 /// Bandpass Q value. v4: `filter.Q.setValueAtTime(2.18, 0)`.
 const BANDPASS_Q: f32 = 2.18;
 /// Noise lowpass Q. v4: `noiseFilter.Q.setValueAtTime(1.0, 0)`.
@@ -108,7 +113,15 @@ pub struct LineSynth {
     bandpass_freq: Shared,
     /// Drives the noise-path lowpass cutoff in Hz.
     noise_freq: Shared,
-    /// LFO depth in Hz (added to `bandpass_freq` to form the modulated cutoff).
+    /// LFO oscillator rate in Hz. v4 sets this to `flatRatio` every frame —
+    /// typically 1–3 Hz during sustained press, slower when the particle
+    /// cloud is roughly circular, faster during left/right cursor motion.
+    /// The LFO modulates `bandpass_freq` to produce the filter's audible
+    /// breathing character.
+    lfo_rate: Shared,
+    /// LFO modulation depth in Hz (added to `bandpass_freq` to form the
+    /// modulated cutoff). v4 sets this as `bandpass_freq × 0.06` inside
+    /// `setFrequency`, auto-coupling depth to cutoff.
     lfo_depth: Shared,
     /// Source-mix master volume. Multiplied through `SOURCE_GAIN_SCALE` and
     /// `NOISE_GAIN_SCALE` to feed the two voice paths.
@@ -118,8 +131,13 @@ pub struct LineSynth {
 impl LineSynth {
     /// All `SetLineParam` keys this synth recognizes. Anything else is
     /// logged and dropped by [`Self::set_param`].
-    pub const KNOWN_KEYS: &'static [&'static str] =
-        &["bandpass_freq", "noise_freq", "lfo_freq", "volume"];
+    pub const KNOWN_KEYS: &'static [&'static str] = &[
+        "bandpass_freq",
+        "noise_freq",
+        "lfo_freq",
+        "lfo_rate_hz",
+        "volume",
+    ];
 
     /// Build the voice graph for a given output `sample_rate`. Allocates;
     /// call only on activation (e.g. from `AudioCommand::AddLineSynth`).
@@ -127,6 +145,7 @@ impl LineSynth {
         // Shared parameter handles. Cloned into the graph via `var(&…)`.
         let bandpass_freq = shared(DEFAULT_BANDPASS_HZ);
         let noise_freq = shared(DEFAULT_NOISE_HZ);
+        let lfo_rate = shared(DEFAULT_LFO_RATE_HZ);
         let lfo_depth = shared(DEFAULT_LFO_DEPTH);
         let volume = shared(DEFAULT_VOLUME);
 
@@ -160,13 +179,17 @@ impl LineSynth {
 
         // ----- LFO -----
         //
-        // v4: `sourceLfo` is a `sine` at 8.66 Hz, `lfoGain` is its output
-        // amplitude. The LFO output is added to filter.frequency via Web
-        // Audio's signal routing. We replicate by computing
-        //   modulated_cutoff = bandpass_freq + lfo_depth · sin(2π·8.66·t)
-        // and feeding that into both bandpass instances.
+        // v4: `sourceLfo` is a sine whose frequency is set to `flatRatio`
+        // (typically 1-3 Hz) each frame via `sourceLfoFreq.setTargetAtTime`,
+        // and `lfoGain.gain` is set to `bandpass_freq × 0.06`. The LFO
+        // output is added to filter.frequency via Web Audio's signal
+        // routing. We replicate by computing
+        //   modulated_cutoff = bandpass_freq + lfo_depth · sin(2π · lfo_rate · t)
+        // with both `lfo_rate` and `lfo_depth` driven from `Shared` handles
+        // updated by the coupling system. Use `sine` (variable-rate, takes
+        // frequency from input) rather than `sine_hz` (constant rate).
         let bp_base = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
-        let bp_lfo = sine_hz::<f64>(LFO_FREQUENCY_HZ)
+        let bp_lfo = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
             * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
         let bp_cutoff = bp_base + bp_lfo;
 
@@ -179,7 +202,7 @@ impl LineSynth {
         // can't `Clone` an `An` node, but we can clone the `Shared` handle
         // and rebuild a new modulation summer.
         let bp_base2 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
-        let bp_lfo2 = sine_hz::<f64>(LFO_FREQUENCY_HZ)
+        let bp_lfo2 = ((var(&lfo_rate) >> follow(PARAM_SMOOTHING_S)) >> sine::<f64>())
             * ((var(&lfo_depth) * LFO_DEPTH_SCALE) >> follow(PARAM_SMOOTHING_S));
         let bp_cutoff2 = bp_base2 + bp_lfo2;
 
@@ -206,6 +229,7 @@ impl LineSynth {
             graph,
             bandpass_freq,
             noise_freq,
+            lfo_rate,
             lfo_depth,
             volume,
         }
@@ -216,7 +240,16 @@ impl LineSynth {
         match key {
             "bandpass_freq" => self.bandpass_freq.set(value.max(MIN_FILTER_HZ)),
             "noise_freq" => self.noise_freq.set(value.max(MIN_FILTER_HZ)),
+            // Historically named `lfo_freq` for compatibility with the Phase F
+            // wiring; routed to LFO depth (in Hz). The actual LFO rate is
+            // `lfo_rate_hz`.
             "lfo_freq" => self.lfo_depth.set(value.max(0.0)),
+            // LFO oscillator rate. v4 typical 1-3 Hz during sustained press.
+            // Clamp to a sane LFO range: below 0.1 Hz is sub-perception
+            // (single-cycle longer than a typical interaction), above 20 Hz
+            // crosses into low-frequency audio range and would sound like
+            // FM rather than amplitude modulation.
+            "lfo_rate_hz" => self.lfo_rate.set(value.clamp(0.1, 20.0)),
             "volume" => self.volume.set(value.max(0.0)),
             other => {
                 tracing::warn!(key = other, value, "dropping unknown SetLineParam key");
@@ -236,6 +269,7 @@ impl core::fmt::Debug for LineSynth {
         f.debug_struct("LineSynth")
             .field("bandpass_freq", &self.bandpass_freq.value())
             .field("noise_freq", &self.noise_freq.value())
+            .field("lfo_rate", &self.lfo_rate.value())
             .field("lfo_depth", &self.lfo_depth.value())
             .field("volume", &self.volume.value())
             .finish_non_exhaustive()
@@ -257,8 +291,21 @@ mod tests {
         assert!((synth.noise_freq.value() - 567.0).abs() < f32::EPSILON);
         synth.set_param("lfo_freq", 12.0);
         assert!((synth.lfo_depth.value() - 12.0).abs() < f32::EPSILON);
+        synth.set_param("lfo_rate_hz", 2.5);
+        assert!((synth.lfo_rate.value() - 2.5).abs() < f32::EPSILON);
         synth.set_param("volume", 0.5);
         assert!((synth.volume.value() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn lfo_rate_hz_clamps_to_sane_range() {
+        let synth = LineSynth::new(48_000.0);
+        // Below 0.1 Hz: sub-perception LFO; clamp up.
+        synth.set_param("lfo_rate_hz", 0.001);
+        assert!((synth.lfo_rate.value() - 0.1).abs() < f32::EPSILON);
+        // Above 20 Hz: low-audio range, FM not AM; clamp down.
+        synth.set_param("lfo_rate_hz", 100.0);
+        assert!((synth.lfo_rate.value() - 20.0).abs() < f32::EPSILON);
     }
 
     #[test]

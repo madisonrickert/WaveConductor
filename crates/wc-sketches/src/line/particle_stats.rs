@@ -88,8 +88,15 @@ pub fn update_particle_stats(
     time: Res<'_, Time>,
     mut stats: ResMut<'_, ParticleStats>,
 ) {
-    let dt = time.delta_secs();
+    step_envelope(&mut stats, mouse.power, time.delta_secs());
+}
 
+/// Pure-function step: advance the envelope state by one frame of `dt` seconds
+/// given the current attractor `power`. Extracted from `update_particle_stats`
+/// so unit tests can drive the same math without a Bevy `World` / `Res` /
+/// `ResMut` setup. Production code only ever calls this through the system
+/// wrapper above.
+pub(crate) fn step_envelope(stats: &mut ParticleStats, power: f32, dt: f32) {
     // Normalised attractor activity in [0, 1]. Drives all downstream envelopes.
     //
     // Divide by `MOUSE_POWER_FLOOR` (not `MOUSE_POWER_PRESS`) so excitement
@@ -99,7 +106,7 @@ pub fn update_particle_stats(
     // groupedUpness stays elevated during sustained press (particles keep
     // orbiting the attractor). Power == 0 (explicit release) is the only
     // way excitement reaches 0.
-    let excitement = (mouse.power / MOUSE_POWER_FLOOR).clamp(0.0, 1.0);
+    let excitement = (power / MOUSE_POWER_FLOOR).clamp(0.0, 1.0);
 
     // average_vel: snaps up on press, decays slowly. Asymmetric attack/release
     // matches v4's behavior where particles accelerate fast (forces are strong
@@ -142,19 +149,31 @@ pub fn update_particle_stats(
         (variance_rate * dt).min(1.0),
     );
 
-    // Normalised stats derive from variance_length. v4 used per-axis math here;
-    // for perceptual parity a shared scalar is sufficient (the audio formulas
-    // downstream treat them as smooth ranges, not exact ratios).
-    stats.normalized_entropy = stats.variance_length;
+    // normalized_variance_length tracks variance_length directly: drives the
+    // noise filter cutoff (`2000 × value`), which sweeps 200 Hz (peak press,
+    // value ≈ SPREAD_MIN) → 2000 Hz (rest, value ≈ SPREAD_BASELINE). Matches
+    // v4's noise lowpass floor.
     stats.normalized_variance_length = stats.variance_length;
+
+    // normalized_entropy needs a HIGHER floor than variance_length: the
+    // downstream bandpass cutoff is `222 / normalized_entropy`. v4's typical
+    // peak `normalizedEntropy ≈ 0.2` gives bandpass ≈ 1110 Hz; allowing
+    // normalized_entropy to drop to SPREAD_MIN = 0.1 would give 2220 Hz —
+    // letting too many high frequencies through (Madison's manual-test
+    // feedback). Clamp at ENTROPY_FLOOR so the bandpass cutoff caps at v4's
+    // typical peak.
+    stats.normalized_entropy = stats.variance_length.max(ENTROPY_FLOOR);
 
     // normalized_average_vel follows average_vel directly.
     stats.normalized_average_vel = stats.average_vel;
 
-    // flat_ratio: aspect ratio of the cloud. v4 varies this with mouse motion
-    // direction; for a first cut we hold at 1.0 (circular cloud). Tune if
-    // manual sign-off shows the LFO frequency target sounds off.
-    stats.flat_ratio = 1.0;
+    // flat_ratio: drives the LFO oscillator rate via `lfo_rate_hz`. v4 sets
+    // this to the cloud's `varianceX / varianceY` (typically 1-3 Hz during
+    // sustained press, with brief excursions higher during horizontal mouse
+    // motion). Without per-particle state we approximate as a mild excitement
+    // sweep: 1 Hz at rest (slow LFO breathing), 3 Hz at peak press (moderate
+    // tremolo character) — keeps the LFO in v4's perceptual range.
+    stats.flat_ratio = FLAT_RATIO_BASELINE + excitement * (FLAT_RATIO_PEAK - FLAT_RATIO_BASELINE);
 }
 
 /// Linear interpolation. `t` is clamped to [0, 1] by the caller before this is
@@ -198,6 +217,25 @@ const SPREAD_BASELINE: f32 = 1.0;
 /// lowpass floor (`normalizedVarianceLength → ~0.1` at tightest clustering,
 /// noise filter cutoff → ~200 Hz).
 const SPREAD_MIN: f32 = 0.1;
+
+/// Lower clamp for `normalized_entropy`. The bandpass cutoff formula is
+/// `222 / normalized_entropy`, so this floor of 0.2 caps the cutoff at
+/// `222 / 0.2 = 1110 Hz`, matching v4's typical peak. Without the clamp,
+/// `normalized_entropy` could drop to [`SPREAD_MIN`] = 0.1 and push the
+/// bandpass to 2220 Hz — audibly too bright vs v4.
+const ENTROPY_FLOOR: f32 = 0.2;
+
+/// `flat_ratio` at rest (excitement = 0). v4's `flatRatio` is the cloud's
+/// `varianceX / varianceY`; at rest the synth is silent so the exact value
+/// doesn't audibly matter, but a low value here keeps the LFO rate in slow-
+/// breathing territory (1 Hz) for the moment volume crosses the silence
+/// threshold on press.
+const FLAT_RATIO_BASELINE: f32 = 1.0;
+
+/// `flat_ratio` at peak press (excitement = 1). Drives the LFO oscillator
+/// rate to 3 Hz — middle of v4's typical sustained-press range (1-3 Hz).
+/// Higher than this starts to sound like tremolo rather than a slow LFO.
+const FLAT_RATIO_PEAK: f32 = 3.0;
 
 #[cfg(test)]
 #[path = "particle_stats_tests.rs"]
