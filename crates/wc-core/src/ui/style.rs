@@ -40,11 +40,15 @@ pub struct OverlayStyle {
     pub button_size_fine: f32,
     /// Coarse-pointer button size `44×44` per `overlayButton.scss:23–24`.
     pub button_size_coarse: f32,
-    /// Dim chrome text colour, ≈ v4 `$gray3` / `$gray4`.
+    /// Dim chrome text colour, ≈ v4 `$gray3` / `$gray4`. Palette value for
+    /// callers that draw text labels; not applied to the global egui `Style`
+    /// (which uses `text_color_bright` via `override_text_color`).
     pub text_color_dim: egui::Color32,
     /// Bright chrome text colour (white labels, hover state).
     pub text_color_bright: egui::Color32,
-    /// Sketch-name font size in the picker tiles, derived from v4 Orbitron sizing.
+    /// Sketch-name font size in the picker tiles, derived from v4 Orbitron
+    /// sizing. Palette value applied by `picker.rs` (Task 16) when rendering
+    /// each sketch tile; not used by the global egui style.
     pub picker_tile_name_size: f32,
 }
 
@@ -142,6 +146,8 @@ pub(super) fn apply_overlay_style(
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, style.button_stroke);
     visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(style.button_corner_radius);
     visuals.widgets.active.weak_bg_fill = style.button_fill_hovered;
+    visuals.widgets.active.corner_radius = egui::CornerRadius::same(style.button_corner_radius);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, style.button_stroke);
     visuals.override_text_color = Some(style.text_color_bright);
 
     ctx.set_visuals(visuals);
