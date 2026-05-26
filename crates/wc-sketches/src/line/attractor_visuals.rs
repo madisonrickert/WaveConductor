@@ -2,7 +2,7 @@
 //!
 //! ## Role
 //!
-//! For each attractor with `power > 0`, spawn 10 concentric annulus mesh
+//! For each attractor with `power > 0`, spawn 10 concentric polygonal ring mesh
 //! entities. Per-frame rotate each ring (speed ∝ power, varies by ring
 //! index) and scale the group by `sqrt(power) / 5` — matching v4's
 //! `Attractor.animate()` in `src/particles/attractor.ts`.
@@ -63,10 +63,10 @@ pub const ATTRACTOR_RING_COLOR: Color = Color::srgb(0.77, 0.886, 0.8);
 /// `Attractor.RING_COUNT`.
 const NUM_RINGS: u32 = 10;
 
-/// Inner radius of the annulus mesh (world units, before per-ring scaling).
+/// Inner radius of the polygonal ring mesh (world units, before per-ring scaling).
 const RING_INNER_RADIUS: f32 = 15.0;
 
-/// Outer radius of the annulus mesh (world units, before per-ring scaling).
+/// Outer radius of the polygonal ring mesh (world units, before per-ring scaling).
 const RING_OUTER_RADIUS: f32 = 18.0;
 
 /// Group scale denominator: `scale = sqrt(power) / 5`. v4 parity.
@@ -323,6 +323,8 @@ mod tests {
             let outer_len = (outer[0] * outer[0] + outer[1] * outer[1]).sqrt();
             assert!((inner_len - 15.0).abs() < 1e-4);
             assert!((outer_len - 18.0).abs() < 1e-4);
+        } else {
+            panic!("position attribute must be Float32x3");
         }
     }
 }
