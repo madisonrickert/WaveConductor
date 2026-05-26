@@ -73,9 +73,12 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 # GPU struct alignment helpers (used by Line sketch particle/uniform buffers)
 bytemuck = { version = "1", features = ["derive"] }
 # Image decode (Plan 10 Phase A): Line sketch's heatmap-image spawn template
-# decodes a user-supplied PNG. Already a transitive dep via Bevy; declared
-# here so the heatmap module can depend on it directly.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# decodes a user-supplied image. Format support must match the extension list
+# in `LineSettings::spawn_template`'s `#[setting(extensions = […])]` (Plan 11
+# Phase C). The PNG decoder is also a transitive dep via Bevy; JPEG and WebP
+# are added explicitly so the file-picker's filter doesn't advertise formats
+# the decoder can't read.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Random sampling (Plan 10 Phase A): CDF inversion sampler for the heatmap
 # spawn. Already a transitive dep; declared here for a direct dependency edge.
 rand = "0.9"

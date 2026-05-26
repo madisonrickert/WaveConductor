@@ -25,12 +25,17 @@
 //!   `lfo_freq` parameter scaled by v4's `× 0.06`)
 //! - Cascaded through a second `bandpass` to deepen the resonance
 //! - Master `source_gain` (the `volume` parameter)
-//! - Final `limiter` to control peaks
+//! - Post-mix: two cascaded `highshelf` attenuators at `BASE × 4` (1280 Hz)
+//!   and `BASE × 8` (2560 Hz), each `-6 dB`, then a `limiter` for peak
+//!   protection. The highshelves match v4's `highAttenuation` +
+//!   `highAttenuation2` pair (added in Plan 11 Phase F after Madison's
+//!   manual-test feedback that v5 had more high-frequency content than v4).
 //!
-//! Deferred to Phase B/C/D: the chord stack (`makeChordSource`), the second
-//! `highshelf` attenuation pair, the dynamics-compressor knee/ratio match,
-//! and the background-mp3 mixer. The shape is faithful to v4's spine; the
-//! reactivity coupling lands in Phase D.
+//! Deferred: the chord stack (`makeChordSource`), the dynamics-compressor
+//! knee/ratio match (fundsp doesn't ship a direct equivalent to Web Audio's
+//! `DynamicsCompressorNode`; the `limiter` approximates the protective role),
+//! and the background-mp3 mixer (which lives at host level in `DspHost`,
+//! Plan 9 Phase B). The shape is faithful to v4's spine.
 //!
 //! ## Parameter contract
 //!
@@ -97,6 +102,23 @@ const MIN_FILTER_HZ: f32 = 1.0;
 /// Smoothing time constant (seconds) for parameter changes. v4 uses 16 ms via
 /// `setTargetAtTime`; we match.
 const PARAM_SMOOTHING_S: f32 = 0.016;
+
+/// v4 oscillator base frequency. Used to position the two post-mix highshelf
+/// attenuators at `BASE × 4 = 1280 Hz` and `BASE × 8 = 2560 Hz`. v4:
+/// `const BASE_FREQUENCY = 320` in `audio.ts`.
+const BASE_FREQUENCY_HZ: f32 = 320.0;
+
+/// Highshelf attenuation in dB, applied twice in v4's post-mix chain
+/// (`highAttenuation` + `highAttenuation2`). Each stage cuts frequencies
+/// above its corner by 6 dB; cascaded they produce ~12 dB attenuation above
+/// the second corner (2560 Hz). Without these, v5 has noticeably more
+/// high-frequency content than v4 — Madison's manual-test feedback.
+const HIGHSHELF_ATTENUATION_DB: f32 = -6.0;
+
+/// Q (resonance) for the highshelf attenuators. v4 doesn't set a Q value
+/// explicitly, falling back to Web Audio's default of 1.0 (≈ no resonance,
+/// gentle shelf slope). fundsp's `highshelf_hz` takes a Q parameter.
+const HIGHSHELF_Q: f32 = 1.0;
 
 /// Voice graph for the Line sketch.
 ///
@@ -210,14 +232,38 @@ impl LineSynth {
         let bp1 = (voice | bp_cutoff | dc(BANDPASS_Q)) >> bandpass::<f64>();
         let bp2 = (bp1 | bp_cutoff2 | dc(BANDPASS_Q)) >> bandpass::<f64>();
 
-        // ----- Mix + limiter -----
+        // ----- Mix + post-process -----
         //
-        // v4 sums noise and `filterGain · bp2` (filterGain = 0.4). The
-        // dynamics-compressor stage and the two highshelf attenuators are
-        // deferred to Phase D where parity tuning happens; for Phase A we
-        // run a `limiter` to keep peaks in check during real-mode bring-up.
+        // v4 sums noise and `filterGain · bp2` (filterGain = 0.4), then
+        // routes through:
+        //   compressor (threshold=-50, knee=12, ratio=2)
+        //     → highshelf at BASE×4 (1280 Hz), -6 dB
+        //     → highshelf at BASE×8 (2560 Hz), -6 dB
+        //     → output.
+        //
+        // The two highshelves cumulatively cut content above 2560 Hz by
+        // ~12 dB — a defining tonal feature of v4's sound. Without them,
+        // v5 was noticeably brighter / had more high-frequency content
+        // (Madison's manual-test feedback). The `limiter` stays as the
+        // final peak guard (fundsp doesn't ship a direct equivalent to
+        // Web Audio's DynamicsCompressorNode; the limiter approximates
+        // the protective role of v4's compressor at slightly different
+        // dynamics. If sign-off shows the dynamics differ audibly, swap
+        // for a custom compressor in a follow-up).
         let mix = noise_voice + bp2 * 0.4;
-        let post = mix >> limiter(0.005, 0.100);
+        // `highshelf_hz::<f64>` takes f64 arguments. Our highshelf consts
+        // are stored as `f32` to match the rest of the audio module; convert
+        // at the call site via `f64::from` (lossless from f32 to f64).
+        let post =
+            mix >> highshelf_hz::<f64>(
+                f64::from(BASE_FREQUENCY_HZ) * 4.0,
+                f64::from(HIGHSHELF_Q),
+                db_amp(f64::from(HIGHSHELF_ATTENUATION_DB)),
+            ) >> highshelf_hz::<f64>(
+                f64::from(BASE_FREQUENCY_HZ) * 8.0,
+                f64::from(HIGHSHELF_Q),
+                db_amp(f64::from(HIGHSHELF_ATTENUATION_DB)),
+            ) >> limiter(0.005, 0.100);
 
         // Build the boxed graph at the configured sample rate. `allocate`
         // pre-sizes any internal buffers so the first `tick` is hitch-free.
