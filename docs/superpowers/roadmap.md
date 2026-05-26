@@ -145,13 +145,38 @@ Per spec §8 the v4 deck contains five sketches. Plans 12+ port them. Order is p
 
 | Sketch | Parity target | Notes |
 | ------ | ------------- | ----- |
-| Line | Perceptual | Plans 7–10. |
-| Flame | Perceptual | IFS fractal; recognizability matters, chaotic detail can drift. Similar render-graph shape to Line — leverages Plans 7–9 plumbing. |
-| Dots | Perceptual | Particle character matters; shares most infrastructure with Line. Likely the lightest sketch port. |
-| Cymatics | Physics-matched | 2025-era human-authored sketch. The visual *is* the simulation; numerical drift = wrong sketch. Likely the hardest port. |
-| Waves | Perceptual | Audio-reactive with FFT bin response. Requires microphone capture + rustfft path that Plan 4 explicitly deferred. |
+| Line | Perceptual | Plans 7–11. |
+| Flame | Perceptual | IFS fractal; recognizability matters, chaotic detail can drift. CPU-bound (tree structure doesn't parallelize to GPU); audio coupling stays where v4 has it (visitor stats during the same per-frame CPU traversal). No GPU↔CPU sync concern. |
+| Dots | Perceptual | Particle character matters; shares most infrastructure with Line. **Keep particles on CPU** (matches v4); if particle counts ever demand GPU, port the audio coupling to the approximated-envelope pattern from Plan 11 Phase F. |
+| Cymatics | Physics-matched | 2025-era human-authored sketch. The visual *is* the simulation; numerical drift = wrong sketch. GPU compute (ping-pong wave PDE) — and v4's audio coupling already reads CPU-side input scalars (`activeRadius`, `numCycles`, `centerSpeed`, `slowDownAmount`), never GPU state. This is the architectural reference for the universal pattern below. |
+| Waves | Perceptual | Audio→visual coupling (FFT of microphone). Requires microphone capture + rustfft path that Plan 4 explicitly deferred. Visuals are a closed-form CPU heightmap; no GPU compute needed. |
 
-Each sketch ships its own `PARITY.md` and absorbs whatever carry-forwards have accumulated. Audio coupling generalizes after Plan 9; the synthesis registration shape established for Line should serve Waves and Cymatics with sketch-specific synth defs only.
+Each sketch ships its own `PARITY.md` and absorbs whatever carry-forwards have accumulated.
+
+### Universal audio-coupling pattern (codified during Plan 11 Phase F)
+
+**Audio derives from CPU-side simulation *inputs*, never from GPU-side simulation *outputs*.**
+
+The pattern surfaced when Line's Plan 7 GPU-compute pipeline created a CPU↔GPU sync problem: the audio coupling needed per-frame particle statistics, but the authoritative particle state lived on the GPU. Plans 7–10 worked around it with a `LineCpuMirror` running parallel physics on the host. Plan 11 Phase F replaced that mirror with smoothed CPU envelopes driven by `MouseAttractorState` events — the audio coupling now reads attractor power directly, not the per-particle reduction, at ~1µs/frame instead of ~50µs.
+
+The architectural insight: v4's Cymatics sketch already does this naturally. Its GPU compute simulation is driven by CPU-side parameters (`activeRadius`, `numCycles`, etc.); the audio reads those same parameters. The GPU is never read back. **Cymatics is the reference; Line's Phase F brings it into the same shape.**
+
+Apply to future sketches:
+
+- **Identify the CPU-side inputs that drive the simulation** (mouse position, attractor power, time-since-event, mode/setting changes, etc.).
+- **Derive audio control signals from those inputs**, not from per-particle / per-cell statistics computed off GPU state.
+- **Use smoothed envelopes** (attack/release on rising/falling edges of input events) to produce the right *perceptual shape* — rising on activity, plateauing during sustained input, decaying after release. Tune the constants against v4 perceptually; document them as named consts with rustdoc.
+- **Approved deviation**: audio output won't be mathematically equivalent to v4 frame-by-frame, but IS perceptually equivalent. Document in `PARITY.md` per sketch.
+
+Implications per sketch:
+
+- **Flame**: no change needed — visitor stats are already CPU-side, IFS is CPU-bound, no GPU coupling.
+- **Dots**: simplest path is to keep particles on CPU (v4-faithful, no mirror, no envelope work). Only fall back to envelope approximation if particle counts force a GPU port.
+- **Cymatics**: copy v4's pattern directly. CPU drives the inputs that feed the GPU compute; audio reads from those same CPU inputs.
+- **Waves**: audio is INPUT (microphone FFT), not output. Visuals derive from CPU heightmap. No coupling concern.
+- **Future post-v4 sketches**: design with this pattern from day one. If you need a per-particle reduction for audio, that's a smell — derive from inputs instead.
+
+The synthesis registration shape established for Line (`AudioCommand::AddLineSynth` / `RemoveLineSynth` + per-synth-param messages over a lock-free ring) is the right pattern; future sketches add their own `Add<Sketch>Synth` variants with sketch-specific param keys.
 
 ## Pre-release tier
 
