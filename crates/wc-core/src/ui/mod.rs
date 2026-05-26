@@ -21,6 +21,7 @@
 use bevy::prelude::*;
 
 pub mod auto_fade;
+pub mod blur;
 pub mod style;
 
 /// Umbrella plugin for the overlay UI surface.
@@ -28,6 +29,10 @@ pub struct WaveConductorUiPlugin;
 
 impl Plugin for WaveConductorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((style::OverlayStylePlugin, auto_fade::AutoFadePlugin));
+        app.add_plugins((
+            style::OverlayStylePlugin,
+            blur::BackdropBlurPlugin,
+            auto_fade::AutoFadePlugin,
+        ));
     }
 }
