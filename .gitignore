@@ -41,3 +41,8 @@ Thumbs.db
 .claude/
 .agents/
 skills-lock.json
+
+# Sibling worktrees (e.g., `.worktrees/v4` for the v4 reference during the
+# Plan 11 manual parity sign-off). Created via `git worktree add`; never
+# committed to the rewrite/bevy branch.
+/.worktrees/
