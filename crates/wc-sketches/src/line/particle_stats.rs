@@ -40,7 +40,7 @@
 
 use bevy::prelude::*;
 
-use super::systems::mouse::{MouseAttractorState, MOUSE_POWER_PRESS};
+use super::systems::mouse::{MouseAttractorState, MOUSE_POWER_FLOOR};
 
 /// Statistics over the current particle population.
 ///
@@ -91,7 +91,15 @@ pub fn update_particle_stats(
     let dt = time.delta_secs();
 
     // Normalised attractor activity in [0, 1]. Drives all downstream envelopes.
-    let excitement = (mouse.power / MOUSE_POWER_PRESS).clamp(0.0, 1.0);
+    //
+    // Divide by `MOUSE_POWER_FLOOR` (not `MOUSE_POWER_PRESS`) so excitement
+    // stays at 1.0 throughout the held period. `decay_mouse_attractor` brings
+    // power asymptotically to the floor; with this normalisation, anything
+    // power ≥ floor clamps to excitement = 1.0, matching v4 where
+    // groupedUpness stays elevated during sustained press (particles keep
+    // orbiting the attractor). Power == 0 (explicit release) is the only
+    // way excitement reaches 0.
+    let excitement = (mouse.power / MOUSE_POWER_FLOOR).clamp(0.0, 1.0);
 
     // average_vel: snaps up on press, decays slowly. Asymmetric attack/release
     // matches v4's behavior where particles accelerate fast (forces are strong

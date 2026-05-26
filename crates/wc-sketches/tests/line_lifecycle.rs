@@ -340,19 +340,22 @@ fn enter_line(app: &mut App) {
 /// values. Tuning constants in `particle_stats.rs` can change without failing
 /// this test as long as the monotonic shape is preserved.
 ///
-/// Uses [`MouseAttractorState`] injection to hold attractor power at maximum
-/// for the press phase, bypassing `decay_mouse_attractor`'s geometric decay.
-/// This isolates the envelope-shape behavior from v4's power-decay constants.
 /// Sets `TimeUpdateStrategy::ManualDuration(16ms)` so `Time::delta_secs()` is
 /// non-zero; without this, Bevy's virtual time in `MinimalPlugins` is 0 each
 /// frame and the envelope lerp factor is `(rate * 0.0) = 0`, producing no
 /// movement.
+///
+/// Uses the natural press flow (`press_left` then `release_left`). After
+/// Phase F's tuning fix (normalise excitement by `MOUSE_POWER_FLOOR` not
+/// `MOUSE_POWER_PRESS`), the geometric decay of power toward floor=2 keeps
+/// excitement clamped at 1.0 throughout the held period — matching v4 where
+/// `groupedUpness` stays elevated during sustained press.
 #[test]
 fn particle_stats_rise_on_press_and_decay_on_release() {
     use std::time::Duration;
 
     use bevy::time::TimeUpdateStrategy;
-    use wc_sketches::line::systems::MouseAttractorState;
+    use common::input::{press_left, release_left};
 
     let mut app = sketches_test_app();
     // Configure 16 ms per frame so `Time::delta_secs()` is non-zero in tests.
@@ -370,25 +373,24 @@ fn particle_stats_rise_on_press_and_decay_on_release() {
         "expected near-zero grouped_upness at rest; got {initial_grouped}",
     );
 
-    // Hold attractor power at the production press level for ~1 second (60
-    // frames at 16 ms/frame ≈ 60 Hz). Re-injecting each frame keeps the power
-    // from decaying toward the floor between updates, so the envelope sees
-    // full excitement.
+    // Natural press + hold: power asymptotes toward floor=2 over ~1s but
+    // excitement = power / floor clamps to 1.0 throughout. Envelope rises to
+    // peak.
     move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
     app.update(); // fold CursorMoved into PointerState
+    press_left(&mut app);
 
     for _ in 0..60 {
-        app.world_mut().resource_mut::<MouseAttractorState>().power = MOUSE_POWER_PRESS;
         app.update();
     }
     let peak_grouped = app.world().resource::<ParticleStats>().grouped_upness;
     assert!(
         peak_grouped > 0.3,
-        "expected grouped_upness > 0.3 after 1s at max power; got {peak_grouped}",
+        "expected grouped_upness > 0.3 after 1s sustained press; got {peak_grouped}",
     );
 
-    // Release (zero power) and let ~1 second of decay run.
-    app.world_mut().resource_mut::<MouseAttractorState>().power = 0.0;
+    // Release: power = 0 immediately (Phase E behavior). Envelope decays.
+    release_left(&mut app);
     for _ in 0..60 {
         app.update();
     }
