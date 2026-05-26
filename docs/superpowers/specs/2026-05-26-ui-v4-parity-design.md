@@ -47,6 +47,12 @@ crates/wc-core/src/ui/
 ├── picker.rs           # Sketch picker page (AppState::Home rendering)
 └── frame.rs            # backdrop_blur_frame() helper — wraps any panel
 
+crates/wc-core/src/sketch/
+├── mod.rs              # (existing) cross-sketch helpers
+├── cleanup.rs          # (existing) despawn_with::<Root>
+├── scheduling.rs       # (existing) sketch_active() run condition
+└── manifest.rs         # NEW: SketchManifest registry — picker tile metadata
+
 assets/shaders/backdrop_blur/
 ├── downsample.wgsl     # Kawase 5-tap downsample pass
 └── upsample.wgsl       # Kawase 8-tap upsample + composite pass
@@ -236,27 +242,97 @@ pub struct OverlayUiSettings {
 
 Defaults: 30.0, 0.6, true. All three fields registered via the `#[setting(...)]` derive macro as `category = Dev` so they show up in the dev panel for runtime tuning.
 
+## Sketch manifest registry (`wc-core/src/sketch/manifest.rs`)
+
+The picker needs per-sketch display metadata — name, screenshot, availability. Hardcoding the full table in `picker.rs` would couple the picker to every sketch in `AppState`, defeating the isolation the rest of the codebase preserves (each sketch's plugin currently has zero references to any other sketch). The settings system already solves the same problem with a registry — `register_sketch_settings::<LineSettings>()`. The picker uses the same pattern.
+
+**Types:**
+
+```rust
+/// Picker tile metadata for one sketch. Registered by each sketch's plugin
+/// at startup so the picker can render tiles without naming any specific
+/// sketch.
+#[derive(Clone)]
+pub struct SketchManifestEntry {
+    pub state: AppState,                  // which AppState the tile launches
+    pub display_name: &'static str,       // e.g. "Line", "Cymatics"
+    pub screenshot: Handle<Image>,        // tile background
+}
+
+#[derive(Resource, Default)]
+pub struct SketchManifest {
+    entries: Vec<SketchManifestEntry>,
+}
+
+impl SketchManifest {
+    pub fn get(&self, state: AppState) -> Option<&SketchManifestEntry>;
+}
+
+/// Extension trait — sketches call `app.register_sketch_manifest(...)` at
+/// startup. Mirrors `register_sketch_settings` in `wc-core/src/settings/`.
+pub trait RegisterSketchManifestExt {
+    fn register_sketch_manifest(&mut self, entry: SketchManifestEntry) -> &mut Self;
+}
+
+impl RegisterSketchManifestExt for App { /* push to SketchManifest */ }
+```
+
+**Per-sketch wiring** — LinePlugin gains one line in its `build()`:
+
+```rust
+let screenshot = asset_server.load("sketches/line/screenshot.png");
+app.register_sketch_manifest(SketchManifestEntry {
+    state: AppState::Line,
+    display_name: "Line",
+    screenshot,
+});
+```
+
+That's the entire coupling between Line and the picker. Future sketches (Flame, Dots, Cymatics, Waves in Plan 12+) each add their own one-liner when their plugin lands. Until then, those `AppState` variants stay unregistered and the picker renders them as placeholders automatically.
+
+**Screenshot asset:** Line's screenshot lives at `assets/sketches/line/screenshot.png` — porting `screenshot.png` from the repo root as part of this sprint (the repo-root file gets removed once the asset is in place).
+
 ## SketchPickerPlugin (picker.rs)
 
 Draws during `EguiPrimaryContextPass` gated on `AppState::Home`. Renders a `egui::CentralPanel` with `Color32::from_rgb(16, 22, 26)` background (v4's `#10161A`) and a 3×2 `egui::Grid` of sketch tiles.
 
-Tiles:
+**Tile generation** — pure iteration over `AppState::SKETCH_ORDER`, looking up entries in `SketchManifest`:
 
-| Cell | Sketch | Image source | Click action |
-|---|---|---|---|
-| (0,0) | Line | `assets/sketches/line/screenshot.png` | `NextState<AppState>::set(Line)` |
-| (1,0) | Flame | placeholder | disabled |
-| (2,0) | Dots | placeholder | disabled |
-| (0,1) | Cymatics | placeholder | disabled |
-| (1,1) | Waves | placeholder | disabled |
-| (2,1) | (empty) | — | — |
+```rust
+for (cell_idx, &state) in AppState::SKETCH_ORDER.iter().enumerate() {
+    match manifest.get(state) {
+        Some(entry) => render_active_tile(ui, entry),       // screenshot + sheen + clickable
+        None        => render_placeholder_tile(ui, state),  // "Coming soon"
+    }
+    if cell_idx % 3 == 2 { ui.end_row(); }
+}
+// 6th cell stays empty (SKETCH_ORDER has 5 entries; grid has 6 cells).
+```
 
-Each tile is a `sketch_tile(ui, name, image, available) -> Response` widget:
+`render_placeholder_tile` uses the variant's `Debug` name (`format!("{state:?}")` → `"Flame"` etc.) as the displayed sketch name. No string table in the picker, no per-sketch knowledge.
 
-- Allocates a rect at the cell's grid size (computed as `window_size / Vec2::new(3.0, 2.0)`).
-- Paints the screenshot via `ui.painter().image(texture_id, rect, uv, Color32::WHITE)` (`Handle<Image>` → `EguiUserTextures` → `TextureId`). Placeholders paint `Color32::from_rgb(20, 26, 32)` solid fill.
-- Paints the sketch name in Orbitron at the bottom-left in `RichText::new(name).size(40.0)`, with v4's gradient-fade overlay: a `Mesh` of two vertex-colored triangles forming a vertical gradient from `Color32::from_black_alpha(165)` at the bottom to `Color32::TRANSPARENT` at the top, drawn over the bottom 30% of the tile.
-- **Sheen-on-hover:** a diagonal gradient sweep from off-screen-left to off-screen-right, 0.5s duration. Driven by `let t = ctx.animate_bool_with_time(tile_id, hovered, 0.5)` returning a progress `t ∈ [0,1]`; the sheen's center X interpolates from `-tile_width` to `2 × tile_width`. Painted as a 4-vertex `Mesh` with gradient stops `rgba(255,255,255,0.13)` → `rgba(255,255,255,0.5)` → `rgba(255,255,255,0)` from `homePage.scss:155–164`. Click is rejected (no `Sense::click()`) when `available == false`.
+**Adding a new sketch in Plan 12+ requires zero changes to `picker.rs`** — registering the manifest entry in the new sketch's plugin is sufficient.
+
+Both `render_active_tile` and `render_placeholder_tile` share a common widget signature:
+
+```rust
+fn render_active_tile(ui: &mut Ui, entry: &SketchManifestEntry) -> Response;
+fn render_placeholder_tile(ui: &mut Ui, state: AppState) -> Response;
+```
+
+Active tile behavior:
+
+- Allocates a rect at the cell's grid size (`window_size / Vec2::new(3.0, 2.0)`).
+- Paints `entry.screenshot` via `ui.painter().image(texture_id, rect, uv, Color32::WHITE)` (`Handle<Image>` → `EguiUserTextures` → `TextureId`).
+- Paints `entry.display_name` in Orbitron at the bottom-left in `RichText::new(...).size(40.0)`, with v4's gradient-fade overlay: a `Mesh` of two vertex-colored triangles forming a vertical gradient from `Color32::from_black_alpha(165)` at the bottom to `Color32::TRANSPARENT` at the top, drawn over the bottom 30% of the tile.
+- **Sheen-on-hover:** a diagonal gradient sweep from off-screen-left to off-screen-right, 0.5s duration. Driven by `let t = ctx.animate_bool_with_time(tile_id, hovered, 0.5)` returning a progress `t ∈ [0,1]`; the sheen's center X interpolates from `-tile_width` to `2 × tile_width`. Painted as a 4-vertex `Mesh` with gradient stops `rgba(255,255,255,0.13)` → `rgba(255,255,255,0.5)` → `rgba(255,255,255,0)` from `homePage.scss:155–164`.
+- Allocates with `Sense::click()`; on click sets `NextState<AppState>::set(entry.state)`.
+
+Placeholder tile behavior:
+
+- Paints `Color32::from_rgb(20, 26, 32)` solid fill.
+- Paints the sketch name in Orbitron (derived from `format!("{state:?}")`) and a smaller subtitle "Coming soon" in `OverlayStyle::text_color_dim`.
+- No sheen, no `Sense::click()` — the tile is inert.
 
 Responsive layout: kiosk fixed at 1920×1080 — single layout, no breakpoints. Documented as out of scope.
 
@@ -316,8 +392,15 @@ EguiPass ── each frame ──► BackdropBlurPaintCallback.render()
                           ViewTarget composite (final framebuffer)
 
 
-AppState::Home ──► SketchPickerPlugin draws grid
-                       ──► Click on tile ──► NextState<AppState>::set(target)
+AppState::Home ──► SketchPickerPlugin iterates AppState::SKETCH_ORDER
+                       ──► Looks up each state in SketchManifest resource
+                              ──► Some(entry) ──► render_active_tile (clickable)
+                              ──► None        ──► render_placeholder_tile (inert)
+                       ──► Click on active tile ──► NextState<AppState>::set(entry.state)
+
+Each sketch plugin at startup:
+    app.register_sketch_manifest(SketchManifestEntry { state, display_name, screenshot })
+        ──► SketchManifest.entries (consumed by picker; no cross-sketch coupling)
 
 Settings cog click ──► toggle SettingsPanelVisible
                             ──► panel_user draws frame next pass
@@ -336,6 +419,8 @@ Shift+D ──► toggle DevPanelVisible (existing)
 - `SettingsButton` click flips `SettingsPanelVisible`.
 - Click-outside detection: pointer-down outside `LastSettingsPanelRect` → `SettingsPanelVisible = false`; inside → unchanged.
 - Sketch picker Line-tile click transitions `AppState::Home → AppState::Line`.
+- `SketchManifest::get(state)` returns `Some(entry)` for a registered sketch and `None` for an unregistered one. `register_sketch_manifest` appends to the entry list.
+- Picker iteration over `AppState::SKETCH_ORDER` with a manifest containing only `AppState::Line` produces 1 active tile + 4 placeholder tiles, in `SKETCH_ORDER` order.
 - `PointerCoarse(true)` after a `TouchInput::Started` event; back to `false` after 1s with no touch events.
 
 All use `MinimalPlugins` test apps, no egui context required.
