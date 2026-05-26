@@ -15,18 +15,16 @@ use common::{arm_idle_timeline, sketches_test_app};
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
-use wc_sketches::line::systems::{MOUSE_POWER_DECAY, MOUSE_POWER_FLOOR};
+use wc_sketches::line::systems::{MOUSE_POWER_DECAY, MOUSE_POWER_FLOOR, MOUSE_POWER_PRESS};
 use wc_sketches::line::{settings::LineSettings, LineRoot};
-
-/// Initial seeded power for the gravity-scaling lifecycle test.
-const SEEDED_MOUSE_POWER: f32 = 10.0;
 
 /// Expected post-decay power after one tick of `decay_mouse_attractor`:
 /// `floor + (power - floor) * decay`. Derived from the same v4 constants the
 /// production decay system uses, so the test follows tuning changes
-/// automatically.
+/// automatically. Seeded from the production `MOUSE_POWER_PRESS` (the value
+/// `update_mouse_attractor` would set on `just_pressed`).
 const EXPECTED_POST_DECAY_POWER: f32 =
-    MOUSE_POWER_FLOOR + (SEEDED_MOUSE_POWER - MOUSE_POWER_FLOOR) * MOUSE_POWER_DECAY;
+    MOUSE_POWER_FLOOR + (MOUSE_POWER_PRESS - MOUSE_POWER_FLOOR) * MOUSE_POWER_DECAY;
 
 #[test]
 fn line_settings_resource_inserted() {
@@ -235,11 +233,11 @@ fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
     app.update();
     app.update();
 
-    // Seed an active mouse attractor at (5, 5) with the test-fixed starting
-    // power. `EXPECTED_POST_DECAY_POWER` (module scope) computes the post-tick
-    // value from the same v4 constants the production code uses.
+    // Seed an active mouse attractor at (5, 5) with the production initial
+    // press power. `EXPECTED_POST_DECAY_POWER` (module scope) computes the
+    // post-tick value from the same v4 constants the production code uses.
     app.world_mut().insert_resource(MouseAttractorState {
-        power: SEEDED_MOUSE_POWER,
+        power: MOUSE_POWER_PRESS,
         position: [5.0, 5.0],
     });
 

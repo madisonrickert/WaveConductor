@@ -13,9 +13,10 @@
 //! [`LinePostParams`] is populated each frame on the main thread by
 //! [`crate::line::systems::update_sim_params`] (which also writes the compute
 //! sim params). [`ExtractResourcePlugin`] mirrors it into the render world.
-//! On each frame the node uploads the latest snapshot into a freshly
-//! allocated uniform buffer — the buffer is small (32 bytes) and the cost is
-//! bounded, matching the pattern Bevy's own post-process examples use.
+//! A persistent uniform buffer is allocated once in
+//! [`PostProcessPipeline::from_world`]; each frame the node uploads the
+//! latest snapshot via `queue.write_buffer` — no per-frame GPU allocation.
+//! Mirrors the [`crate::line::compute`] sim-params-buffer pattern.
 //!
 //! ## Shader
 //!
@@ -41,13 +42,13 @@ use bevy::render::render_graph::{
 };
 use bevy::render::render_resource::{
     binding_types::{sampler, texture_2d, uniform_buffer_sized},
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BufferInitDescriptor,
+    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferDescriptor,
     BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, LoadOp,
     MultisampleState, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
     RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
     ShaderStages, StoreOp, TextureFormat, TextureSampleType, VertexState,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::view::ViewTarget;
 use bevy::render::RenderApp;
 use bevy::shader::Shader;
@@ -73,6 +74,12 @@ pub struct LinePostParams {
     pub i_global_time: f32,
     /// Gravity constant `G` used by the smear ray-march. Plan 9 will modulate
     /// this with audio + a triangle wave; Phase C ships a constant placeholder.
+    ///
+    /// Default is `0.0` so the post-process is visually no-op outside
+    /// `AppState::Line`. `update_sim_params` (gated by `sketch_active(Line)`)
+    /// writes a non-zero value each frame in Line; `remove_sim_params` resets
+    /// to default on `OnExit(Line)` so the next state doesn't inherit the
+    /// last in-Line value.
     pub g_constant: f32,
     /// Per-channel gamma curve applied as the final step of the post-process.
     pub gamma: f32,
@@ -144,6 +151,14 @@ pub struct PostProcessPipeline {
     pub sampler: Sampler,
     /// Handle into Bevy's `PipelineCache` for the gravity-smear render pipeline.
     pub pipeline_id: CachedRenderPipelineId,
+    /// Persistent uniform buffer for [`LinePostParams`].
+    ///
+    /// Allocated once with `UNIFORM | COPY_DST` and updated each frame via
+    /// `queue.write_buffer` in [`LinePostProcessNode::run`] — avoids a GPU
+    /// buffer allocation every frame that `create_buffer_with_data` would
+    /// incur. Mirrors `LinePipeline::sim_params_buffer` in
+    /// [`crate::line::compute`].
+    pub post_params_buffer: Buffer,
 }
 
 impl FromWorld for PostProcessPipeline {
@@ -166,6 +181,15 @@ impl FromWorld for PostProcessPipeline {
             BindGroupLayoutDescriptor::new("line_post_layout", &entries);
 
         let sampler = render_device.create_sampler(&SamplerDescriptor::default());
+
+        // Allocate the post-params uniform buffer once. Each frame the node
+        // uploads new data via `queue.write_buffer` — no per-frame allocation.
+        let post_params_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("line_post_params"),
+            size: std::mem::size_of::<LinePostParams>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let shader: Handle<Shader> = world
             .resource::<AssetServer>()
@@ -204,6 +228,7 @@ impl FromWorld for PostProcessPipeline {
             bind_group_layout_descriptor,
             sampler,
             pipeline_id,
+            post_params_buffer,
         }
     }
 }
@@ -212,8 +237,9 @@ impl FromWorld for PostProcessPipeline {
 ///
 /// Runs after [`Node2d::MainTransparentPass`] (so the scene texture contains
 /// the rendered particles + attractor rings) and before [`Node2d::EndMainPass`].
-/// Builds a fresh uniform buffer + bind group each frame, then issues a
-/// 3-vertex fullscreen-triangle draw.
+/// Uploads [`LinePostParams`] into the persistent uniform buffer on
+/// [`PostProcessPipeline`] via `queue.write_buffer`, builds a fresh bind
+/// group, then issues a 3-vertex fullscreen-triangle draw.
 #[derive(Default)]
 pub struct LinePostProcessNode;
 
@@ -244,15 +270,16 @@ impl ViewNode for LinePostProcessNode {
             return Ok(());
         };
 
-        // Upload uniforms into a fresh buffer each frame. 32 bytes; cheap.
-        let uniform_buf =
-            render_context
-                .render_device()
-                .create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some("line_post_params"),
-                    contents: bytemuck::bytes_of(post_params),
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                });
+        // Upload current LinePostParams into the persistent uniform buffer.
+        // `write_buffer` is a staged copy — no allocation after init.
+        // `RenderQueue` is fetched from the render world (Bevy 0.18 does not
+        // expose a `render_queue()` accessor on `RenderContext`).
+        let render_queue = world.resource::<RenderQueue>();
+        render_queue.0.write_buffer(
+            &pipeline_res.post_params_buffer,
+            0,
+            bytemuck::bytes_of(post_params),
+        );
 
         let post_process_write = view_target.post_process_write();
         let source = post_process_write.source;
@@ -265,7 +292,7 @@ impl ViewNode for LinePostProcessNode {
             "line_post_bind_group",
             &layout,
             &BindGroupEntries::sequential((
-                uniform_buf.as_entire_binding(),
+                pipeline_res.post_params_buffer.as_entire_binding(),
                 source,
                 &pipeline_res.sampler,
             )),

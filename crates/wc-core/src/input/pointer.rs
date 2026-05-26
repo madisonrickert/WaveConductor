@@ -63,6 +63,8 @@ pub fn pointer_merge_system(
     // Drain pending CursorMoved messages once, up front — even if a hand
     // source ends up winning the merge below. Leaving them in the channel
     // would accumulate stale positions for the next tick.
+    // Newest wins; we discard intermediate positions intentionally — we want
+    // pointer position, not motion path.
     let cursor_msg_position: Option<Vec2> = cursor_moved_reader.read().last().map(|c| c.position);
 
     // Hand wins if any hand is present. Use the right-hand index-finger tip

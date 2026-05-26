@@ -51,7 +51,11 @@ const WORKGROUP_SIZE: u32 = 64;
 /// `SimParams` is non-zero-sized by definition (it has fields). The `panic!`
 /// branch is inside a `const` expression, so any future change that made it
 /// zero-sized would fail at compile time rather than at runtime.
-const SIM_PARAMS_SIZE: NonZeroU64 = match NonZeroU64::new(std::mem::size_of::<SimParams>() as u64) {
+const SIM_PARAMS_SIZE: NonZeroU64 = match NonZeroU64::new(
+    // const usize→u64 cast — u64::try_from(usize) isn't const-stable.
+    // size_of fits in u64 on all supported targets.
+    std::mem::size_of::<SimParams>() as u64,
+) {
     Some(n) => n,
     None => panic!("SimParams must be non-zero-sized"),
 };

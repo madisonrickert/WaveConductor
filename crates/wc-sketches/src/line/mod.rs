@@ -96,9 +96,17 @@ impl Plugin for LinePlugin {
 /// clone is freed and the GPU storage buffer's ref-count reaches zero,
 /// releasing VRAM on each Enter/Exit cycle. Also drops the CPU mirror so its
 /// per-particle `Vec` is freed and re-seeded fresh by the next `spawn_line`.
+///
+/// Resets [`post_process::LinePostParams`] to its `Default` (which has
+/// `g_constant = 0.0`) so the gravity-smear post-process is visually no-op
+/// outside `AppState::Line`. The `update_sim_params` system that writes the
+/// real per-frame uniform is gated by `sketch_active(AppState::Line)`, so
+/// without this reset the resource would retain its last in-Line value and
+/// the post-process would keep applying smear after leaving Line.
 fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<compute::LineSimParams>();
     commands.remove_resource::<sim_cpu::LineCpuMirror>();
+    commands.insert_resource(post_process::LinePostParams::default());
 }
 
 /// Listens for `SketchRestart { storage_key == LineSettings::STORAGE_KEY }`
