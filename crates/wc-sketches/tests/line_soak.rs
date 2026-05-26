@@ -143,3 +143,99 @@ fn line_soak_8h() {
     let elapsed = start.elapsed();
     tracing::info!(?elapsed, updates = SOAK_UPDATES, "Line soak complete");
 }
+
+/// Variant of [`line_soak_8h`] that adds [`wc_core::ui::WaveConductorUiPlugin`]
+/// and drives a 60-simulated-second opacity toggle cycle throughout the run.
+///
+/// This exercises the `AutoFadePlugin` / `UiOpacity` code paths over the same
+/// ~1.7 M updates as the baseline soak, toggling `UiOpacity::current` between
+/// 1.0 (visible) and 0.0 (hidden) every 3600 ticks (≈ 60 seconds at 60 fps).
+/// The BackdropBlurPlugin, OverlayButtonsPlugin, and SketchPickerPlugin all
+/// run under `MinimalPlugins` (no RenderApp), so the GPU-side paths are not
+/// exercised — the goal is CPU/schedule stability across enable/disable cycles.
+///
+/// ## Running the soak
+///
+/// ```text
+/// cargo test --release -p wc-sketches --test line_soak -- --ignored line_soak_with_overlay_ui
+/// ```
+#[test]
+#[ignore = "8-hour soak; run via cargo test --release --ignored line_soak_with_overlay_ui"]
+fn line_soak_with_overlay_ui() {
+    use wc_core::ui::auto_fade::UiOpacity;
+    use wc_core::ui::WaveConductorUiPlugin;
+
+    /// Ticks per opacity-toggle cycle. 3 600 = 60 seconds × 60 fps.
+    const OPACITY_CYCLE_TICKS: usize = 60 * 60;
+
+    let mut app = sketches_test_app();
+    app.add_plugins(WaveConductorUiPlugin);
+    app.update();
+
+    // Enter Line via Digit1 keyboard nav.
+    tap_key(&mut app, KeyCode::Digit1);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line,
+        "soak prerequisite: must enter AppState::Line before the loop"
+    );
+
+    let start = Instant::now();
+    for i in 0..SOAK_UPDATES {
+        // Toggle UiOpacity::current between 1.0 and 0.0 every cycle.
+        // Direct mutation bypasses the lerp system intentionally — the goal
+        // is to exercise the enable/disable branch in every overlay system,
+        // not to test the lerp convergence (that is covered by the unit tests
+        // in `wc_core::ui::auto_fade::tests`).
+        let phase = (i / OPACITY_CYCLE_TICKS) % 2;
+        app.world_mut().resource_mut::<UiOpacity>().current =
+            if phase == 0 { 1.0 } else { 0.0 };
+
+        if i % POINTER_TICK_PERIOD == 0 {
+            #[allow(
+                clippy::as_conversions,
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "synthetic-pointer counter; values are bounded and integer-shaped"
+            )]
+            let x = (i % 1280) as f32;
+            #[allow(
+                clippy::as_conversions,
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "synthetic-pointer counter; values are bounded and integer-shaped"
+            )]
+            let y = ((i / 1280) % 720) as f32;
+            move_pointer(&mut app, x, y, Vec2::ZERO);
+        }
+
+        let phase = i % PRESS_CYCLE_PERIOD;
+        if phase == 0 {
+            press_left(&mut app);
+        } else if phase == PRESS_CYCLE_PERIOD / 2 {
+            release_left(&mut app);
+        }
+
+        app.update();
+    }
+
+    // Pass criteria inherited from line_soak_8h: sketch must still be in
+    // AppState::Line, proving the UI plugin didn't perturb the lifecycle.
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line,
+        "soak postcondition: sketch must remain in AppState::Line after {SOAK_UPDATES} ticks"
+    );
+
+    let elapsed = start.elapsed();
+    tracing::info!(
+        ?elapsed,
+        updates = SOAK_UPDATES,
+        "Line soak with overlay UI complete"
+    );
+}
