@@ -20,6 +20,7 @@ pub mod input;
 pub mod lifecycle;
 pub mod settings;
 pub mod sketch;
+pub mod ui;
 
 use bevy::prelude::*;
 
@@ -34,6 +35,7 @@ impl Plugin for CorePlugin {
         app.add_plugins(input::HandTrackingPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
+        app.add_plugins(ui::WaveConductorUiPlugin);
     }
 }
 
@@ -56,5 +58,17 @@ mod tests {
         app.add_plugins(bevy::input::InputPlugin);
         app.add_plugins(StatesPlugin);
         app.add_plugins(CorePlugin);
+    }
+
+    #[test]
+    fn core_plugin_registers_ui_plugin() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::input::InputPlugin);
+        app.add_plugins(StatesPlugin);
+        app.add_plugins(CorePlugin);
+        // WaveConductorUiPlugin should at least be addable without panic.
+        // Concrete behavior is tested in each sub-plugin's own tests.
+        assert!(app.is_plugin_added::<crate::ui::WaveConductorUiPlugin>());
     }
 }
