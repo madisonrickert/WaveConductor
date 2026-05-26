@@ -172,8 +172,11 @@ fn render_widget(
         SettingKind::Boolean => render_bool(field, def.label, ui),
         SettingKind::Color => render_color(field, def.label, ui),
         SettingKind::Text => render_text(field, def.label, ui),
-        SettingKind::FilePath { extensions } => {
-            render_file_path(field, def.label, extensions, ui);
+        SettingKind::FilePath {
+            filter_label,
+            extensions,
+        } => {
+            render_file_path(field, def.label, filter_label, extensions, ui);
         }
     }
 }
@@ -286,6 +289,7 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &
 fn render_file_path(
     field: &mut dyn bevy::reflect::PartialReflect,
     label: &str,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] filter_label: &str,
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] extensions: &[&str],
     ui: &mut egui::Ui,
 ) {
@@ -300,7 +304,7 @@ fn render_file_path(
         if ui.button("Browse…").clicked() {
             let mut dlg = rfd::FileDialog::new();
             if !extensions.is_empty() {
-                dlg = dlg.add_filter("Image", extensions);
+                dlg = dlg.add_filter(filter_label, extensions);
             }
             if let Some(path) = dlg.pick_file() {
                 *v = path.to_string_lossy().into_owned();
@@ -371,19 +375,27 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::panic, reason = "test assertion — panic on wrong variant is intentional")]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion — panic on wrong variant is intentional"
+    )]
     fn file_path_kind_dispatches() {
         let def = SettingDef {
             field_name: "path",
             label: "Path",
             category: SettingsCategory::User,
             kind: SettingKind::FilePath {
+                filter_label: "Image",
                 extensions: &["png"],
             },
             requires_restart: false,
         };
         match def.kind {
-            SettingKind::FilePath { extensions } => {
+            SettingKind::FilePath {
+                filter_label,
+                extensions,
+            } => {
+                assert_eq!(filter_label, "Image");
                 assert_eq!(extensions, &["png"]);
             }
             _ => panic!("expected FilePath kind"),

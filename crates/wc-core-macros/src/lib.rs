@@ -35,6 +35,7 @@
 //! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `FilePath` | `Number` |
 //! | `min`, `max`, `step` | numeric expr | none (only meaningful on `Number`) |
 //! | `extensions`       | `["ext", ...]` | none (only meaningful on `FilePath`) |
+//! | `filter_label`     | string    | `"File"` (only meaningful on `FilePath`) |
 //! | `requires_restart` | flag      | absent                           |
 
 #![allow(
@@ -98,6 +99,8 @@ struct FieldInfo {
     step: Option<Expr>,
     /// File extensions for `Kind::FilePath`. None for other kinds.
     extensions: Option<Vec<String>>,
+    /// Human-facing filter label for `Kind::FilePath`. None for other kinds.
+    filter_label: Option<String>,
 }
 
 fn parse_storage_key(input: &DeriveInput) -> syn::Result<String> {
@@ -157,80 +160,91 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
             max: None,
             step: None,
             extensions: None,
+            filter_label: None,
         };
 
         for attr in &field.attrs {
             if !attr.path().is_ident("setting") {
                 continue;
             }
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("default") {
-                    info.default = Some(meta.value()?.parse::<Expr>()?);
-                } else if meta.path.is_ident("label") {
-                    let value: LitStr = meta.value()?.parse()?;
-                    info.label = Some(value.value());
-                } else if meta.path.is_ident("category") {
-                    let ident: Ident = meta.value()?.parse()?;
-                    info.category = match ident.to_string().as_str() {
-                        "User" => Category::User,
-                        "Dev" => Category::Dev,
-                        other => {
-                            return Err(meta.error(format!(
-                                "unknown category `{other}` (expected `User` or `Dev`)"
-                            )))
-                        }
-                    };
-                } else if meta.path.is_ident("ty") {
-                    let ident: Ident = meta.value()?.parse()?;
-                    info.kind = match ident.to_string().as_str() {
-                        "Number" => Kind::Number,
-                        "Boolean" => Kind::Boolean,
-                        "Color" => Kind::Color,
-                        "Text" => Kind::Text,
-                        "FilePath" => Kind::FilePath,
-                        other => {
-                            return Err(meta.error(format!(
-                                "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, or `FilePath`)"
-                            )))
-                        }
-                    };
-                } else if meta.path.is_ident("min") {
-                    info.min = Some(meta.value()?.parse::<Expr>()?);
-                } else if meta.path.is_ident("max") {
-                    info.max = Some(meta.value()?.parse::<Expr>()?);
-                } else if meta.path.is_ident("step") {
-                    info.step = Some(meta.value()?.parse::<Expr>()?);
-                } else if meta.path.is_ident("extensions") {
-                    let value = meta.value()?;
-                    let arr: syn::ExprArray = value.parse()?;
-                    let mut exts: Vec<String> = Vec::with_capacity(arr.elems.len());
-                    for elem in &arr.elems {
-                        if let syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(s),
-                            ..
-                        }) = elem
-                        {
-                            exts.push(s.value());
-                        } else {
-                            return Err(syn::Error::new_spanned(
-                                elem,
-                                "`extensions` must be an array of string literals",
-                            ));
-                        }
-                    }
-                    info.extensions = Some(exts);
-                } else if meta.path.is_ident("requires_restart") {
-                    info.requires_restart = true;
-                } else {
-                    return Err(meta.error("unknown #[setting(...)] key"));
-                }
-                Ok(())
-            })?;
+            attr.parse_nested_meta(|meta| parse_setting_attr(meta, &mut info))?;
         }
 
         out.push(info);
     }
     Ok(out)
+}
+
+/// Parse a single `key = value` (or bare flag) inside `#[setting(...)]`.
+/// Mutates `info` in place; returns an error for unknown keys.
+fn parse_setting_attr(
+    meta: syn::meta::ParseNestedMeta<'_>,
+    info: &mut FieldInfo,
+) -> syn::Result<()> {
+    if meta.path.is_ident("default") {
+        info.default = Some(meta.value()?.parse::<Expr>()?);
+    } else if meta.path.is_ident("label") {
+        let value: LitStr = meta.value()?.parse()?;
+        info.label = Some(value.value());
+    } else if meta.path.is_ident("filter_label") {
+        let value: LitStr = meta.value()?.parse()?;
+        info.filter_label = Some(value.value());
+    } else if meta.path.is_ident("category") {
+        let ident: Ident = meta.value()?.parse()?;
+        info.category = match ident.to_string().as_str() {
+            "User" => Category::User,
+            "Dev" => Category::Dev,
+            other => {
+                return Err(meta.error(format!(
+                    "unknown category `{other}` (expected `User` or `Dev`)"
+                )))
+            }
+        };
+    } else if meta.path.is_ident("ty") {
+        let ident: Ident = meta.value()?.parse()?;
+        info.kind = match ident.to_string().as_str() {
+            "Number" => Kind::Number,
+            "Boolean" => Kind::Boolean,
+            "Color" => Kind::Color,
+            "Text" => Kind::Text,
+            "FilePath" => Kind::FilePath,
+            other => {
+                return Err(meta.error(format!(
+                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, or `FilePath`)"
+                )))
+            }
+        };
+    } else if meta.path.is_ident("min") {
+        info.min = Some(meta.value()?.parse::<Expr>()?);
+    } else if meta.path.is_ident("max") {
+        info.max = Some(meta.value()?.parse::<Expr>()?);
+    } else if meta.path.is_ident("step") {
+        info.step = Some(meta.value()?.parse::<Expr>()?);
+    } else if meta.path.is_ident("extensions") {
+        let value = meta.value()?;
+        let arr: syn::ExprArray = value.parse()?;
+        let mut exts: Vec<String> = Vec::with_capacity(arr.elems.len());
+        for elem in &arr.elems {
+            if let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = elem
+            {
+                exts.push(s.value());
+            } else {
+                return Err(syn::Error::new_spanned(
+                    elem,
+                    "`extensions` must be an array of string literals",
+                ));
+            }
+        }
+        info.extensions = Some(exts);
+    } else if meta.path.is_ident("requires_restart") {
+        info.requires_restart = true;
+    } else {
+        return Err(meta.error("unknown #[setting(...)] key"));
+    }
+    Ok(())
 }
 
 fn emit_default(struct_name: &Ident, fields: &[FieldInfo]) -> TokenStream2 {
@@ -281,6 +295,7 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
             Kind::Color => quote! { ::wc_core::settings::SettingKind::Color },
             Kind::Text => quote! { ::wc_core::settings::SettingKind::Text },
             Kind::FilePath => {
+                let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
                 let exts: Vec<&str> = f
                     .extensions
                     .as_deref()
@@ -290,6 +305,7 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
                     .collect();
                 quote! {
                     ::wc_core::settings::SettingKind::FilePath {
+                        filter_label: #filter_label,
                         extensions: &[ #( #exts, )* ],
                     }
                 }

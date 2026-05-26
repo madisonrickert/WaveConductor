@@ -21,8 +21,11 @@ pub enum SettingKind {
     /// plus a Browse… button that opens [`rfd::FileDialog`]. The `extensions`
     /// list filters the dialog; an empty slice allows any file.
     FilePath {
+        /// Human-facing filter label shown above the extension list in the
+        /// file dialog (e.g., "Image", "Audio sample", "Configuration").
+        filter_label: &'static str,
         /// Extensions to filter the picker on (e.g., `&["png", "jpg"]`).
-        /// Empty means no filter.
+        /// Empty means no filter (and the label is ignored).
         extensions: &'static [&'static str],
     },
 }

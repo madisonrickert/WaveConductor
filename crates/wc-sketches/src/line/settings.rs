@@ -80,6 +80,7 @@ pub struct LineSettings {
     #[setting(
         default = String::new(),
         ty = FilePath,
+        filter_label = "Image",
         extensions = ["png", "jpg", "jpeg", "webp"],
         category = User,
         requires_restart
@@ -88,6 +89,9 @@ pub struct LineSettings {
     pub spawn_template: String,
 }
 
+// Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
+// attributes above so a missing-field deserialize lands on the same value the
+// derive-macro `Default` impl would produce. Update both sites together.
 fn default_particle_density() -> f32 {
     10.0
 }
@@ -110,7 +114,10 @@ mod tests {
     /// and revert every sibling to default — Plan 8's `gamma` addition
     /// would have done exactly that to existing user files.
     #[test]
-    #[allow(clippy::expect_used, reason = "test-only: panic on bad TOML is the intended failure mode")]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on bad TOML is the intended failure mode"
+    )]
     fn missing_field_preserves_sibling_values() {
         let legacy = r#"
             particle_density = 7.5
