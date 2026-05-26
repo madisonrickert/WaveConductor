@@ -36,10 +36,9 @@ pub fn step_cpu_mirror(
     }
 }
 
-/// Pure function, allocation-free; called once per particle per frame from
-/// [`step_cpu_mirror`]. Hot path — do not introduce branches or allocations.
-///
-/// Pure function: step a single particle. Extracted for unit testing.
+/// Pure function, allocation-free: step a single particle. Called once per
+/// particle per frame from [`step_cpu_mirror`]; extracted for unit testing.
+/// Hot path — do not introduce branches or allocations.
 pub fn step_one(p: &mut Particle, params: &SimParams) {
     // Accumulate force. v4: constant-magnitude in unit direction toward attractor.
     let mut accel = [0.0_f32, 0.0];

@@ -4,8 +4,7 @@
 //! Canonical home for [`arm_idle_timeline`] so both crate test suites share
 //! a single implementation:
 //!
-//! - `wc-core` integration tests import via `common::lifecycle::arm_idle_timeline`
-//!   (or the `common::app` re-export for backward compat).
+//! - `wc-core` integration tests import via `common::lifecycle::arm_idle_timeline`.
 //! - `wc-sketches` integration tests import via a `#[path]` re-export in
 //!   `crates/wc-sketches/tests/common/mod.rs`.
 
