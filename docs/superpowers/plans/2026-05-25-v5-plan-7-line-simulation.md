@@ -2021,8 +2021,11 @@ Plan 7 Phase D: particle_density setting + horizontal-line spawn
 particle_count (absolute) becomes particle_density (per canvas-px),
 matching v4's `particleDensity = 10`. Spawn switches from a centered
 grid to a horizontal line at mid-Y with subtle 5-strand sawtooth jitter.
-The drag setting moves to Dev category since the SimParams-baked dual
-drag is now authoritative.
+The `drag` field was removed entirely from `LineSettings` (not moved to
+Dev) because v4's drag constants are baked into `SimParams` at fixed values
+and are not user-tunable. The plan doc originally said "moves to Dev" but
+the implementation dropped the field outright; this message has been
+corrected to reflect reality.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF

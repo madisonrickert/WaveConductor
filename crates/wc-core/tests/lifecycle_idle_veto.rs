@@ -1,7 +1,8 @@
 //! Integration tests for the idle-veto hook.
 
 mod common;
-use common::app::{arm_idle_timeline, lifecycle_test_app};
+use common::app::lifecycle_test_app;
+use common::lifecycle::arm_idle_timeline;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::idle::RegisterIdleVetoExt;

@@ -36,6 +36,9 @@ pub fn step_cpu_mirror(
     }
 }
 
+/// Pure function, allocation-free; called once per particle per frame from
+/// [`step_cpu_mirror`]. Hot path — do not introduce branches or allocations.
+///
 /// Pure function: step a single particle. Extracted for unit testing.
 pub fn step_one(p: &mut Particle, params: &SimParams) {
     // Accumulate force. v4: constant-magnitude in unit direction toward attractor.
@@ -141,7 +144,21 @@ mod tests {
             _pad: 0.0,
         };
         step_one(&mut p, &params);
-        assert!(p.velocity[0] > 0.0, "should accelerate toward attractor");
+        // Attractor at (100, 0), particle at (0, 0) → purely x-aligned pull.
+        // Expected x-acceleration = power * size_scale * (dx/dist) = 1000 * 1.0 * 1.0.
+        // Expected x-velocity ≈ accel * dt = power * size_scale * dt (before drag).
+        // Pulling drag (params.pulling_drag_baked = 0.9) then scales the result,
+        // so the post-drag value is ~10 % below `power * size_scale * dt`.
+        // ±10 % tolerance catches any regression in the force formula while
+        // admitting the single drag step.
+        let expected_vx = params.attractors[0].power * params.size_scale * params.dt;
+        let tolerance = expected_vx * 0.11; // ±11 % (absorbs one pulling-drag step of ~10%)
+        assert!(
+            (p.velocity[0] - expected_vx).abs() <= tolerance,
+            "velocity[0] = {} should be within 11% of expected {} (power * size_scale * dt)",
+            p.velocity[0],
+            expected_vx,
+        );
     }
 
     #[test]

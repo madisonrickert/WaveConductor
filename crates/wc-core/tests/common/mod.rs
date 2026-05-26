@@ -17,6 +17,7 @@
 
 pub mod app;
 pub mod input;
+pub mod lifecycle;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

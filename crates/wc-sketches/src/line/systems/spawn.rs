@@ -71,6 +71,8 @@ pub fn spawn_line(
     let win_h = window.height();
     let half_w = w * 0.5;
     let half_h = win_h * 0.5;
+    // TODO(plan-12+): if a sketch needs the Line camera off-center, promote
+    // mid_y to a setting.
     let mid_y = 0.0_f32; // window-centered world
 
     // v4 particleDensity = 10 per canvas-pixel of width. Derive count from

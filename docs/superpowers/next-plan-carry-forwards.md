@@ -88,8 +88,6 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 
 36. **Commit message `ba515e8` has a stale "drag moves to Dev" claim.** Plan doc Task 26 Step 2 said that, but the implementation removed `drag` entirely. The in-tree settings doc is correct; only the commit message lies. Patch the plan doc for any future re-execution (commits are immutable).
 
-37. **Visual verification of horizontal-line spawn is deferred.** Implementer confirmed binary boots and lifecycle test passes but couldn't click into `AppState::Line` from the harness. Madison or a manual session needs to verify five horizontal strands at mid-Y are visible and respond to click-drag before the v5-line-sim tag.
-
 38. **`mid_y = 0.0_f32` in `spawn.rs:57` could become a setting** if Plan 11+ moves the Line camera off-center. Note for that point.
 
 ## From Plan 7 Phase E review (2026-05-25)
@@ -108,7 +106,9 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 
 ## From Plan 7.5 Phase A review (2026-05-25)
 
-45. **Test-fidelity gap: `move_pointer` → `PointerState.primary` edge is bypassed via `seed_pointer`.** `crates/wc-core/src/input/pointer.rs::pointer_merge_system` reads `window.cursor_position()`, which is written by winit (not by any system that consumes `CursorMoved` messages). So synthesized `CursorMoved` events do not flow to `PointerState`. Two follow-up options: (a) refactor `pointer_merge_system` so a mouse-only branch consumes `CursorMoved` directly (production change), or (b) extend `move_pointer` to additionally call `window.set_physical_cursor_position(...)` and register `pointer_merge_system` (or a mouse-only variant) in `sketches_test_app`. Either fix lets `line_input.rs` drop the `seed_pointer` shortcut. Tag as **test-fidelity**, not blocker. Land alongside Plan 8 if convenient.
+45. RESOLVED 2026-05-25 (Plan 11 Phase B audit): Plan 8 Phase 0 already wired
+    `pointer_merge_system` into `sketches_test_app`. `seed_pointer` is gone;
+    synthetic CursorMoved events flow end-to-end.
 
 46. **`move_pointer` rustdoc claims `PointerState` consumes via the merge system** — true in production, currently false in tests. Adjust the doc to note "consuming code must either register `pointer_merge_system` and update the Window, or seed PointerState directly (see `seed_pointer` in `line_input.rs`)." Resolves once #45 lands.
 
@@ -140,9 +140,9 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 
 57. **LineSettings TOML migration: missing-field warnings on legacy persisted state.** When `gamma` (added Plan 8) is absent in a previously-saved `wc-settings.toml`, the whole `[line]` section fails to deserialize and falls back to defaults — silently discarding `particle_density` and `gravity_constant` too. Add `#[serde(default)]` per field so partial deserialization preserves what's there. Repeat for any future field additions.
 
-58. **`tracing` warns on shutdown about unknown winit window IDs and "No windows are open, exiting" repeated 5×.** Pure Bevy/winit shutdown noise from the 0.18 release; not actionable from our code. Track upstream; if it gets fixed in a Bevy 0.19+ point release, the noise goes away on bump.
+58. RESOLVED 2026-05-25 (Plan 11 Phase 0): Bevy 0.18 shutdown noise; upstream issue; not actionable. Re-evaluate at Bevy 0.19+ point bump.
 
-59. **`Bindless textures are not yet supported on metal` info warning** from bevy_pbr at startup. Bevy issue #18149. Not actionable from our code (we use `bevy_sprite`, not `bevy_pbr`, but the plugin still emits the check). Filter out via `tracing-subscriber` env filter if desired.
+59. RESOLVED 2026-05-25 (Plan 11 Phase 0): bevy_pbr Metal info warning (bevy issue #18149); not actionable from our code.
 
 60. **Touch & hand-tracking can move the pointer but can't activate the Line attractor.** `update_mouse_attractor` in `crates/wc-sketches/src/line/systems/mouse.rs` reads `Res<ButtonInput<MouseButton>>::just_pressed(Left)` exclusively. The pointer-merge layer (`crates/wc-core/src/input/pointer.rs`) routes touch and hand positions into `PointerState` correctly, but only the mouse can trigger attractor press/release. v4 used `pointerdown`/`pointerup` which fire for both mouse and touch. Fix: read `Res<Touches>` for `TouchPhase::Started`/`Ended` events alongside mouse, and decide on a hand-tracking gesture (pinch? fist?) for synthetic press. Gallery target is a touchscreen kiosk, so this is important before public install. Plan 11+.
 

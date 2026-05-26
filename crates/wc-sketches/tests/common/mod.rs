@@ -1,11 +1,12 @@
 //! Shared test fixtures for `wc-sketches` integration tests.
 //!
 //! Hosts the `sketches_test_app` builder (the `AssetPlugin` / `MeshPlugin` /
-//! `LinePlugin` variant that needs a real `Window` entity) and an
-//! `arm_idle_timeline` mirror that targets `wc_core::lifecycle::idle::
-//! InteractionTimer`. Cargo's per-crate integration-test isolation prevents
-//! cross-crate `tests/common/` sharing of code that depends on wc-core types,
-//! so `arm_idle_timeline` is duplicated here rather than re-imported.
+//! `LinePlugin` variant that needs a real `Window` entity).
+//!
+//! `arm_idle_timeline` is imported from `crates/wc-core/tests/common/lifecycle.rs`
+//! via `#[path]` — the canonical implementation lives there and is shared
+//! between the wc-core and wc-sketches test suites (Plan 11 Phase 0,
+//! carry-forward #39).
 //!
 //! Phase A of Plan 7.5 adds a `#[path = ...] pub mod input;` re-import of
 //! `crates/wc-core/tests/common/input.rs` so the synthetic-event helpers
@@ -13,13 +14,17 @@
 
 #![allow(
     dead_code,
+    unused_imports,
     reason = "Test fixtures may be unused by some integration test binaries."
 )]
 
 #[path = "../../../wc-core/tests/common/input.rs"]
 pub mod input;
 
-use std::time::Duration;
+#[path = "../../../wc-core/tests/common/lifecycle.rs"]
+pub mod lifecycle;
+
+pub use lifecycle::arm_idle_timeline;
 
 use bevy::asset::AssetPlugin;
 use bevy::image::Image;
@@ -27,7 +32,6 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::sprite_render::ColorMaterial;
 use bevy::state::app::StatesPlugin;
-use bevy::time::TimeUpdateStrategy;
 use wc_core::input::pointer::{pointer_merge_system, PointerState};
 use wc_core::input::state::HandTrackingState;
 use wc_sketches::line::LinePlugin;
@@ -130,29 +134,4 @@ pub fn sketches_test_app() -> App {
     app.add_plugins(LinePlugin);
 
     app
-}
-
-/// Configure an app so its idle-transition tests can advance time
-/// deterministically over a handful of update ticks. Mirror of
-/// `wc-core::tests::common::app::arm_idle_timeline`, duplicated here
-/// because Cargo's per-crate test isolation prevents cross-crate
-/// `tests/common/` sharing of code that depends on wc-core types.
-///
-/// Installs `TimeUpdateStrategy::ManualDuration(80 ms)`, marks the interaction
-/// timer at `Time::elapsed()` so `idle_for` starts at zero, and shrinks
-/// `idle_threshold` to 50 ms (with `screensaver_threshold` bumped to 60 s
-/// so accumulated ticks during the test don't overshoot into Screensaver).
-///
-/// **Required:** the app must already have `LifecyclePlugin` registered.
-pub fn arm_idle_timeline(app: &mut App) {
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        80,
-    )));
-    let now = app.world().resource::<Time>().elapsed();
-    let mut timer = app
-        .world_mut()
-        .resource_mut::<wc_core::lifecycle::idle::InteractionTimer>();
-    timer.mark(now);
-    timer.idle_threshold = Duration::from_millis(50);
-    timer.screensaver_threshold = Duration::from_secs(60);
 }

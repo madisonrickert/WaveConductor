@@ -12,7 +12,8 @@
 // also verify the input test re-enables cleanly.
 
 mod common;
-use common::app::{arm_idle_timeline, lifecycle_test_app};
+use common::app::lifecycle_test_app;
+use common::lifecycle::arm_idle_timeline;
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::*;
