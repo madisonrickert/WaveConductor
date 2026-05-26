@@ -24,27 +24,23 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_state",
     "bevy_winit",
     "bevy_render",
-    "bevy_pbr",
     "bevy_core_pipeline",
     "bevy_sprite",
     "bevy_sprite_render",
     "bevy_mesh",
     "bevy_asset",
     "png",
-    "default_font",
     "x11",
     "wayland",
-    "webgl2",
-    "tonemapping_luts",
-    "zstd_rust",
 ] }
 # UI
 bevy_egui = "0.39"
 bevy-inspector-egui = "0.36"
 # Input action mapping (added in Plan 2; 0.20 is the Bevy-0.18-compatible release)
 leafwing-input-manager = "0.20"
-# Diagnostics & debug
-bevy_mod_debugdump = "0.13"
+# (bevy_mod_debugdump removed 2026-05-25 — declared but never consumed by any
+# crate. If we need schedule inspection during debug, add it temporarily then
+# remove again rather than carrying the dep year-round.)
 # Small inline vectors (hand-tracking: typically ≤2 active hands)
 smallvec = { version = "1", features = ["const_generics", "union"] }
 # Errors & logging
