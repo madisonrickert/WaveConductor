@@ -1,11 +1,22 @@
-//! CPU-side particle integrator — a parallel implementation of the WGSL
-//! kernel in `assets/shaders/line/simulate.wgsl`.
+//! CPU-side particle integrator — parallel implementation of the WGSL kernel
+//! in `assets/shaders/line/simulate.wgsl`.
 //!
-//! Used by Plan 9's `ParticleStats` computation (not yet introduced) as a readable source for
-//! per-particle velocities (avoiding a GPU readback stall). The GPU sim
-//! remains authoritative for rendering; the two integrators run independently
-//! and may drift by ≤1% due to floating-point order-of-operations, which is
-//! acceptable for `groupedUpness` and other smooth scalars.
+//! Plan 11 Phase F removed the per-frame CPU-mirror step from the production
+//! `LinePlugin` schedule. [`step_cpu_mirror`] is no longer registered as a
+//! production system. The CPU mirror's role narrowed to:
+//!
+//! - **Spawn snapshot**: `spawn_line` still inserts [`LineCpuMirror`] with the
+//!   initial particle layout so tests can read the spawn positions (used by
+//!   `crates/wc-sketches/tests/line_heatmap_e2e.rs` to verify the heatmap
+//!   sampler's output).
+//! - **Test scaffolding**: tests that want to advance the CPU mirror
+//!   explicitly can register [`step_cpu_mirror`] in their app builder. See
+//!   the existing pattern in `crates/wc-sketches/tests/line_lifecycle.rs`
+//!   if any tests still use it post-Phase F.
+//!
+//! The two integrators (WGSL kernel + Rust [`step_one`]) remain
+//! mathematically equivalent to ≤1% float-op drift, documented in
+//! `crates/wc-sketches/src/line/PARITY.md`.
 
 use bevy::prelude::*;
 
@@ -15,8 +26,12 @@ use super::particle::{Particle, SimParams, MAX_ATTRACTORS};
 
 /// CPU mirror of the particle storage buffer.
 ///
-/// Populated by [`crate::line::systems::spawn_line`] with the same grid the
-/// GPU buffer starts from, then stepped each `Update` by [`step_cpu_mirror`].
+/// Populated by [`crate::line::systems::spawn_line`] with the initial
+/// particle layout (spawn-time snapshot). In production (Plan 11 Phase F),
+/// this resource is no longer stepped each frame — it serves as a read-only
+/// snapshot for heatmap integration tests
+/// (`crates/wc-sketches/tests/line_heatmap_e2e.rs`). Tests that need a
+/// stepped mirror can register [`step_cpu_mirror`] in their own app builder.
 #[derive(Resource, Default)]
 pub struct LineCpuMirror {
     /// Particle state in the same layout as the GPU buffer.
@@ -24,8 +39,11 @@ pub struct LineCpuMirror {
 }
 
 /// Step the CPU mirror by one frame. The math mirrors the WGSL kernel
-/// exactly; if you change one, change both, and re-check the parity test in
-/// `crates/wc-sketches/tests/line_lifecycle.rs`.
+/// exactly; if you change one, change both, and re-check the parity test.
+///
+/// Not registered in `LinePlugin`'s production schedule as of Plan 11 Phase F.
+/// Tests that want to advance the mirror can register this system explicitly
+/// in their own `App` builder.
 pub fn step_cpu_mirror(
     mut mirror: ResMut<'_, LineCpuMirror>,
     sim: Res<'_, super::compute::LineSimParams>,

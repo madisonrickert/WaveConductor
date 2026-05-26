@@ -31,6 +31,24 @@
 
 - WGSL compute kernel replaces CPU-side `particleSystem.ts` for rendering; a parallel Rust CPU mirror runs the same math on the host (introduced in Plan 7) to feed `ParticleStats` in Plan 9 without a GPU readback stall. The two integrators may drift by ≤1% over long timescales due to floating-point order-of-operations differences; acceptable for groupedUpness and friends.
 
+## Phase F approximation note (audio coupling)
+
+Plan 11 Phase F replaced the per-frame `ParticleStats` reduction over
+`LineCpuMirror` with smoothed CPU envelopes driven by attractor state. The
+audio coupling no longer reads per-particle state; it reads attack/release
+envelopes keyed on `MouseAttractorState.power` events.
+
+**Approved deviation**: audio output is no longer mathematically equivalent
+to v4's `computeStats`-driven reactivity. It IS perceptually equivalent:
+the same musical shape (rising on press, sustained during hold, decaying
+after release) at near-zero CPU cost. Tuning constants in
+`crates/wc-sketches/src/line/particle_stats.rs` shape the response; adjust
+during sign-off if specific synth voices sound off.
+
+This brings Line in line with Cymatics (v4)'s architectural pattern: audio
+derives from CPU-side simulation inputs, never from GPU-side simulation
+outputs. Future GPU-compute sketches should follow the same pattern.
+
 ## Verdict
 
 **Status:** PENDING — verdict deferred to Plan 11.

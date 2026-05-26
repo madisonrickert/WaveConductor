@@ -4,10 +4,17 @@
 //!
 //! 1. `OnEnter(AppState::Line)` runs [`systems::spawn_line`]: allocates the
 //!    particle storage buffer, spawns the render entity under [`LineRoot`],
-//!    and installs [`compute::LineSimParams`].
-//! 2. Every `Update` while `sketch_active(AppState::Line)` is true,
-//!    [`systems::update_sim_params`] writes the current pointer position +
-//!    `LineSettings` values into `LineSimParams`.
+//!    installs [`compute::LineSimParams`], and seeds [`sim_cpu::LineCpuMirror`]
+//!    with the initial particle layout (spawn-time snapshot for heatmap tests).
+//! 2. Every `Update` while `sketch_active(AppState::Line)` is true:
+//!    - a. [`systems::update_sim_params`] writes the current pointer position +
+//!      `LineSettings` values into `LineSimParams`.
+//!    - b. [`particle_stats::update_particle_stats`] reads
+//!      [`systems::MouseAttractorState`] and [`Time`], populating
+//!      [`particle_stats::ParticleStats`] via smoothed CPU envelopes (Plan 11
+//!      Phase F; no per-particle reduction, no CPU mirror step in production).
+//!    - c. [`audio_coupling::drive_audio_and_shader`] reads `ParticleStats` and
+//!      drives the Line synth voice + `LinePostParams` shader uniforms.
 //! 3. The render world extracts `LineSimParams` and dispatches the compute
 //!    pipeline (`assets/shaders/line/simulate.wgsl`) which updates the
 //!    storage buffer in place.
@@ -83,7 +90,6 @@ impl Plugin for LinePlugin {
         // transition to `Idle` mid-decay and the (gated) `decay_mouse_attractor`
         // system would never finish releasing the pull.
         app.register_idle_veto(line_idle_veto);
-        app.init_resource::<sim_cpu::LineCpuMirror>();
         app.init_resource::<particle_stats::ParticleStats>();
         app.add_systems(
             Update,
@@ -91,7 +97,6 @@ impl Plugin for LinePlugin {
                 systems::update_mouse_attractor,
                 systems::decay_mouse_attractor,
                 systems::update_sim_params,
-                sim_cpu::step_cpu_mirror,
                 particle_stats::update_particle_stats,
                 // `drive_audio_and_shader` reads `ParticleStats` and overrides
                 // the placeholder `g_constant` + `i_mouse_factor` written by
@@ -116,7 +121,9 @@ impl Plugin for LinePlugin {
 /// Drops the `LineSimParams` resource so its `Handle<ShaderStorageBuffer>`
 /// clone is freed and the GPU storage buffer's ref-count reaches zero,
 /// releasing VRAM on each Enter/Exit cycle. Also drops the CPU mirror so its
-/// per-particle `Vec` is freed and re-seeded fresh by the next `spawn_line`.
+/// per-particle `Vec` is freed; `spawn_line` re-inserts a fresh snapshot on
+/// the next `OnEnter`. The mirror is not stepped in production (Plan 11 Phase
+/// F); it is only a spawn-time snapshot for heatmap test coverage.
 ///
 /// Resets [`post_process::LinePostParams`] to its `Default` (which has
 /// `g_constant = 0.0`) so the gravity-smear post-process is visually no-op

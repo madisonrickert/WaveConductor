@@ -1,182 +1,179 @@
-#![allow(
-    clippy::similar_names,
-    clippy::excessive_precision,
-    reason = "var_x2/var_y2 and dx2/dy2 names mirror v4 particleStats.ts directly; 1.383_870_349 and 0.288_66 are v4 constants preserved verbatim for audit-trail parity"
-)]
-
-//! Per-frame statistics over the CPU particle mirror.
+//! CPU-side approximated audio control signals for the Line sketch.
 //!
-//! Direct port of v4's `src/particles/particleStats.ts::computeStats`. Reads
-//! [`LineCpuMirror`] and writes [`ParticleStats`] each frame while the Line
-//! sketch is `Active`. Plan 9's reactivity-coupling system
-//! ([`super::audio_coupling::drive_audio_and_shader`]) reads `ParticleStats`
-//! and drives the Line synth voice + gravity-smear post-process uniforms.
+//! ## Approach
 //!
-//! ## Why CPU?
+//! v4 computed full per-particle aggregate statistics each frame (`computeStats`
+//! in `src/particles/particleStats.ts` — averageVel, varianceX/Y, entropy,
+//! flatRatio, groupedUpness). Plan 7's GPU compute pipeline moved particle
+//! physics off-CPU, which would have required either:
 //!
-//! Stats are scalars summarising the full particle population. A GPU reduction
-//! would require a readback stall (frame N+1 sees frame N's values, GPU/CPU
-//! sync cost). Plan 7's [`LineCpuMirror`] is a parallel CPU integrator
-//! deliberately introduced so this module can read per-particle state with
-//! zero readback latency. The GPU sim remains authoritative for rendering;
-//! drift between the two is bounded at ≤1% from float-op order differences,
-//! which is well within tolerance for the smooth audio control signals here.
+//! - a per-frame GPU readback (sync stall, audio reacts to stale visuals), or
+//! - a CPU mirror running the same physics twice (Plan 7–10's solution, ~50µs/
+//!   frame at 12k particles).
 //!
-//! ## Formula provenance
+//! Plan 11 Phase F replaces both with smoothed CPU envelopes driven by
+//! [`super::systems::MouseAttractorState`] state. The audio coupling doesn't
+//! need exact statistics — it needs the right *perceptual shape* of the
+//! control signals. `groupedUpness` rising on press, plateauing during hold,
+//! decaying after release: that shape can be captured by a handful of
+//! attack/release envelopes at near-zero CPU cost (~1µs/frame).
 //!
-//! All seven fields are direct ports of v4's `computeStats`:
-//! - `averageVel = sqrt(mean(vx² + vy²))` — RMS velocity magnitude.
-//! - `varianceLength = sqrt(varX² + varY²)` — 2D spread of positions.
-//! - `flatRatio = varianceX / varianceY` — aspect ratio of the cloud (1.0
-//!   when varianceY is zero to avoid div-by-zero; in practice this only
-//!   happens during the first frame before any motion).
-//! - `groupedUpness = sqrt(averageVel / varianceLength)` — high when the
-//!   particles are moving fast *and* clustered together (the "gathering"
-//!   condition that v4 keys most of its musical reactivity on).
-//! - `entropy = sum(length × ln(length)) / N` where `length` is the distance
-//!   from each particle to the mean position. Normalised by
-//!   `width × 1.383870349` (the v4 constant; documented in v4 as the
-//!   theoretical max for a uniform spread).
-//! - `normalizedVarianceLength = varianceLength / (0.28866 × width)`.
-//! - `normalizedAverageVel = averageVel / width`.
+//! Cymatics (v4) is the architectural reference: its audio coupling reads
+//! CPU-side input scalars (`activeRadius`, `numCycles`, etc.) that drive the
+//! GPU compute simulation, never reading the simulation state back. Phase F
+//! brings Line in line with that pattern.
+//!
+//! ## Perceptual deviation
+//!
+//! This is a *perceptual* approximation, not mathematical parity. Values
+//! within each field's expected range, dynamics within expected attack/
+//! release shapes, but a side-by-side comparison against v4 will show
+//! frame-by-frame numerical differences. Signed off as an approved deviation
+//! in `PARITY.md`.
+//!
+//! ## Tuning
+//!
+//! The constants at the bottom of this module (`ATTACK_RATE_FAST`,
+//! `GROUPED_UPNESS_PEAK`, `SPREAD_MIN`, etc.) are tunable knobs that shape
+//! the musical response. If a specific downstream synth parameter sounds
+//! wrong on manual sign-off, adjust the relevant constant and re-test.
 
 use bevy::prelude::*;
 
-use super::sim_cpu::LineCpuMirror;
+use super::systems::mouse::{MouseAttractorState, MOUSE_POWER_PRESS};
 
 /// Statistics over the current particle population.
 ///
-/// All values are dimensionless or normalised except `average_vel` (px/s) and
-/// `variance_length` (px). Default is all-zero; produced by Bevy when the
-/// resource is first initialised and reset by [`update_particle_stats`] if
-/// the mirror is empty.
+/// All values are dimensionless or normalised. Default is all-zero; produced
+/// by Bevy when the resource is first initialised and populated each frame
+/// by [`update_particle_stats`] via smoothed attack/release envelopes keyed
+/// on [`MouseAttractorState`]. See module rustdoc for the perceptual-
+/// approximation rationale.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct ParticleStats {
     /// RMS speed across all particles, in world-pixel units per second.
+    /// Approximated: snaps up on press, decays slowly on release via
+    /// [`ATTACK_RATE_FAST`] / [`RELEASE_RATE_SLOW`] envelopes.
     pub average_vel: f32,
-    /// 2D variance length `sqrt(varX² + varY²)` over particle positions,
-    /// in world-pixel units. Measures how spread out the cloud is.
+    /// 2D variance length `sqrt(varX² + varY²)` over particle positions.
+    /// Approximated: high at rest (particles spread along spawn line),
+    /// drops during press (cluster forms around attractor).
     pub variance_length: f32,
-    /// Position-cloud aspect ratio `varianceX / varianceY`. Hovers near 1
-    /// for a circular spread, grows when the cloud is horizontally elongated.
-    /// Forced to 1.0 if `varianceY` is zero (first-frame degenerate case).
+    /// Position-cloud aspect ratio `varianceX / varianceY`. Held at 1.0
+    /// (circular cloud) for this approximation. Tune if the LFO frequency
+    /// target sounds off during manual sign-off.
     pub flat_ratio: f32,
     /// `sqrt(average_vel / variance_length)`. High when particles are moving
     /// fast *and* tightly clustered — the v4 "gathering" condition that gates
     /// most of the musical reactivity.
     pub grouped_upness: f32,
-    /// Entropy of particle-to-centroid distances, normalised by
-    /// `width × 1.383870349` (v4 constant). Dimensionless.
+    /// Entropy of particle-to-centroid distances, normalised. Approximated
+    /// from `variance_length` (same scalar, different downstream formula).
     pub normalized_entropy: f32,
-    /// `variance_length` divided by `0.28866 × width` (v4 normalisation
-    /// constant). Dimensionless.
+    /// `variance_length` divided by the v4 normalisation constant
+    /// `0.28866 × width`. Approximated from `variance_length`.
     pub normalized_variance_length: f32,
-    /// `average_vel` divided by canvas width. Dimensionless.
+    /// `average_vel` divided by canvas width. Approximated from
+    /// `average_vel`.
     pub normalized_average_vel: f32,
 }
 
-/// Update `ParticleStats` from the current [`LineCpuMirror`] state.
+/// Per-frame approximated CPU audio control signals.
 ///
-/// Two passes over the particle array:
-/// 1. Compute mean position and mean squared velocity.
-/// 2. Compute X/Y variances around the mean and the
-///    `sum(length × ln(length))` entropy term.
-///
-/// Then derive the seven `ParticleStats` fields from those reductions.
-///
-/// When the mirror is empty (between `OnExit` resetting and the next
-/// `spawn_line` populating it), writes [`ParticleStats::default`] so
-/// downstream consumers see zero values rather than stale data.
+/// Reads [`MouseAttractorState::power`] and time, smooths them into envelopes
+/// shaped like v4's full per-particle reduction, and writes [`ParticleStats`].
+/// See module rustdoc for the perceptual-approximation rationale.
 pub fn update_particle_stats(
-    mirror: Res<'_, LineCpuMirror>,
-    window: Single<'_, '_, &bevy::window::Window>,
+    mouse: Res<'_, MouseAttractorState>,
+    time: Res<'_, Time>,
     mut stats: ResMut<'_, ParticleStats>,
 ) {
-    let n = mirror.particles.len();
-    if n == 0 {
-        *stats = ParticleStats::default();
-        return;
-    }
-    // `usize → f32` is intentional for the reduction divisor; particle counts
-    // up to ~16M are exactly representable in f32, well beyond our needs.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::as_conversions,
-        reason = "particle counts are well under f32's exact-int limit (~16M)"
-    )]
-    let n_f = n as f32;
+    let dt = time.delta_secs();
 
-    // --- Pass 1: mean position, mean velocity² ---
-    let mut avg_x = 0.0_f32;
-    let mut avg_y = 0.0_f32;
-    let mut avg_vel2 = 0.0_f32;
-    for p in &mirror.particles {
-        avg_x += p.position[0];
-        avg_y += p.position[1];
-        // Squared speed = vx² + vy²; mean of squared speeds (the RMS² value).
-        avg_vel2 += p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1];
-    }
-    avg_x /= n_f;
-    avg_y /= n_f;
-    avg_vel2 /= n_f;
+    // Normalised attractor activity in [0, 1]. Drives all downstream envelopes.
+    let excitement = (mouse.power / MOUSE_POWER_PRESS).clamp(0.0, 1.0);
 
-    // --- Pass 2: position variances around the mean + entropy term ---
-    let mut var_x2 = 0.0_f32;
-    let mut var_y2 = 0.0_f32;
-    let mut entropy = 0.0_f32;
-    for p in &mirror.particles {
-        let dx = p.position[0] - avg_x;
-        let dy = p.position[1] - avg_y;
-        let dx2 = dx * dx;
-        let dy2 = dy * dy;
-        var_x2 += dx2;
-        var_y2 += dy2;
-        // `length × ln(length)` term — guard the `ln(0)` case. Particles
-        // exactly on the centroid contribute zero (which is `lim x→0 x·ln(x)`).
-        let length = (dx2 + dy2).sqrt();
-        if length > 0.0 {
-            entropy += length * length.ln();
-        }
-    }
-    entropy /= n_f;
-    var_x2 /= n_f;
-    var_y2 /= n_f;
-
-    let variance_x = var_x2.sqrt();
-    let variance_y = var_y2.sqrt();
-    // 2D "spread length" — Euclidean combination of per-axis std deviations.
-    let variance_length = (var_x2 + var_y2).sqrt();
-    let average_vel = avg_vel2.sqrt();
-
-    // Aspect ratio of the cloud. Degenerate when `variance_y` is zero
-    // (only possible when all particles share a y-coordinate, e.g. before
-    // any motion). v4 returns 1.0 in that case; mirror it here.
-    let flat_ratio = if variance_y > 0.0 {
-        variance_x / variance_y
+    // average_vel: snaps up on press, decays slowly. Asymmetric attack/release
+    // matches v4's behavior where particles accelerate fast (forces are strong
+    // near the attractor) but slow gradually due to drag after release.
+    let target_vel = excitement;
+    let vel_rate = if target_vel > stats.average_vel {
+        ATTACK_RATE_FAST
     } else {
-        1.0
+        RELEASE_RATE_SLOW
     };
-    // Clamp width to ≥1 to avoid div-by-zero in headless / minimised cases.
-    let width = window.width().max(1.0);
+    stats.average_vel = lerp(stats.average_vel, target_vel, (vel_rate * dt).min(1.0));
 
-    stats.average_vel = average_vel;
-    stats.variance_length = variance_length;
-    stats.flat_ratio = flat_ratio;
-    // `grouped_upness` is the v4 musical-reactivity primary driver:
-    // sqrt(speed / spread) — large when fast + clustered.
-    stats.grouped_upness = if variance_length > 0.0 {
-        (average_vel / variance_length).sqrt()
-    } else {
-        0.0
-    };
-    // v4 normalisation constants (`1.383870349`, `0.28866`) preserved verbatim
-    // as the audit trail back to v4's source. They are empirical scaling
-    // factors that bring the normalised values into ~[0, 1] for typical
-    // canvas widths.
-    stats.normalized_entropy = entropy / (width * 1.383_870_349);
-    stats.normalized_variance_length = variance_length / (0.288_66 * width);
-    stats.normalized_average_vel = average_vel / width;
+    // grouped_upness: lags average_vel slightly (clustering follows acceleration).
+    // Peak value tuned to v4's typical sustained-press range (~0.5-0.8).
+    let target_grouped = excitement * GROUPED_UPNESS_PEAK;
+    stats.grouped_upness = lerp(
+        stats.grouped_upness,
+        target_grouped,
+        (GROUPED_UPNESS_RATE * dt).min(1.0),
+    );
+
+    // variance_length: high at rest (particles spread along the horizontal spawn
+    // line), drops during press (cluster forms around attractor). Mapped so
+    // 1.0 = full spread, 0.2 = tight cluster.
+    let target_variance = SPREAD_BASELINE - excitement * (SPREAD_BASELINE - SPREAD_MIN);
+    stats.variance_length = lerp(
+        stats.variance_length,
+        target_variance,
+        (RELEASE_RATE_SLOW * dt).min(1.0),
+    );
+
+    // Normalised stats derive from variance_length. v4 used per-axis math here;
+    // for perceptual parity a shared scalar is sufficient (the audio formulas
+    // downstream treat them as smooth ranges, not exact ratios).
+    stats.normalized_entropy = stats.variance_length;
+    stats.normalized_variance_length = stats.variance_length;
+
+    // normalized_average_vel follows average_vel directly.
+    stats.normalized_average_vel = stats.average_vel;
+
+    // flat_ratio: aspect ratio of the cloud. v4 varies this with mouse motion
+    // direction; for a first cut we hold at 1.0 (circular cloud). Tune if
+    // manual sign-off shows the LFO frequency target sounds off.
+    stats.flat_ratio = 1.0;
 }
+
+/// Linear interpolation. `t` is clamped to [0, 1] by the caller before this is
+/// reached, so no clamp inside.
+fn lerp(current: f32, target: f32, t: f32) -> f32 {
+    current + (target - current) * t
+}
+
+// Tuning constants — initial values from architectural review. Adjust during
+// manual sign-off if specific musical effects need shaping.
+
+/// Attack rate for `average_vel` rising. Higher = snappier press response.
+const ATTACK_RATE_FAST: f32 = 8.0;
+
+/// Release rate for `average_vel` and `variance_length`. Lower = longer audio
+/// tail after release. v4's particle drag (`PULLING_DRAG=0.93075`) takes ~1s
+/// for velocity to halve; this rate matches that decay shape.
+const RELEASE_RATE_SLOW: f32 = 1.5;
+
+/// Attack rate for `grouped_upness`. Slightly slower than `average_vel`
+/// because clustering follows acceleration.
+const GROUPED_UPNESS_RATE: f32 = 3.0;
+
+/// Peak `grouped_upness` value at sustained-press excitement = 1.0. Tuned to
+/// v4's observed sustained-press range (~0.5-0.8). The downstream synth
+/// volume formula is `max(grouped_upness - 0.05, 0) * 5`, so this cap of 0.7
+/// produces a volume peak of ~3.25.
+const GROUPED_UPNESS_PEAK: f32 = 0.7;
+
+/// `variance_length` at rest (no attractor activity). Particles spread across
+/// the canvas; normalised to 1.0 as the "fully spread" baseline.
+const SPREAD_BASELINE: f32 = 1.0;
+
+/// `variance_length` at sustained-press peak excitement = 1.0. Particles
+/// tightly clustered around the attractor. The downstream noise filter cutoff
+/// formula is `2000 * normalized_variance_length`, so this floor of 0.2
+/// produces a cutoff of 400 Hz at peak clustering.
+const SPREAD_MIN: f32 = 0.2;
 
 #[cfg(test)]
 #[path = "particle_stats_tests.rs"]

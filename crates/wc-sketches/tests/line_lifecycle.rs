@@ -11,10 +11,13 @@
 )]
 
 mod common;
+use common::input::move_pointer;
 use common::{arm_idle_timeline, sketches_test_app};
 
+use bevy::math::Vec2;
 use bevy::prelude::*;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
+use wc_sketches::line::particle_stats::ParticleStats;
 use wc_sketches::line::systems::{MOUSE_POWER_DECAY, MOUSE_POWER_FLOOR, MOUSE_POWER_PRESS};
 use wc_sketches::line::{settings::LineSettings, LineRoot};
 
@@ -306,5 +309,92 @@ fn settings_restart_cycles_back_to_line() {
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,
         "settings restart should cycle Line → Home → Line within a few frames",
+    );
+}
+
+/// Transition to `AppState::Line` in a test app.
+///
+/// Uses Digit1 keyboard nav — the same binding exercised in `line_input.rs`.
+/// Three updates are sufficient: one folds the synthetic key into
+/// `ButtonInput<KeyCode>` + ticks leafwing's `ActionState`, one runs
+/// `handle_navigation_actions` to set `NextState`, one runs the
+/// `OnEnter(AppState::Line)` schedule.
+fn enter_line(app: &mut App) {
+    use bevy::input::keyboard::KeyCode;
+    common::input::tap_key(app, KeyCode::Digit1);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line,
+        "Digit1 keyboard nav should enter AppState::Line",
+    );
+}
+
+/// Sanity check for the Plan 11 Phase F envelope approximation.
+///
+/// Verifies the monotonic musical shape: `grouped_upness` near zero at rest,
+/// rises during sustained press, decays back after release. Thresholds are
+/// intentionally loose — the goal is the dynamic shape, not exact numerical
+/// values. Tuning constants in `particle_stats.rs` can change without failing
+/// this test as long as the monotonic shape is preserved.
+///
+/// Uses [`MouseAttractorState`] injection to hold attractor power at maximum
+/// for the press phase, bypassing `decay_mouse_attractor`'s geometric decay.
+/// This isolates the envelope-shape behavior from v4's power-decay constants.
+/// Sets `TimeUpdateStrategy::ManualDuration(16ms)` so `Time::delta_secs()` is
+/// non-zero; without this, Bevy's virtual time in `MinimalPlugins` is 0 each
+/// frame and the envelope lerp factor is `(rate * 0.0) = 0`, producing no
+/// movement.
+#[test]
+fn particle_stats_rise_on_press_and_decay_on_release() {
+    use std::time::Duration;
+
+    use bevy::time::TimeUpdateStrategy;
+    use wc_sketches::line::systems::MouseAttractorState;
+
+    let mut app = sketches_test_app();
+    // Configure 16 ms per frame so `Time::delta_secs()` is non-zero in tests.
+    // Bevy's `MinimalPlugins` virtual clock defaults to 0 dt without this.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    app.update();
+    enter_line(&mut app);
+
+    // At rest (no attractor activity): grouped_upness should be near zero.
+    let initial_grouped = app.world().resource::<ParticleStats>().grouped_upness;
+    assert!(
+        initial_grouped < 0.1,
+        "expected near-zero grouped_upness at rest; got {initial_grouped}",
+    );
+
+    // Hold attractor power at the production press level for ~1 second (60
+    // frames at 16 ms/frame ≈ 60 Hz). Re-injecting each frame keeps the power
+    // from decaying toward the floor between updates, so the envelope sees
+    // full excitement.
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    app.update(); // fold CursorMoved into PointerState
+
+    for _ in 0..60 {
+        app.world_mut().resource_mut::<MouseAttractorState>().power = MOUSE_POWER_PRESS;
+        app.update();
+    }
+    let peak_grouped = app.world().resource::<ParticleStats>().grouped_upness;
+    assert!(
+        peak_grouped > 0.3,
+        "expected grouped_upness > 0.3 after 1s at max power; got {peak_grouped}",
+    );
+
+    // Release (zero power) and let ~1 second of decay run.
+    app.world_mut().resource_mut::<MouseAttractorState>().power = 0.0;
+    for _ in 0..60 {
+        app.update();
+    }
+    let post_release = app.world().resource::<ParticleStats>().grouped_upness;
+    assert!(
+        post_release < 0.2,
+        "expected grouped_upness < 0.2 after 1s release decay; got {post_release}",
     );
 }
