@@ -52,123 +52,6 @@ use wc_core::audio::ring::AudioCommandSender;
 use super::particle_stats::ParticleStats;
 use super::post_process::LinePostParams;
 
-// --- TEMPORARY: Plan 11 audio comparison instrumentation ---
-//
-// Per-frame CSV logging of the same scalars v4's `step()` emits, gated on
-// the `WC_AUDIO_LOG` env var. Use to compare v4 vs v5 audio envelopes
-// directly. Remove this block (and the call from `drive_audio_and_shader`)
-// once the Plan 11 sign-off lands.
-
-/// Per-system state for the audio CSV logger. Held in a `Local` so the system
-/// owns its own logging window without a global.
-pub struct AudioLogState {
-    /// Open file handle, lazily initialised on the first active frame.
-    /// `Some(_)` after init succeeds; `None` while either the env var is
-    /// unset or the file couldn't be opened.
-    file: Option<std::fs::File>,
-    /// True after the CSV header has been written to `file`.
-    header_emitted: bool,
-    /// Wall-clock seconds at the first active frame. Subtract from
-    /// `Time::elapsed_secs()` to get a comparable `t` column.
-    start_secs: f32,
-    /// Frames remaining in the post-release tail. Counts down each frame the
-    /// audio is silent; resets to 180 each frame audio is active. When this
-    /// hits zero, logging pauses until the next active frame.
-    tail_frames_remaining: u32,
-    /// True once the env var has been consulted. Cached so we don't hit the
-    /// env each frame.
-    init_attempted: bool,
-}
-
-impl Default for AudioLogState {
-    fn default() -> Self {
-        Self {
-            file: None,
-            header_emitted: false,
-            start_secs: 0.0,
-            tail_frames_remaining: 0,
-            init_attempted: false,
-        }
-    }
-}
-
-fn audio_log_csv(
-    stats: &ParticleStats,
-    time: &Time,
-    mouse: &super::systems::mouse::MouseAttractorState,
-    log: &mut AudioLogState,
-) {
-    use std::io::Write;
-
-    if !log.init_attempted {
-        log.init_attempted = true;
-        if let Ok(path) = std::env::var("WC_AUDIO_LOG") {
-            match std::fs::File::create(&path) {
-                Ok(f) => {
-                    tracing::info!(?path, "audio log enabled");
-                    log.file = Some(f);
-                }
-                Err(err) => {
-                    tracing::warn!(?err, ?path, "WC_AUDIO_LOG set but file open failed");
-                }
-            }
-        }
-    }
-    let Some(file) = log.file.as_mut() else {
-        return;
-    };
-    let active_now = stats.grouped_upness > 0.001 || mouse.power > 0.0;
-    if active_now {
-        log.tail_frames_remaining = 180;
-    }
-    if !active_now && log.tail_frames_remaining == 0 {
-        return;
-    }
-    let now = time.elapsed_secs();
-    if !log.header_emitted {
-        let _ = writeln!(
-            file,
-            "t,power,avgVel,varLen,flatRatio,normEntropy,normVarLen,normAvgVel,groupedUpness,bpFreq,noiseFreq,volume,lfoRate,lfoDepth"
-        );
-        log.header_emitted = true;
-        log.start_secs = now;
-    }
-    let t = now - log.start_secs;
-    let power = mouse.power;
-    // `normalized_entropy` is always non-negative (variance_length is
-    // non-negative, max(ENTROPY_FLOOR) preserves that). `> 0.0` is the
-    // clippy-clean way to write the div-by-zero guard.
-    let bp_freq = if stats.normalized_entropy > 0.0 {
-        222.0 / stats.normalized_entropy
-    } else {
-        f32::NAN
-    };
-    let noise_freq = 2000.0 * stats.normalized_variance_length;
-    let volume = (stats.grouped_upness - 0.05).max(0.0) * 5.0;
-    let lfo_rate = stats.flat_ratio;
-    let lfo_depth = if bp_freq.is_finite() {
-        bp_freq * LFO_DEPTH_OVER_CUTOFF
-    } else {
-        f32::NAN
-    };
-    let _ = writeln!(
-        file,
-        "{t:.3},{power:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{bp_freq:.2},{noise_freq:.2},{volume:.3},{lfo_rate:.3},{lfo_depth:.2}",
-        stats.average_vel,
-        stats.variance_length,
-        stats.flat_ratio,
-        stats.normalized_entropy,
-        stats.normalized_variance_length,
-        stats.normalized_average_vel,
-        stats.grouped_upness,
-    );
-    if !active_now {
-        log.tail_frames_remaining = log.tail_frames_remaining.saturating_sub(1);
-    }
-}
-
-// --- END TEMPORARY ---
-
 /// v4's `lfoGain.gain.setTargetAtTime(freq * 0.06, …)` constant.
 ///
 /// The LFO modulation depth tracks the bandpass cutoff so the wobble's
@@ -193,18 +76,8 @@ pub fn drive_audio_and_shader(
     time: Res<'_, Time>,
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     mut post: ResMut<'_, LinePostParams>,
-    mouse: Res<'_, super::systems::mouse::MouseAttractorState>,
     settings: Res<'_, super::settings::LineSettings>,
-    mut log_state: Local<'_, AudioLogState>,
 ) {
-    // --- TEMPORARY: Plan 11 audio comparison instrumentation (matches v4) ---
-    // Logs the same CSV the v4 worktree emits in its `step()`, so envelopes
-    // can be diffed column-by-column. Active when audio is engaged or within
-    // a 3s tail. Set `WC_AUDIO_LOG=1` env var to enable; off by default so
-    // production runs aren't spammed.
-    audio_log_csv(&stats, &time, &mouse, &mut log_state);
-    // --- END TEMPORARY ---
-
     // --- Audio modulation (matches v4 LineSketch.step()) ---
     //
     // Each `push` may fail with `Err(dropped_command)` if the audio ring is
