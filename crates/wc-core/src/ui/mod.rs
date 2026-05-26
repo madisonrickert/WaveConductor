@@ -10,15 +10,13 @@
 //! dependency order so that downstream plugins can rely on upstream
 //! resources existing during `Startup`:
 //!
-//! 1. [`style::OverlayStylePlugin`] — egui [`Style`] tuned to v4.
-//! 2. [`blur::BackdropBlurPlugin`] — render-graph node producing the
+//! 1. `style::OverlayStylePlugin` — egui `Style` tuned to v4.
+//! 2. `blur::BackdropBlurPlugin` — render-graph node producing the
 //!    half-resolution blurred texture every panel samples.
-//! 3. [`auto_fade::AutoFadePlugin`] — `UiOpacity` driven from the existing
+//! 3. `auto_fade::AutoFadePlugin` — `UiOpacity` driven from the existing
 //!    `InteractionTimer`.
-//! 4. [`buttons::OverlayButtonsPlugin`] — Home/Settings/Volume corner buttons.
-//! 5. [`picker::SketchPickerPlugin`] — Home-state grid.
-//!
-//! [`egui::Style`]: bevy_egui::egui::Style
+//! 4. `buttons::OverlayButtonsPlugin` — Home/Settings/Volume corner buttons.
+//! 5. `picker::SketchPickerPlugin` — Home-state grid.
 
 use bevy::prelude::*;
 
