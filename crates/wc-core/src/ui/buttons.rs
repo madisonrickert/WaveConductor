@@ -10,15 +10,19 @@
 //! `TouchInput` messages → [`update_pointer_coarse`] → [`PointerCoarse`] resource.
 //! [`overlay_icon_button`] reads [`OverlayStyle`] constants and the egui
 //! animation clock to produce a hover-animated, alpha-scaled button widget.
-//! Tasks 14 and 15 wire the actual `draw_*` systems; this module provides
-//! only the shared primitive and the touch-detection resource.
+//! Task 14 adds `SettingsPanelVisible`, `LastSettingsPanelRect`,
+//! `draw_home_button`, and `draw_settings_button`. Task 15 adds the volume
+//! button. This module provides the shared primitive, touch-detection
+//! resource, and all draw systems.
 
 use std::time::Duration;
 
 use bevy::input::touch::TouchInput;
 use bevy::prelude::*;
+use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::egui;
 
+use crate::lifecycle::state::AppState;
 use super::auto_fade::UiOpacity;
 use super::style::OverlayStyle;
 
@@ -55,11 +59,17 @@ impl Plugin for OverlayButtonsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PointerCoarse>();
         app.init_resource::<LastTouchAt>();
+        app.init_resource::<SettingsPanelVisible>();
+        app.init_resource::<LastSettingsPanelRect>();
         // Register the message type if it isn't already present (idempotent).
         // `bevy::input::InputPlugin` handles this in production; tests that
         // use `MinimalPlugins` need explicit registration.
         app.add_message::<TouchInput>();
         app.add_systems(Update, update_pointer_coarse);
+        app.add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            (draw_home_button, draw_settings_button),
+        );
     }
 }
 
@@ -83,6 +93,130 @@ pub(crate) fn update_pointer_coarse(
     }
     if coarse.0 && now.saturating_sub(last_touch_at.0) >= TOUCH_COARSE_HOLD {
         coarse.0 = false;
+    }
+}
+
+/// Visibility flag for the user-facing settings panel.
+///
+/// Toggled by [`draw_settings_button`] when the cog icon is clicked. Task 18
+/// reads this resource to decide whether to draw `panel_user`'s frosted-glass
+/// frame. Defaults `false` so the panel starts hidden.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct SettingsPanelVisible(pub bool);
+
+/// Last frame's settings-panel bounding rectangle, in egui points.
+///
+/// Written by Task 18's panel-draw system each frame the panel is open. Used
+/// by the same system's click-outside detection to dismiss the panel when the
+/// user clicks away. Default is [`egui::Rect::NOTHING`] (zero-area sentinel).
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct LastSettingsPanelRect(pub egui::Rect);
+
+impl Default for LastSettingsPanelRect {
+    fn default() -> Self {
+        Self(egui::Rect::NOTHING)
+    }
+}
+
+/// Top-left home button. Hidden when [`AppState`] is already [`AppState::Home`].
+///
+/// Runs in [`bevy_egui::EguiPrimaryContextPass`]. On click, sets
+/// `NextState<AppState>` to `Home`. Button size scales with [`PointerCoarse`]
+/// (32 px fine / 44 px coarse). Icon: [`egui_phosphor::regular::HOUSE`].
+pub fn draw_home_button(world: &mut World) {
+    // Skip when EguiPlugin is absent (MinimalPlugins tests).
+    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+        return;
+    }
+    // Hidden on the Home screen itself — no point navigating home from home.
+    {
+        let state = world.get_resource::<State<AppState>>();
+        if state.is_some_and(|s| **s == AppState::Home) {
+            return;
+        }
+    }
+
+    let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
+        bevy::ecs::system::SystemState::new(world);
+    let mut contexts = state_param.get_mut(world);
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let ctx = ctx.clone();
+    state_param.apply(world);
+
+    let style = *world.resource::<OverlayStyle>();
+    let opacity = world.resource::<UiOpacity>().current;
+    let coarse = world.resource::<PointerCoarse>().0;
+    let size = if coarse { style.button_size_coarse } else { style.button_size_fine };
+
+    let mut clicked = false;
+    egui::Area::new(egui::Id::new("wc-home-button"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(12.0, 12.0))
+        .show(&ctx, |ui| {
+            let response =
+                overlay_icon_button(ui, &style, egui_phosphor::regular::HOUSE, size, opacity);
+            if response.clicked() {
+                clicked = true;
+            }
+        });
+
+    if clicked {
+        if let Some(mut next) = world.get_resource_mut::<NextState<AppState>>() {
+            next.set(AppState::Home);
+        }
+    }
+}
+
+/// Top-right settings cog. Toggles [`SettingsPanelVisible`].
+///
+/// Runs in [`bevy_egui::EguiPrimaryContextPass`]. Position is
+/// `(window_width - 12 - size, 12)` so it stays flush with the right edge
+/// regardless of window size. Button size scales with [`PointerCoarse`]
+/// (32 px fine / 44 px coarse). Icon: [`egui_phosphor::regular::GEAR`].
+pub fn draw_settings_button(world: &mut World) {
+    // Skip when EguiPlugin is absent (MinimalPlugins tests).
+    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+        return;
+    }
+
+    // Read window width; fall back to 1280 if no primary window is present yet.
+    let window_width = {
+        let mut q = world.query_filtered::<&Window, With<PrimaryWindow>>();
+        q.single(world).map(Window::width).unwrap_or(1280.0)
+    };
+
+    let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
+        bevy::ecs::system::SystemState::new(world);
+    let mut contexts = state_param.get_mut(world);
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let ctx = ctx.clone();
+    state_param.apply(world);
+
+    let style = *world.resource::<OverlayStyle>();
+    let opacity = world.resource::<UiOpacity>().current;
+    let coarse = world.resource::<PointerCoarse>().0;
+    let size = if coarse { style.button_size_coarse } else { style.button_size_fine };
+
+    let mut clicked = false;
+    egui::Area::new(egui::Id::new("wc-settings-button"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(window_width - 12.0 - size, 12.0))
+        .show(&ctx, |ui| {
+            let response =
+                overlay_icon_button(ui, &style, egui_phosphor::regular::GEAR, size, opacity);
+            if response.clicked() {
+                clicked = true;
+            }
+        });
+
+    if clicked {
+        if let Some(mut visible) = world.get_resource_mut::<SettingsPanelVisible>() {
+            visible.0 = !visible.0;
+        }
     }
 }
 
@@ -194,12 +328,6 @@ fn scale_color_alpha(color: egui::Color32, mul: f32) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
-// Suppress unused-import lint: UiOpacity is imported so Task 14 draw
-// systems added to this module won't need an extra import.
-const _: fn() = || {
-    let _ = std::mem::size_of::<UiOpacity>();
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +357,23 @@ mod tests {
         });
         app.update();
         assert!(app.world().resource::<PointerCoarse>().0);
+    }
+
+    #[test]
+    fn settings_panel_visible_defaults_false() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<SettingsPanelVisible>();
+        assert!(!app.world().resource::<SettingsPanelVisible>().0);
+    }
+
+    #[test]
+    fn settings_panel_visible_toggles_with_resource_change() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<SettingsPanelVisible>();
+        app.world_mut().resource_mut::<SettingsPanelVisible>().0 = true;
+        assert!(app.world().resource::<SettingsPanelVisible>().0);
     }
 
     #[test]
