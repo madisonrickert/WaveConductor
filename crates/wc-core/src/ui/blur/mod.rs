@@ -16,6 +16,7 @@
 //!    rect, completing the CSS `backdrop-filter: blur()` compositing
 //!    order.
 
+pub mod callback;
 pub mod node;
 
 use bevy::math::UVec2;
@@ -137,6 +138,7 @@ impl Plugin for BackdropBlurPlugin {
             return;
         };
         render_app.init_resource::<node::BackdropBlurPipeline>();
+        render_app.init_resource::<callback::CompositePipeline>();
     }
 }
 
