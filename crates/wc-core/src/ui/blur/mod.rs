@@ -16,6 +16,8 @@
 //!    rect, completing the CSS `backdrop-filter: blur()` compositing
 //!    order.
 
+pub mod node;
+
 use bevy::math::UVec2;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -84,7 +86,6 @@ impl BackdropBlurPlugin {
             Render,
             ensure_blur_texture.in_set(RenderSystems::PrepareResources),
         );
-        // Task 9 will initialize BackdropBlurPipeline here.
     }
 }
 
@@ -93,6 +94,18 @@ impl Plugin for BackdropBlurPlugin {
         app.init_resource::<BackdropBlurEnabled>();
         app.add_plugins(ExtractResourcePlugin::<BackdropBlurEnabled>::default());
         Self::setup_render_app(app);
+    }
+
+    /// Initialise render-app resources that depend on `PipelineCache` and
+    /// `AssetServer` being fully set up. Called after all `build` methods
+    /// complete, matching the pattern used by [`LinePostProcessPlugin`].
+    ///
+    /// [`LinePostProcessPlugin`]: crate::line::post_process::LinePostProcessPlugin
+    fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        render_app.init_resource::<node::BackdropBlurPipeline>();
     }
 }
 
