@@ -10,7 +10,7 @@
 - **Plan 7 (shipped, tag `v5-line-sim`)** — multi-attractor physics with dual drag, size-scaled gravity, mouse-power decay, `original_xy` + constrain-to-box, fade-in α, horizontal-line spawn with sawtooth jitter, `particle_density` setting.
 - **Plan 8 (shipped, tag `v5-line-render`)** — gravity-smear post-process shader, star sprite, attractor ring meshes, `gamma` setting.
 - **Plan 9 (shipped, tag `v5-line-audio`)** — fundsp-based synthesis (bandpass cascade + LFO + noise + master gain mixed with looped `line_background.ogg`), `ParticleStats` CPU reduction over `LineCpuMirror`, coupling system writing per-frame `SetLineParam` (lfo_freq/bandpass_freq/noise_freq/volume) and overriding `LinePostParams.g_constant` + `i_mouse_factor` from groupedUpness × triangle-wave.
-- **Plan 10 (shipped, tag `v5-line-parity`)** — heatmap-image spawn, soak harness, signed verdict.
+- **Plan 10 (shipped, parity gaps deferred to Plan 11)** — heatmap-image spawn, soak harness, manual-testing fixes (PNG feature, OGG path via `CARGO_MANIFEST_DIR`, black `ClearColor`, dep trim of unused Bevy features). Originally scoped to also sign the verdict, but the first hands-on run on 2026-05-25 surfaced four parity gaps that don't fit "polish" (see Verdict section below). Untagged at this state; the `v5-line-parity` tag is reserved for the Plan 11 closure.
   - **Phase A** — heatmap-image spawn template ported from v4's
     `src/sketches/line/heatmapSampler.ts`. New `LineSettings.spawn_template:
     String` field (Text setting, `requires_restart`); empty = horizontal-line
@@ -27,44 +27,32 @@
     Runs under `MinimalPlugins`, so the renderer is not exercised; a
     `DefaultPlugins` variant is reserved for Plan 11+.
 
-**Approved deviations from v4** (carried forward; verdict signed below):
+**Approved deviations from v4** (carried forward):
 
 - WGSL compute kernel replaces CPU-side `particleSystem.ts` for rendering; a parallel Rust CPU mirror runs the same math on the host (introduced in Plan 7) to feed `ParticleStats` in Plan 9 without a GPU readback stall. The two integrators may drift by ≤1% over long timescales due to floating-point order-of-operations differences; acceptable for groupedUpness and friends.
 
 ## Verdict
 
-**Status:** PENDING MANUAL VERIFICATION.
+**Status:** PENDING — verdict deferred to Plan 11.
 
-The harness, math, and asset ports are complete. Plans 7–10 land the
-multi-attractor physics, the gravity-smear post-process, the fundsp
-synthesis graph + `line_background.ogg` loop, the audio↔visual
-reactivity coupling, and the heatmap-image spawn template — all
-covered by automated integration tests
-(`crates/wc-sketches/tests/line_input.rs`,
-`crates/wc-sketches/tests/line_lifecycle.rs`) and a `#[ignore]`-d
-8-hour soak (`crates/wc-sketches/tests/line_soak.rs`).
+Plan 10 landed the bulk of the parity work: multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph plus `line_background.ogg` loop, the audio↔visual reactivity coupling, and the heatmap-image spawn template — covered by automated integration tests (`crates/wc-sketches/tests/line_input.rs`, `crates/wc-sketches/tests/line_lifecycle.rs`) and a `#[ignore]`-d 8-hour soak (`crates/wc-sketches/tests/line_soak.rs`).
 
-**Tag points for the side-by-side capture:**
+The first hands-on run on 2026-05-25 surfaced four parity gaps that Plan 11 will close before signing:
 
-- **v5** — `v5-line-parity` tag on this repository (`rewrite/bevy`
-  branch HEAD at the time of tagging).
-- **v4** — `main` branch on this same repository at commit
-  `3b85676` ("Bump version to 4.2.0"). The v4 codebase lives at the
-  repository root prior to the `rewrite/bevy` branch — `npm run dev`
-  on `main` boots it.
+1. **Attractor ring rotation invisible.** `bevy::math::primitives::Annulus` is rotationally symmetric, so the per-frame `(10 - idx) / 20 * power` rotation has no visible effect. v4's rings appear visibly spinning. Plan 11 swaps to a low-segment polygon (`RegularPolygon` with 6–8 sides) or a stroked custom mesh whose corners make rotation legible.
+2. **Touch and hand-tracking cannot activate the attractor.** `update_mouse_attractor` reads `Res<ButtonInput<MouseButton>>::just_pressed(Left)` only. Pointer position routes correctly from touch/hand into `PointerState`, but only the mouse triggers press/release. v4 used pointer events that fired for both. Plan 11 adds `Res<Touches>` for `TouchPhase::Started`/`Ended` and a hand-tracking gesture for synthetic press.
+3. **`spawn_template` lacks a file picker.** Currently a free-text input — typing absolute paths is a poor kiosk UX. Plan 11 adds an `rfd`-backed Browse… button next to the field.
+4. **Manual side-by-side capture not yet performed.** The human-in-the-loop step below is what flips this verdict from PENDING to PASS.
 
-**Human-in-the-loop step:** Madison runs both apps at 1280×720 and
-confirms perceptual parity in three states:
+**Tag points for the side-by-side capture (when Plan 11 performs it):**
 
-1. **Idle** — no input. Particles settle to the horizontal-line spawn
-   (or to the heatmap if `spawn_template` is set).
-2. **Mid-press at center** — left button held at canvas center. Gravity
-   smear concentric rings, chromatic shift, attractor ring rotation.
-3. **Mid-decay (~5s after release)** — power decays geometrically, idle
-   veto holds the sketch Active, audio reactivity tracks `groupedUpness`
-   back down through silence.
+- **v5** — `v5-line-parity` tag on this repository (`rewrite/bevy` branch HEAD at the time Plan 11 tags). Plan 10's commits are reachable via plain branch history; no Plan 10 tag was created since parity was incomplete.
+- **v4** — `main` branch on this same repository at commit `3b85676` ("Bump version to 4.2.0"). The v4 codebase lives at the repository root prior to the `rewrite/bevy` branch — `npm run dev` on `main` boots it.
 
-**Known remaining parity deviations:** none expected. The CPU mirror
-integration drift listed under "Approved deviations" is the only
-documented divergence and is bounded at ≤1% over long timescales —
-imperceptible at the festival-loop horizon.
+**Human-in-the-loop step (Plan 11):** Madison runs both apps at 1280×720 and confirms perceptual parity in three states:
+
+1. **Idle** — no input. Particles settle to the horizontal-line spawn (or to the heatmap if `spawn_template` is set).
+2. **Mid-press at center** — left button held at canvas center. Gravity smear concentric rings, chromatic shift, attractor ring rotation visible.
+3. **Mid-decay (~5s after release)** — power decays geometrically, idle veto holds the sketch Active, audio reactivity tracks `groupedUpness` back down through silence.
+
+**Known remaining parity deviations after Plan 11 closes:** none expected. The CPU mirror integration drift listed under "Approved deviations" is the only documented divergence and is bounded at ≤1% over long timescales — imperceptible at the festival-loop horizon.
