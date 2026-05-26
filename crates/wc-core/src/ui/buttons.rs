@@ -72,7 +72,10 @@ impl Plugin for OverlayButtonsPlugin {
         // Keep VolumeMuted in sync with the audio thread's echo so the button
         // icon always reflects the authoritative mute state (the keyboard
         // shortcut `v` toggles audio independently of the UI button).
-        app.add_systems(PreUpdate, sync_volume_muted);
+        app.add_systems(
+            PreUpdate,
+            sync_volume_muted.after(crate::audio::state::pump_audio_messages),
+        );
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
             (draw_home_button, draw_settings_button, draw_volume_button),
