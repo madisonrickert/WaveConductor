@@ -72,23 +72,34 @@ impl Default for OverlayStyle {
 }
 
 /// Plugin: inserts [`OverlayStyle`] and applies the egui `Style` /
-/// `FontDefinitions` at `PostStartup` (after `bevy_egui` has built its
-/// context).
+/// `FontDefinitions` on the first `Update` frame where the egui context is
+/// ready. In Bevy 0.18 + `bevy_egui` 0.39, the egui primary context is created
+/// lazily (typically not until the first rendered frame), so `PostStartup` is
+/// too early — `ctx_mut()` returns `Err` and the font definitions are never
+/// installed, causing a panic when the picker tries to use `FontFamily::Name("orbitron")`.
 pub struct OverlayStylePlugin;
 
 impl Plugin for OverlayStylePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OverlayStyle>();
-        app.add_systems(PostStartup, apply_overlay_style);
+        app.add_systems(Update, apply_overlay_style);
     }
 }
 
 /// Configure the egui context: load Inter / Fira Code / Orbitron fonts and
 /// apply the dark visuals derived from [`OverlayStyle`].
+///
+/// Runs every `Update` tick but only does work on the first frame where
+/// `ctx_mut()` succeeds. The `applied` local guard prevents redundant
+/// `set_fonts` / `set_visuals` calls on subsequent frames.
 pub(super) fn apply_overlay_style(
     mut contexts: bevy_egui::EguiContexts<'_, '_>,
     style: Res<'_, OverlayStyle>,
+    mut applied: Local<'_, bool>,
 ) {
+    if *applied {
+        return;
+    }
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -151,9 +162,14 @@ pub(super) fn apply_overlay_style(
     visuals.override_text_color = Some(style.text_color_bright);
 
     ctx.set_visuals(visuals);
+    *applied = true;
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    reason = "comparing exact integer-representable constants set by assignment, not by arithmetic"
+)]
 mod tests {
     use super::*;
 
