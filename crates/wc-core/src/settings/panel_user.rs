@@ -13,6 +13,14 @@
 //! sketch would add another monomorphized renderer with another match
 //! ladder. Reflection drives a single walker that consumes the metadata
 //! table the derive macro already emits.
+//!
+//! ## Task 18: v4 chrome
+//!
+//! The panel is now gated on [`crate::ui::buttons::SettingsPanelVisible`]
+//! (default `false`) so it no longer auto-opens at startup. The `egui::Window`
+//! is replaced by `egui::Area` + [`crate::ui::backdrop_blur_frame`] for the
+//! translucent frosted-glass look. A click-outside dismiss system runs each
+//! `Update` frame to match v4's `mousedown`-outside behaviour.
 
 #![allow(
     clippy::as_conversions,
@@ -32,6 +40,9 @@ use smallvec::SmallVec;
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
+use crate::ui::auto_fade::UiOpacity;
+use crate::ui::buttons::{LastSettingsPanelRect, SettingsPanelVisible};
+use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
 
 /// Inline stack snapshot of registered settings storage keys. Sized for the
 /// expected case of ≤8 settings types per app; spills to the heap above that.
@@ -39,13 +50,32 @@ type KeySnapshot = SmallVec<[&'static str; 8]>;
 
 /// Plugin assembly hook called by [`super::SettingsPlugin::build`].
 ///
-/// Scheduled inside `bevy_egui::EguiPrimaryContextPass`. See [`super::panel_dev`]
-/// for the same scheduling rationale.
+/// The draw system runs in [`bevy_egui::EguiPrimaryContextPass`] and is gated
+/// on [`SettingsPanelVisible`] so the panel only renders when the settings cog
+/// has been clicked. A second system runs each [`Update`] frame to dismiss the
+/// panel when the user clicks outside its bounds.
 pub(super) fn add_systems(app: &mut App) {
-    app.add_systems(bevy_egui::EguiPrimaryContextPass, draw_user_panel);
+    app.add_systems(
+        bevy_egui::EguiPrimaryContextPass,
+        draw_user_panel.run_if(settings_panel_visible),
+    );
+    app.add_systems(Update, dismiss_on_click_outside);
 }
 
-/// Exclusive system that draws the user panel.
+/// Run condition: returns `true` when the settings panel should be visible.
+fn settings_panel_visible(visible: Res<'_, SettingsPanelVisible>) -> bool {
+    visible.0
+}
+
+/// Exclusive system that draws the user settings panel with v4 chrome.
+///
+/// Uses `egui::Area` for fixed top-right positioning (under the cog) and
+/// wraps content in [`backdrop_blur_frame`] for the translucent frosted-glass
+/// look. Only runs when [`SettingsPanelVisible`] is `true` (gated by the
+/// `settings_panel_visible` run condition in [`add_systems`]).
+///
+/// After drawing, updates [`LastSettingsPanelRect`] so that
+/// [`dismiss_on_click_outside`] knows the panel's bounds for the next frame.
 fn draw_user_panel(world: &mut World) {
     // Skip when no egui context is up (e.g., MinimalPlugins test harness).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
@@ -62,6 +92,16 @@ fn draw_user_panel(world: &mut World) {
         return;
     }
 
+    // Read style and opacity before entering the egui context borrow.
+    let style = *world.resource::<OverlayStyle>();
+    let opacity_mul = world.resource::<UiOpacity>().current;
+
+    // Read window width for top-right positioning; fall back to 1280.
+    let window_width = {
+        let mut q = world.query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world).map(bevy::window::Window::width).unwrap_or(1280.0)
+    };
+
     let mut state: bevy::ecs::system::SystemState<EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
     let mut contexts = state.get_mut(world);
@@ -74,14 +114,85 @@ fn draw_user_panel(world: &mut World) {
     let ctx = ctx.clone();
     state.apply(world);
 
-    egui::Window::new("Settings")
-        .id(egui::Id::new("wc-settings-user-panel"))
-        .default_open(true)
+    // Position: top-right, 16 px inset, 60 px from the top (below the cog).
+    // Width fixed at 320 px to match v4's overlay panel width.
+    let area_pos = egui::pos2(window_width - 16.0 - 320.0, 60.0);
+
+    let mut panel_rect = egui::Rect::NOTHING;
+
+    egui::Area::new(egui::Id::new("wc-settings-user-panel"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(area_pos)
         .show(&ctx, |ui| {
-            for key in keys {
-                render_section_by_key(world, ui, key);
-            }
+            ui.set_max_width(320.0);
+            let resp = backdrop_blur_frame(
+                ui,
+                &style,
+                FrameOptions {
+                    corner_radius: style.panel_corner_radius,
+                    padding: egui::vec2(20.0, 16.0),
+                    opacity_mul,
+                },
+                |ui| {
+                    // Title row: "SETTINGS" in dim chrome text.
+                    // Note: egui has no built-in letter-spacing; default spacing
+                    // is an approved deviation per Plan 11.5 Task 18.
+                    ui.label(
+                        egui::RichText::new("SETTINGS")
+                            .color(style.text_color_dim)
+                            .size(13.0),
+                    );
+                    ui.separator();
+                    for key in &keys {
+                        render_section_by_key(world, ui, key);
+                    }
+                },
+            );
+            // Capture the panel rect for click-outside detection. Written here
+            // (inside the Area closure) so it reflects the drawn frame's actual
+            // bounds, not a stale value from a previous frame.
+            panel_rect = resp.rect;
         });
+
+    world.resource_mut::<LastSettingsPanelRect>().0 = panel_rect;
+}
+
+/// Dismiss the settings panel when the user clicks outside its bounds.
+///
+/// Mirrors v4's `mousedown` outside handler. Only triggers on
+/// `MouseButton::Left` just-pressed events. If `EguiPointerCaptured` is true,
+/// the click was consumed by egui (e.g., hitting the cog to toggle the panel),
+/// so this handler skips — the cog's own toggle logic already handled it.
+fn dismiss_on_click_outside(
+    mut visible: ResMut<'_, SettingsPanelVisible>,
+    last_rect: Res<'_, LastSettingsPanelRect>,
+    egui_captured: Res<'_, crate::settings::EguiPointerCaptured>,
+    mouse: Res<'_, ButtonInput<MouseButton>>,
+    windows: Query<'_, '_, &bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+) {
+    if !visible.0 {
+        return;
+    }
+    // Only fire on the frame the left button is first pressed.
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // If egui captured the pointer this frame, the click landed inside egui
+    // (which includes the panel itself and the cog button). Defer to the cog's
+    // own toggle — don't double-dismiss.
+    if egui_captured.0 {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let cursor_egui = egui::pos2(cursor.x, cursor.y);
+    if !last_rect.0.contains(cursor_egui) {
+        visible.0 = false;
+    }
 }
 
 /// Look up the type registration matching `storage_key` and render its
