@@ -12,6 +12,7 @@
 
 use bevy::prelude::*;
 use wc_core::input::pointer::PointerState;
+use wc_core::settings::EguiPointerCaptured;
 
 /// Lifecycle state for the mouse attractor — power that activates on click and
 /// decays geometrically while held. Matches v4's behavior: `power=10` on press;
@@ -71,6 +72,16 @@ pub struct LastPinchState {
 /// Release detection is independent of `pointer.primary`: an off-screen
 /// release still zeros power.
 ///
+/// ## egui pointer-capture gating
+///
+/// Mouse and touch presses are gated by [`EguiPointerCaptured`]: a click
+/// inside the Settings panel both tweaks the egui widget AND would otherwise
+/// fire this handler, spawning a stray attractor under the slider. When egui
+/// has captured the pointer, we suppress only the press edge — release
+/// events and continuous position updates still fire so an attractor that
+/// was activated outside the panel and then dragged over it still releases
+/// cleanly. Hand-pinch presses are NOT gated; egui doesn't see hand input.
+///
 /// Hand-tracking gesture (feature-gated, since `HandTrackingState` has no
 /// writer until Plan 12+ lands a provider): pinch strength ≥
 /// [`PINCH_PRESS_THRESHOLD`] = 0.85 counts as pressed. [`LastPinchState`]
@@ -80,6 +91,7 @@ pub fn update_mouse_attractor(
     pointer: Res<'_, PointerState>,
     mouse_buttons: Res<'_, bevy::input::ButtonInput<bevy::input::mouse::MouseButton>>,
     touches: Res<'_, bevy::input::touch::Touches>,
+    egui_captured: Option<Res<'_, EguiPointerCaptured>>,
     #[cfg(feature = "hand-tracking-gestures")] hands: Res<
         '_,
         wc_core::input::state::HandTrackingState,
@@ -115,7 +127,11 @@ pub fn update_mouse_attractor(
     #[cfg(not(feature = "hand-tracking-gestures"))]
     let (hand_just_pressed, hand_just_released) = (false, false);
 
-    let just_pressed = mouse_just_pressed || touch_just_pressed || hand_just_pressed;
+    // Pointer (mouse + touch) presses are suppressed when egui owns the
+    // pointer this frame; hand-pinch presses ignore the gate.
+    let pointer_captured = egui_captured.is_some_and(|c| c.0);
+    let pointer_press_active = (mouse_just_pressed || touch_just_pressed) && !pointer_captured;
+    let just_pressed = pointer_press_active || hand_just_pressed;
     let just_released = mouse_just_released || touch_just_released || hand_just_released;
 
     if let Some(cursor_window) = pointer.primary {

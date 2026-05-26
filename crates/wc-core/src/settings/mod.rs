@@ -28,6 +28,7 @@ pub mod def;
 pub mod event;
 pub mod panel_dev;
 pub mod persistence;
+pub mod pointer_capture;
 pub mod registry;
 pub mod trait_def;
 
@@ -36,6 +37,7 @@ mod panel_user;
 pub use def::{NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
 pub use panel_dev::DevPanelVisible;
+pub use pointer_capture::EguiPointerCaptured;
 pub use registry::{RegisterSketchSettingsExt, SettingsRegistry};
 pub use trait_def::SketchSettings;
 
@@ -53,6 +55,7 @@ impl Plugin for SettingsPlugin {
         app.init_resource::<SettingsRegistry>()
             .init_resource::<DevPanelVisible>()
             .init_resource::<autosave::AutosaveState>()
+            .init_resource::<EguiPointerCaptured>()
             .add_message::<SketchRestart>()
             // Real sketches register their own settings via `LinePlugin`, `FlamePlugin`,
             // etc. The synthetic TestSketchSettings only lives in #[cfg(test)] builds
@@ -60,6 +63,7 @@ impl Plugin for SettingsPlugin {
             .add_systems(
                 Update,
                 (
+                    pointer_capture::update_egui_pointer_capture,
                     panel_dev::handle_dev_panel_toggle,
                     registry::emit_restart_events,
                     autosave::detect_changes,

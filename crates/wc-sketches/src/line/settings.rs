@@ -109,14 +109,14 @@ pub struct LineSettings {
     /// Voice envelope attack time in milliseconds. Smaller = snappier press
     /// onset; larger = slower swell-in. Internally converts to an envelope
     /// lerp rate of `1000 / attack_ms`.
-    #[setting(default = 40.0_f32, min = 5.0_f32, max = 200.0_f32, step = 5.0_f32, category = User)]
+    #[setting(default = 115.0_f32, min = 5.0_f32, max = 200.0_f32, step = 5.0_f32, category = User)]
     #[serde(default = "default_synth_attack_ms")]
     pub synth_attack_ms: f32,
 
     /// Voice envelope release tail length in milliseconds. Smaller = abrupt
     /// cutoff; larger = long pad tail. Internally converts to an envelope
     /// lerp rate of `1000 / release_ms`.
-    #[setting(default = 670.0_f32, min = 100.0_f32, max = 3000.0_f32, step = 50.0_f32, category = User)]
+    #[setting(default = 350.0_f32, min = 100.0_f32, max = 3000.0_f32, step = 50.0_f32, category = User)]
     #[serde(default = "default_synth_release_ms")]
     pub synth_release_ms: f32,
 
@@ -156,11 +156,11 @@ fn default_synth_volume_scale() -> f32 {
 }
 
 fn default_synth_attack_ms() -> f32 {
-    40.0
+    115.0
 }
 
 fn default_synth_release_ms() -> f32 {
-    670.0
+    350.0
 }
 
 fn default_synth_evolution_attack_s() -> f32 {
