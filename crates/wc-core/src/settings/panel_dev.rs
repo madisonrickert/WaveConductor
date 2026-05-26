@@ -5,11 +5,20 @@
 //! is wired in [`super::SettingsPlugin`]; this module owns only the boolean
 //! state resource and its toggle system so the rest of the codebase can
 //! depend on `DevPanelVisible` without dragging in egui.
+//!
+//! ## Task 19: v4 chrome
+//!
+//! The `egui::Window` is replaced by `egui::Area` + [`crate::ui::backdrop_blur_frame`]
+//! for the translucent frosted-glass look. A `ScrollArea` wraps the world
+//! inspector so it remains usable on shorter displays. Shift+D is the only
+//! toggle — there is no click-outside dismiss for this developer tool.
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::ActionState;
 
 use crate::lifecycle::actions::WaveConductorAction;
+use crate::ui::auto_fade::UiOpacity;
+use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
 
 /// True when the dev inspector window should be drawn.
 ///
@@ -47,9 +56,15 @@ fn dev_panel_visible(visible: Res<'_, DevPanelVisible>) -> bool {
     visible.0
 }
 
-/// Exclusive `&mut World` system that opens a `bevy-inspector-egui`
-/// world-inspector window. Renders nothing when the panel is hidden
-/// (the `run_if` above gates entry).
+/// Exclusive `&mut World` system that draws the world inspector with v4 chrome.
+///
+/// Uses `egui::Area` for fixed top-left positioning (below where the Home
+/// button sits) and wraps content in [`backdrop_blur_frame`] for the
+/// translucent frosted-glass look. A `ScrollArea` wraps the world inspector
+/// so it remains usable when the inspector content exceeds the window height.
+///
+/// Only runs when [`DevPanelVisible`] is `true` (gated by the
+/// `dev_panel_visible` run condition in [`add_systems`]).
 fn draw_dev_panel(world: &mut World) {
     // Guard: EguiPlugin must be initialized. In test harnesses that use
     // MinimalPlugins without EguiPlugin the resource won't exist and
@@ -57,6 +72,16 @@ fn draw_dev_panel(world: &mut World) {
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
         return;
     }
+
+    let style = *world.resource::<OverlayStyle>();
+    let opacity_mul = world.resource::<UiOpacity>().current;
+    let window_height = {
+        let mut q = world
+            .query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world)
+            .map(bevy::window::Window::height)
+            .unwrap_or(720.0)
+    };
 
     let mut state: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
@@ -70,11 +95,34 @@ fn draw_dev_panel(world: &mut World) {
     let ctx = ctx.clone();
     state.apply(world);
 
-    bevy_egui::egui::Window::new("Dev Inspector")
-        .id(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
-        .default_open(true)
+    bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
+        .order(bevy_egui::egui::Order::Foreground)
+        .fixed_pos(bevy_egui::egui::pos2(16.0, 60.0))
         .show(&ctx, |ui| {
-            bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+            ui.set_max_width(480.0);
+            ui.set_max_height((window_height - 100.0).max(200.0));
+            backdrop_blur_frame(
+                ui,
+                &style,
+                FrameOptions {
+                    corner_radius: style.panel_corner_radius,
+                    padding: bevy_egui::egui::vec2(20.0, 16.0),
+                    opacity_mul,
+                },
+                |ui| {
+                    ui.label(
+                        bevy_egui::egui::RichText::new("DEV INSPECTOR")
+                            .color(style.text_color_dim)
+                            .size(13.0),
+                    );
+                    ui.separator();
+                    bevy_egui::egui::ScrollArea::vertical()
+                        .max_height((window_height - 200.0).max(100.0))
+                        .show(ui, |ui| {
+                            bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+                        });
+                },
+            );
         });
 }
 
