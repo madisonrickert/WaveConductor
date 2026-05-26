@@ -172,6 +172,9 @@ fn render_widget(
         SettingKind::Boolean => render_bool(field, def.label, ui),
         SettingKind::Color => render_color(field, def.label, ui),
         SettingKind::Text => render_text(field, def.label, ui),
+        SettingKind::FilePath { extensions } => {
+            render_file_path(field, def.label, extensions, ui);
+        }
     }
 }
 
@@ -276,6 +279,36 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &
     }
 }
 
+/// Render a filesystem-path field as a text edit plus a Browse… button.
+/// On Browse, opens [`rfd::FileDialog`] filtered to `extensions`; the
+/// selected path replaces the field value. Available only on native
+/// platforms — the wasm build renders a text-edit only (no picker).
+fn render_file_path(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    label: &str,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] extensions: &[&str],
+    ui: &mut egui::Ui,
+) {
+    let Some(v) = field.try_downcast_mut::<String>() else {
+        ui.label(format!("(expected String for {label})"));
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.text_edit_singleline(v);
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui.button("Browse…").clicked() {
+            let mut dlg = rfd::FileDialog::new();
+            if !extensions.is_empty() {
+                dlg = dlg.add_filter("Image", extensions);
+            }
+            if let Some(path) = dlg.pick_file() {
+                *v = path.to_string_lossy().into_owned();
+            }
+        }
+    });
+}
+
 /// Reflection branch for `Vec2` fields. Not yet reachable through the
 /// `#[setting(...)]` attribute (no `SettingKind` variant); added eagerly so
 /// the panel is ready when the next sketch needs it. The derive macro will
@@ -331,4 +364,29 @@ fn settings_type_id_for_key(
     use super::registry::SettingsTypeKey;
     let data = reg.data::<SettingsTypeKey>()?;
     (data.0 == storage_key).then(|| reg.type_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::panic, reason = "test assertion — panic on wrong variant is intentional")]
+    fn file_path_kind_dispatches() {
+        let def = SettingDef {
+            field_name: "path",
+            label: "Path",
+            category: SettingsCategory::User,
+            kind: SettingKind::FilePath {
+                extensions: &["png"],
+            },
+            requires_restart: false,
+        };
+        match def.kind {
+            SettingKind::FilePath { extensions } => {
+                assert_eq!(extensions, &["png"]);
+            }
+            _ => panic!("expected FilePath kind"),
+        }
+    }
 }

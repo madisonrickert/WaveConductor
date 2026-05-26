@@ -32,8 +32,9 @@
 //! | `default`          | expr      | `Default::default()`             |
 //! | `label`            | string    | the field name                   |
 //! | `category`         | `User` \| `Dev` | `Dev`                       |
-//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` | `Number` |
+//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `FilePath` | `Number` |
 //! | `min`, `max`, `step` | numeric expr | none (only meaningful on `Number`) |
+//! | `extensions`       | `["ext", ...]` | none (only meaningful on `FilePath`) |
 //! | `requires_restart` | flag      | absent                           |
 
 #![allow(
@@ -82,6 +83,7 @@ enum Kind {
     Boolean,
     Color,
     Text,
+    FilePath,
 }
 
 struct FieldInfo {
@@ -94,6 +96,8 @@ struct FieldInfo {
     min: Option<Expr>,
     max: Option<Expr>,
     step: Option<Expr>,
+    /// File extensions for `Kind::FilePath`. None for other kinds.
+    extensions: Option<Vec<String>>,
 }
 
 fn parse_storage_key(input: &DeriveInput) -> syn::Result<String> {
@@ -152,6 +156,7 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
             min: None,
             max: None,
             step: None,
+            extensions: None,
         };
 
         for attr in &field.attrs {
@@ -182,9 +187,10 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
                         "Boolean" => Kind::Boolean,
                         "Color" => Kind::Color,
                         "Text" => Kind::Text,
+                        "FilePath" => Kind::FilePath,
                         other => {
                             return Err(meta.error(format!(
-                                "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, or `Text`)"
+                                "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, or `FilePath`)"
                             )))
                         }
                     };
@@ -194,6 +200,25 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
                     info.max = Some(meta.value()?.parse::<Expr>()?);
                 } else if meta.path.is_ident("step") {
                     info.step = Some(meta.value()?.parse::<Expr>()?);
+                } else if meta.path.is_ident("extensions") {
+                    let value = meta.value()?;
+                    let arr: syn::ExprArray = value.parse()?;
+                    let mut exts: Vec<String> = Vec::with_capacity(arr.elems.len());
+                    for elem in &arr.elems {
+                        if let syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(s),
+                            ..
+                        }) = elem
+                        {
+                            exts.push(s.value());
+                        } else {
+                            return Err(syn::Error::new_spanned(
+                                elem,
+                                "`extensions` must be an array of string literals",
+                            ));
+                        }
+                    }
+                    info.extensions = Some(exts);
                 } else if meta.path.is_ident("requires_restart") {
                     info.requires_restart = true;
                 } else {
@@ -255,6 +280,20 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
             Kind::Boolean => quote! { ::wc_core::settings::SettingKind::Boolean },
             Kind::Color => quote! { ::wc_core::settings::SettingKind::Color },
             Kind::Text => quote! { ::wc_core::settings::SettingKind::Text },
+            Kind::FilePath => {
+                let exts: Vec<&str> = f
+                    .extensions
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                quote! {
+                    ::wc_core::settings::SettingKind::FilePath {
+                        extensions: &[ #( #exts, )* ],
+                    }
+                }
+            }
         };
         quote! {
             ::wc_core::settings::SettingDef {

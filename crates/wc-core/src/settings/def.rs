@@ -17,6 +17,14 @@ pub enum SettingKind {
     Color,
     /// Free-form UTF-8 string. Rendered as a single-line text edit.
     Text,
+    /// Filesystem path stored as a UTF-8 `String`. Rendered as a text-edit
+    /// plus a Browse… button that opens [`rfd::FileDialog`]. The `extensions`
+    /// list filters the dialog; an empty slice allows any file.
+    FilePath {
+        /// Extensions to filter the picker on (e.g., `&["png", "jpg"]`).
+        /// Empty means no filter.
+        extensions: &'static [&'static str],
+    },
 }
 
 /// Numeric range constraints. All bounds are stored as `f64` for uniform
