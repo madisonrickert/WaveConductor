@@ -108,7 +108,10 @@ needless_pass_by_value = "allow"
 
 [profile.dev]
 opt-level = 1
-debug = true
+# Line-only DWARF: keeps readable panics/backtraces (file:line) but drops
+# variable type info that bloats target/debug to 30+ GiB on the Bevy dep tree.
+# Flip back to `true` temporarily if you need lldb breakpoints/inspection.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
