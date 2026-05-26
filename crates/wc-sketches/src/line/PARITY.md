@@ -7,14 +7,13 @@
 **Plan progression toward parity:**
 
 - **Plan 6 (shipped, tag `v5-line`)** — sketch scaffolding, single-attractor inverse-linear gravity, flat-color quads.
-- **Plan 7 (this plan, tag `v5-line-sim`)** — multi-attractor physics with dual drag, size-scaled gravity, mouse-power decay, `original_xy` + constrain-to-box, fade-in α, horizontal-line spawn with sawtooth jitter, `particle_density` setting.
-- **Plan 8 (tag `v5-line-render`)** — gravity-smear post-process shader, star sprite, attractor ring meshes.
+- **Plan 7 (shipped, tag `v5-line-sim`)** — multi-attractor physics with dual drag, size-scaled gravity, mouse-power decay, `original_xy` + constrain-to-box, fade-in α, horizontal-line spawn with sawtooth jitter, `particle_density` setting.
+- **Plan 8 (shipped, tag `v5-line-render`)** — gravity-smear post-process shader, star sprite, attractor ring meshes, `gamma` setting.
 - **Plan 9 (tag `v5-line-audio`)** — fundsp-based synthesis, particle-stats coupling driving synth params and shader uniforms.
-- **Plan 10 (tag `v5-line-parity`)** — heatmap-image spawn, `gamma` setting, signed verdict.
+- **Plan 10 (tag `v5-line-parity`)** — heatmap-image spawn, signed verdict.
 
 **Approved deviations from v4** (carried forward; verdict deferred until Plan 10):
 
-- Render uses vertex-index-driven quads (6 vertices per particle, triangle list mesh) rather than instanced quads. Visually identical; chosen because Bevy 0.18's `Material2d` path does not support N-instance single-entity draws without a custom render phase.
 - WGSL compute kernel replaces CPU-side `particleSystem.ts` for rendering; a parallel Rust CPU mirror runs the same math on the host (introduced in Plan 7) to feed `ParticleStats` in Plan 9 without a GPU readback stall. The two integrators may drift by ≤1% over long timescales due to floating-point order-of-operations differences; acceptable for groupedUpness and friends.
 
 **Verdict:** pending (Plan 10).

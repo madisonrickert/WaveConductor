@@ -121,6 +121,5 @@ pub fn update_sim_params(
     post.i_global_time = time.elapsed_secs();
     // Plan 9 will modulate this with `groupedUpness * triangleWave(t/5000) * 15000`.
     post.g_constant = 5000.0;
-    // Plan 8 Phase D wires `LineSettings.gamma`; Phase C ships the v4 default.
-    post.gamma = 1.0;
+    post.gamma = settings.gamma;
 }

@@ -36,4 +36,9 @@ pub struct LineSettings {
     /// Strength of the pull toward the pointer attractor. v4 default = 280.
     #[setting(default = 280.0_f32, min = 0.0_f32, max = 1000.0_f32, step = 10.0_f32, category = User)]
     pub gravity_constant: f32,
+
+    /// Per-channel gamma curve applied as the final step of the gravity-smear
+    /// post-process. v4 default = 1.0.
+    #[setting(default = 1.0_f32, min = 0.1_f32, max = 4.0_f32, step = 0.1_f32, category = User)]
+    pub gamma: f32,
 }
