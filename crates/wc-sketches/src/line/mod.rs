@@ -19,6 +19,7 @@
 //!    `LineSimParams` resource so its `Handle<ShaderStorageBuffer>` clone is
 //!    released, allowing the GPU storage buffer ref-count to reach zero.
 
+pub mod attractor_visuals;
 pub mod compute;
 pub mod material;
 pub mod particle;
@@ -72,6 +73,9 @@ impl Plugin for LinePlugin {
                 systems::decay_mouse_attractor,
                 systems::update_sim_params,
                 sim_cpu::step_cpu_mirror,
+                attractor_visuals::spawn_attractor_visual,
+                attractor_visuals::animate_attractor_visual,
+                attractor_visuals::despawn_attractor_visual,
             )
                 .chain()
                 .run_if(sketch_active(AppState::Line)),

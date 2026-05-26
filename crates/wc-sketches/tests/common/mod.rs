@@ -25,6 +25,7 @@ use bevy::asset::AssetPlugin;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
+use bevy::sprite_render::ColorMaterial;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 use wc_core::input::pointer::{pointer_merge_system, PointerState};
@@ -79,6 +80,14 @@ pub fn sketches_test_app() -> App {
     // handle, which is fine because `MaterialPlugin` is also a render-world
     // no-op without `RenderApp`.
     app.init_asset::<Image>();
+
+    // Plan 8 Phase B: `spawn_attractor_visual` adds the attractor ring meshes
+    // by inserting a `ColorMaterial` asset. `ColorMaterialPlugin` is part of
+    // `SpriteRenderPlugin` in production (registered via `DefaultPlugins`);
+    // the MinimalPlugins-based harness has to register the asset type
+    // explicitly so `materials.add(...)` doesn't panic on a missing
+    // `Assets<ColorMaterial>` resource.
+    app.init_asset::<ColorMaterial>();
 
     // PointerState + HandTrackingState are normally registered by
     // `wc_core::input::HandTrackingPlugin`; the sketches-test harness does not

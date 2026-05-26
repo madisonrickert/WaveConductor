@@ -152,6 +152,50 @@ fn decay_holds_active_via_idle_veto() {
 }
 
 #[test]
+fn attractor_visual_spawns_on_press_and_despawns_on_release() {
+    use wc_sketches::line::attractor_visuals::AttractorVisual;
+
+    let mut app = sketches_test_app();
+    app.update();
+    enter_line(&mut app);
+    move_pointer(&mut app, 640.0, 360.0, Vec2::ZERO);
+    app.update();
+
+    let before = app
+        .world_mut()
+        .query::<&AttractorVisual>()
+        .iter(app.world())
+        .count();
+    assert_eq!(before, 0, "no visual before press");
+
+    press_left(&mut app);
+    app.update();
+    app.update();
+    let after_press = app
+        .world_mut()
+        .query::<&AttractorVisual>()
+        .iter(app.world())
+        .count();
+    assert_eq!(after_press, 1, "one visual after press");
+
+    release_left(&mut app);
+    // Power decays geometrically toward MOUSE_POWER_FLOOR=2.0 by ×0.9 each
+    // tick; zeroes when power < floor + 1e-2. Starting from ~8.48 (two
+    // decay ticks past peak 10.0), the excess 6.48 × 0.9^n needs to fall
+    // below 0.01 — n > log(0.01/6.48)/log(0.9) ≈ 61. 80 ticks gives a
+    // comfortable safety margin.
+    for _ in 0..80 {
+        app.update();
+    }
+    let after_decay = app
+        .world_mut()
+        .query::<&AttractorVisual>()
+        .iter(app.world())
+        .count();
+    assert_eq!(after_decay, 0, "visual despawned after power reaches zero");
+}
+
+#[test]
 fn power_zero_lets_state_transition_to_idle() {
     let mut app = sketches_test_app();
     app.update();
