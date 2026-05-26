@@ -73,7 +73,7 @@ pub struct BackdropBlurPlugin;
 impl BackdropBlurPlugin {
     /// Wires render-sub-app systems. Called from [`Plugin::build`].
     ///
-    /// Returns early without error if no RenderApp is present (e.g. in
+    /// Returns early without error if no `RenderApp` is present (e.g. in
     /// headless tests that don't load `RenderPlugin`).
     fn setup_render_app(app: &mut App) {
         // In Bevy 0.18, get_sub_app_mut returns Option<&mut SubApp>.
