@@ -22,10 +22,12 @@ use bevy::prelude::*;
 
 pub mod auto_fade;
 pub mod blur;
+pub mod buttons;
 pub mod frame;
 pub mod style;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
+pub use buttons::PointerCoarse;
 pub use frame::{backdrop_blur_frame, FrameOptions};
 pub use style::OverlayStyle;
 
@@ -38,6 +40,7 @@ impl Plugin for WaveConductorUiPlugin {
             style::OverlayStylePlugin,
             blur::BackdropBlurPlugin,
             auto_fade::AutoFadePlugin,
+            buttons::OverlayButtonsPlugin,
         ));
     }
 }
