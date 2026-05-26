@@ -21,7 +21,7 @@ pub mod spawn;
 
 pub use mouse::{
     decay_mouse_attractor, update_mouse_attractor, MouseAttractorState, MOUSE_POWER_DECAY,
-    MOUSE_POWER_DECAY_EPSILON, MOUSE_POWER_FLOOR, MOUSE_POWER_PRESS,
+    MOUSE_POWER_FLOOR, MOUSE_POWER_PRESS,
 };
 pub use sim_params::{
     update_sim_params, V4_FIXED_DT, V4_INERTIAL_DRAG_CONSTANT, V4_PULLING_DRAG_CONSTANT,

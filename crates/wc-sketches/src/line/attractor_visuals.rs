@@ -2,7 +2,7 @@
 //!
 //! ## Role
 //!
-//! For each attractor with `power > 0`, spawn 10 concentric polygonal ring mesh
+//! For each attractor with `power > 0`, spawn 10 concentric ring mesh
 //! entities. Per-frame rotate each ring (speed ∝ power, varies by ring
 //! index) and scale the group by `sqrt(power) / 5` — matching v4's
 //! `Attractor.animate()` in `src/particles/attractor.ts`.
@@ -21,18 +21,19 @@
 //!
 //! ## Geometry
 //!
-//! - Polygonal ring with [`RING_SEGMENTS`] = 6 segments. v4 uses 32-segment
-//!   smooth annuli but tilts the parent group 0.8 rad on X so Y-rotation is
-//!   visibly elliptical. This 2D port can't tilt, so a 6-segment polygon
-//!   gives the rotation a legible corner to spin around — see Plan 11 § A.
+//! - Smooth 32-segment ring matching v4's `RingGeometry(15, 18, 32)`.
 //! - Inner radius: 15 world units.
 //! - Outer radius: 18 world units.
-//! - Per-ring scale: `1 + (i / 10)^2 * 2` (outer rings progressively larger).
+//! - Per-ring scale: `1 + (i / 10)^2 * 2` (outer rings progressively larger),
+//!   with Y scaled by [`V4_TILT_FORESHORTEN_FACTOR`] to mimic v4's 0.8 rad
+//!   X-axis tilt. The resulting ellipse silhouette makes Z-rotation visibly
+//!   precess the major axis in screen space — Plan 11 Phase E.
 //! - Group scale: `sqrt(power) / 5`.
 //! - Per-ring rotation speed: `(10 - i) / 20 * power` rad/s (inner rings
 //!   spin faster).
 //! - Z position: `-1.0` so the rings sit just behind the particles.
-//! - Color: v4 `#C5E2CC` ≈ `Color::srgb(0.77, 0.886, 0.8)`.
+//! - Color: v4 `#C5E2CC` at `opacity: 0.6` ≈ `Color::srgba(0.77, 0.886, 0.8, 0.6)`
+//!   with `AlphaMode2d::Blend` so the 10 stacked rings composite correctly.
 
 use bevy::color::Color;
 use bevy::prelude::*;
@@ -54,10 +55,15 @@ pub struct AttractorVisual;
 #[derive(Component)]
 pub struct AttractorRing(pub u32);
 
-/// v4 ring colour `#C5E2CC` — `Color::srgb(0.77, 0.886, 0.8)`. Stored once at
-/// module scope so the spawn system uses a single constant value (and the
-/// expected colour is greppable from tests / inspectors).
-pub const ATTRACTOR_RING_COLOR: Color = Color::srgb(0.77, 0.886, 0.8);
+/// v4 ring colour `#C5E2CC` at `opacity: 0.6` ≈ `Color::srgba(0.77, 0.886, 0.8, 0.6)`.
+///
+/// The alpha matches v4's `MeshBasicMaterial({ transparent: true, opacity: 0.6 })`.
+/// `ColorMaterial::from(Color)` automatically sets `AlphaMode2d::Blend` when
+/// alpha < 1.0, so the 10 stacked rings blend correctly without an explicit
+/// `AlphaMode2d` override. Without transparency, the outermost (slowest-
+/// rotating, i=9) ring covers all inner rings opaquely and the animation
+/// reads as nearly stationary.
+pub const ATTRACTOR_RING_COLOR: Color = Color::srgba(0.77, 0.886, 0.8, 0.6);
 
 /// Number of concentric rings per attractor visual. Matches v4's
 /// `Attractor.RING_COUNT`.
@@ -85,14 +91,25 @@ const ROTATION_SPEED_DIVISOR: f32 = 20.0;
 /// (which render at z=0) so the rings appear underneath the star sprites.
 const VISUAL_Z: f32 = -1.0;
 
-/// Number of segments around each ring. Six is the smallest count that still
-/// reads as a "ring" (a circle) at typical viewing distances but is angular
-/// enough that the per-frame rotation is visibly perceivable. v4 uses 32 with
-/// a 3D tilt; we use 6 to compensate for the lack of 3D in this 2D port.
+/// Number of segments around each ring. 32 matches v4's `RingGeometry(15, 18, 32)`
+/// and produces a smooth ring. Visible rotation is achieved not through polygon
+/// corners but via per-ring Y-axis squash ([`V4_TILT_FORESHORTEN_FACTOR`]) that
+/// produces an ellipse silhouette whose major axis precesses visibly under
+/// Z-rotation — Plan 11 Phase E.
+const RING_SEGMENTS: u32 = 32;
+
+/// 2D analog of v4's `Group.rotation.x = 0.8` (rad) 3D tilt. The tilt
+/// foreshortens each ring into an ellipse whose vertical extent is `cos(0.8)
+/// ≈ 0.697` of its horizontal extent. We bake the foreshortening directly
+/// into each ring's `Transform::scale.y`, since the 2D port can't tilt.
 ///
-/// Carry-forward #56 (PARITY.md verdict §1) is the source-of-record for the
-/// rotation-visibility motivation.
-const RING_SEGMENTS: u32 = 6;
+/// Per-ring Z-rotation of this squashed ellipse precesses its major axis in
+/// screen space — visually equivalent to v4's `child.rotation.y` on the
+/// tilted disc. Without this squash, a uniformly-scaled circular ring is
+/// rotationally symmetric and Z-rotation produces no visible motion (the
+/// reason Plan 11 Phase A's hexagonal mesh existed; Phase E replaces that
+/// fix with this directly-v4-faithful one).
+const V4_TILT_FORESHORTEN_FACTOR: f32 = 0.697;
 
 /// Build a flat polygonal ring mesh as an indexed triangle list.
 ///
@@ -209,7 +226,15 @@ pub fn spawn_attractor_visual(
                 AttractorRing(i),
                 bevy::mesh::Mesh2d(mesh_handle.clone()),
                 bevy::sprite_render::MeshMaterial2d(material_handle.clone()),
-                Transform::from_scale(Vec3::splat(ring_scale)),
+                // Y-axis squash mimics v4's 3D X-axis tilt of 0.8 rad
+                // (cos(0.8) ≈ 0.697). The ellipse silhouette makes Z-rotation
+                // visually precess the major axis — without this squash,
+                // a circular ring's Z-rotation is invisible.
+                Transform::from_scale(Vec3::new(
+                    ring_scale,
+                    ring_scale * V4_TILT_FORESHORTEN_FACTOR,
+                    ring_scale,
+                )),
                 GlobalTransform::default(),
                 Visibility::default(),
             ))

@@ -1,19 +1,22 @@
 //! Pointer-driven mouse attractor lifecycle.
 //!
 //! - [`update_mouse_attractor`] tracks pointer button transitions and updates
-//!   [`MouseAttractorState`] (power = [`MOUSE_POWER_PRESS`] on press, position
-//!   follows the cursor every frame).
+//!   [`MouseAttractorState`]: press rising edge sets `power = MOUSE_POWER_PRESS`,
+//!   release falling edge immediately zeros power, and position follows the
+//!   cursor every frame. Covers mouse, touch, and (feature-gated) hand pinch.
 //! - [`decay_mouse_attractor`] decays the attractor's power geometrically each
-//!   frame so the pull fades smoothly after release, matching v4's
-//!   `MOUSE_ATTRACTOR_POWER_DECAY_SPEED` of `0.9`.
+//!   frame. While the button is held, power asymptotes toward
+//!   `MOUSE_POWER_FLOOR = 2.0` but never reaches zero — only an explicit
+//!   release event (from `update_mouse_attractor`) can zero the power.
+//!   Matches v4's `MOUSE_ATTRACTOR_POWER_DECAY_SPEED` of `0.9`.
 
 use bevy::prelude::*;
 use wc_core::input::pointer::PointerState;
 
 /// Lifecycle state for the mouse attractor — power that activates on click and
-/// decays geometrically while held or after release. Matches v4's behavior:
-/// `power=10` on press; each frame `power = floor + (power - floor) * 0.9`
-/// down to `power < floor + epsilon`, then zero.
+/// decays geometrically while held. Matches v4's behavior: `power=10` on press;
+/// each frame `power = floor + (power - floor) * 0.9`, asymptoting to floor
+/// while held. Power becomes exactly zero only on explicit release.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct MouseAttractorState {
     /// Current power. `0.0` = inactive. Also read by `line_idle_veto` (in
@@ -26,14 +29,12 @@ pub struct MouseAttractorState {
 
 /// v4 `MOUSE_ATTRACTOR_POWER_DECAY_SPEED = 0.9`.
 pub const MOUSE_POWER_DECAY: f32 = 0.9;
-/// v4 `MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2.0`. Power below
-/// [`MOUSE_POWER_FLOOR`] + [`MOUSE_POWER_DECAY_EPSILON`] zeros.
+/// v4 `MOUSE_ATTRACTOR_POWER_DECAY_FLOOR = 2.0`. Power asymptotes toward this
+/// floor while the button is held but never reaches zero — only an explicit
+/// release can set power to zero.
 pub const MOUSE_POWER_FLOOR: f32 = 2.0;
 /// v4 `enableMouseAttractor`: `power = 10` on click.
 pub const MOUSE_POWER_PRESS: f32 = 10.0;
-/// Tolerance below which a decaying mouse attractor is treated as zero.
-/// Floor + one centipower; arbitrary cutoff small enough to be invisible.
-pub const MOUSE_POWER_DECAY_EPSILON: f32 = 1e-2;
 
 /// Pinch strength at which a hand counts as "pressed" (analogous to a finger
 /// touching the screen). Leap Motion's `pinch_strength` ranges `[0, 1]`; this
@@ -42,10 +43,12 @@ pub const MOUSE_POWER_DECAY_EPSILON: f32 = 1e-2;
 #[cfg(feature = "hand-tracking-gestures")]
 pub const PINCH_PRESS_THRESHOLD: f32 = 0.85;
 
-/// Tracks last-frame pinch state per chirality so we can detect press *edges*
-/// (transition from below-threshold to above), not just "is currently
-/// pinched." Without edge detection, holding a pinched fist would re-trigger
-/// `MOUSE_POWER_PRESS` every frame (the bug Plan 7 Phase C fixed for mouse).
+/// Tracks last-frame pinch state per chirality so we can detect press AND
+/// release *edges* (rising = transition from below-threshold to above;
+/// falling = transition from above to below). Without edge detection,
+/// holding a pinched fist would re-trigger `MOUSE_POWER_PRESS` every frame,
+/// and a slowly-relaxing pinch would never trigger the release path that
+/// zeros power.
 #[cfg(feature = "hand-tracking-gestures")]
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct LastPinchState {
@@ -60,13 +63,19 @@ pub struct LastPinchState {
 /// updates [`MouseAttractorState`].
 ///
 /// Matches v4's `pointerdown`/`pointerup`: only the rising edge of "any
-/// source pressed" sets `power = MOUSE_POWER_PRESS`. Held with a stationary
-/// input decays to floor; positional updates just move the attractor.
+/// source pressed" sets `power = MOUSE_POWER_PRESS`; the falling edge
+/// (explicit release) immediately sets `power = 0.0`. Held with a stationary
+/// input lets `decay_mouse_attractor` run asymptotically toward floor.
+/// Positional updates just move the attractor.
+///
+/// Release detection is independent of `pointer.primary`: an off-screen
+/// release still zeros power.
 ///
 /// Hand-tracking gesture (feature-gated, since `HandTrackingState` has no
 /// writer until Plan 12+ lands a provider): pinch strength ≥
 /// [`PINCH_PRESS_THRESHOLD`] = 0.85 counts as pressed. [`LastPinchState`]
-/// tracks per-chirality edges so a held pinch doesn't re-trigger every frame.
+/// tracks per-chirality edges so a held pinch doesn't re-trigger every frame,
+/// and a relaxing pinch triggers the release path that zeros power.
 pub fn update_mouse_attractor(
     pointer: Res<'_, PointerState>,
     mouse_buttons: Res<'_, bevy::input::ButtonInput<bevy::input::mouse::MouseButton>>,
@@ -80,26 +89,34 @@ pub fn update_mouse_attractor(
     mut state: ResMut<'_, MouseAttractorState>,
 ) {
     let mouse_just_pressed = mouse_buttons.just_pressed(bevy::input::mouse::MouseButton::Left);
+    let mouse_just_released = mouse_buttons.just_released(bevy::input::mouse::MouseButton::Left);
     let touch_just_pressed = touches.iter_just_pressed().next().is_some();
+    let touch_just_released = touches.iter_just_released().next().is_some();
 
     #[cfg(feature = "hand-tracking-gestures")]
-    let hand_just_pressed = {
+    let (hand_just_pressed, hand_just_released) = {
         let right_now = hands
             .right()
             .is_some_and(|h| h.pinch_strength >= PINCH_PRESS_THRESHOLD);
         let left_now = hands
             .left()
             .is_some_and(|h| h.pinch_strength >= PINCH_PRESS_THRESHOLD);
-        let right_edge = right_now && !last_pinch.right_pinched;
-        let left_edge = left_now && !last_pinch.left_pinched;
+        let right_pressed_edge = right_now && !last_pinch.right_pinched;
+        let left_pressed_edge = left_now && !last_pinch.left_pinched;
+        let right_released_edge = !right_now && last_pinch.right_pinched;
+        let left_released_edge = !left_now && last_pinch.left_pinched;
         last_pinch.right_pinched = right_now;
         last_pinch.left_pinched = left_now;
-        right_edge || left_edge
+        (
+            right_pressed_edge || left_pressed_edge,
+            right_released_edge || left_released_edge,
+        )
     };
     #[cfg(not(feature = "hand-tracking-gestures"))]
-    let hand_just_pressed = false;
+    let (hand_just_pressed, hand_just_released) = (false, false);
 
     let just_pressed = mouse_just_pressed || touch_just_pressed || hand_just_pressed;
+    let just_released = mouse_just_released || touch_just_released || hand_just_released;
 
     if let Some(cursor_window) = pointer.primary {
         let w = window.width();
@@ -112,20 +129,26 @@ pub fn update_mouse_attractor(
             state.power = MOUSE_POWER_PRESS;
         }
     }
+    // v4 parity: explicit release events zero the attractor. The geometric
+    // decay alone never reaches zero (asymptotic to floor), so without this,
+    // a released attractor would stay visible forever. Release detection is
+    // independent of `pointer.primary` so an off-screen release still zeros.
+    if just_released {
+        state.power = 0.0;
+    }
 }
 
-/// Decays the mouse attractor power each frame regardless of input state.
+/// Decay the mouse attractor power each frame regardless of input state.
 ///
-/// v4 runs this in the sketch's `animate()` regardless of idle state, so the
-/// attractor's visual decay completes even after the user has stopped
-/// interacting. Plan 8 will add the visual mesh; here only the physical power
-/// matters.
+/// v4 parity: `power = floor + (power - floor) * 0.9` per frame. The decay
+/// is asymptotic — it never reaches zero. Power can only become exactly
+/// zero on explicit release, handled by [`update_mouse_attractor`]. This
+/// system runs whether the button is held or not; while held, power
+/// approaches floor; after release (which zeros power directly), this
+/// system early-returns on the `power <= 0.0` guard.
 pub fn decay_mouse_attractor(mut state: ResMut<'_, MouseAttractorState>) {
     if state.power <= 0.0 {
         return;
     }
     state.power = MOUSE_POWER_FLOOR + (state.power - MOUSE_POWER_FLOOR) * MOUSE_POWER_DECAY;
-    if state.power < MOUSE_POWER_FLOOR + MOUSE_POWER_DECAY_EPSILON {
-        state.power = 0.0;
-    }
 }
