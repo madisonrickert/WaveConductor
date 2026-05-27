@@ -185,6 +185,9 @@ fn render_active_tile(
     texture_id: egui::TextureId,
 ) -> Option<AppState> {
     let (rect, response) = ui.allocate_exact_size(tile_size, egui::Sense::click());
+    // Show a pointer cursor when hovering over a clickable active tile,
+    // matching v4's `<a>` / `<Link>` element behaviour.
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     // Paint the screenshot as the tile background.
     // UV rect covers the full texture (0,0)→(1,1); tint is WHITE (no colour
@@ -315,13 +318,34 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
         .rect_filled(rect, egui::CornerRadius::ZERO, PLACEHOLDER_FILL);
 
     // Centre all text vertically and horizontally inside the tile.
+    // `Align::Center` cross-aligns each widget horizontally (centres text
+    // within the tile's width). Vertical centering is achieved by prepending
+    // `add_space` equal to half the remaining height above the content block.
+    //
+    // Estimated content height for the credits block:
+    //   28 px  WaveConductor heading
+    //    8 px  spacing
+    //   12 px  attribution row
+    //   12 px  spacing
+    //   13 px  Madison Rickert hyperlink
+    //   13 px  Rich Trapani hyperlink
+    //   16 px  spacing
+    //   11 px  Open Source Licenses label
+    //   ──────
+    //  113 px  total
+    #[allow(
+        clippy::items_after_statements,
+        reason = "constant is local to this function and belongs beside its usage context"
+    )]
+    const CREDITS_CONTENT_HEIGHT: f32 = 113.0;
     let mut child_ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect)
             .layout(egui::Layout::top_down(egui::Align::Center)),
     );
-    // Push spacing so the block sits roughly in the vertical centre.
-    child_ui.add_space(tile_size.y * 0.28);
+    // Clamp to zero so that a very short tile never produces negative space.
+    let top_pad = ((tile_size.y - CREDITS_CONTENT_HEIGHT) * 0.5).max(0.0);
+    child_ui.add_space(top_pad);
 
     // "WaveConductor" heading — Orbitron Bold, large.
     child_ui.label(
