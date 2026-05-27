@@ -3,11 +3,10 @@
 //! ## Pipeline
 //!
 //! 1. Once per frame, [`node::BackdropBlurNode`] samples the camera's
-//!    post-tonemap colour attachment, runs 5 downsample passes
-//!    (1/2 → 1/4 → 1/8 → 1/16 → 1/32) and 5 upsample passes back to 1/2
-//!    resolution using the dual-Kawase shaders with a 1.5× texel offset,
-//!    and parks the result in [`BackdropBlurTexture`]. The effective blur
-//!    radius is approximately 6× larger than the original 3-level chain.
+//!    post-tonemap colour attachment, runs 3 downsample passes
+//!    (1/2 → 1/4 → 1/8) and 3 upsample passes back to 1/2
+//!    resolution using the dual-Kawase shaders with a 1.0× texel offset,
+//!    and parks the result in [`BackdropBlurTexture`].
 //! 2. Any panel that wants frosted glass wraps its content in
 //!    [`super::frame::backdrop_blur_frame`], which pushes a
 //!    [`callback::BackdropBlurPaintCallback`] into the egui paint list.
@@ -71,8 +70,8 @@ pub struct BackdropBlurTexture {
 /// Intermediate scratch textures for the dual-Kawase downsample/upsample chain.
 ///
 /// Allocated alongside [`BackdropBlurTexture`] in [`ensure_blur_texture`].
-/// Five levels: half, quarter, eighth, sixteenth, and thirty-secondth of the
-/// primary viewport's physical resolution.
+/// Three levels: half, quarter, and eighth of the primary viewport's physical
+/// resolution.
 ///
 /// The private `_*_tex` fields hold the [`Texture`] objects to keep the GPU
 /// resources alive while the views remain valid.
@@ -84,26 +83,16 @@ pub struct BackdropBlurScratch {
     pub quarter_view: TextureView,
     /// View into the eighth-resolution intermediate texture.
     pub eighth_view: TextureView,
-    /// View into the sixteenth-resolution intermediate texture.
-    pub sixteenth_view: TextureView,
-    /// View into the thirty-secondth-resolution intermediate texture.
-    pub thirtysecondth_view: TextureView,
     /// Physical size of the half-resolution scratch texture.
     pub half_extent: UVec2,
     /// Physical size of the quarter-resolution scratch texture.
     pub quarter_extent: UVec2,
     /// Physical size of the eighth-resolution scratch texture.
     pub eighth_extent: UVec2,
-    /// Physical size of the sixteenth-resolution scratch texture.
-    pub sixteenth_extent: UVec2,
-    /// Physical size of the thirty-secondth-resolution scratch texture.
-    pub thirtysecondth_extent: UVec2,
     // Hold textures alive so their views remain valid.
     _half_tex: Texture,
     _quarter_tex: Texture,
     _eighth_tex: Texture,
-    _sixteenth_tex: Texture,
-    _thirtysecondth_tex: Texture,
 }
 
 /// Plugin assembly for the backdrop-blur feature.
@@ -162,8 +151,8 @@ impl Plugin for BackdropBlurPlugin {
 /// each dimension (minimum 1 px), and skips reallocation when the existing
 /// [`BackdropBlurTexture`] already matches. On (re)allocation, creates:
 /// - [`BackdropBlurTexture`] at 1/2 resolution (final blur output).
-/// - [`BackdropBlurScratch`] with textures at 1/2, 1/4, 1/8, 1/16, and 1/32
-///   resolution (intermediate Kawase chain stages).
+/// - [`BackdropBlurScratch`] with textures at 1/2, 1/4, and 1/8 resolution
+///   (intermediate Kawase chain stages).
 ///
 /// All textures use `Rgba8UnormSrgb` format with `RENDER_ATTACHMENT |
 /// TEXTURE_BINDING` usages. The shared sampler on [`BackdropBlurTexture`] is
@@ -228,34 +217,22 @@ pub(super) fn ensure_blur_texture(
 
     let quarter = UVec2::new((physical.x / 4).max(1), (physical.y / 4).max(1));
     let eighth = UVec2::new((physical.x / 8).max(1), (physical.y / 8).max(1));
-    let sixteenth = UVec2::new((physical.x / 16).max(1), (physical.y / 16).max(1));
-    let thirtysecondth = UVec2::new((physical.x / 32).max(1), (physical.y / 32).max(1));
 
     // Scratch textures (intermediate Kawase chain stages).
     let (half_tex, half_view) = make_scratch(half, "backdrop_blur_scratch_half");
     let (quarter_tex, quarter_view) = make_scratch(quarter, "backdrop_blur_scratch_quarter");
     let (eighth_tex, eighth_view) = make_scratch(eighth, "backdrop_blur_scratch_eighth");
-    let (sixteenth_tex, sixteenth_view) =
-        make_scratch(sixteenth, "backdrop_blur_scratch_sixteenth");
-    let (thirtysecondth_tex, thirtysecondth_view) =
-        make_scratch(thirtysecondth, "backdrop_blur_scratch_thirtysecondth");
 
     commands.insert_resource(BackdropBlurScratch {
         half_view,
         quarter_view,
         eighth_view,
-        sixteenth_view,
-        thirtysecondth_view,
         half_extent: half,
         quarter_extent: quarter,
         eighth_extent: eighth,
-        sixteenth_extent: sixteenth,
-        thirtysecondth_extent: thirtysecondth,
         _half_tex: half_tex,
         _quarter_tex: quarter_tex,
         _eighth_tex: eighth_tex,
-        _sixteenth_tex: sixteenth_tex,
-        _thirtysecondth_tex: thirtysecondth_tex,
     });
 
     // Final output texture.

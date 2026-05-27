@@ -18,19 +18,15 @@
 //!
 //! ## Kawase chain
 //!
-//! Ten render passes in sequence (5 down + 5 up). Each pass uses a 1.5×
-//! texel offset for a heavier per-pass blur contribution:
+//! Six render passes in sequence (3 down + 3 up). Each pass uses a 1.0×
+//! texel offset:
 //!
-//! 1. `source (full-res)`       → `scratch.half`          — downsample
-//! 2. `scratch.half`            → `scratch.quarter`        — downsample
-//! 3. `scratch.quarter`         → `scratch.eighth`         — downsample
-//! 4. `scratch.eighth`          → `scratch.sixteenth`      — downsample
-//! 5. `scratch.sixteenth`       → `scratch.thirtysecondth` — downsample
-//! 6. `scratch.thirtysecondth`  → `scratch.sixteenth`      — upsample
-//! 7. `scratch.sixteenth`       → `scratch.eighth`         — upsample
-//! 8. `scratch.eighth`          → `scratch.quarter`        — upsample
-//! 9. `scratch.quarter`         → `scratch.half`           — upsample
-//! 10. `scratch.half`           → `BackdropBlurTexture`    — upsample (final output)
+//! 1. `source (full-res)`  → `scratch.half`       — downsample
+//! 2. `scratch.half`       → `scratch.quarter`    — downsample
+//! 3. `scratch.quarter`    → `scratch.eighth`     — downsample
+//! 4. `scratch.eighth`     → `scratch.quarter`    — upsample
+//! 5. `scratch.quarter`    → `scratch.half`       — upsample
+//! 6. `scratch.half`       → `BackdropBlurTexture` — upsample (final output)
 //!
 //! ## Run conditions
 //!
@@ -285,7 +281,7 @@ pub struct BackdropBlurNode;
 impl ViewNode for BackdropBlurNode {
     type ViewQuery = &'static ViewTarget;
 
-    #[allow(clippy::too_many_lines, reason = "ten-pass Kawase chain is linear and shouldn't be split")]
+    #[allow(clippy::too_many_lines, reason = "six-pass Kawase chain is linear and shouldn't be split")]
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext<'_>,
@@ -350,7 +346,7 @@ impl ViewNode for BackdropBlurNode {
         // Upload a per-pass uniform buffer with the input-texture texel size.
         // Allocation per-pass is acceptable: this node runs once per frame and
         // the buffers are small (16 bytes each). A future optimisation could
-        // pre-allocate 6 persistent buffers in `BackdropBlurPipeline`.
+        // pre-allocate persistent buffers in `BackdropBlurPipeline`.
         //
         // `device` is a cloned `Arc`-backed handle — cheap to clone.
         let device = render_context.render_device().clone();
@@ -431,9 +427,9 @@ impl ViewNode for BackdropBlurNode {
                 pass.draw(0..3, 0..1);
             };
 
-        // --- Ten-pass Kawase chain (5 down + 5 up) ---
+        // --- Six-pass Kawase chain (3 down + 3 up) ---
         //
-        // Downsample: source(full) → half → quarter → eighth → sixteenth → thirtysecondth
+        // Downsample: source(full) → half → quarter → eighth
         encode_pass(
             render_context,
             source_view,
@@ -458,40 +454,8 @@ impl ViewNode for BackdropBlurNode {
             scratch.quarter_extent,
             "backdrop_blur_down_eighth",
         );
-        encode_pass(
-            render_context,
-            &scratch.eighth_view,
-            &scratch.sixteenth_view,
-            down_pipeline,
-            scratch.eighth_extent,
-            "backdrop_blur_down_sixteenth",
-        );
-        encode_pass(
-            render_context,
-            &scratch.sixteenth_view,
-            &scratch.thirtysecondth_view,
-            down_pipeline,
-            scratch.sixteenth_extent,
-            "backdrop_blur_down_thirtysecondth",
-        );
 
-        // Upsample: thirtysecondth → sixteenth → eighth → quarter → half → BackdropBlurTexture
-        encode_pass(
-            render_context,
-            &scratch.thirtysecondth_view,
-            &scratch.sixteenth_view,
-            up_pipeline,
-            scratch.thirtysecondth_extent,
-            "backdrop_blur_up_sixteenth",
-        );
-        encode_pass(
-            render_context,
-            &scratch.sixteenth_view,
-            &scratch.eighth_view,
-            up_pipeline,
-            scratch.sixteenth_extent,
-            "backdrop_blur_up_eighth",
-        );
+        // Upsample: eighth → quarter → half → BackdropBlurTexture
         encode_pass(
             render_context,
             &scratch.eighth_view,
