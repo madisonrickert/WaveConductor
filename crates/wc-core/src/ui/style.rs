@@ -34,7 +34,11 @@ pub struct OverlayStyle {
     /// 160 is the midpoint between v4's 204 and an aggressive 128; approved
     /// deviation from v4 for visual parity of intent.
     pub panel_fill: egui::Color32,
-    /// Panel hairline border, ≈ `rgba(255,255,255,0.08)` per `overlayPanel.scss:13`.
+    /// Panel hairline border.
+    /// v4 SCSS: `rgba(255,255,255,0.08)` (alpha 20/255, `overlayPanel.scss:13`).
+    /// Bumped to alpha 60 (≈ 0.24) so the stroke catches light against the dark
+    /// blurred backdrop — same treatment applied to `button_stroke` (20 → 76).
+    /// Approved deviation from v4 SCSS; intent matches, literal value differs.
     pub panel_stroke: egui::Color32,
     /// Panel corner radius `10px` per `overlayPanel.scss:7`.
     pub panel_corner_radius: u8,
@@ -73,7 +77,10 @@ impl Default for OverlayStyle {
             // Alpha 160 (~0.63): tuned down from v4's 204 (0.8) so the
             // frosted-glass blur is visible behind the tint. See field doc.
             panel_fill: egui::Color32::from_black_alpha(160),
-            panel_stroke: egui::Color32::from_white_alpha(20),
+            // Brightened from v4's literal 20 (0.08 alpha) to 60 (≈ 0.24) so the
+            // border is visible against the dark blurred backdrop — same approach
+            // taken for button_stroke (38 → 76). Approved deviation from v4 SCSS.
+            panel_stroke: egui::Color32::from_white_alpha(60),
             panel_corner_radius: 10,
             button_fill_inactive: egui::Color32::from_black_alpha(102),
             button_fill_hovered: egui::Color32::from_black_alpha(153),
@@ -221,8 +228,10 @@ mod tests {
         // WaveConductor uses 160 (~0.63 alpha) so the frosted-glass blur
         // is visible — approved deviation from v4 (see OverlayStyle::panel_fill doc).
         assert_eq!(style.panel_fill, egui::Color32::from_black_alpha(160));
-        // overlayPanel.scss:13 rgba(255,255,255,0.08) → ~20/255
-        assert_eq!(style.panel_stroke, egui::Color32::from_white_alpha(20));
+        // overlayPanel.scss:13 rgba(255,255,255,0.08) → ~20/255 in v4.
+        // WaveConductor uses 60 (≈ 0.24 alpha) so the border catches light against
+        // the dark blurred backdrop — approved deviation from v4 (see field doc).
+        assert_eq!(style.panel_stroke, egui::Color32::from_white_alpha(60));
         // overlayPanel.scss:7 border-radius 10px
         assert_eq!(style.panel_corner_radius, 10);
         // overlayButton.scss:9 rgba(0,0,0,0.4) → ~102/255
