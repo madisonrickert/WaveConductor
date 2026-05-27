@@ -166,37 +166,63 @@ fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.insert_resource(post_process::LinePostParams::default());
 }
 
+/// How long the user must stop adjusting a `requires_restart` setting before
+/// the sketch restarts. 500 ms quiescence prevents mid-drag sketch kills when
+/// the user is still adjusting a slider.
+const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Listens for `SketchRestart { storage_key == LineSettings::STORAGE_KEY }`
-/// and forces a same-frame `Line → Home → Line` cycle so the `OnExit`/`OnEnter`
-/// systems rebuild the sketch with the new settings.
+/// and forces a `Line → Home → Line` cycle so the `OnExit`/`OnEnter` systems
+/// rebuild the sketch with the new settings.
 ///
-/// Uses a one-frame `LineRestartPending` resource as a self-clearing trampoline:
-/// on the frame the restart message arrives, we set `NextState::Home` *and*
-/// insert `LineRestartPending`. On the following frame's update, the resource is
-/// observed → `NextState::Line`, then the resource is removed.
+/// A 500 ms debounce (`RESTART_DEBOUNCE`) prevents the restart from firing
+/// while the user is still dragging a slider. The restart is deferred until
+/// 500 ms of silence (no further `SketchRestart` messages for this key). The
+/// debounce timestamp is tracked in a `Local<Option<Duration>>` that is
+/// updated on every message and checked each frame against `Time::elapsed`.
+///
+/// After the debounce window closes, uses the one-frame `LineRestartPending`
+/// trampoline: set `NextState::Home` and insert the marker, then on the
+/// following frame set `NextState::Line` and remove the marker.
 fn restart_on_settings_change(
     mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
+    time: Res<'_, bevy::prelude::Time>,
     current: Res<'_, State<AppState>>,
     mut next: ResMut<'_, NextState<AppState>>,
     mut commands: Commands<'_, '_>,
     pending: Option<Res<'_, LineRestartPending>>,
+    // Tracks the `Time::elapsed` of the last received restart message.
+    // `None` means no message has been received since the last restart.
+    mut last_change_at: Local<'_, Option<std::time::Duration>>,
 ) {
     if pending.is_some() {
         // Second frame: complete the cycle by re-entering Line.
         next.set(AppState::Line);
         commands.remove_resource::<LineRestartPending>();
+        *last_change_at = None;
         // `debug!` rather than `info!` — the trampoline has been stable since
         // Plan 7; firing on every settings restart is noise in release builds.
         tracing::debug!("LineSettings restart cycle: re-entering Line");
         return;
     }
-    let want_restart = events
+
+    // Absorb any new restart messages, updating the debounce timestamp.
+    let got_message = events
         .read()
         .any(|e| e.storage_key == settings::LineSettings::STORAGE_KEY);
-    if want_restart && **current == AppState::Line {
-        next.set(AppState::Home);
-        commands.insert_resource(LineRestartPending);
-        tracing::debug!("LineSettings changed — cycling Line via Home for one frame");
+    if got_message && **current == AppState::Line {
+        *last_change_at = Some(time.elapsed());
+        tracing::debug!("LineSettings changed — debounce timer reset (500 ms)");
+    }
+
+    // Fire the restart only after 500 ms of no further changes.
+    if let Some(last) = *last_change_at {
+        let elapsed_since = time.elapsed().saturating_sub(last);
+        if elapsed_since >= RESTART_DEBOUNCE && **current == AppState::Line {
+            next.set(AppState::Home);
+            commands.insert_resource(LineRestartPending);
+            tracing::debug!("LineSettings debounce elapsed — cycling Line via Home");
+        }
     }
 }
 
@@ -217,7 +243,7 @@ fn line_idle_veto(world: &World) -> bool {
 }
 
 /// `OnEnter(AppState::Line)` — push `AddLineSynth` and restore the background
-/// volume so the line_background.ogg sample resumes playing.
+/// volume so the `line_background.ogg` sample resumes playing.
 ///
 /// Two commands are pushed:
 /// 1. `AddLineSynth` — builds the synth voice graph (idempotent: no-op if a
@@ -249,7 +275,7 @@ fn enter_line_audio(
 }
 
 /// `OnExit(AppState::Line)` — push `RemoveLineSynth` and mute the background
-/// volume so the line_background.ogg sample stops playing when the user
+/// volume so the `line_background.ogg` sample stops playing when the user
 /// navigates to Home.
 ///
 /// Two commands are pushed:

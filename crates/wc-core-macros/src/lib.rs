@@ -267,10 +267,35 @@ fn emit_default(struct_name: &Ident, fields: &[FieldInfo]) -> TokenStream2 {
     }
 }
 
+/// Convert a `snake_case` field name to `Title Case` for display in the UI.
+///
+/// Splits on `_`, capitalises the first letter of each word, joins with spaces.
+/// Example: `particle_density` → `"Particle Density"`.
+///
+/// The macro defaults to this transform when no explicit `label = "..."` is
+/// provided in the `#[setting(...)]` attribute.
+fn title_case(snake: &str) -> String {
+    snake
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo]) -> TokenStream2 {
     let setting_defs = fields.iter().map(|f| {
         let field_name = f.ident.to_string();
-        let label = f.label.clone().unwrap_or_else(|| field_name.clone());
+        // Default label: title-case the field name (`particle_density` →
+        // `"Particle Density"`). Explicit `label = "..."` in the attribute
+        // overrides this. This makes the user panel readable without requiring
+        // every field to carry an explicit label.
+        let label = f.label.clone().unwrap_or_else(|| title_case(&field_name));
         let category = match f.category {
             Category::User => quote! { ::wc_core::settings::SettingsCategory::User },
             Category::Dev => quote! { ::wc_core::settings::SettingsCategory::Dev },

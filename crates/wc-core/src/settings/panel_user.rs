@@ -1,8 +1,8 @@
 //! Curated user-facing settings panel.
 //!
 //! Walks [`super::SettingsRegistry`] each frame and, for each registered
-//! settings resource, renders an `egui::CollapsingHeader` containing typed
-//! widgets for every `SettingDef` whose `category == User`. Field values are
+//! settings resource, renders typed widgets directly (no collapsing header)
+//! for every `SettingDef` whose `category == User`. Field values are
 //! read and written through `bevy_reflect::ReflectMut` so this panel works
 //! for any settings type without per-struct dispatch code.
 //!
@@ -124,8 +124,10 @@ fn draw_user_panel(world: &mut World) {
     state.apply(world);
 
     // Position: top-right, 16 px inset, 60 px from the top (below the cog).
-    // Width fixed at 320 px to match v4's overlay panel width.
-    let area_pos = egui::pos2(window_width - 16.0 - 320.0, 60.0);
+    // Width bumped from 320 px to 420 px so the spawn_template file-picker row
+    // (text edit + Browse… button) fits on one line without overflowing.
+    // This is a minor intentional deviation from v4's exact panel width.
+    let area_pos = egui::pos2(window_width - 16.0 - 420.0, 60.0);
 
     let mut panel_rect = egui::Rect::NOTHING;
 
@@ -133,7 +135,7 @@ fn draw_user_panel(world: &mut World) {
         .order(egui::Order::Foreground)
         .fixed_pos(area_pos)
         .show(&ctx, |ui| {
-            ui.set_max_width(320.0);
+            ui.set_max_width(420.0);
             let resp = backdrop_blur_frame(
                 ui,
                 &style,
@@ -223,40 +225,38 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
         return;
     }
 
-    ui.collapsing(storage_key, |ui| {
-        // Walk the type registry to find the settings type by its
-        // SketchSettings::STORAGE_KEY. Compare by value, not pointer identity.
-        let type_id = world
-            .resource::<AppTypeRegistry>()
-            .read()
-            .iter()
-            .find_map(|reg| settings_type_id_for_key(reg, storage_key));
-        let Some(type_id) = type_id else {
-            ui.label("(settings type not in TypeRegistry — register via App::register_type)");
-            return;
-        };
+    // Walk the type registry to find the settings type by its
+    // SketchSettings::STORAGE_KEY. Compare by value, not pointer identity.
+    let type_id = world
+        .resource::<AppTypeRegistry>()
+        .read()
+        .iter()
+        .find_map(|reg| settings_type_id_for_key(reg, storage_key));
+    let Some(type_id) = type_id else {
+        ui.label("(settings type not in TypeRegistry — register via App::register_type)");
+        return;
+    };
 
-        // Get a Reflect handle on the resource.
-        // Clone the Arc so the read guard doesn't borrow `world`.
-        let registry = world.resource::<AppTypeRegistry>().clone();
-        let registry_read = registry.read();
-        let Some(type_data) =
-            registry_read.get_type_data::<bevy::ecs::reflect::ReflectResource>(type_id)
-        else {
-            ui.label("(no ReflectResource on settings type)");
-            return;
-        };
-        // `&mut World` implements `Into<FilteredResourcesMut>`, so this is
-        // safe to call without any unsafe code.
-        let reflect_result = type_data.reflect_mut(world);
-        drop(registry_read);
-        let Ok(mut reflect_mut) = reflect_result else {
-            ui.label("(resource not present)");
-            return;
-        };
-        // Deref `Mut<dyn Reflect>` to get `&mut dyn Reflect`.
-        render_user_fields_via_reflect(&mut *reflect_mut, defs.as_ref(), ui);
-    });
+    // Get a Reflect handle on the resource.
+    // Clone the Arc so the read guard doesn't borrow `world`.
+    let registry = world.resource::<AppTypeRegistry>().clone();
+    let registry_read = registry.read();
+    let Some(type_data) =
+        registry_read.get_type_data::<bevy::ecs::reflect::ReflectResource>(type_id)
+    else {
+        ui.label("(no ReflectResource on settings type)");
+        return;
+    };
+    // `&mut World` implements `Into<FilteredResourcesMut>`, so this is
+    // safe to call without any unsafe code.
+    let reflect_result = type_data.reflect_mut(world);
+    drop(registry_read);
+    let Ok(mut reflect_mut) = reflect_result else {
+        ui.label("(resource not present)");
+        return;
+    };
+    // Deref `Mut<dyn Reflect>` to get `&mut dyn Reflect`.
+    render_user_fields_via_reflect(&mut *reflect_mut, defs.as_ref(), ui);
 }
 
 /// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
@@ -301,8 +301,21 @@ fn render_widget(
     }
 }
 
+/// Fixed pixel width for the label column in horizontal field rows.
+///
+/// Applied via `ui.add_sized([LABEL_COLUMN_WIDTH, 0.0], Label::new(...))` so
+/// all labels share the same column and the input widgets align vertically.
+/// 120 px is a good starting point for the 420 px wide settings panel; the
+/// remaining width (~280 px) is available for the slider or input widget.
+const LABEL_COLUMN_WIDTH: f32 = 120.0;
+
 /// Render a numeric field. Dispatches on the field's concrete Rust type
 /// (u32, f32, etc.) via `try_downcast_mut`.
+///
+/// Layout: `[label (120 px fixed)][slider]` — label is LEFT of the slider.
+/// Previously the label was attached via `Slider::text()` which places it to
+/// the RIGHT; removing `.text()` and using a fixed-width label column aligns
+/// all inputs vertically and matches v4's perceived left-label layout.
 fn render_number(
     field: &mut dyn bevy::reflect::PartialReflect,
     label: &str,
@@ -313,99 +326,110 @@ fn render_number(
     let hi = range.max.unwrap_or(1.0);
     let step = range.step;
 
-    if let Some(v) = field.try_downcast_mut::<u32>() {
-        let mut tmp = *v as i64;
-        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64)).text(label);
-        if let Some(s) = step {
-            slider = slider.step_by(s);
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
+            egui::Label::new(label),
+        );
+        if let Some(v) = field.try_downcast_mut::<u32>() {
+            let mut tmp = *v as i64;
+            let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
+            if let Some(s) = step {
+                slider = slider.step_by(s);
+            }
+            if ui.add(slider).changed() {
+                *v = tmp.max(0) as u32;
+            }
+        } else if let Some(v) = field.try_downcast_mut::<f32>() {
+            let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32));
+            if let Some(s) = step {
+                slider = slider.step_by(s);
+            }
+            ui.add(slider);
+        } else if let Some(v) = field.try_downcast_mut::<f64>() {
+            let mut slider = egui::Slider::new(v, lo..=hi);
+            if let Some(s) = step {
+                slider = slider.step_by(s);
+            }
+            ui.add(slider);
+        } else if let Some(v) = field.try_downcast_mut::<i32>() {
+            let mut tmp = *v as i64;
+            let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
+            if let Some(s) = step {
+                slider = slider.step_by(s);
+            }
+            if ui.add(slider).changed() {
+                *v = tmp.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            }
+        } else if let Some(v) = field.try_downcast_mut::<i64>() {
+            let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64));
+            if let Some(s) = step {
+                slider = slider.step_by(s);
+            }
+            ui.add(slider);
+        } else {
+            ui.label(format!("(unsupported number type for {label})"));
         }
-        if ui.add(slider).changed() {
-            *v = tmp.max(0) as u32;
-        }
-        return;
-    }
-    if let Some(v) = field.try_downcast_mut::<f32>() {
-        let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32)).text(label);
-        if let Some(s) = step {
-            slider = slider.step_by(s);
-        }
-        ui.add(slider);
-        return;
-    }
-    if let Some(v) = field.try_downcast_mut::<f64>() {
-        let mut slider = egui::Slider::new(v, lo..=hi).text(label);
-        if let Some(s) = step {
-            slider = slider.step_by(s);
-        }
-        ui.add(slider);
-        return;
-    }
-    if let Some(v) = field.try_downcast_mut::<i32>() {
-        let mut tmp = *v as i64;
-        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64)).text(label);
-        if let Some(s) = step {
-            slider = slider.step_by(s);
-        }
-        if ui.add(slider).changed() {
-            *v = tmp.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-        }
-        return;
-    }
-    if let Some(v) = field.try_downcast_mut::<i64>() {
-        let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64)).text(label);
-        if let Some(s) = step {
-            slider = slider.step_by(s);
-        }
-        ui.add(slider);
-        return;
-    }
-    ui.label(format!("(unsupported number type for {label})"));
+    });
 }
 
+/// Render a boolean field as `[label (120 px)][checkbox]` — label LEFT of input.
 fn render_bool(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
-    if let Some(v) = field.try_downcast_mut::<bool>() {
-        ui.checkbox(v, label);
-    } else {
-        ui.label(format!("(expected bool for {label})"));
-    }
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
+            egui::Label::new(label),
+        );
+        if let Some(v) = field.try_downcast_mut::<bool>() {
+            ui.checkbox(v, "");
+        } else {
+            ui.label(format!("(expected bool for {label})"));
+        }
+    });
 }
 
+/// Render a colour field as `[label (120 px)][colour picker]` — label LEFT of input.
 fn render_color(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
-    if let Some(v) = field.try_downcast_mut::<[f32; 4]>() {
-        ui.horizontal(|ui| {
-            ui.label(label);
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
+            egui::Label::new(label),
+        );
+        if let Some(v) = field.try_downcast_mut::<[f32; 4]>() {
             ui.color_edit_button_rgba_unmultiplied(v);
-        });
-        return;
-    }
-    if let Some(v) = field.try_downcast_mut::<bevy::color::Color>() {
-        let mut rgba = v.to_srgba().to_f32_array();
-        ui.horizontal(|ui| {
-            ui.label(label);
+        } else if let Some(v) = field.try_downcast_mut::<bevy::color::Color>() {
+            let mut rgba = v.to_srgba().to_f32_array();
             if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
                 *v = bevy::color::Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
             }
-        });
-        return;
-    }
-    ui.label(format!("(expected [f32; 4] or Color for {label})"));
+        } else {
+            ui.label(format!("(expected [f32; 4] or Color for {label})"));
+        }
+    });
 }
 
+/// Render a text field as `[label (120 px)][text edit]` — label LEFT of input.
 fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
-    if let Some(v) = field.try_downcast_mut::<String>() {
-        ui.horizontal(|ui| {
-            ui.label(label);
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
+            egui::Label::new(label),
+        );
+        if let Some(v) = field.try_downcast_mut::<String>() {
             ui.text_edit_singleline(v);
-        });
-    } else {
-        ui.label(format!("(expected String for {label})"));
-    }
+        } else {
+            ui.label(format!("(expected String for {label})"));
+        }
+    });
 }
 
-/// Render a filesystem-path field as a text edit plus a Browse… button.
-/// On Browse, opens [`rfd::FileDialog`] filtered to `extensions`; the
-/// selected path replaces the field value. Available only on native
-/// platforms — the wasm build renders a text-edit only (no picker).
+/// Render a filesystem-path field as `[label (120 px)][text edit][Browse…]`.
+///
+/// Label is LEFT of the text edit; Browse… button follows. On Browse, opens
+/// [`rfd::FileDialog`] filtered to `extensions`; the selected path replaces
+/// the field value. Available only on native platforms — the wasm build renders
+/// a text-edit only (no picker). The panel width was bumped to 420 px (Fix 7)
+/// so the text edit + Browse… button fit on one row without overflowing.
 fn render_file_path(
     field: &mut dyn bevy::reflect::PartialReflect,
     label: &str,
@@ -418,7 +442,10 @@ fn render_file_path(
         return;
     };
     ui.horizontal(|ui| {
-        ui.label(label);
+        ui.add_sized(
+            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
+            egui::Label::new(label),
+        );
         ui.text_edit_singleline(v);
         #[cfg(not(target_arch = "wasm32"))]
         if ui.button("Browse…").clicked() {

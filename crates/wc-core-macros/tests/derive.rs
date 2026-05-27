@@ -74,10 +74,12 @@ fn requires_restart_flag_propagates() {
 }
 
 #[test]
-fn label_falls_back_to_field_name_when_unset() {
+fn label_title_cases_field_name_when_unset() {
+    // When no explicit `label = "..."` is given, the macro title-cases the
+    // field name: `count` → `"Count"`, `my_field` → `"My Field"`.
     let defs = Fixture::settings_def();
-    assert_eq!(defs[0].label, "count");
-    // Explicit override.
+    assert_eq!(defs[0].label, "Count");
+    // Explicit `label = "Greeting"` overrides the title-case default.
     assert_eq!(defs[4].label, "Greeting");
 }
 

@@ -32,7 +32,12 @@ pub struct OverlayStyle {
     pub button_fill_inactive: egui::Color32,
     /// Button background when hovered, ≈ `rgba(0,0,0,0.6)` per `overlayButton.scss:18`.
     pub button_fill_hovered: egui::Color32,
-    /// Button hairline border, ≈ `rgba(255,255,255,0.15)` per `overlayButton.scss:10`.
+    /// Button hairline border.
+    /// v4 SCSS: `rgba(255,255,255,0.15)` (alpha 38/255, overlayButton.scss:10).
+    /// Bumped to alpha 76 (≈ 0.30) so the stroke is perceptible in egui's
+    /// render pipeline — egui composites on a dark background and the v4 CSS
+    /// value is genuinely too faint to see at 1 px (approved deviation from v4
+    /// SCSS; intent matches, literal value differs).
     pub button_stroke: egui::Color32,
     /// Button corner radius `6px` per `overlayButton.scss:11`.
     pub button_corner_radius: u8,
@@ -60,7 +65,9 @@ impl Default for OverlayStyle {
             panel_corner_radius: 10,
             button_fill_inactive: egui::Color32::from_black_alpha(102),
             button_fill_hovered: egui::Color32::from_black_alpha(153),
-            button_stroke: egui::Color32::from_white_alpha(38),
+            // note: brighter than v4 SCSS (alpha 38) to be visible against egui's render.
+            // v4 SCSS rgba(255,255,255,0.15) = alpha 38; bumped to 76 (≈ 0.30) here.
+            button_stroke: egui::Color32::from_white_alpha(76),
             button_corner_radius: 6,
             button_size_fine: 32.0,
             button_size_coarse: 44.0,
@@ -212,5 +219,8 @@ mod tests {
         assert_eq!(style.button_size_fine, 32.0);
         // overlayButton.scss:23–24 @media (pointer: coarse) → 44px
         assert_eq!(style.button_size_coarse, 44.0);
+        // button_stroke: intentional deviation from v4's alpha 38 → bumped to 76
+        // so the border is perceptible in egui's render pipeline (see style.rs doc).
+        assert_eq!(style.button_stroke, egui::Color32::from_white_alpha(76));
     }
 }

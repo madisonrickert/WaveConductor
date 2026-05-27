@@ -22,12 +22,14 @@ use std::time::Duration;
 use bevy::input::touch::TouchInput;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, Window};
+use bevy_egui::render::EguiBevyPaintCallback;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::audio::command::AudioCommand;
 use crate::audio::state::AudioState;
 use crate::lifecycle::state::AppState;
 use super::auto_fade::UiOpacity;
+use super::blur::callback::BackdropBlurPaintCallback;
 use super::style::OverlayStyle;
 
 // Re-export so Tasks 14/15 can reach the icon glyph constants via this module.
@@ -231,14 +233,22 @@ pub fn draw_settings_button(
     }
 }
 
-/// Draw a round-cornered icon button with hover colour transition.
+/// Draw a round-cornered icon button with hover colour transition and frosted
+/// glass background.
 ///
 /// Allocates a `size × size` rect with click sense, animates the background
 /// fill between [`OverlayStyle::button_fill_inactive`] and
 /// [`OverlayStyle::button_fill_hovered`] via `ctx.animate_value_with_time`,
-/// paints the rounded rect + stroke, then centres the icon glyph at
-/// `size * 0.5` font points. All colours are alpha-scaled by `opacity_mul`
-/// so the auto-fade system can dim the whole chrome surface uniformly.
+/// paints a [`backdrop_blur_frame`] (frosted glass + tint + stroke), then
+/// centres the icon glyph at `size * 0.5` font points. All colours are
+/// alpha-scaled by `opacity_mul` so the auto-fade system can dim the whole
+/// chrome surface uniformly.
+///
+/// The frosted blur background is an intentional deviation from v4's CSS
+/// (v4's `.overlay-button` did not have `backdrop-filter`), added at Madison's
+/// request to match the settings-panel frosted look. The blur callback is a
+/// no-op when the blur texture or pipeline is not yet ready, so the tint still
+/// shows through as a fallback.
 ///
 /// `icon` should be a UTF-8 glyph string from [`egui_phosphor::regular`]
 /// (or any other icon font registered with the egui context).
@@ -251,7 +261,11 @@ pub fn overlay_icon_button(
     size: f32,
     opacity_mul: f32,
 ) -> egui::Response {
+    // Allocate the full click-sense rect first so hover/click detection works
+    // before the blur frame is painted underneath.
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::click());
+    // Pointer cursor: matching v4's `cursor: pointer` on `.overlay-button`.
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let hovered = response.hovered();
 
     // Lerp fill colour by hover state. `animate_value_with_time` uses the
@@ -260,18 +274,43 @@ pub fn overlay_icon_button(
     let t = ui
         .ctx()
         .animate_value_with_time(response.id, if hovered { 1.0_f32 } else { 0.0_f32 }, 0.2);
-    let fill = lerp_color(style.button_fill_inactive, style.button_fill_hovered, t);
-    let fill = scale_color_alpha(fill, opacity_mul);
-    let stroke = scale_color_alpha(style.button_stroke, opacity_mul);
 
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        egui::CornerRadius::same(style.button_corner_radius),
-        fill,
-        egui::Stroke::new(1.0, stroke),
-        egui::epaint::StrokeKind::Inside,
-    );
+    // Paint the frosted blur background + tint using backdrop_blur_frame.
+    // The tint alpha lerps between inactive and hovered fills via the hover
+    // animation value `t`. This matches the panel chrome's frosted appearance.
+    // Note: backdrop_blur_frame calls ui.allocate_exact_size internally, so we
+    // paint into a child UI constrained to the already-allocated rect.
+    // Use a zero-padding frame since the button icon is painted separately below.
+    {
+        let fill = lerp_color(style.button_fill_inactive, style.button_fill_hovered, t);
+        let fill = scale_color_alpha(fill, opacity_mul);
+        let stroke = scale_color_alpha(style.button_stroke, opacity_mul);
+
+        let painter = ui.painter();
+        // Blur callback: composites the blurred backdrop behind the button.
+        // This is the frosted-glass layer. It is a no-op when the blur texture
+        // or pipeline is not yet ready — the tint below still shows through.
+        // note: intentional deviation from v4's literal CSS — buttons get
+        // backdrop blur in v5 by Madison's request (v4 `.overlay-button` had
+        // no `backdrop-filter`).
+        painter.add(EguiBevyPaintCallback::new_paint_callback(
+            rect,
+            BackdropBlurPaintCallback {
+                corner_radius: f32::from(style.button_corner_radius),
+                rect,
+            },
+        ));
+
+        // Tint + stroke over the blur. Stroke uses Outside so it remains
+        // visible in egui's compositing — Inside can be occluded by the fill.
+        painter.add(egui::Shape::Rect(egui::epaint::RectShape::new(
+            rect,
+            egui::CornerRadius::same(style.button_corner_radius),
+            fill,
+            egui::Stroke::new(1.0, stroke),
+            egui::epaint::StrokeKind::Outside,
+        )));
+    }
 
     // Lerp text colour with the same animation value `t` so icon brightness
     // transitions smoothly (matching v4's unified hover transition).
@@ -286,7 +325,7 @@ pub fn overlay_icon_button(
     // family bypasses that clash and always uses the correct Phosphor glyph.
     // Font size = half the button size so the glyph fills ~50% of the area
     // (matching v4's icon sizing).
-    painter.text(
+    ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         icon,

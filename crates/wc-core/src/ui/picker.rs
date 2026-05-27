@@ -358,29 +358,34 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
 
     // Attribution line: "based on hellochar by Xiaohan Zhang" with the two
     // names as clickable hyperlinks matching v4's HomePage.tsx:52–53.
-    child_ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("based on ")
-                .size(12.0)
-                .color(style.text_color_dim),
-        );
-        ui.hyperlink_to(
-            egui::RichText::new("hellochar")
-                .size(12.0)
-                .color(style.text_color_dim),
-            "https://github.com/hellochar/hellochar.com",
-        );
-        ui.label(
-            egui::RichText::new(" by ")
-                .size(12.0)
-                .color(style.text_color_dim),
-        );
-        ui.hyperlink_to(
-            egui::RichText::new("Xiaohan Zhang")
-                .size(12.0)
-                .color(style.text_color_dim),
-            "https://github.com/hellochar",
-        );
+    // Wrapped in top_down(Center) so the horizontal row collapses to its
+    // content width and gets centred within the tile — plain `horizontal`
+    // would expand to fill the available width and left-align visually.
+    child_ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("based on ")
+                    .size(12.0)
+                    .color(style.text_color_dim),
+            );
+            ui.hyperlink_to(
+                egui::RichText::new("hellochar")
+                    .size(12.0)
+                    .color(style.text_color_dim),
+                "https://github.com/hellochar/hellochar.com",
+            );
+            ui.label(
+                egui::RichText::new(" by ")
+                    .size(12.0)
+                    .color(style.text_color_dim),
+            );
+            ui.hyperlink_to(
+                egui::RichText::new("Xiaohan Zhang")
+                    .size(12.0)
+                    .color(style.text_color_dim),
+                "https://github.com/hellochar",
+            );
+        });
     });
     child_ui.add_space(12.0);
 
