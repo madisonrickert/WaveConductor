@@ -123,7 +123,10 @@ impl FromWorld for CompositePipeline {
             },
             BindGroupLayoutEntry {
                 binding: 2,
-                visibility: ShaderStages::FRAGMENT,
+                // `composite.wgsl` reads `uniforms` in both `vs_main` (for
+                // UV/half-extent) and `fs_main` (for corner-radius SDF), so
+                // the layout must expose the binding to both stages.
+                visibility: ShaderStages::VERTEX_FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
