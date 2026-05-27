@@ -25,6 +25,7 @@ pub mod blur;
 pub mod buttons;
 pub mod frame;
 pub mod picker;
+pub mod reload_overlay;
 pub mod style;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
@@ -44,5 +45,11 @@ impl Plugin for WaveConductorUiPlugin {
             buttons::OverlayButtonsPlugin,
             picker::SketchPickerPlugin,
         ));
+        // Full-screen reload fade overlay: runs unconditionally (no state gate)
+        // so it fires even during the one-frame Switch phase (AppState::Home).
+        app.add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            reload_overlay::draw_reload_overlay,
+        );
     }
 }

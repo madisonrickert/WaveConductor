@@ -261,6 +261,11 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
 
 /// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
 /// each user-category field as a typed widget.
+///
+/// Uses `egui::Grid` with two columns so labels are left-aligned in column 1
+/// and input widgets fill column 2. This is the idiomatic egui form-layout
+/// pattern; it replaces the previous `horizontal` + `add_sized` label approach
+/// which centred labels inside their fixed column rather than left-aligning them.
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
@@ -271,54 +276,54 @@ fn render_user_fields_via_reflect(
         return;
     };
 
-    for def in defs.iter().filter(|d| d.category == SettingsCategory::User) {
-        let Some(field) = struct_mut.field_mut(def.field_name) else {
-            continue;
-        };
-        render_widget(field, def, ui);
-    }
+    egui::Grid::new("settings_form")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 8.0))
+        .show(ui, |ui| {
+            for def in defs.iter().filter(|d| d.category == SettingsCategory::User) {
+                let Some(field) = struct_mut.field_mut(def.field_name) else {
+                    continue;
+                };
+                // Column 1: label, left-aligned by default in egui Grid.
+                ui.label(def.label);
+                // Column 2: widget fills remaining width automatically.
+                render_widget_value(field, def, ui);
+                ui.end_row();
+            }
+        });
 }
 
-/// Render one widget into `field` based on the metadata in `def`.
+/// Render the widget (second Grid column) for `field` based on the metadata in `def`.
+///
+/// Called from inside an `egui::Grid` row after the label has already been
+/// placed in column 1. Each helper renders only the input widget — no label,
+/// no `ui.horizontal` wrapper. The Grid handles label/widget alignment.
 ///
 /// `field` is `&mut dyn PartialReflect` as returned by [`Struct::field_mut`].
-fn render_widget(
+fn render_widget_value(
     field: &mut dyn bevy::reflect::PartialReflect,
     def: &SettingDef,
     ui: &mut egui::Ui,
 ) {
     match &def.kind {
-        SettingKind::Number(range) => render_number(field, def.label, range, ui),
-        SettingKind::Boolean => render_bool(field, def.label, ui),
-        SettingKind::Color => render_color(field, def.label, ui),
-        SettingKind::Text => render_text(field, def.label, ui),
+        SettingKind::Number(range) => render_number(field, range, ui),
+        SettingKind::Boolean => render_bool(field, ui),
+        SettingKind::Color => render_color(field, ui),
+        SettingKind::Text => render_text(field, ui),
         SettingKind::FilePath {
             filter_label,
             extensions,
         } => {
-            render_file_path(field, def.label, filter_label, extensions, ui);
+            render_file_path(field, filter_label, extensions, ui);
         }
     }
 }
 
-/// Fixed pixel width for the label column in horizontal field rows.
-///
-/// Applied via `ui.add_sized([LABEL_COLUMN_WIDTH, 0.0], Label::new(...))` so
-/// all labels share the same column and the input widgets align vertically.
-/// 120 px is a good starting point for the 420 px wide settings panel; the
-/// remaining width (~280 px) is available for the slider or input widget.
-const LABEL_COLUMN_WIDTH: f32 = 120.0;
-
-/// Render a numeric field. Dispatches on the field's concrete Rust type
-/// (u32, f32, etc.) via `try_downcast_mut`.
-///
-/// Layout: `[label (120 px fixed)][slider]` — label is LEFT of the slider.
-/// Previously the label was attached via `Slider::text()` which places it to
-/// the RIGHT; removing `.text()` and using a fixed-width label column aligns
-/// all inputs vertically and matches v4's perceived left-label layout.
+/// Render the numeric widget (slider) for a field. Called from inside a Grid row
+/// where the label has already been placed in column 1. Dispatches on the
+/// field's concrete Rust type (u32, f32, etc.) via `try_downcast_mut`.
 fn render_number(
     field: &mut dyn bevy::reflect::PartialReflect,
-    label: &str,
     range: &super::def::NumberRange,
     ui: &mut egui::Ui,
 ) {
@@ -326,126 +331,100 @@ fn render_number(
     let hi = range.max.unwrap_or(1.0);
     let step = range.step;
 
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
-        if let Some(v) = field.try_downcast_mut::<u32>() {
-            let mut tmp = *v as i64;
-            let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
-            if let Some(s) = step {
-                slider = slider.step_by(s);
-            }
-            if ui.add(slider).changed() {
-                *v = tmp.max(0) as u32;
-            }
-        } else if let Some(v) = field.try_downcast_mut::<f32>() {
-            let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32));
-            if let Some(s) = step {
-                slider = slider.step_by(s);
-            }
-            ui.add(slider);
-        } else if let Some(v) = field.try_downcast_mut::<f64>() {
-            let mut slider = egui::Slider::new(v, lo..=hi);
-            if let Some(s) = step {
-                slider = slider.step_by(s);
-            }
-            ui.add(slider);
-        } else if let Some(v) = field.try_downcast_mut::<i32>() {
-            let mut tmp = *v as i64;
-            let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
-            if let Some(s) = step {
-                slider = slider.step_by(s);
-            }
-            if ui.add(slider).changed() {
-                *v = tmp.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-            }
-        } else if let Some(v) = field.try_downcast_mut::<i64>() {
-            let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64));
-            if let Some(s) = step {
-                slider = slider.step_by(s);
-            }
-            ui.add(slider);
-        } else {
-            ui.label(format!("(unsupported number type for {label})"));
+    if let Some(v) = field.try_downcast_mut::<u32>() {
+        let mut tmp = *v as i64;
+        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
+        if let Some(s) = step {
+            slider = slider.step_by(s);
         }
-    });
+        if ui.add(slider).changed() {
+            *v = tmp.max(0) as u32;
+        }
+    } else if let Some(v) = field.try_downcast_mut::<f32>() {
+        let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32));
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        ui.add(slider);
+    } else if let Some(v) = field.try_downcast_mut::<f64>() {
+        let mut slider = egui::Slider::new(v, lo..=hi);
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        ui.add(slider);
+    } else if let Some(v) = field.try_downcast_mut::<i32>() {
+        let mut tmp = *v as i64;
+        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        if ui.add(slider).changed() {
+            *v = tmp.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        }
+    } else if let Some(v) = field.try_downcast_mut::<i64>() {
+        let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64));
+        if let Some(s) = step {
+            slider = slider.step_by(s);
+        }
+        ui.add(slider);
+    } else {
+        ui.label("(unsupported number type)");
+    }
 }
 
-/// Render a boolean field as `[label (120 px)][checkbox]` — label LEFT of input.
-fn render_bool(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
-        if let Some(v) = field.try_downcast_mut::<bool>() {
-            ui.checkbox(v, "");
-        } else {
-            ui.label(format!("(expected bool for {label})"));
-        }
-    });
+/// Render the boolean widget (checkbox) for a field. No label — Grid column 1
+/// already holds it.
+fn render_bool(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<bool>() {
+        ui.checkbox(v, "");
+    } else {
+        ui.label("(expected bool)");
+    }
 }
 
-/// Render a colour field as `[label (120 px)][colour picker]` — label LEFT of input.
-fn render_color(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
-        if let Some(v) = field.try_downcast_mut::<[f32; 4]>() {
-            ui.color_edit_button_rgba_unmultiplied(v);
-        } else if let Some(v) = field.try_downcast_mut::<bevy::color::Color>() {
-            let mut rgba = v.to_srgba().to_f32_array();
-            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
-                *v = bevy::color::Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-            }
-        } else {
-            ui.label(format!("(expected [f32; 4] or Color for {label})"));
+/// Render the colour widget for a field. No label — Grid column 1 already holds it.
+fn render_color(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<[f32; 4]>() {
+        ui.color_edit_button_rgba_unmultiplied(v);
+    } else if let Some(v) = field.try_downcast_mut::<bevy::color::Color>() {
+        let mut rgba = v.to_srgba().to_f32_array();
+        if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+            *v = bevy::color::Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
         }
-    });
+    } else {
+        ui.label("(expected [f32; 4] or Color)");
+    }
 }
 
-/// Render a text field as `[label (120 px)][text edit]` — label LEFT of input.
-fn render_text(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
-        if let Some(v) = field.try_downcast_mut::<String>() {
-            ui.text_edit_singleline(v);
-        } else {
-            ui.label(format!("(expected String for {label})"));
-        }
-    });
+/// Render the text widget for a field. No label — Grid column 1 already holds it.
+fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
+    if let Some(v) = field.try_downcast_mut::<String>() {
+        ui.text_edit_singleline(v);
+    } else {
+        ui.label("(expected String)");
+    }
 }
 
-/// Render a filesystem-path field as `[label (120 px)][text edit][Browse…]`.
+/// Render the filesystem-path widget (`[text edit][Browse…]`) for a field.
 ///
-/// Label is LEFT of the text edit; Browse… button follows. On Browse, opens
+/// No label — Grid column 1 already holds it. On Browse, opens
 /// [`rfd::FileDialog`] filtered to `extensions`; the selected path replaces
 /// the field value. Available only on native platforms — the wasm build renders
 /// a text-edit only (no picker). The panel width was bumped to 420 px (Fix 7)
 /// so the text edit + Browse… button fit on one row without overflowing.
 fn render_file_path(
     field: &mut dyn bevy::reflect::PartialReflect,
-    label: &str,
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] filter_label: &str,
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] extensions: &[&str],
     ui: &mut egui::Ui,
 ) {
     let Some(v) = field.try_downcast_mut::<String>() else {
-        ui.label(format!("(expected String for {label})"));
+        ui.label("(expected String for file path)");
         return;
     };
+    // Wrap text-edit + Browse in a horizontal so the Browse button sits inline.
+    // The Grid's second column expands to fill, so this horizontal fills it.
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_COLUMN_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
         ui.text_edit_singleline(v);
         #[cfg(not(target_arch = "wasm32"))]
         if ui.button("Browse…").clicked() {
@@ -464,19 +443,20 @@ fn render_file_path(
 /// `#[setting(...)]` attribute (no `SettingKind` variant); added eagerly so
 /// the panel is ready when the next sketch needs it. The derive macro will
 /// gain a `kind = Vec2` parser when that sketch lands.
+///
+/// Follows the Grid column-2 convention: no label here — Grid column 1 holds it.
 #[allow(
     dead_code,
     reason = "preemptive support; reachable once `kind = Vec2` lands in the derive macro"
 )]
-fn render_vec2(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+fn render_vec2(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
     if let Some(v) = field.try_downcast_mut::<bevy::math::Vec2>() {
         ui.horizontal(|ui| {
-            ui.label(label);
             ui.add(egui::DragValue::new(&mut v.x).prefix("x: "));
             ui.add(egui::DragValue::new(&mut v.y).prefix("y: "));
         });
     } else {
-        ui.label(format!("(expected Vec2 for {label})"));
+        ui.label("(expected Vec2)");
     }
 }
 
@@ -484,20 +464,21 @@ fn render_vec2(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &
 /// `#[setting(...)]` attribute (no `SettingKind` variant); added eagerly so
 /// the panel is ready when the next sketch needs it. The derive macro will
 /// gain a `kind = Vec3` parser when that sketch lands.
+///
+/// Follows the Grid column-2 convention: no label here — Grid column 1 holds it.
 #[allow(
     dead_code,
     reason = "preemptive support; reachable once `kind = Vec3` lands in the derive macro"
 )]
-fn render_vec3(field: &mut dyn bevy::reflect::PartialReflect, label: &str, ui: &mut egui::Ui) {
+fn render_vec3(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
     if let Some(v) = field.try_downcast_mut::<bevy::math::Vec3>() {
         ui.horizontal(|ui| {
-            ui.label(label);
             ui.add(egui::DragValue::new(&mut v.x).prefix("x: "));
             ui.add(egui::DragValue::new(&mut v.y).prefix("y: "));
             ui.add(egui::DragValue::new(&mut v.z).prefix("z: "));
         });
     } else {
-        ui.label(format!("(expected Vec3 for {label})"));
+        ui.label("(expected Vec3)");
     }
 }
 

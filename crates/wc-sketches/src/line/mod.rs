@@ -42,6 +42,8 @@ pub use systems::LineRoot;
 
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
+use wc_core::audio::state::AudioState;
+use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
@@ -114,7 +116,9 @@ impl Plugin for LinePlugin {
                 .run_if(sketch_active(AppState::Line)),
         );
 
-        // Restart listener: cycles Line → Home → Line when particle_density changes.
+        // Restart listener: begins the FadeOut phase of the reload overlay when
+        // a requires_restart setting changes. The overlay's `drive_reload_state`
+        // system (in wc-core) drives the full FadeOut → Switch → FadeIn cycle.
         app.add_systems(Update, restart_on_settings_change);
     }
 }
@@ -172,65 +176,57 @@ fn remove_sim_params(mut commands: Commands<'_, '_>) {
 const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Listens for `SketchRestart { storage_key == LineSettings::STORAGE_KEY }`
-/// and forces a `Line → Home → Line` cycle so the `OnExit`/`OnEnter` systems
-/// rebuild the sketch with the new settings.
+/// and begins the reload fade-overlay transition so the `Line → Home → Line`
+/// cycle is blacked out rather than flashing the picker page.
 ///
 /// A 500 ms debounce (`RESTART_DEBOUNCE`) prevents the restart from firing
-/// while the user is still dragging a slider. The restart is deferred until
-/// 500 ms of silence (no further `SketchRestart` messages for this key). The
-/// debounce timestamp is tracked in a `Local<Option<Duration>>` that is
-/// updated on every message and checked each frame against `Time::elapsed`.
+/// while the user is still dragging a slider. The debounce timestamp is tracked
+/// in a `Local<Option<Duration>>` that is updated on every message and checked
+/// each frame against `Time::elapsed`.
 ///
-/// After the debounce window closes, uses the one-frame `LineRestartPending`
-/// trampoline: set `NextState::Home` and insert the marker, then on the
-/// following frame set `NextState::Line` and remove the marker.
+/// After the debounce window closes, calls `SketchReloadState::begin_fade_out`
+/// which sets `phase = FadeOut`. The `drive_reload_state` system (registered in
+/// `wc-core`'s `LifecyclePlugin`) owns all subsequent phase transitions:
+/// `FadeOut` → Switch (sets `NextState::Home`) → `FadeIn` (sets `NextState::Line`).
 fn restart_on_settings_change(
     mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
     time: Res<'_, bevy::prelude::Time>,
     current: Res<'_, State<AppState>>,
-    mut next: ResMut<'_, NextState<AppState>>,
-    mut commands: Commands<'_, '_>,
-    pending: Option<Res<'_, LineRestartPending>>,
+    mut reload_state: ResMut<'_, SketchReloadState>,
+    // Optional: not present in headless (MinimalPlugins) test harnesses.
+    audio_state: Option<Res<'_, AudioState>>,
     // Tracks the `Time::elapsed` of the last received restart message.
     // `None` means no message has been received since the last restart.
     mut last_change_at: Local<'_, Option<std::time::Duration>>,
 ) {
-    if pending.is_some() {
-        // Second frame: complete the cycle by re-entering Line.
-        next.set(AppState::Line);
-        commands.remove_resource::<LineRestartPending>();
-        *last_change_at = None;
-        // `debug!` rather than `info!` — the trampoline has been stable since
-        // Plan 7; firing on every settings restart is noise in release builds.
-        tracing::debug!("LineSettings restart cycle: re-entering Line");
-        return;
-    }
-
     // Absorb any new restart messages, updating the debounce timestamp.
+    // Only arm when in Line (not during the Home/FadeIn return leg) and when
+    // no reload is already in progress.
     let got_message = events
         .read()
         .any(|e| e.storage_key == settings::LineSettings::STORAGE_KEY);
-    if got_message && **current == AppState::Line {
+    if got_message && **current == AppState::Line && reload_state.is_idle() {
         *last_change_at = Some(time.elapsed());
         tracing::debug!("LineSettings changed — debounce timer reset (500 ms)");
     }
 
-    // Fire the restart only after 500 ms of no further changes.
+    // Fire the FadeOut only after 500 ms of no further changes.
     if let Some(last) = *last_change_at {
         let elapsed_since = time.elapsed().saturating_sub(last);
-        if elapsed_since >= RESTART_DEBOUNCE && **current == AppState::Line {
-            next.set(AppState::Home);
-            commands.insert_resource(LineRestartPending);
-            tracing::debug!("LineSettings debounce elapsed — cycling Line via Home");
+        if elapsed_since >= RESTART_DEBOUNCE
+            && **current == AppState::Line
+            && reload_state.is_idle()
+        {
+            // Fall back to full volume (1.0) when the audio engine hasn't
+            // started — headless tests and early startup before the cpal
+            // stream is active.
+            let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
+            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume);
+            *last_change_at = None;
+            tracing::debug!("LineSettings debounce elapsed — beginning reload FadeOut");
         }
     }
 }
-
-/// Trampoline marker for the same-frame Line→Home→Line cycle. Inserted on the
-/// frame a restart is detected; the next frame's `restart_on_settings_change`
-/// observes it, transitions back to `Line`, and removes the resource.
-#[derive(Resource)]
-struct LineRestartPending;
 
 /// Idle veto for the Line sketch. Returns `true` while the mouse attractor's
 /// power is non-zero (i.e., still decaying) — keeps the sketch in

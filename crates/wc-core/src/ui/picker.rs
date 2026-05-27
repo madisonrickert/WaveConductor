@@ -26,6 +26,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use super::style::OverlayStyle;
+use crate::lifecycle::reload::SketchReloadState;
 use crate::lifecycle::state::AppState;
 use crate::sketch::SketchManifest;
 
@@ -34,16 +35,28 @@ use crate::sketch::SketchManifest;
 use egui_phosphor::regular as phosphor;
 
 /// Plugin: registers [`draw_sketch_picker`] in
-/// [`bevy_egui::EguiPrimaryContextPass`], gated on [`AppState::Home`].
+/// [`bevy_egui::EguiPrimaryContextPass`], gated on [`AppState::Home`] AND
+/// `SketchReloadState::is_idle()` so the picker stays hidden during the
+/// `FadeOut` → Switch → `FadeIn` reload round-trip.
 pub struct SketchPickerPlugin;
 
 impl Plugin for SketchPickerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            draw_sketch_picker.run_if(in_state(AppState::Home)),
+            draw_sketch_picker
+                .run_if(in_state(AppState::Home))
+                .run_if(picker_not_reloading),
         );
     }
+}
+
+/// Run condition: returns `true` only when no reload transition is in progress.
+///
+/// Prevents the picker grid from flashing during the brief `Switch` phase where
+/// `AppState == Home` but the screen should be fully blacked out.
+fn picker_not_reloading(state: Option<Res<'_, SketchReloadState>>) -> bool {
+    state.is_none_or(|s| s.is_idle())
 }
 
 /// Background colour for the picker page, matching v4's `#10161A`.
@@ -358,11 +371,22 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
 
     // Attribution line: "based on hellochar by Xiaohan Zhang" with the two
     // names as clickable hyperlinks matching v4's HomePage.tsx:52–53.
-    // Wrapped in top_down(Center) so the horizontal row collapses to its
-    // content width and gets centred within the tile — plain `horizontal`
-    // would expand to fill the available width and left-align visually.
-    child_ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-        ui.horizontal(|ui| {
+    //
+    // egui's `horizontal` always expands to fill the parent's available width,
+    // so wrapping it in `top_down(Center)` only centers within the allocation
+    // — the row content still left-aligns inside the full-width horizontal.
+    // The correct idiom for "horizontally center a row of widgets" is:
+    // 1. Put the parent in `top_down(Align::Center)` (already done via child_ui).
+    // 2. Use `allocate_ui_with_layout` with a *fixed* width matching the row
+    //    content so the child UI has no spare width to push content left.
+    //    The `top_down(Center)` parent then centers that fixed-width child.
+    //
+    // 280 px ≈ "based on " + "hellochar" + " by " + "Xiaohan Zhang" in Inter 12 pt.
+    // Nudge if the rendered row clips or has visible gap on a different DPI.
+    child_ui.allocate_ui_with_layout(
+        egui::vec2(280.0, 20.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
             ui.label(
                 egui::RichText::new("based on ")
                     .size(12.0)
@@ -385,8 +409,8 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
                     .color(style.text_color_dim),
                 "https://github.com/hellochar",
             );
-        });
-    });
+        },
+    );
     child_ui.add_space(12.0);
 
     // Contributors — each a clickable hyperlink.

@@ -19,10 +19,12 @@
 pub mod actions;
 pub mod idle;
 pub mod nav;
+pub mod reload;
 pub mod screensaver;
 pub mod state;
 
 pub use idle::RegisterIdleVetoExt;
+pub use reload::SketchReloadState;
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::*;
@@ -45,6 +47,8 @@ impl Plugin for LifecyclePlugin {
             // Idle / interaction tracking
             .init_resource::<idle::InteractionTimer>()
             .init_resource::<idle::IdleVetoes>()
+            // Sketch reload fade-overlay state (cross-sketch; not Line-specific).
+            .init_resource::<reload::SketchReloadState>()
             // Register HandTrackingFrame message so reset_on_interaction can
             // read it. If HandTrackingPlugin is also present, Bevy deduplicates
             // the registration; registering here ensures lifecycle tests that do
@@ -57,6 +61,7 @@ impl Plugin for LifecyclePlugin {
                     nav::handle_navigation_actions,
                     idle::reset_on_interaction,
                     idle::advance_activity,
+                    reload::drive_reload_state,
                 )
                     .chain(),
             )
