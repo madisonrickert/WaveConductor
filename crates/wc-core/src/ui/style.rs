@@ -142,6 +142,13 @@ pub(super) fn apply_overlay_style(
     fonts
         .families
         .insert(egui::FontFamily::Name("orbitron".into()), vec!["orbitron".to_owned()]);
+    // Register Phosphor icon font so PUA glyphs (HOUSE, GEAR, SPEAKER_HIGH, etc.)
+    // resolve correctly. `add_to_fonts` appends "phosphor" at position 1 in the
+    // Proportional family — after Inter so body text is unaffected, before the
+    // egui fallback so icon glyphs are found. Must run AFTER our three custom
+    // `font_data.insert` calls above so the families entry for Proportional already
+    // exists (created by the Inter insert above).
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
 
     // Visuals — start from dark, override key fields to match v4's SCSS.

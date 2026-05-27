@@ -40,6 +40,7 @@ use smallvec::SmallVec;
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
+use crate::lifecycle::state::AppState;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::{LastSettingsPanelRect, SettingsPanelVisible};
 use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
@@ -63,8 +64,16 @@ pub(super) fn add_systems(app: &mut App) {
 }
 
 /// Run condition: returns `true` when the settings panel should be visible.
-fn settings_panel_visible(visible: Res<'_, SettingsPanelVisible>) -> bool {
-    visible.0
+///
+/// Also gates on `AppState != Home` — the settings panel is sketch chrome and
+/// must not appear over the picker page, matching v4's behaviour where the cog
+/// button itself is hidden on Home (Fix 2). Without this guard, a panel opened
+/// while in a sketch would persist visually through the Home transition.
+fn settings_panel_visible(
+    visible: Res<'_, SettingsPanelVisible>,
+    state: Res<'_, State<AppState>>,
+) -> bool {
+    visible.0 && **state != AppState::Home
 }
 
 /// Exclusive system that draws the user settings panel with v4 chrome.

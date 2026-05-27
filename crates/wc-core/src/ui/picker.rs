@@ -144,8 +144,11 @@ pub fn draw_sketch_picker(world: &mut World) {
                             ui.end_row();
                         }
                     }
-                    // 6th cell: empty spacer so the grid stays 3×2.
-                    ui.allocate_ui(tile_size, |_ui| {});
+                    // 6th cell: credits tile (bottom-right), matching v4's
+                    // `<div class="work-grid-item credits-block">` in HomePage.tsx:45.
+                    ui.allocate_ui(tile_size, |ui| {
+                        render_credits_tile(ui, &style, tile_size);
+                    });
                 });
         });
 
@@ -187,14 +190,19 @@ fn render_active_tile(
 
     paint_tile_name(ui, style, rect, name, style.text_color_bright);
 
-    // Sheen-on-hover: animate progress [0, 1] over 0.5 s using egui's built-in
-    // bool animator. Skip the mesh entirely when progress is zero to avoid
-    // painting a zero-alpha strip every frame.
-    let hover_t = ui
+    // Sheen-on-hover: two separate animations matching v4's CSS split:
+    //   position transition → 0.5 s (slow diagonal sweep, CSS `transition: 0.5s`)
+    //   opacity transition  → 0.15 s (quick flash in/out, CSS `transition: 0.15s`)
+    // Using distinct animation keys (suffixed with "pos"/"alpha") so each
+    // parameter animates independently on the same widget id.
+    let position_t = ui
         .ctx()
-        .animate_bool_with_time(response.id, response.hovered(), 0.5);
-    if hover_t > 0.0 {
-        paint_sheen(ui, rect, hover_t);
+        .animate_bool_with_time(response.id.with("pos"), response.hovered(), 0.5);
+    let opacity_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("alpha"), response.hovered(), 0.15);
+    if opacity_t > 0.0 {
+        paint_sheen(ui, rect, position_t, opacity_t);
     }
 
     if response.clicked() {
@@ -232,11 +240,82 @@ fn render_placeholder_tile(
     );
 }
 
-/// Paint a diagonal sheen sweep across the tile, parametrized by
-/// `progress ∈ (0, 1]`.
+/// Render the bottom-right credits tile, matching v4's `credits-block` div
+/// (HomePage.tsx:45–60). Paint-only — no click handler.
+///
+/// Displays:
+/// - `"WaveConductor"` in Orbitron Bold at ~28 pt, centred.
+/// - "based on hellochar by Xiaohan Zhang" in dim text at ~12 pt.
+/// - "Madison Rickert" and `"Rich Trapani | LoveTech"` each on their own line.
+/// - "Open Source Licenses" in dimmer text at the bottom.
+///
+/// Links from v4 are omitted for now (egui hyperlinks are non-trivial and this
+/// is intentionally a lean parity tile). Deferred to a future polish task.
+fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui::Vec2) {
+    let (rect, _response) = ui.allocate_exact_size(tile_size, egui::Sense::hover());
+    // Fill matches PLACEHOLDER_FILL / v4's `$dark-gray1`.
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::ZERO, PLACEHOLDER_FILL);
+
+    // Centre all text vertically and horizontally inside the tile.
+    let mut child_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+    );
+    // Push spacing so the block sits roughly in the vertical centre.
+    child_ui.add_space(tile_size.y * 0.28);
+
+    // "WaveConductor" heading — Orbitron Bold, large.
+    child_ui.label(
+        egui::RichText::new("WaveConductor")
+            .size(28.0)
+            .family(egui::FontFamily::Name("orbitron".into()))
+            .color(style.text_color_bright),
+    );
+    child_ui.add_space(8.0);
+
+    // Attribution line.
+    child_ui.label(
+        egui::RichText::new("based on hellochar by Xiaohan Zhang")
+            .size(12.0)
+            .color(style.text_color_dim),
+    );
+    child_ui.add_space(12.0);
+
+    // Contributors.
+    child_ui.label(
+        egui::RichText::new("Madison Rickert")
+            .size(13.0)
+            .color(style.text_color_dim),
+    );
+    child_ui.label(
+        egui::RichText::new("Rich Trapani | LoveTech")
+            .size(13.0)
+            .color(style.text_color_dim),
+    );
+    child_ui.add_space(16.0);
+
+    // Licenses footer — dimmer than contributor text.
+    child_ui.label(
+        egui::RichText::new("Open Source Licenses")
+            .size(11.0)
+            .color(egui::Color32::from_gray(90)),
+    );
+}
+
+/// Paint a diagonal sheen sweep across the tile.
+///
+/// Two independent animation parameters match v4's split CSS transitions:
+/// - `position_t ∈ [0, 1]` — controls where the band sits horizontally,
+///   animated over 0.5 s (slow sweep, v4 CSS `transition: 0.5s`).
+/// - `opacity_t ∈ (0, 1]` — scales every vertex alpha, animated over 0.15 s
+///   (quick flash in/out, v4 CSS `transition: 0.15s`). The caller already
+///   skips the call when `opacity_t == 0` so this function always receives a
+///   positive value.
 ///
 /// Reproduces v4's `homePage.scss:155–164` hover highlight: a vertical
-/// band that sweeps from left-of-tile to right-of-tile as `progress` rises
+/// band that sweeps from left-of-tile to right-of-tile as `position_t` rises
 /// from 0 to 1. The band is 60% of the tile width and uses four colour
 /// stops (transparent → dim white → bright white → transparent) painted
 /// as three adjacent quads via an `epaint::Mesh`.
@@ -244,34 +323,37 @@ fn render_placeholder_tile(
 /// The gradient runs vertically (same colour at top and bottom of each
 /// column), giving a flat translucent strip rather than a true rotated
 /// gradient — close enough to v4 and avoids shader dependencies.
-fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, progress: f32) {
+fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, position_t: f32, opacity_t: f32) {
     let painter = ui.painter();
 
     // The sheen band is 60% of the tile width. It starts fully off-left
-    // at progress=0 and finishes fully off-right at progress=1, so the
+    // at position_t=0 and finishes fully off-right at position_t=1, so the
     // visible highlight sweeps across the tile.
     let sheen_width = rect.width() * 0.6;
     let half = sheen_width * 0.5;
     let travel = rect.width() + sheen_width; // total distance band travels
-    let center_x = (rect.left() - half) + travel * progress;
+    let center_x = (rect.left() - half) + travel * position_t;
 
     let top = rect.top();
     let bottom = rect.bottom();
 
     // Four X positions form three quads. Colour stops match v4:
     //   transparent → rgba(255,255,255,0.13) → rgba(255,255,255,0.5) → transparent
+    // Each stop is alpha-scaled by `opacity_t` so the whole sheen fades in/out
+    // independently of the sweep position.
     let xs: [f32; 4] = [
         center_x - half,
         center_x - half * 0.333,
         center_x + half * 0.333,
         center_x + half,
     ];
-    let colors: [egui::Color32; 4] = [
+    let base_colors: [egui::Color32; 4] = [
         egui::Color32::TRANSPARENT,
         egui::Color32::from_white_alpha(33),  // ≈ 0.13 × 255
         egui::Color32::from_white_alpha(128), // ≈ 0.5 × 255
         egui::Color32::TRANSPARENT,
     ];
+    let colors: [egui::Color32; 4] = base_colors.map(|c| scale_sheen_alpha(c, opacity_t));
 
     // Build an 8-vertex mesh: 2 rows (top, bottom) × 4 columns = 8 vertices,
     // 3 quads × 2 triangles each = 6 triangles.
@@ -291,6 +373,22 @@ fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, progress: f32) {
     }
 
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Scale the alpha channel of a sheen colour vertex by `mul ∈ [0, 1]`.
+///
+/// Used to apply the fast-opacity animation independently from the slow-position
+/// sweep. The `as u8` cast is safe: `f32::from(u8) * mul.clamp(0, 1)` lies in
+/// `[0.0, 255.0]`; truncation is the intended rounding mode.
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "product is in [0.0, 255.0] by construction; truncation is intentional"
+)]
+fn scale_sheen_alpha(c: egui::Color32, mul: f32) -> egui::Color32 {
+    let a = (f32::from(c.a()) * mul.clamp(0.0, 1.0)) as u8;
+    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
 /// Paint the Orbitron sketch name at the bottom-left with a gradient

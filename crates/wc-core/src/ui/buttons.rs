@@ -185,10 +185,20 @@ pub fn draw_home_button(world: &mut World) {
 /// `(window_width - 12 - size, 12)` so it stays flush with the right edge
 /// regardless of window size. Button size scales with [`PointerCoarse`]
 /// (32 px fine / 44 px coarse). Icon: [`egui_phosphor::regular::GEAR`].
+///
+/// Hidden on [`AppState::Home`] — sketch chrome is not shown on the picker page,
+/// matching v4's behaviour where only active sketch pages show the cog.
 pub fn draw_settings_button(world: &mut World) {
     // Skip when EguiPlugin is absent (MinimalPlugins tests).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
         return;
+    }
+    // Hidden on the Home screen — same guard as `draw_home_button`.
+    {
+        let state = world.get_resource::<State<AppState>>();
+        if state.is_some_and(|s| **s == AppState::Home) {
+            return;
+        }
     }
 
     // Read window width; fall back to 1280 if no primary window is present yet.
@@ -272,14 +282,12 @@ pub fn overlay_icon_button(
         egui::epaint::StrokeKind::Inside,
     );
 
-    let text_color = scale_color_alpha(
-        if hovered {
-            style.text_color_bright
-        } else {
-            style.text_color_dim
-        },
-        opacity_mul,
-    );
+    // Lerp text colour with the same animation value `t` so icon brightness
+    // transitions smoothly (matching v4's unified hover transition).
+    // Previously this was a hard switch (dim ↔ bright); the lerp gives the
+    // same smooth feel as the background fill transition.
+    let text_color = lerp_color(style.text_color_dim, style.text_color_bright, t);
+    let text_color = scale_color_alpha(text_color, opacity_mul);
     // Paint the icon glyph centred in the button. Font size = half the button
     // size so the glyph fills ~50% of the available area (matching v4's
     // icon sizing).
@@ -377,10 +385,20 @@ pub(crate) fn sync_volume_muted(
 /// [`AudioCommand::SetMuted`] to the audio ring. Ring-full failures are
 /// silently dropped — the audio thread is severely backlogged in that case
 /// and will process the eventual echo correctly.
+///
+/// Hidden on [`AppState::Home`] — sketch chrome is not shown on the picker page,
+/// matching v4's behaviour where only active sketch pages show the volume control.
 pub fn draw_volume_button(world: &mut World) {
     // Skip when EguiPlugin is absent (MinimalPlugins tests).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
         return;
+    }
+    // Hidden on the Home screen — same guard as `draw_home_button`.
+    {
+        let state = world.get_resource::<State<AppState>>();
+        if state.is_some_and(|s| **s == AppState::Home) {
+            return;
+        }
     }
 
     // Read window width; fall back to 1280 if no primary window is present yet.

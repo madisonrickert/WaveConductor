@@ -131,10 +131,13 @@ impl Plugin for LinePlugin {
 /// fill defined in `OverlayStyle`.
 pub(crate) fn register_line_manifest(app: &mut App) {
     let asset_server = app.world().resource::<AssetServer>();
-    let screenshot = asset_server.load("sketches/line/screenshot.png");
+    // Load the v4 screenshot (gravity4_cropped.jpg). Using the `.jpg` extension
+    // so Bevy's asset loader applies JPEG decoding correctly. v4 calls this
+    // sketch "Gravity" in HomePage.tsx:44.
+    let screenshot = asset_server.load("sketches/line/screenshot.jpg");
     app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
         state: AppState::Line,
-        display_name: "Line",
+        display_name: "Gravity",
         screenshot,
     });
 }
@@ -210,13 +213,19 @@ fn line_idle_veto(world: &World) -> bool {
         .is_some_and(|s| s.power > 0.0)
 }
 
-/// `OnEnter(AppState::Line)` — push `AddLineSynth` so the audio thread builds
-/// the Line synth voice graph.
+/// `OnEnter(AppState::Line)` — push `AddLineSynth` and restore the background
+/// volume so the line_background.ogg sample resumes playing.
 ///
-/// Idempotent on the audio side: if a synth already exists (e.g. from a
-/// dropped tear-down), the audio thread's `AddLineSynth` handler is a no-op.
-/// Drops the command silently with a `warn` if the ring is full — the synth
-/// will be re-tried on the next sketch entry.
+/// Two commands are pushed:
+/// 1. `AddLineSynth` — builds the synth voice graph (idempotent: no-op if a
+///    synth already exists from a dropped tear-down).
+/// 2. `SetLineParam { key: "background_volume", value: 1.0 }` — restores the
+///    DSP host's background mixer to full volume. `exit_line_audio` sets this
+///    to 0.0 on exit; after `enter_line_audio` restores it to 1.0 the
+///    `audio_coupling` system keeps updating it each frame while Line is active.
+///
+/// Drops commands silently with a `warn` if the ring is full — the synth and
+/// background will be set up correctly on the next successful command delivery.
 fn enter_line_audio(
     audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
 ) {
@@ -228,13 +237,29 @@ fn enter_line_audio(
     if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::AddLineSynth) {
         tracing::warn!("audio command ring full on Line entry; AddLineSynth dropped");
     }
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    }) {
+        tracing::warn!("audio command ring full on Line entry; background_volume restore dropped");
+    }
 }
 
-/// `OnExit(AppState::Line)` — push `RemoveLineSynth` so the audio thread tears
-/// down the Line synth voice graph and frees its DSP allocations.
+/// `OnExit(AppState::Line)` — push `RemoveLineSynth` and mute the background
+/// volume so the line_background.ogg sample stops playing when the user
+/// navigates to Home.
 ///
-/// Idempotent on the audio side: if no synth is active, the audio thread's
-/// `RemoveLineSynth` handler is a no-op.
+/// Two commands are pushed:
+/// 1. `RemoveLineSynth` — tears down the synth voice graph (idempotent: no-op
+///    if no synth is active).
+/// 2. `SetLineParam { key: "background_volume", value: 0.0 }` — silences the
+///    DSP host's background mixer so the sample track does not continue playing
+///    over the picker page. `enter_line_audio` restores this to 1.0 on the next
+///    entry, after which the `audio_coupling` system keeps it updated each frame.
+///
+/// Ring-full failures are logged as warnings and dropped — the audio thread is
+/// severely backlogged in that case and the param will be restored on the next
+/// `OnEnter(Line)`.
 fn exit_line_audio(
     audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
 ) {
@@ -244,9 +269,19 @@ fn exit_line_audio(
     if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::RemoveLineSynth) {
         tracing::warn!("audio command ring full on Line exit; RemoveLineSynth dropped");
     }
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 0.0,
+    }) {
+        tracing::warn!("audio command ring full on Line exit; background_volume mute dropped");
+    }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "test assertions — panicking on unexpected None is the correct behaviour"
+)]
 mod tests {
     use super::*;
     use wc_core::sketch::SketchManifest;
@@ -270,6 +305,6 @@ mod tests {
         let entry = manifest
             .get(AppState::Line)
             .expect("Line manifest entry should be registered");
-        assert_eq!(entry.display_name, "Line");
+        assert_eq!(entry.display_name, "Gravity");
     }
 }
