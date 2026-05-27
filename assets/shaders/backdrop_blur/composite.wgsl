@@ -41,8 +41,11 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
     let c = corners[vid];
     out.local = c * uniforms.half_extent;
     // UV in source viewport: lerp uv_rect.xy → uv_rect.zw by (c * 0.5 + 0.5).
+    // Clip-space Y increases upward but UV-Y (screen-space) increases downward,
+    // so flip Y to avoid a vertical mirror of the sampled backdrop.
     let t = c * 0.5 + 0.5;
-    out.uv = mix(uniforms.uv_rect.xy, uniforms.uv_rect.zw, t);
+    let t_uv = vec2<f32>(t.x, 1.0 - t.y);
+    out.uv = mix(uniforms.uv_rect.xy, uniforms.uv_rect.zw, t_uv);
     out.clip_position = vec4<f32>(c, 0.0, 1.0);
     return out;
 }
