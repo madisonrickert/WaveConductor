@@ -31,6 +31,7 @@
 //! |--------------------|-----------|----------------------------------|
 //! | `default`          | expr      | `Default::default()`             |
 //! | `label`            | string    | the field name                   |
+//! | `section`          | string    | `""` (no section header)         |
 //! | `category`         | `User` \| `Dev` | `Dev`                       |
 //! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `FilePath` | `Number` |
 //! | `min`, `max`, `step` | numeric expr | none (only meaningful on `Number`) |
@@ -91,6 +92,8 @@ struct FieldInfo {
     ident: Ident,
     default: Option<Expr>,
     label: Option<String>,
+    /// Section group name. `None` serialises to `""` (no header).
+    section: Option<String>,
     category: Category,
     requires_restart: bool,
     kind: Kind,
@@ -153,6 +156,7 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
             ident,
             default: None,
             label: None,
+            section: None,
             category: Category::Dev,
             requires_restart: false,
             kind: Kind::Number,
@@ -186,6 +190,9 @@ fn parse_setting_attr(
     } else if meta.path.is_ident("label") {
         let value: LitStr = meta.value()?.parse()?;
         info.label = Some(value.value());
+    } else if meta.path.is_ident("section") {
+        let value: LitStr = meta.value()?.parse()?;
+        info.section = Some(value.value());
     } else if meta.path.is_ident("filter_label") {
         let value: LitStr = meta.value()?.parse()?;
         info.filter_label = Some(value.value());
@@ -296,6 +303,7 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
         // overrides this. This makes the user panel readable without requiring
         // every field to carry an explicit label.
         let label = f.label.clone().unwrap_or_else(|| title_case(&field_name));
+        let section = f.section.clone().unwrap_or_default();
         let category = match f.category {
             Category::User => quote! { ::wc_core::settings::SettingsCategory::User },
             Category::Dev => quote! { ::wc_core::settings::SettingsCategory::Dev },
@@ -340,6 +348,7 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
             ::wc_core::settings::SettingDef {
                 field_name: #field_name,
                 label: #label,
+                section: #section,
                 category: #category,
                 kind: #kind_tokens,
                 requires_restart: #requires_restart,

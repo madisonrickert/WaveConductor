@@ -59,17 +59,31 @@ impl Default for UiOpacity {
 #[settings(storage_key = "overlay_ui")]
 pub struct OverlayUiSettings {
     /// Seconds of pointer inactivity before chrome fades out. v4 default: 30.
-    #[setting(default = 30.0_f32, min = 5.0_f32, max = 600.0_f32, step = 1.0_f32, category = Dev)]
+    #[setting(
+        default = 30.0_f32,
+        min = 5.0_f32,
+        max = 600.0_f32,
+        step = 1.0_f32,
+        section = "Overlay",
+        category = Dev
+    )]
     #[serde(default = "default_idle_fade_threshold")]
     pub idle_fade_threshold_seconds: f32,
 
     /// Time constant for the opacity ease. v4 default: 0.6.
-    #[setting(default = 0.6_f32, min = 0.0_f32, max = 5.0_f32, step = 0.1_f32, category = Dev)]
+    #[setting(
+        default = 0.6_f32,
+        min = 0.0_f32,
+        max = 5.0_f32,
+        step = 0.1_f32,
+        section = "Overlay",
+        category = Dev
+    )]
     #[serde(default = "default_idle_fade_duration")]
     pub idle_fade_duration_seconds: f32,
 
     /// Master toggle for the backdrop-blur pass. Dev escape hatch.
-    #[setting(default = true, category = Dev)]
+    #[setting(default = true, section = "Overlay", category = Dev)]
     #[serde(default = "default_backdrop_blur_enabled")]
     pub backdrop_blur_enabled: bool,
 }

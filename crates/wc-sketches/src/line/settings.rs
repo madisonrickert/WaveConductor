@@ -65,6 +65,7 @@ pub struct LineSettings {
         min = 0.1_f32,
         max = 30.0_f32,
         step = 0.5_f32,
+        section = "Particles",
         category = User,
         requires_restart
     )]
@@ -72,13 +73,27 @@ pub struct LineSettings {
     pub particle_density: f32,
 
     /// Strength of the pull toward the pointer attractor. v4 default = 280.
-    #[setting(default = 280.0_f32, min = 0.0_f32, max = 1000.0_f32, step = 10.0_f32, category = User)]
+    #[setting(
+        default = 280.0_f32,
+        min = 0.0_f32,
+        max = 1000.0_f32,
+        step = 10.0_f32,
+        section = "Particles",
+        category = User
+    )]
     #[serde(default = "default_gravity_constant")]
     pub gravity_constant: f32,
 
     /// Per-channel gamma curve applied as the final step of the gravity-smear
     /// post-process. v4 default = 1.0.
-    #[setting(default = 1.0_f32, min = 0.1_f32, max = 4.0_f32, step = 0.1_f32, category = User)]
+    #[setting(
+        default = 1.0_f32,
+        min = 0.1_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        section = "Visual",
+        category = User
+    )]
     #[serde(default = "default_gamma")]
     pub gamma: f32,
 
@@ -93,6 +108,7 @@ pub struct LineSettings {
         ty = FilePath,
         filter_label = "Image",
         extensions = ["png", "jpg", "jpeg", "webp"],
+        section = "Spawn",
         category = User,
         requires_restart
     )]
@@ -102,21 +118,42 @@ pub struct LineSettings {
     /// Master output gain trim for the synth voice. `1.0` = unchanged.
     /// Applied as a final multiplier on the `volume` audio param so kiosk
     /// loudness can be balanced without touching system volume.
-    #[setting(default = 1.0_f32, min = 0.0_f32, max = 2.0_f32, step = 0.05_f32, category = User)]
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 2.0_f32,
+        step = 0.05_f32,
+        section = "Audio",
+        category = User
+    )]
     #[serde(default = "default_synth_volume_scale")]
     pub synth_volume_scale: f32,
 
     /// Voice envelope attack time in milliseconds. Smaller = snappier press
     /// onset; larger = slower swell-in. Internally converts to an envelope
     /// lerp rate of `1000 / attack_ms`.
-    #[setting(default = 115.0_f32, min = 5.0_f32, max = 200.0_f32, step = 5.0_f32, category = User)]
+    #[setting(
+        default = 115.0_f32,
+        min = 5.0_f32,
+        max = 200.0_f32,
+        step = 5.0_f32,
+        section = "Audio",
+        category = User
+    )]
     #[serde(default = "default_synth_attack_ms")]
     pub synth_attack_ms: f32,
 
     /// Voice envelope release tail length in milliseconds. Smaller = abrupt
     /// cutoff; larger = long pad tail. Internally converts to an envelope
     /// lerp rate of `1000 / release_ms`.
-    #[setting(default = 350.0_f32, min = 100.0_f32, max = 3000.0_f32, step = 50.0_f32, category = User)]
+    #[setting(
+        default = 350.0_f32,
+        min = 100.0_f32,
+        max = 3000.0_f32,
+        step = 50.0_f32,
+        section = "Audio",
+        category = User
+    )]
     #[serde(default = "default_synth_release_ms")]
     pub synth_release_ms: f32,
 

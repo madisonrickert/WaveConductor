@@ -61,6 +61,10 @@ pub struct SettingDef {
     /// Human-facing label. Defaults to `field_name` when `label = "..."` is
     /// not given in the attribute.
     pub label: &'static str,
+    /// Optional section group name shown as a header above a cluster of
+    /// related fields. Empty string (`""`) means no header — the field
+    /// renders in an unlabeled group at the start of the panel.
+    pub section: &'static str,
     /// Which panel renders this field.
     pub category: SettingsCategory,
     /// Widget shape + value-space constraints.

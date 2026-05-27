@@ -260,12 +260,16 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
 }
 
 /// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
-/// each user-category field as a typed widget.
+/// each user-category field as a typed widget, grouped under section headers.
 ///
-/// Uses `egui::Grid` with two columns so labels are left-aligned in column 1
-/// and input widgets fill column 2. This is the idiomatic egui form-layout
-/// pattern; it replaces the previous `horizontal` + `add_sized` label approach
-/// which centred labels inside their fixed column rather than left-aligning them.
+/// Fields with the same `section` name are clustered together under an
+/// uppercase section header label. Fields with `section == ""` are rendered
+/// first in an unlabeled group (no header). Section order follows the first
+/// appearance of each section name in the `defs` slice.
+///
+/// Each section uses its own `egui::Grid` with two columns so labels are
+/// left-aligned in column 1 and input widgets fill column 2. This is the
+/// idiomatic egui form-layout pattern.
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
@@ -276,21 +280,48 @@ fn render_user_fields_via_reflect(
         return;
     };
 
-    egui::Grid::new("settings_form")
-        .num_columns(2)
-        .spacing(egui::vec2(12.0, 8.0))
-        .show(ui, |ui| {
-            for def in defs.iter().filter(|d| d.category == SettingsCategory::User) {
-                let Some(field) = struct_mut.field_mut(def.field_name) else {
-                    continue;
-                };
-                // Column 1: label, left-aligned by default in egui Grid.
-                ui.label(def.label);
-                // Column 2: widget fills remaining width automatically.
-                render_widget_value(field, def, ui);
-                ui.end_row();
-            }
-        });
+    // Pass 1: collect section names in order of first appearance among User
+    // fields. `""` (no section) always sorts first when present.
+    let mut section_order: Vec<&'static str> = Vec::new();
+    for def in defs.iter().filter(|d| d.category == SettingsCategory::User) {
+        if !section_order.contains(&def.section) {
+            section_order.push(def.section);
+        }
+    }
+
+    // Pass 2: render each section as a labelled block with its own Grid.
+    for (idx, &section_name) in section_order.iter().enumerate() {
+        if idx > 0 {
+            ui.add_space(8.0);
+        }
+        if !section_name.is_empty() {
+            ui.label(
+                egui::RichText::new(section_name.to_uppercase())
+                    .size(11.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+        }
+
+        egui::Grid::new(format!("settings_form_{section_name}"))
+            .num_columns(2)
+            .spacing(egui::vec2(12.0, 8.0))
+            .show(ui, |ui| {
+                for def in defs
+                    .iter()
+                    .filter(|d| d.category == SettingsCategory::User && d.section == section_name)
+                {
+                    let Some(field) = struct_mut.field_mut(def.field_name) else {
+                        continue;
+                    };
+                    // Column 1: label, left-aligned by default in egui Grid.
+                    ui.label(def.label);
+                    // Column 2: widget fills remaining width automatically.
+                    render_widget_value(field, def, ui);
+                    ui.end_row();
+                }
+            });
+    }
 }
 
 /// Render the widget (second Grid column) for `field` based on the metadata in `def`.
@@ -410,8 +441,13 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
 /// No label — Grid column 1 already holds it. On Browse, opens
 /// [`rfd::FileDialog`] filtered to `extensions`; the selected path replaces
 /// the field value. Available only on native platforms — the wasm build renders
-/// a text-edit only (no picker). The panel width was bumped to 420 px (Fix 7)
-/// so the text edit + Browse… button fit on one row without overflowing.
+/// a text-edit only (no picker).
+///
+/// The text edit is constrained to 180 px with `clip_text(true)` so it
+/// scrolls horizontally inside its box rather than expanding the Grid column
+/// and pushing the Browse… button off the panel. 180 px + 12 px spacing +
+/// ~70 px button ≈ 262 px — fits comfortably in the 420 px panel's second
+/// column after 20 px padding on each side.
 fn render_file_path(
     field: &mut dyn bevy::reflect::PartialReflect,
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] filter_label: &str,
@@ -423,9 +459,14 @@ fn render_file_path(
         return;
     };
     // Wrap text-edit + Browse in a horizontal so the Browse button sits inline.
-    // The Grid's second column expands to fill, so this horizontal fills it.
+    // desired_width constrains the text field so the Browse button has room
+    // beside it without overflowing the 420 px panel.
     ui.horizontal(|ui| {
-        ui.text_edit_singleline(v);
+        ui.add(
+            egui::TextEdit::singleline(v)
+                .desired_width(180.0)
+                .clip_text(true),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         if ui.button("Browse…").clicked() {
             let mut dlg = rfd::FileDialog::new();
@@ -511,6 +552,7 @@ mod tests {
         let def = SettingDef {
             field_name: "path",
             label: "Path",
+            section: "",
             category: SettingsCategory::User,
             kind: SettingKind::FilePath {
                 filter_label: "Image",
