@@ -29,6 +29,10 @@ use super::style::OverlayStyle;
 use crate::lifecycle::state::AppState;
 use crate::sketch::SketchManifest;
 
+// Phosphor icon glyph for the tile hover overlay.
+// Using `egui_phosphor::regular` directly (same crate used by `buttons.rs`).
+use egui_phosphor::regular as phosphor;
+
 /// Plugin: registers [`draw_sketch_picker`] in
 /// [`bevy_egui::EguiPrimaryContextPass`], gated on [`AppState::Home`].
 pub struct SketchPickerPlugin;
@@ -164,7 +168,12 @@ pub fn draw_sketch_picker(world: &mut World) {
 /// Paints the sketch screenshot as the tile background using the provided
 /// [`egui::TextureId`] (registered from the manifest's `Handle<Image>` via
 /// [`bevy_egui::EguiUserTextures::add_image`]). Overlays the Orbitron name
-/// with a gradient fade, then animates a sheen sweep on hover.
+/// with a gradient fade. On hover, three additional layers appear (layer order
+/// matches v4's `.work-highlight-sheen.sheen-on-hover` stacking):
+///
+/// 1. Faint white tint over the whole tile (0 → alpha 40 over 0.3 s).
+/// 2. Diagonal sheen sweep (v4's `.sheen-on-hover:after`) with cubic ease-out.
+/// 3. Centred PLAY icon (v4's `<FaPlay />`, 0 → alpha 255 over 0.3 s).
 ///
 /// Returns `Some(state)` when the tile is clicked.
 fn render_active_tile(
@@ -190,19 +199,68 @@ fn render_active_tile(
 
     paint_tile_name(ui, style, rect, name, style.text_color_bright);
 
+    // Hover light tint: a faint white wash over the whole tile, fading in over
+    // 0.3 s — same timeline as the play icon. Painted before the sheen sweep
+    // so the layer order is: screenshot → name gradient → tint → sheen → play.
+    // Matches the "bit of a light overlay" effect from v4's sheen hover.
+    let hover_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("play"), response.hovered(), 0.3);
+    if hover_t > 0.0 {
+        #[allow(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "hover_t is in [0, 1] so product is in [0, 40]; truncation is intentional"
+        )]
+        let tint_alpha = (40.0 * hover_t) as u8;
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, tint_alpha),
+        );
+    }
+
     // Sheen-on-hover: two separate animations matching v4's CSS split:
-    //   position transition → 0.5 s (slow diagonal sweep, CSS `transition: 0.5s`)
-    //   opacity transition  → 0.15 s (quick flash in/out, CSS `transition: 0.15s`)
+    //   position transition → 0.5 s with cubic ease-out (v4: `transition: 0.5s ease`)
+    //   opacity transition  → 0.15 s (quick flash in/out, v4: `transition: 0.15s`)
     // Using distinct animation keys (suffixed with "pos"/"alpha") so each
     // parameter animates independently on the same widget id.
-    let position_t = ui
+    let position_t_linear = ui
         .ctx()
         .animate_bool_with_time(response.id.with("pos"), response.hovered(), 0.5);
+    // Apply cubic ease-out to match CSS `ease` (which decelerates toward the end).
+    // Formula: 1 - (1 - t)³  produces fast start, slow finish — the same feel
+    // as CSS `transition-timing-function: ease`.
+    let position_t = 1.0 - (1.0 - position_t_linear).powi(3);
+
     let opacity_t = ui
         .ctx()
         .animate_bool_with_time(response.id.with("alpha"), response.hovered(), 0.15);
     if opacity_t > 0.0 {
         paint_sheen(ui, rect, position_t, opacity_t);
+    }
+
+    // Play icon overlay: a centred Phosphor PLAY glyph, fading in over 0.3 s
+    // on hover. Matches v4's `<FaPlay />` inside `.work-highlight-sheen` (opacity
+    // 0 → 1, transition 0.3 s). Uses `hover_t` computed above (same id key "play").
+    // Uses the named "phosphor" font family so the PUA codepoint routes directly
+    // to the Phosphor font regardless of Inter's PUA overlap.
+    if hover_t > 0.0 {
+        #[allow(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "hover_t is in [0, 1] so product is in [0, 255]; truncation is intentional"
+        )]
+        let play_alpha = (255.0 * hover_t) as u8;
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            phosphor::PLAY,
+            egui::FontId::new(100.0, egui::FontFamily::Name("phosphor".into())),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, play_alpha),
+        );
     }
 
     if response.clicked() {
@@ -331,7 +389,8 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
 ///
 /// Two independent animation parameters match v4's split CSS transitions:
 /// - `position_t ∈ [0, 1]` — controls where the band sits horizontally,
-///   animated over 0.5 s (slow sweep, v4 CSS `transition: 0.5s`).
+///   animated over 0.5 s with cubic ease-out applied by the caller (v4:
+///   `transition: 0.5s ease`). The caller should pass an already-eased value.
 /// - `opacity_t ∈ (0, 1]` — scales every vertex alpha, animated over 0.15 s
 ///   (quick flash in/out, v4 CSS `transition: 0.15s`). The caller already
 ///   skips the call when `opacity_t == 0` so this function always receives a
@@ -342,8 +401,10 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
 /// `transform: rotate(30deg)` on `.work-highlight-sheen`) that sweeps
 /// diagonally from left-of-tile to right-of-tile. The band is 60% of
 /// the tile width and uses four colour stops
-/// (transparent → dim white → bright white → transparent) painted as
-/// three adjacent quads via an `epaint::Mesh`.
+/// (transparent → dim white → bright white peak at strip centre → transparent).
+/// The bright peak is centred in the strip (not at 92% as in v4's original
+/// CSS) so it remains visible for more of the sweep, and its alpha is boosted
+/// to ~0.7 so it reads clearly over dark thumbnails.
 ///
 /// The vertical extent is extended 1.5× beyond the tile top/bottom so that
 /// after the 30° rotation the angled strip still covers the full tile.
@@ -366,20 +427,24 @@ fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, position_t: f32, opacity_t: f32)
     let top = center_y - v_extend;
     let bottom = center_y + v_extend;
 
-    // Four X positions form three quads. Colour stops match v4:
-    //   transparent → rgba(255,255,255,0.13) → rgba(255,255,255,0.5) → transparent
-    // Each stop is alpha-scaled by `opacity_t` so the whole sheen fades in/out
-    // independently of the sweep position.
+    // Four X positions form three quads. Colour stops adapted from v4's gradient:
+    //   transparent → dim white → BRIGHT peak (centred in strip) → transparent
+    //
+    // v4 placed the bright peak at 92% of the strip width (near the right edge),
+    // which caused it to pass through too quickly. Centring the bright stop at
+    // x=0 of the strip makes the peak visible for more of the sweep duration.
+    // Peak alpha boosted from 0.5 (128) → ~0.7 (180) so the highlight reads
+    // clearly over dark screenshot thumbnails.
     let xs: [f32; 4] = [
-        center_x - half,
-        center_x - half * 0.333,
-        center_x + half * 0.333,
-        center_x + half,
+        center_x - half,         // left edge: transparent
+        center_x - half * 0.3,   // dim entry
+        center_x + half * 0.0,   // bright peak at strip centre
+        center_x + half,         // right edge: transparent
     ];
     let base_colors: [egui::Color32; 4] = [
         egui::Color32::TRANSPARENT,
-        egui::Color32::from_white_alpha(33),  // ≈ 0.13 × 255
-        egui::Color32::from_white_alpha(128), // ≈ 0.5 × 255
+        egui::Color32::from_white_alpha(33),  // ≈ 0.13 × 255 (dim shoulder)
+        egui::Color32::from_white_alpha(180), // ≈ 0.7 × 255 (bright peak, up from 0.5)
         egui::Color32::TRANSPARENT,
     ];
     let colors: [egui::Color32; 4] = base_colors.map(|c| scale_sheen_alpha(c, opacity_t));

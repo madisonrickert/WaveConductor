@@ -34,10 +34,14 @@
 //!
 //! ## Lifecycle and home-screen silence
 //!
-//! The cpal stream is paused on [`AppState::Home`] via [`pause_audio_on_home`]
-//! and resumed on exit via [`resume_audio_on_sketch`]. Bevy fires
-//! `OnEnter(AppState::Home)` for the default state at app startup, so the
-//! stream begins paused and no audio leaks onto the home screen.
+//! The cpal stream is **started in a paused state** by [`engine::start_audio_engine`]:
+//! it calls `stream.play()` then immediately `stream.pause()` so the OS device
+//! is registered but silent. This is the primary silence guarantee at launch.
+//!
+//! [`pause_audio_on_home`] (registered on `OnEnter(AppState::Home)`) provides
+//! a secondary pause for runtime navigation back to Home after a sketch has run.
+//! [`resume_audio_on_sketch`] (registered on `OnExit(AppState::Home)`) resumes
+//! the stream when the user navigates into any sketch.
 //!
 //! ## Default behavior
 //!
@@ -84,8 +88,8 @@ impl Plugin for AudioPlugin {
             .add_systems(PreUpdate, state::pump_audio_messages)
             .add_systems(Update, nav::handle_volume_toggle)
             // Pause the cpal device callback on Home; resume when entering any
-            // sketch. OnEnter(Home) fires for the initial default state at
-            // startup, so the stream begins paused.
+            // sketch. The stream is already paused at engine start, so this
+            // system's primary role is runtime Home re-entry (not startup).
             .add_systems(OnEnter(AppState::Home), pause_audio_on_home)
             .add_systems(OnExit(AppState::Home), resume_audio_on_sketch);
     }

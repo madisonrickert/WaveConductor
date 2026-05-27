@@ -143,12 +143,25 @@ pub(super) fn apply_overlay_style(
         .families
         .insert(egui::FontFamily::Name("orbitron".into()), vec!["orbitron".to_owned()]);
     // Register Phosphor icon font so PUA glyphs (HOUSE, GEAR, SPEAKER_HIGH, etc.)
-    // resolve correctly. `add_to_fonts` appends "phosphor" at position 1 in the
-    // Proportional family — after Inter so body text is unaffected, before the
-    // egui fallback so icon glyphs are found. Must run AFTER our three custom
-    // `font_data.insert` calls above so the families entry for Proportional already
-    // exists (created by the Inter insert above).
+    // resolve correctly.
+    //
+    // `add_to_fonts` inserts phosphor data and places "phosphor" at position 1
+    // in the Proportional family. However Inter-Regular.ttf maps several PUA
+    // codepoints (U+E1E2–E2C7) that clash with Phosphor icons including HOUSE
+    // and GEAR — egui picks the first font in the list that covers a codepoint,
+    // so Inter wins and renders the wrong glyph.
+    //
+    // Fix: ALSO register "phosphor" as a standalone named family so callers that
+    // need icon glyphs (overlay buttons, picker play icon) can reference it
+    // explicitly via `FontFamily::Name("phosphor".into())`. The Proportional
+    // fallback chain entry added by `add_to_fonts` is kept for any future
+    // non-icon callers that happen to use PUA codepoints outside the Inter clash
+    // range, but critical icon sites use the named family directly.
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    fonts.families.insert(
+        egui::FontFamily::Name("phosphor".into()),
+        vec!["phosphor".to_owned()],
+    );
     ctx.set_fonts(fonts);
 
     // Visuals — start from dark, override key fields to match v4's SCSS.

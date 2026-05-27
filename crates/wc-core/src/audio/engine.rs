@@ -60,7 +60,12 @@ impl AudioStream {
     }
 }
 
-/// Startup system. Builds the cpal stream and installs all engine resources.
+/// Startup system. Builds the cpal stream, starts it, then immediately pauses
+/// it. Installs all engine resources.
+///
+/// The stream starts paused so the home screen is always silent at launch,
+/// regardless of `OnEnter(AppState::Home)` scheduling order. The
+/// `OnExit(AppState::Home)` system calls `play()` when the first sketch loads.
 ///
 /// On failure (no default output device, build error, play error) the system
 /// logs the error and writes `AudioStatus::Errored` to `Res<AudioState>`. The
@@ -220,7 +225,17 @@ fn build_engine(encoded_background: &[u8]) -> Result<BuiltEngine, EngineBuildErr
         },
         None,
     )?;
+    // Start the device callback so cpal registers the stream with the OS, then
+    // immediately pause. The DSP host and ring buffers are ready; the
+    // `OnExit(AppState::Home)` system calls `play()` when a sketch loads.
+    // This guarantees silence on the home screen even if `OnEnter(AppState::Home)`
+    // does not fire before the first rendered frame.
     stream.play()?;
+    if let Err(err) = stream.pause() {
+        tracing::warn!(?err, "initial stream pause failed; audio may play on home screen");
+    } else {
+        tracing::debug!("cpal stream started in paused state");
+    }
 
     Ok(BuiltEngine {
         stream: AudioStream { stream },

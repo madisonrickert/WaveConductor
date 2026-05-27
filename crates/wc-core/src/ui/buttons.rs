@@ -279,14 +279,18 @@ pub fn overlay_icon_button(
     // same smooth feel as the background fill transition.
     let text_color = lerp_color(style.text_color_dim, style.text_color_bright, t);
     let text_color = scale_color_alpha(text_color, opacity_mul);
-    // Paint the icon glyph centred in the button. Font size = half the button
-    // size so the glyph fills ~50% of the available area (matching v4's
-    // icon sizing).
+    // Paint the icon glyph centred in the button. Use the named "phosphor"
+    // font family explicitly — the Proportional chain has Inter at position 0,
+    // which maps some PUA codepoints (U+E1E2–E2C7) that overlap with Phosphor
+    // icon glyphs including HOUSE (E2C2) and GEAR (E270). Using the named
+    // family bypasses that clash and always uses the correct Phosphor glyph.
+    // Font size = half the button size so the glyph fills ~50% of the area
+    // (matching v4's icon sizing).
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         icon,
-        egui::FontId::proportional(size * 0.5),
+        egui::FontId::new(size * 0.5, egui::FontFamily::Name("phosphor".into())),
         text_color,
     );
 
