@@ -36,7 +36,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let o = uniforms.texel_size;
+    let o = uniforms.texel_size * 1.5;
     var sum = textureSample(input_texture, input_sampler, in.uv) * 4.0;
     sum += textureSample(input_texture, input_sampler, in.uv - vec2<f32>( o.x,  o.y));
     sum += textureSample(input_texture, input_sampler, in.uv + vec2<f32>( o.x, -o.y));
