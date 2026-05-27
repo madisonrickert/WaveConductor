@@ -8,48 +8,22 @@
 //!
 //! ## Blending
 //!
-//! Particles use additive blending (`src * src_alpha + dst`) rather than
-//! standard alpha blending (`src * src_alpha + dst * (1 - src_alpha)`).
-//! Additive blending accumulates brightness where particles overlap, which
-//! produces the luminous "star cluster" look consistent with v4. With standard
-//! alpha blending the particles look dim because each quad partially occludes
-//! what is already in the framebuffer rather than adding to it.
-//!
-//! `AlphaMode2d` has no `Add` variant, so the blend state is injected via the
-//! `specialize` hook on `Material2d`. The pipeline must still be submitted to
-//! the `Transparent2d` pass, which `AlphaMode2d::Blend` ensures.
+//! Particles use standard alpha blending (`src * src_alpha + dst * (1 - src_alpha)`),
+//! which is Bevy's default for `AlphaMode2d::Blend`. The gravity-smear
+//! post-process (`assets/shaders/line/gravity.wgsl`) is v4's actual glow
+//! mechanism: it ray-marches 11 steps of gravity-distorted UV samples and
+//! accumulates the result on top of the scene, producing the luminous
+//! chromatic-smear look. Additive blending at the particle level double-stacks
+//! brightness — the post-process samples an already-additive framebuffer 22
+//! times and adds it back — making particles far too bright.
 
 use bevy::asset::Asset;
 use bevy::image::Image;
-use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
-    SpecializedMeshPipelineError,
-};
+use bevy::render::render_resource::AsBindGroup;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
-use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
-
-/// Additive blend state: `output = src.rgb * src.a + dst.rgb`.
-///
-/// Each particle quad contributes its brightness weighted by its own alpha,
-/// then is *added* to the framebuffer content rather than blending over it.
-/// Overlapping quads brighten each other, giving star-cluster glow at high
-/// particle densities. Alpha channel uses `One + One` so the compositor treats
-/// the layer as fully accumulated rather than partially transparent.
-const ADDITIVE_BLEND: BlendState = BlendState {
-    color: BlendComponent {
-        src_factor: BlendFactor::SrcAlpha,
-        dst_factor: BlendFactor::One,
-        operation: BlendOperation::Add,
-    },
-    alpha: BlendComponent {
-        src_factor: BlendFactor::One,
-        dst_factor: BlendFactor::One,
-        operation: BlendOperation::Add,
-    },
-};
+use bevy::sprite_render::{AlphaMode2d, Material2d};
 
 /// Bind-group layout: `@group(2) @binding(0)` is the particle storage buffer
 /// (read-only at the render stage; write happens in the compute stage);
@@ -77,27 +51,10 @@ impl Material2d for LineMaterial {
         "shaders/line/render.wgsl".into()
     }
 
-    /// Tells Bevy to submit this material to the `Transparent2d` render phase.
-    /// The actual blend equation is overridden to additive in `specialize`.
+    /// Standard alpha blending (`AlphaMode2d::Blend`) — Bevy's default for the
+    /// `Transparent2d` pass. The gravity-smear post-process provides the glow;
+    /// no specialization needed.
     fn alpha_mode(&self) -> AlphaMode2d {
         AlphaMode2d::Blend
-    }
-
-    /// Override the blend state on the first (and only) color target to
-    /// additive. `AlphaMode2d::Blend` above places the pipeline in the
-    /// transparent pass; this hook swaps the blend equation from the default
-    /// `SrcAlpha + (1 - SrcAlpha) * Dst` to `SrcAlpha + Dst` so overlapping
-    /// particles accumulate brightness instead of occluding each other.
-    fn specialize(
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: Material2dKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            if let Some(Some(target)) = fragment.targets.first_mut() {
-                target.blend = Some(ADDITIVE_BLEND);
-            }
-        }
-        Ok(())
     }
 }
