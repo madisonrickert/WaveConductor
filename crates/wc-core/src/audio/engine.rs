@@ -22,12 +22,42 @@ use super::state::AudioState;
 
 /// Wraps the live `cpal::Stream` so Bevy keeps it alive for the app's
 /// lifetime. `cpal::Stream` is `!Send` on macOS, hence the non-send resource.
+///
+/// Call [`pause`][Self::pause] / [`play`][Self::play] to suspend or resume the
+/// cpal device callback without tearing down the stream. Both operations are
+/// idempotent per cpal's contract.
 pub struct AudioStream {
-    /// Owned `cpal::Stream` handle. Never accessed after construction —
-    /// dropping `AudioStream` stops the underlying audio thread. The leading
-    /// underscore documents that intent to readers and silences the unused-
-    /// field lint. Do not rename to remove the underscore.
-    _stream: cpal::Stream,
+    /// Owned `cpal::Stream` handle. Dropping `AudioStream` stops the
+    /// underlying audio thread.
+    stream: cpal::Stream,
+}
+
+impl AudioStream {
+    /// Suspend the cpal device callback.
+    ///
+    /// The DSP host and ring buffers are unaffected; audio resumes from where
+    /// it left off when [`play`][Self::play] is called. Errors are logged with
+    /// `tracing::warn!` rather than panicked — a failed pause leaves audio
+    /// running, which is audible but not catastrophic.
+    pub fn pause(&self) {
+        if let Err(err) = self.stream.pause() {
+            tracing::warn!(?err, "cpal stream pause failed");
+        } else {
+            tracing::debug!("cpal stream paused");
+        }
+    }
+
+    /// Resume the cpal device callback after a [`pause`][Self::pause].
+    ///
+    /// Errors are logged with `tracing::warn!` rather than panicked — a failed
+    /// play leaves the stream paused, which is silent but not catastrophic.
+    pub fn play(&self) {
+        if let Err(err) = self.stream.play() {
+            tracing::warn!(?err, "cpal stream play failed");
+        } else {
+            tracing::debug!("cpal stream resumed");
+        }
+    }
 }
 
 /// Startup system. Builds the cpal stream and installs all engine resources.
@@ -193,7 +223,7 @@ fn build_engine(encoded_background: &[u8]) -> Result<BuiltEngine, EngineBuildErr
     stream.play()?;
 
     Ok(BuiltEngine {
-        stream: AudioStream { _stream: stream },
+        stream: AudioStream { stream },
         sender: AudioCommandSender::new(cmd_producer),
         receiver: AudioMessageReceiver::new(msg_consumer),
         sample_rate,
