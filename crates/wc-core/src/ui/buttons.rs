@@ -14,13 +14,15 @@
 //! `draw_home_button`, and `draw_settings_button`. Task 15 adds `VolumeMuted`,
 //! `draw_volume_button`, and `sync_volume_muted`. This module provides the
 //! shared primitive, touch-detection resource, and all draw systems.
+//! Plan 11.5 Bug 1 refactored all three draw systems from `&mut World` to
+//! typed [`SystemParam`] signatures so click events are processed correctly.
 
 use std::time::Duration;
 
 use bevy::input::touch::TouchInput;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, Window};
-use bevy_egui::egui;
+use bevy_egui::{egui, EguiContexts};
 
 use crate::audio::command::AudioCommand;
 use crate::audio::state::AudioState;
@@ -78,7 +80,11 @@ impl Plugin for OverlayButtonsPlugin {
         );
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            (draw_home_button, draw_settings_button, draw_volume_button),
+            // Chain ensures deterministic draw order (Home → Settings → Volume,
+            // left-to-right matching v4's layout). All three share EguiContexts
+            // so they cannot run in parallel regardless; `.chain()` makes the
+            // ordering explicit rather than relying on Bevy's conflict resolution.
+            (draw_home_button, draw_settings_button, draw_volume_button).chain(),
         );
     }
 }
@@ -133,49 +139,43 @@ impl Default for LastSettingsPanelRect {
 /// Runs in [`bevy_egui::EguiPrimaryContextPass`]. On click, sets
 /// `NextState<AppState>` to `Home`. Button size scales with [`PointerCoarse`]
 /// (32 px fine / 44 px coarse). Icon: [`egui_phosphor::regular::HOUSE`].
-pub fn draw_home_button(world: &mut World) {
-    // Skip when EguiPlugin is absent (MinimalPlugins tests).
-    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+///
+/// Uses the standard [`SystemParam`] signature (not `&mut World`) so that
+/// [`bevy_egui::EguiContexts`] and [`NextState`] are held as ordinary
+/// typed borrows, avoiding any potential exclusive-world ordering issues that
+/// could prevent click events from being processed correctly.
+pub fn draw_home_button(
+    state: Res<'_, State<AppState>>,
+    mut contexts: EguiContexts<'_, '_>,
+    style: Res<'_, OverlayStyle>,
+    opacity: Res<'_, UiOpacity>,
+    coarse: Res<'_, PointerCoarse>,
+    mut next: ResMut<'_, NextState<AppState>>,
+) {
+    // Hidden on the Home screen itself — no point navigating home from home.
+    if **state == AppState::Home {
         return;
     }
-    // Hidden on the Home screen itself — no point navigating home from home.
-    {
-        let state = world.get_resource::<State<AppState>>();
-        if state.is_some_and(|s| **s == AppState::Home) {
-            return;
-        }
-    }
-
-    let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
-        bevy::ecs::system::SystemState::new(world);
-    let mut contexts = state_param.get_mut(world);
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let ctx = ctx.clone();
-    state_param.apply(world);
 
-    let style = *world.resource::<OverlayStyle>();
-    let opacity = world.resource::<UiOpacity>().current;
-    let coarse = world.resource::<PointerCoarse>().0;
-    let size = if coarse { style.button_size_coarse } else { style.button_size_fine };
+    let size = if coarse.0 { style.button_size_coarse } else { style.button_size_fine };
 
     let mut clicked = false;
     egui::Area::new(egui::Id::new("wc-home-button"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(12.0, 12.0))
-        .show(&ctx, |ui| {
+        .show(ctx, |ui| {
             let response =
-                overlay_icon_button(ui, &style, egui_phosphor::regular::HOUSE, size, opacity);
+                overlay_icon_button(ui, &style, egui_phosphor::regular::HOUSE, size, opacity.current);
             if response.clicked() {
                 clicked = true;
             }
         });
 
     if clicked {
-        if let Some(mut next) = world.get_resource_mut::<NextState<AppState>>() {
-            next.set(AppState::Home);
-        }
+        next.set(AppState::Home);
     }
 }
 
@@ -188,55 +188,46 @@ pub fn draw_home_button(world: &mut World) {
 ///
 /// Hidden on [`AppState::Home`] — sketch chrome is not shown on the picker page,
 /// matching v4's behaviour where only active sketch pages show the cog.
-pub fn draw_settings_button(world: &mut World) {
-    // Skip when EguiPlugin is absent (MinimalPlugins tests).
-    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+///
+/// Uses the standard [`SystemParam`] signature (not `&mut World`) so that
+/// [`bevy_egui::EguiContexts`] and [`SettingsPanelVisible`] are held as ordinary
+/// typed borrows, avoiding any potential exclusive-world ordering issues that
+/// could prevent click events from being processed correctly.
+pub fn draw_settings_button(
+    state: Res<'_, State<AppState>>,
+    mut contexts: EguiContexts<'_, '_>,
+    style: Res<'_, OverlayStyle>,
+    opacity: Res<'_, UiOpacity>,
+    coarse: Res<'_, PointerCoarse>,
+    mut visible: ResMut<'_, SettingsPanelVisible>,
+    windows: Query<'_, '_, &Window, With<PrimaryWindow>>,
+) {
+    // Hidden on the Home screen — same guard as `draw_home_button`.
+    if **state == AppState::Home {
         return;
     }
-    // Hidden on the Home screen — same guard as `draw_home_button`.
-    {
-        let state = world.get_resource::<State<AppState>>();
-        if state.is_some_and(|s| **s == AppState::Home) {
-            return;
-        }
-    }
-
-    // Read window width; fall back to 1280 if no primary window is present yet.
-    let window_width = {
-        let mut q = world.query_filtered::<&Window, With<PrimaryWindow>>();
-        q.single(world).map(Window::width).unwrap_or(1280.0)
-    };
-
-    let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
-        bevy::ecs::system::SystemState::new(world);
-    let mut contexts = state_param.get_mut(world);
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let ctx = ctx.clone();
-    state_param.apply(world);
 
-    let style = *world.resource::<OverlayStyle>();
-    let opacity = world.resource::<UiOpacity>().current;
-    let coarse = world.resource::<PointerCoarse>().0;
-    let size = if coarse { style.button_size_coarse } else { style.button_size_fine };
+    // Read window width; fall back to 1280 if no primary window is present yet.
+    let window_width = windows.single().map(Window::width).unwrap_or(1280.0);
+    let size = if coarse.0 { style.button_size_coarse } else { style.button_size_fine };
 
     let mut clicked = false;
     egui::Area::new(egui::Id::new("wc-settings-button"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(window_width - 12.0 - size, 12.0))
-        .show(&ctx, |ui| {
+        .show(ctx, |ui| {
             let response =
-                overlay_icon_button(ui, &style, egui_phosphor::regular::GEAR, size, opacity);
+                overlay_icon_button(ui, &style, egui_phosphor::regular::GEAR, size, opacity.current);
             if response.clicked() {
                 clicked = true;
             }
         });
 
     if clicked {
-        if let Some(mut visible) = world.get_resource_mut::<SettingsPanelVisible>() {
-            visible.0 = !visible.0;
-        }
+        visible.0 = !visible.0;
     }
 }
 
@@ -388,54 +379,43 @@ pub(crate) fn sync_volume_muted(
 ///
 /// Hidden on [`AppState::Home`] — sketch chrome is not shown on the picker page,
 /// matching v4's behaviour where only active sketch pages show the volume control.
-pub fn draw_volume_button(world: &mut World) {
-    // Skip when EguiPlugin is absent (MinimalPlugins tests).
-    if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
+pub fn draw_volume_button(
+    state: Res<'_, State<AppState>>,
+    mut contexts: EguiContexts<'_, '_>,
+    style: Res<'_, OverlayStyle>,
+    opacity: Res<'_, UiOpacity>,
+    coarse: Res<'_, PointerCoarse>,
+    mut muted: ResMut<'_, VolumeMuted>,
+    sender: Option<NonSendMut<'_, crate::audio::ring::AudioCommandSender>>,
+    windows: Query<'_, '_, &Window, With<PrimaryWindow>>,
+) {
+    // Hidden on the Home screen — same guard as `draw_home_button`.
+    if **state == AppState::Home {
         return;
     }
-    // Hidden on the Home screen — same guard as `draw_home_button`.
-    {
-        let state = world.get_resource::<State<AppState>>();
-        if state.is_some_and(|s| **s == AppState::Home) {
-            return;
-        }
-    }
-
-    // Read window width; fall back to 1280 if no primary window is present yet.
-    let window_width = {
-        let mut q = world.query_filtered::<&Window, With<PrimaryWindow>>();
-        q.single(world).map(Window::width).unwrap_or(1280.0)
-    };
-
-    let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
-        bevy::ecs::system::SystemState::new(world);
-    let mut contexts = state_param.get_mut(world);
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let ctx = ctx.clone();
-    state_param.apply(world);
 
-    let style = *world.resource::<OverlayStyle>();
-    let opacity = world.resource::<UiOpacity>().current;
-    let coarse = world.resource::<PointerCoarse>().0;
-    let muted = world.resource::<VolumeMuted>().0;
-    let size = if coarse { style.button_size_coarse } else { style.button_size_fine };
+    // Read window width; fall back to 1280 if no primary window is present yet.
+    let window_width = windows.single().map(Window::width).unwrap_or(1280.0);
+    let size = if coarse.0 { style.button_size_coarse } else { style.button_size_fine };
 
     // Volume sits just left of Settings, with an 8 px gap between them.
     let pos_x = window_width - 12.0 - size - 8.0 - size;
+    let current_muted = muted.0;
 
     let mut clicked = false;
     egui::Area::new(egui::Id::new("wc-volume-button"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(pos_x, 12.0))
-        .show(&ctx, |ui| {
-            let icon = if muted {
+        .show(ctx, |ui| {
+            let icon = if current_muted {
                 egui_phosphor::regular::SPEAKER_X
             } else {
                 egui_phosphor::regular::SPEAKER_HIGH
             };
-            let response = overlay_icon_button(ui, &style, icon, size, opacity);
+            let response = overlay_icon_button(ui, &style, icon, size, opacity.current);
             if response.clicked() {
                 clicked = true;
             }
@@ -444,15 +424,11 @@ pub fn draw_volume_button(world: &mut World) {
     if clicked {
         // Flip the local mirror first so the icon updates this frame without
         // waiting for the audio-thread echo.
-        let new_muted = !muted;
-        if let Some(mut volume_muted) = world.get_resource_mut::<VolumeMuted>() {
-            volume_muted.0 = new_muted;
-        }
+        let new_muted = !current_muted;
+        muted.0 = new_muted;
         // Push the command to the audio ring. Ring-full failure is non-fatal.
-        if let Some(mut sender) =
-            world.get_non_send_resource_mut::<crate::audio::ring::AudioCommandSender>()
-        {
-            let _ = sender.push(AudioCommand::SetMuted(new_muted));
+        if let Some(mut s) = sender {
+            let _ = s.push(AudioCommand::SetMuted(new_muted));
         }
     }
 }

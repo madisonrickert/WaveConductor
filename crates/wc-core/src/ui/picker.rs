@@ -241,16 +241,15 @@ fn render_placeholder_tile(
 }
 
 /// Render the bottom-right credits tile, matching v4's `credits-block` div
-/// (HomePage.tsx:45–60). Paint-only — no click handler.
+/// (HomePage.tsx:45–60). Paint-only — no sketch-launch click handler.
 ///
 /// Displays:
 /// - `"WaveConductor"` in Orbitron Bold at ~28 pt, centred.
-/// - "based on hellochar by Xiaohan Zhang" in dim text at ~12 pt.
-/// - "Madison Rickert" and `"Rich Trapani | LoveTech"` each on their own line.
-/// - "Open Source Licenses" in dimmer text at the bottom.
-///
-/// Links from v4 are omitted for now (egui hyperlinks are non-trivial and this
-/// is intentionally a lean parity tile). Deferred to a future polish task.
+/// - "based on " + hyperlink "hellochar" + " by " + hyperlink "Xiaohan Zhang".
+/// - Hyperlinks to [`Madison Rickert`](https://madisonrickert.com) and
+///   [`Rich Trapani | LoveTech`](https://lovetech.org) each on their own line.
+/// - Plain text "Open Source Licenses" (v4 linked to an internal `/licenses`
+///   route; v5 has no in-app licenses page yet — TODO: wire to an in-app modal).
 fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui::Vec2) {
     let (rect, _response) = ui.allocate_exact_size(tile_size, egui::Sense::hover());
     // Fill matches PLACEHOLDER_FILL / v4's `$dark-gray1`.
@@ -275,28 +274,52 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
     );
     child_ui.add_space(8.0);
 
-    // Attribution line.
-    child_ui.label(
-        egui::RichText::new("based on hellochar by Xiaohan Zhang")
-            .size(12.0)
-            .color(style.text_color_dim),
-    );
+    // Attribution line: "based on hellochar by Xiaohan Zhang" with the two
+    // names as clickable hyperlinks matching v4's HomePage.tsx:52–53.
+    child_ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("based on ")
+                .size(12.0)
+                .color(style.text_color_dim),
+        );
+        ui.hyperlink_to(
+            egui::RichText::new("hellochar")
+                .size(12.0)
+                .color(style.text_color_dim),
+            "https://github.com/hellochar/hellochar.com",
+        );
+        ui.label(
+            egui::RichText::new(" by ")
+                .size(12.0)
+                .color(style.text_color_dim),
+        );
+        ui.hyperlink_to(
+            egui::RichText::new("Xiaohan Zhang")
+                .size(12.0)
+                .color(style.text_color_dim),
+            "https://github.com/hellochar",
+        );
+    });
     child_ui.add_space(12.0);
 
-    // Contributors.
-    child_ui.label(
+    // Contributors — each a clickable hyperlink.
+    child_ui.hyperlink_to(
         egui::RichText::new("Madison Rickert")
             .size(13.0)
             .color(style.text_color_dim),
+        "https://madisonrickert.com",
     );
-    child_ui.label(
+    child_ui.hyperlink_to(
         egui::RichText::new("Rich Trapani | LoveTech")
             .size(13.0)
             .color(style.text_color_dim),
+        "https://lovetech.org",
     );
     child_ui.add_space(16.0);
 
-    // Licenses footer — dimmer than contributor text.
+    // Licenses footer — plain text for now; v4 links to an internal /licenses
+    // route that v5 does not yet implement.
+    // TODO: wire to an in-app open-source-licenses modal (future plan).
     child_ui.label(
         egui::RichText::new("Open Source Licenses")
             .size(11.0)
@@ -315,14 +338,15 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
 ///   positive value.
 ///
 /// Reproduces v4's `homePage.scss:155–164` hover highlight: a vertical
-/// band that sweeps from left-of-tile to right-of-tile as `position_t` rises
-/// from 0 to 1. The band is 60% of the tile width and uses four colour
-/// stops (transparent → dim white → bright white → transparent) painted
-/// as three adjacent quads via an `epaint::Mesh`.
+/// band with a **30° clockwise rotation** (matching v4's
+/// `transform: rotate(30deg)` on `.work-highlight-sheen`) that sweeps
+/// diagonally from left-of-tile to right-of-tile. The band is 60% of
+/// the tile width and uses four colour stops
+/// (transparent → dim white → bright white → transparent) painted as
+/// three adjacent quads via an `epaint::Mesh`.
 ///
-/// The gradient runs vertically (same colour at top and bottom of each
-/// column), giving a flat translucent strip rather than a true rotated
-/// gradient — close enough to v4 and avoids shader dependencies.
+/// The vertical extent is extended 1.5× beyond the tile top/bottom so that
+/// after the 30° rotation the angled strip still covers the full tile.
 fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, position_t: f32, opacity_t: f32) {
     let painter = ui.painter();
 
@@ -333,9 +357,14 @@ fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, position_t: f32, opacity_t: f32)
     let half = sheen_width * 0.5;
     let travel = rect.width() + sheen_width; // total distance band travels
     let center_x = (rect.left() - half) + travel * position_t;
+    let center_y = rect.center().y;
 
-    let top = rect.top();
-    let bottom = rect.bottom();
+    // Extend the strip's vertical extent by 1.5× the tile height above and
+    // below the tile centre. After the 30° rotation this guarantees the
+    // diagonal covers the full tile even at the tile's corners.
+    let v_extend = rect.height() * 1.5;
+    let top = center_y - v_extend;
+    let bottom = center_y + v_extend;
 
     // Four X positions form three quads. Colour stops match v4:
     //   transparent → rgba(255,255,255,0.13) → rgba(255,255,255,0.5) → transparent
@@ -355,14 +384,29 @@ fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, position_t: f32, opacity_t: f32)
     ];
     let colors: [egui::Color32; 4] = base_colors.map(|c| scale_sheen_alpha(c, opacity_t));
 
+    // Rotation: v4's `.work-highlight-sheen { transform: rotate(30deg) }`.
+    // Rotate each mesh vertex 30° clockwise around the tile centre.
+    let tile_center = rect.center();
+    let angle: f32 = 30.0_f32.to_radians();
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let rotate = |p: egui::Pos2| -> egui::Pos2 {
+        let dx = p.x - tile_center.x;
+        let dy = p.y - tile_center.y;
+        egui::pos2(
+            tile_center.x + dx * cos - dy * sin,
+            tile_center.y + dx * sin + dy * cos,
+        )
+    };
+
     // Build an 8-vertex mesh: 2 rows (top, bottom) × 4 columns = 8 vertices,
     // 3 quads × 2 triangles each = 6 triangles.
     //
     // Vertex layout: column i contributes vertices 2*i (top) and 2*i+1 (bottom).
     let mut mesh = egui::epaint::Mesh::default();
     for (&x, &color) in xs.iter().zip(colors.iter()) {
-        mesh.colored_vertex(egui::pos2(x, top), color);
-        mesh.colored_vertex(egui::pos2(x, bottom), color);
+        mesh.colored_vertex(rotate(egui::pos2(x, top)), color);
+        mesh.colored_vertex(rotate(egui::pos2(x, bottom)), color);
     }
     // Wire up the 3 quads with 6 triangles. Vertex pairs are (0,1), (2,3), (4,5), (6,7).
     for col in 0_u32..3 {

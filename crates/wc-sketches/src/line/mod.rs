@@ -131,10 +131,13 @@ impl Plugin for LinePlugin {
 /// fill defined in `OverlayStyle`.
 pub(crate) fn register_line_manifest(app: &mut App) {
     let asset_server = app.world().resource::<AssetServer>();
-    // Load the v4 screenshot (gravity4_cropped.jpg). Using the `.jpg` extension
-    // so Bevy's asset loader applies JPEG decoding correctly. v4 calls this
-    // sketch "Gravity" in HomePage.tsx:44.
-    let screenshot = asset_server.load("sketches/line/screenshot.jpg");
+    // Load the picker-tile screenshot as PNG. Bevy's default features include
+    // the `png` image loader; JPEG requires the separate `bevy/jpeg` feature
+    // which is not enabled in this workspace. The PNG at this path is the
+    // 1280×720 screenshot that was always present; the JPG copy (loaded in the
+    // previous commit) has been removed.
+    // v4 calls this sketch "Gravity" in HomePage.tsx:44.
+    let screenshot = asset_server.load("sketches/line/screenshot.png");
     app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
         state: AppState::Line,
         display_name: "Gravity",
