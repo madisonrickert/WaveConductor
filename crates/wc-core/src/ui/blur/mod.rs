@@ -28,8 +28,8 @@ use bevy::render::render_resource::{
     TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 use bevy::render::renderer::RenderDevice;
+use bevy::render::view::ExtractedWindows;
 use bevy::render::{Render, RenderApp, RenderSystems};
-use bevy::window::PrimaryWindow;
 
 /// Master toggle for the backdrop-blur node. Lives in the main world.
 ///
@@ -158,9 +158,9 @@ impl Plugin for BackdropBlurPlugin {
 /// Allocate or reallocate the half-resolution blur texture and scratch textures
 /// in the render world.
 ///
-/// Reads the primary window's physical size, halves each dimension (minimum
-/// 1 px), and skips reallocation when the existing [`BackdropBlurTexture`]
-/// already matches. On (re)allocation, creates:
+/// Reads the primary window's physical size from [`ExtractedWindows`], halves
+/// each dimension (minimum 1 px), and skips reallocation when the existing
+/// [`BackdropBlurTexture`] already matches. On (re)allocation, creates:
 /// - [`BackdropBlurTexture`] at 1/2 resolution (final blur output).
 /// - [`BackdropBlurScratch`] with textures at 1/2, 1/4, 1/8, 1/16, and 1/32
 ///   resolution (intermediate Kawase chain stages).
@@ -174,21 +174,26 @@ impl Plugin for BackdropBlurPlugin {
 ///
 /// # Window in the render world
 ///
-/// `bevy_window` extracts the primary `Window` component into the render app
-/// via its own extraction system, so the query here runs against the render
-/// world's copy, which reflects the logical state from the previous main-world
-/// update. The physical dimensions are therefore one frame behind a resize
-/// event — acceptable for a blur texture.
+/// In Bevy 0.18 the render app does **not** mirror `Window` + `PrimaryWindow`
+/// as ECS components. Instead, `bevy_render`'s `WindowRenderPlugin` extracts
+/// window state into the [`ExtractedWindows`] resource each frame. The primary
+/// window's entity is in `ExtractedWindows::primary`; its physical dimensions
+/// are in `ExtractedWindow::physical_width` / `physical_height`. These values
+/// reflect the previous main-world frame — one frame behind a resize, which
+/// is acceptable for a blur texture.
 pub(super) fn ensure_blur_texture(
     mut commands: Commands<'_, '_>,
     device: Res<'_, RenderDevice>,
     existing: Option<Res<'_, BackdropBlurTexture>>,
-    windows: Query<'_, '_, &Window, With<PrimaryWindow>>,
+    extracted_windows: Res<'_, ExtractedWindows>,
 ) {
-    let Ok(window) = windows.single() else {
+    let Some(primary_entity) = extracted_windows.primary else {
         return;
     };
-    let physical = UVec2::new(window.physical_width(), window.physical_height());
+    let Some(window) = extracted_windows.windows.get(&primary_entity) else {
+        return;
+    };
+    let physical = UVec2::new(window.physical_width, window.physical_height);
     // Guard against zero-sized windows during startup or minimization.
     if physical.x == 0 || physical.y == 0 {
         return;

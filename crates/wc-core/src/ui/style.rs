@@ -22,7 +22,17 @@ use bevy_egui::egui;
 /// do it automatically at startup.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct OverlayStyle {
-    /// Panel background, ≈ `rgba(0,0,0,0.8)` per `overlayPanel.scss:5`.
+    /// Panel background tint.
+    ///
+    /// v4 SCSS: `rgba(0,0,0,0.8)` (alpha 204) per `overlayPanel.scss:5`.
+    ///
+    /// Tuned to alpha 160 (~0.63) so the frosted-glass blur is visually
+    /// perceptible behind the tint. v4's CSS `backdrop-filter: blur(12px)` is
+    /// clearly visible at 0.8 alpha because browser compositing lifts the
+    /// apparent brightness — Bevy's `Rgba8UnormSrgb` compositing does not
+    /// apply that lift, so 0.8 alpha makes the blur invisible in practice.
+    /// 160 is the midpoint between v4's 204 and an aggressive 128; approved
+    /// deviation from v4 for visual parity of intent.
     pub panel_fill: egui::Color32,
     /// Panel hairline border, ≈ `rgba(255,255,255,0.08)` per `overlayPanel.scss:13`.
     pub panel_stroke: egui::Color32,
@@ -60,7 +70,9 @@ pub struct OverlayStyle {
 impl Default for OverlayStyle {
     fn default() -> Self {
         Self {
-            panel_fill: egui::Color32::from_black_alpha(204),
+            // Alpha 160 (~0.63): tuned down from v4's 204 (0.8) so the
+            // frosted-glass blur is visible behind the tint. See field doc.
+            panel_fill: egui::Color32::from_black_alpha(160),
             panel_stroke: egui::Color32::from_white_alpha(20),
             panel_corner_radius: 10,
             button_fill_inactive: egui::Color32::from_black_alpha(102),
@@ -205,8 +217,10 @@ mod tests {
         // These assertions intentionally hardcode the v4 SCSS values; if a
         // future re-tune of v4's stylesheet drifts, this test catches it.
         let style = OverlayStyle::default();
-        // overlayPanel.scss:5 rgba(0,0,0,0.8) → 204/255 alpha
-        assert_eq!(style.panel_fill, egui::Color32::from_black_alpha(204));
+        // overlayPanel.scss:5 rgba(0,0,0,0.8) → 204/255 alpha in v4.
+        // WaveConductor uses 160 (~0.63 alpha) so the frosted-glass blur
+        // is visible — approved deviation from v4 (see OverlayStyle::panel_fill doc).
+        assert_eq!(style.panel_fill, egui::Color32::from_black_alpha(160));
         // overlayPanel.scss:13 rgba(255,255,255,0.08) → ~20/255
         assert_eq!(style.panel_stroke, egui::Color32::from_white_alpha(20));
         // overlayPanel.scss:7 border-radius 10px
