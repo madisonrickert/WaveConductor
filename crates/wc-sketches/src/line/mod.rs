@@ -30,6 +30,7 @@ pub mod attractor_visuals;
 pub mod audio_coupling;
 pub mod compute;
 pub mod heatmap;
+pub mod leap_attractors;
 pub mod material;
 pub mod particle;
 pub mod particle_stats;
@@ -68,6 +69,9 @@ impl Plugin for LinePlugin {
 
         // Wire the gravity-smear post-process render-graph node.
         app.add_plugins(post_process::LinePostProcessPlugin);
+
+        // Wire per-hand attractors (Plan 11.6 Phase 11.1).
+        app.add_plugins(leap_attractors::LineLeapAttractorsPlugin);
 
         // Lifecycle: spawn on enter, despawn on exit. Audio lifecycle joins
         // the same `OnEnter`/`OnExit` schedules — `enter_line_audio` builds

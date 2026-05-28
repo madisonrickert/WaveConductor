@@ -532,7 +532,7 @@ fn vec3_from_leaprs(v: leaprs::LeapVectorRef<'_>) -> Vec3 {
 // ── live-update system ────────────────────────────────────────────────────────
 
 /// Watches [`crate::settings::HandTrackingSettings`] for changes to
-/// `leap_background` and re-applies the LeapC policy flag on the registered
+/// `leap_background` and re-applies the `LeapC` policy flag on the registered
 /// Leap provider.
 ///
 /// Runs in `PreUpdate` after `poll_all_providers` so the connection state is
