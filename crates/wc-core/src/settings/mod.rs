@@ -26,6 +26,7 @@
 pub mod autosave;
 pub mod def;
 pub mod event;
+pub mod hand_tracking;
 pub mod panel_dev;
 pub mod persistence;
 pub mod pointer_capture;
@@ -36,6 +37,7 @@ mod panel_user;
 
 pub use def::{NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
+pub use hand_tracking::HandTrackingSettings;
 pub use panel_dev::DevPanelVisible;
 pub use pointer_capture::EguiPointerCaptured;
 pub use registry::{RegisterSketchSettingsExt, SettingsRegistry};

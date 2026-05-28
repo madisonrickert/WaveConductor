@@ -63,6 +63,7 @@ use self::gesture::HandGestureEvent;
 use self::pointer::{pointer_merge_system, PointerState};
 use self::provider::ProviderRegistry;
 use self::state::{HandTrackingFrame, HandTrackingState};
+use crate::settings::RegisterSketchSettingsExt;
 
 /// Single plugin that wires the hand-tracking subsystem into the Bevy [`App`].
 ///
@@ -78,6 +79,10 @@ impl Plugin for HandTrackingPlugin {
             .init_resource::<PointerState>()
             // The provider registry is populated by the binary at startup.
             .init_resource::<ProviderRegistry>()
+            // Global hand-tracking settings (e.g. Leap background policy).
+            // Registered here so the setting follows the input subsystem's
+            // lifecycle rather than being coupled to SettingsPlugin.
+            .register_sketch_settings::<crate::settings::HandTrackingSettings>()
             // Messages
             .add_message::<HandTrackingFrame>()
             .add_message::<state::FusedHandFrame>()
