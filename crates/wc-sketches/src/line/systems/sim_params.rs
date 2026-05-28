@@ -15,8 +15,10 @@
 )]
 
 use bevy::prelude::*;
+use wc_core::input::entity::TrackedHand;
 
 use crate::line::compute::LineSimParams;
+use crate::line::leap_attractors::LineHandAttractor;
 use crate::line::particle::{Attractor, SimParams, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
@@ -61,6 +63,7 @@ pub fn update_sim_params(
     settings: Res<'_, LineSettings>,
     window: Single<'_, '_, &Window>,
     mouse: Res<'_, MouseAttractorState>,
+    line_hands: Query<'_, '_, &LineHandAttractor, With<TrackedHand>>,
     mut sim: ResMut<'_, LineSimParams>,
     mut post: ResMut<'_, LinePostParams>,
 ) {
@@ -76,6 +79,32 @@ pub fn update_sim_params(
             _pad: 0.0,
         };
         attractor_count = 1;
+    }
+
+    // Append LineHandAttractor entries after the mouse attractor.
+    // Skip very-low-power entries to avoid wasting uniform slots on
+    // fully-decayed hands.
+    //
+    // `slot` tracks the usize index in parallel with `attractor_count` (u32)
+    // to avoid a `usize::try_from` / `expect` in the hot path. Both advance
+    // in lockstep and are capped at MAX_ATTRACTORS (= 8), which fits in both.
+    let mut slot = attractor_count as usize;
+    for hand_attractor in &line_hands {
+        if hand_attractor.power.abs() <= 1e-2 {
+            continue;
+        }
+        if slot >= MAX_ATTRACTORS {
+            break;
+        }
+        attractors[slot] = Attractor {
+            position: hand_attractor.position.to_array(),
+            // Bake gravity_constant into power, matching the mouse
+            // attractor's treatment.
+            power: hand_attractor.power * settings.gravity_constant,
+            _pad: 0.0,
+        };
+        attractor_count += 1;
+        slot += 1;
     }
 
     // --- Drag baking ----------------------------------------------------
