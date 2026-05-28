@@ -48,7 +48,7 @@ use bevy::render::render_resource::{
     ShaderStages, StoreOp, TextureFormat, TextureSampleType, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::view::ViewTarget;
+use bevy::render::view::{Hdr, ViewTarget};
 use bevy::render::RenderApp;
 use bevy::shader::Shader;
 use bytemuck::{Pod, Zeroable};
@@ -257,7 +257,15 @@ impl FromWorld for PostProcessPipeline {
 pub struct LinePostProcessNode;
 
 impl ViewNode for LinePostProcessNode {
-    type ViewQuery = &'static ViewTarget;
+    // `&'static Hdr` here is a query filter, not a payload — Bevy's view-node
+    // runner skips any camera that lacks `Hdr`, so the pipeline (which targets
+    // `Rgba16Float`) only ever runs against the main Camera2d's HDR
+    // intermediate. Without this, Plan 11.6's `HandMeshCompositorCamera`
+    // (a non-HDR Camera2d at `order = 2` that draws the off-screen bone
+    // image onto the swap chain) also got dispatched through Core2d and
+    // wgpu panicked on the `Rgba8UnormSrgb` ↔ `Rgba16Float` attachment
+    // mismatch.
+    type ViewQuery = (&'static ViewTarget, &'static Hdr);
 
     fn run<'w>(
         &self,
@@ -266,6 +274,7 @@ impl ViewNode for LinePostProcessNode {
         view_target: QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
+        let (view_target, _hdr) = view_target;
         let pipeline_cache = world.resource::<PipelineCache>();
         let Some(pipeline_res) = world.get_resource::<PostProcessPipeline>() else {
             tracing::trace!(
