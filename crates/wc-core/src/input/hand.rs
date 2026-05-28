@@ -75,7 +75,7 @@ impl LandmarkIndex {
 
 /// Which hand the [`Hand`] represents. Provider-reported; not inferred from
 /// data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Component)]
 pub enum Chirality {
     /// Left hand.
     Left,

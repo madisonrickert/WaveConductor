@@ -41,6 +41,7 @@
 //!   the resources / messages above.
 
 pub mod button;
+pub mod entity;
 pub mod gesture;
 pub mod hand;
 pub mod pointer;
@@ -83,6 +84,13 @@ impl Plugin for HandTrackingPlugin {
             // trip Bevy's "message not initialized" runtime validator.
             // `add_message` is idempotent when the message is already registered.
             .add_message::<bevy::window::CursorMoved>()
+            // Reflection registrations for tracked hand entities and components.
+            .register_type::<entity::TrackedHand>()
+            .register_type::<entity::HandId>()
+            .register_type::<entity::PalmPosition>()
+            .register_type::<entity::PalmVelocity>()
+            .register_type::<entity::PinchStrength>()
+            .register_type::<entity::GrabStrength>()
             // PreUpdate systems, chained, under the same InputSystems set Bevy
             // uses for its own input systems. This means downstream Update
             // systems can use `.after(InputSystems)` to see fresh state.
