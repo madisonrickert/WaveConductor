@@ -486,3 +486,44 @@ fn vec3_from_leaprs(v: leaprs::LeapVectorRef<'_>) -> Vec3 {
     let [x, y, z] = v.array();
     Vec3::new(x, y, z)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that every `leaprs::DeviceStatus` bit maps to the corresponding
+    /// `DeviceHealth` bit.  This is a compile-time-visible table — if a new
+    /// `LeapC` status flag is added and leaprs exposes it, the corresponding
+    /// `DeviceHealth` variant must be added and this test updated.
+    #[test]
+    fn device_health_maps_streaming() {
+        let status = leaprs::DeviceStatus::STREAMING;
+        let health = device_health_from_leaprs(status);
+        assert!(health.contains(DeviceHealth::STREAMING));
+        assert!(!health.contains(DeviceHealth::PAUSED));
+    }
+
+    #[test]
+    fn device_health_maps_multiple_flags() {
+        let status = leaprs::DeviceStatus::STREAMING | leaprs::DeviceStatus::SMUDGED;
+        let health = device_health_from_leaprs(status);
+        assert!(health.contains(DeviceHealth::STREAMING));
+        assert!(health.contains(DeviceHealth::SMUDGED));
+        assert!(!health.contains(DeviceHealth::PAUSED));
+        assert!(!health.contains(DeviceHealth::ROBUST));
+    }
+
+    #[test]
+    fn device_health_maps_failure_flags() {
+        let status = leaprs::DeviceStatus::BAD_FIRMWARE | leaprs::DeviceStatus::BAD_TRANSPORT;
+        let health = device_health_from_leaprs(status);
+        assert!(health.contains(DeviceHealth::BAD_FIRMWARE));
+        assert!(health.contains(DeviceHealth::BAD_TRANSPORT));
+    }
+
+    #[test]
+    fn device_health_empty_roundtrips() {
+        let health = device_health_from_leaprs(leaprs::DeviceStatus::empty());
+        assert_eq!(health, DeviceHealth::empty());
+    }
+}
