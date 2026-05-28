@@ -2,7 +2,8 @@
 //!
 //! Three systems, chained:
 //!
-//! 1. [`poll_active_provider`] — calls `provider.poll`, emitting raw frames.
+//! 1. [`poll_all_providers`] — calls `poll()` on every registered provider,
+//!    stamping each emitted frame with the provider's [`super::provider::ProviderId`].
 //! 2. [`update_hand_tracking_state`] — folds raw frames into the
 //!    [`HandTrackingState`] resource and [`ButtonInput<HandButton>`] resource.
 //! 3. [`detect_gestures`] — examines previous-vs-current button state and
@@ -17,18 +18,32 @@ use bevy::prelude::*;
 
 use super::button::{HandButton, PRESS_THRESHOLD, RELEASE_THRESHOLD};
 use super::gesture::HandGestureEvent;
-use super::provider::ActiveProvider;
+use super::provider::ProviderRegistry;
 use super::state::{HandTrackingFrame, HandTrackingState};
 
-/// Calls `provider.poll`, emitting frames into `Messages<HandTrackingFrame>`.
+/// Calls `poll()` on every registered provider, stamping each emitted
+/// frame with the provider's ID before re-emitting it into the shared
+/// `Messages<HandTrackingFrame>` stream.
 ///
-/// Runs first in the chain so subsequent systems see this frame's data.
-pub fn poll_active_provider(
+/// Runs first in the input chain so subsequent systems see this frame's
+/// data in the same tick.
+pub fn poll_all_providers(
     time: Res<'_, Time>,
-    mut provider: ResMut<'_, ActiveProvider>,
+    mut registry: ResMut<'_, ProviderRegistry>,
     mut frames: ResMut<'_, Messages<HandTrackingFrame>>,
 ) {
-    provider.inner.poll(time.elapsed(), frames.as_mut());
+    let now = time.elapsed();
+    for slot in registry.iter_mut() {
+        // Each provider polls into a scratch buffer, then we stamp the
+        // provider ID before re-emitting. This avoids requiring every
+        // provider to know its own ID.
+        let mut scratch = Messages::<HandTrackingFrame>::default();
+        slot.inner.poll(now, &mut scratch);
+        for mut frame in scratch.drain() {
+            frame.provider = slot.id;
+            frames.write(frame);
+        }
+    }
 }
 
 /// Folds raw frames into the [`HandTrackingState`] resource and updates the

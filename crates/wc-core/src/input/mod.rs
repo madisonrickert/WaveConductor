@@ -55,7 +55,7 @@ use bevy::prelude::*;
 use self::button::HandButton;
 use self::gesture::HandGestureEvent;
 use self::pointer::{pointer_merge_system, PointerState};
-use self::provider::ActiveProvider;
+use self::provider::ProviderRegistry;
 use self::state::{HandTrackingFrame, HandTrackingState};
 
 /// Single plugin that wires the hand-tracking subsystem into the Bevy [`App`].
@@ -70,8 +70,8 @@ impl Plugin for HandTrackingPlugin {
             .init_resource::<HandTrackingState>()
             .init_resource::<ButtonInput<HandButton>>()
             .init_resource::<PointerState>()
-            // The active provider must be inserted by the binary; default to mock.
-            .init_resource::<ActiveProvider>()
+            // The provider registry is populated by the binary at startup.
+            .init_resource::<ProviderRegistry>()
             // Messages
             .add_message::<HandTrackingFrame>()
             .add_message::<HandGestureEvent>()
@@ -89,7 +89,7 @@ impl Plugin for HandTrackingPlugin {
             .add_systems(
                 PreUpdate,
                 (
-                    systems::poll_active_provider,
+                    systems::poll_all_providers,
                     systems::update_hand_tracking_state,
                     systems::detect_gestures,
                     pointer_merge_system,

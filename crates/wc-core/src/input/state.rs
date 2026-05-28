@@ -6,7 +6,6 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy::reflect::Reflect;
 use smallvec::SmallVec;
 use thiserror::Error;
 
@@ -88,34 +87,20 @@ impl HandTrackingState {
 /// One raw frame from a [`super::provider::HandTrackingProvider`].
 ///
 /// Emitted as `Messages<HandTrackingFrame>` by
-/// [`crate::input::systems::poll_active_provider`]. Most systems consume the
+/// [`crate::input::systems::poll_all_providers`]. Most systems consume the
 /// derived [`HandTrackingState`] resource instead; raw frames are useful for
 /// analytics, recording, and the lifecycle interaction-reset system.
 #[derive(Message, Debug, Clone)]
 pub struct HandTrackingFrame {
+    /// Source provider for this frame. Stamped by `poll_all_providers`,
+    /// not by the provider itself, so providers don't need to know their
+    /// own ID.
+    pub provider: super::provider::ProviderId,
     /// Hands tracked in this frame, in provider order. Empty when no hands
     /// are present in the tracking volume.
     pub hands: SmallVec<[Hand; MAX_HANDS]>,
     /// Time the frame was captured by the provider (provider-relative clock).
     pub timestamp: Duration,
-}
-
-/// Lifecycle status of the active hand-tracking provider.
-///
-/// Read by the UI status indicator (added in Plan 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Default)]
-pub enum HandTrackingStatus {
-    /// Provider has not yet been started.
-    #[default]
-    NotStarted,
-    /// Provider is starting up (e.g., negotiating with hardware).
-    Connecting,
-    /// Provider is producing frames.
-    Connected,
-    /// Provider terminated cleanly (hardware unplugged, user-requested stop).
-    Disconnected,
-    /// Provider hit an error and stopped.
-    Errored,
 }
 
 /// Error returned from provider lifecycle methods (`start`).
@@ -380,6 +365,42 @@ pub struct ProviderDiagnostics {
     pub last_error: Option<String>,
 }
 
+/// One hand from a fused frame, tagged with the originating provider so
+/// downstream systems can key their state by `(provider, raw_id)` rather
+/// than relying on a global ID counter.
+#[derive(Debug, Clone)]
+pub struct FusedHand {
+    /// Source provider for this hand.
+    pub provider: super::provider::ProviderId,
+    /// Provider-local hand identifier (stable across consecutive frames
+    /// while the hand stays in the tracking volume).
+    pub raw_id: u32,
+    /// Mirrored from `Hand`.
+    pub chirality: super::hand::Chirality,
+    /// Palm centroid in Leap-device coordinates (millimeters).
+    pub palm_position: Vec3,
+    /// Palm velocity (mm/s).
+    pub palm_velocity: Vec3,
+    /// Pinch strength in `[0, 1]`.
+    pub pinch_strength: f32,
+    /// Grab strength in `[0, 1]`.
+    pub grab_strength: f32,
+    /// 21-landmark `MediaPipe` layout.
+    pub landmarks: [Vec3; super::hand::LANDMARK_COUNT],
+    /// 20 bone centers (5 fingers × 4 bones each) for `HandMesh` rendering.
+    pub bone_centers: [Vec3; 20],
+}
+
+/// Fused frame emitted by `fuse_hand_frames` after combining all
+/// provider-tagged [`HandTrackingFrame`]s for this tick.
+#[derive(Message, Debug, Clone)]
+pub struct FusedHandFrame {
+    /// Hands present this tick, in deterministic order (left then right).
+    pub hands: SmallVec<[FusedHand; MAX_HANDS]>,
+    /// Time the frame was captured (provider-relative).
+    pub timestamp: Duration,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +501,7 @@ mod tests {
     fn ingest_replaces_hands_and_timestamp() {
         let mut state = HandTrackingState::default();
         let frame = HandTrackingFrame {
+            provider: crate::input::provider::ProviderId::Mock,
             hands: smallvec::smallvec![fake_hand(1, Chirality::Left)],
             timestamp: Duration::from_millis(500),
         };
@@ -491,6 +513,7 @@ mod tests {
 
         // Ingest a frame with a different hand; previous one is dropped.
         let frame2 = HandTrackingFrame {
+            provider: crate::input::provider::ProviderId::Mock,
             hands: smallvec::smallvec![fake_hand(2, Chirality::Right)],
             timestamp: Duration::from_millis(800),
         };

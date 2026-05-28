@@ -1,81 +1,184 @@
-//! [`HandTrackingProvider`] strategy trait and [`ActiveProvider`] resource.
+//! [`HandTrackingProvider`] strategy trait and [`ProviderRegistry`] resource.
 //!
 //! The trait is the internal seam between concrete providers (mock, Leap,
 //! WebSocket, future `MediaPipe`) and the rest of the input subsystem. Sketches
 //! never touch this trait.
+//!
+//! Multiple providers can be registered simultaneously in the
+//! [`ProviderRegistry`]. `poll_all_providers` drains each one per tick and
+//! stamps every emitted [`super::state::HandTrackingFrame`] with the
+//! originating [`ProviderId`].
 
 use std::time::Duration;
 
 use bevy::prelude::*;
 
-use super::providers::mock::MockProvider;
-use super::state::{HandTrackingError, HandTrackingFrame, HandTrackingStatus};
+use super::state::{HandTrackingError, HandTrackingFrame};
+
+/// Identifies a provider in the registry. Plan 11.6 only uses `Leap` and
+/// `Mock`; the other variants exist so frame provenance and fusion can
+/// distinguish providers once future plans implement them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProviderId {
+    /// Native `LeapC` FFI provider.
+    Leap,
+    /// Scripted-frame mock provider used by tests + auto-fallback.
+    Mock,
+    /// Future: `WebSocket` bridge for the wasm32 web build.
+    WebSocket,
+    /// Future: `MediaPipe` webcam provider.
+    MediaPipe,
+}
+
+impl ProviderId {
+    /// Short human-readable label for the dev panel.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            ProviderId::Leap => "Leap",
+            ProviderId::Mock => "Mock",
+            ProviderId::WebSocket => "WebSocket",
+            ProviderId::MediaPipe => "MediaPipe",
+        }
+    }
+}
+
+/// What kind of source a provider is. Primary providers' frames win over
+/// Simulator providers' frames during fusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderRole {
+    /// Real hand-tracking source (Leap, `MediaPipe`).
+    Primary,
+    /// Synthetic source (mock for tests, mouse-as-hand for future demos,
+    /// recorded playback).
+    Simulator,
+}
+
+/// One slot in the [`ProviderRegistry`].
+pub struct RegisteredProvider {
+    /// Identity of the provider in this slot.
+    pub id: ProviderId,
+    /// Role (Primary vs Simulator) for fusion precedence.
+    pub role: ProviderRole,
+    /// The boxed provider implementation.
+    pub inner: Box<dyn HandTrackingProvider>,
+}
 
 /// Strategy trait implemented by every concrete hand-tracking provider.
 ///
-/// One provider is active at a time; selected at app startup and installed as
-/// the [`ActiveProvider`] resource. The plugin's
-/// [`crate::input::systems::poll_active_provider`] system calls
-/// [`Self::poll`] once per `PreUpdate` tick to drain whatever frames the
-/// provider has produced since the last poll.
+/// Providers are registered with the [`ProviderRegistry`] resource at
+/// startup. `poll_all_providers` runs each provider's [`Self::poll`] once
+/// per `PreUpdate` tick and stamps each emitted frame with the provider's
+/// [`ProviderId`].
 pub trait HandTrackingProvider: Send + Sync + 'static {
     /// Start the provider. Must be called before [`Self::poll`] returns
     /// meaningful results. Returns an error if the provider cannot acquire
     /// its hardware / transport.
     fn start(&mut self) -> Result<(), HandTrackingError>;
 
-    /// Stop the provider. After this returns, [`Self::status`] should report
-    /// [`HandTrackingStatus::Disconnected`].
+    /// Stop the provider cleanly.
     fn stop(&mut self);
 
-    /// Drain any frames produced since the last call and append them to
-    /// `out`. Called once per `PreUpdate` tick by the plugin.
+    /// Drain frames produced since the last call into `out`. Called once
+    /// per `PreUpdate` tick.
     ///
-    /// `now` is the Bevy main-thread elapsed time, supplied so providers can
-    /// stamp frames consistently when their own clock is unavailable (e.g.,
-    /// mock provider in tests).
+    /// `now` is the Bevy main-thread elapsed time, supplied so providers
+    /// can stamp frames consistently when their own clock is unavailable.
+    /// Providers do NOT set the `provider:` field — `poll_all_providers`
+    /// stamps it after this call returns.
     fn poll(&mut self, now: Duration, out: &mut Messages<HandTrackingFrame>);
 
-    /// Current lifecycle status; read by the UI status indicator.
-    fn status(&self) -> HandTrackingStatus;
+    /// Multi-axis snapshot of the provider's lifecycle and health.
+    /// Updated each `poll()`.
+    fn status(&self) -> crate::input::state::ProviderStatus;
+
+    /// Provider-level diagnostic metadata for the dev panel. Updated each
+    /// `poll()` (or `start()` for static fields like SDK version).
+    fn diagnostics(&self) -> crate::input::state::ProviderDiagnostics;
 }
 
-/// Resource holding the currently-installed [`HandTrackingProvider`].
+/// Resource holding all currently-installed [`HandTrackingProvider`]s.
 ///
-/// Boxed for trait-object polymorphism. The binary swaps the default mock
-/// provider for a real one (Leap, WebSocket, `MediaPipe`) at startup based on
-/// app configuration.
-#[derive(Resource)]
-pub struct ActiveProvider {
-    /// The boxed provider implementation.
-    pub(crate) inner: Box<dyn HandTrackingProvider>,
+/// Replaces the singleton `ActiveProvider` from Plan 3. Multi-provider
+/// support enables future fusion (Leap + `MediaPipe`), simulator sources,
+/// and clean lifecycle (each provider can independently start/stop).
+///
+/// The binary populates this resource at startup via auto-selection
+/// (see `crates/waveconductor/src/main.rs::install_hand_tracking_providers`).
+/// Tests construct their own registry directly.
+#[derive(Resource, Default)]
+pub struct ProviderRegistry {
+    providers: Vec<RegisteredProvider>,
 }
 
-impl Default for ActiveProvider {
-    /// Defaults to an empty [`MockProvider`] so tests and headless builds work
-    /// out of the box.
-    fn default() -> Self {
-        Self {
-            inner: Box::new(MockProvider::default()),
-        }
-    }
-}
-
-impl ActiveProvider {
-    /// Wrap a provider impl as the active provider. Calls
-    /// [`HandTrackingProvider::start`] eagerly and logs the result.
+impl ProviderRegistry {
+    /// Register a provider. Idempotent on ID — re-registering the same
+    /// ID replaces the previous entry (useful for tests).
     ///
-    /// If `start` returns an error, the provider is still installed (so
-    /// `Res<ActiveProvider>` is always populated) but [`HandTrackingProvider::status`]
-    /// will report the provider's error state. Callers that need to confirm
-    /// readiness should check `provider.inner.status()` after construction.
+    /// Calls [`HandTrackingProvider::start`] eagerly and logs the result.
+    /// If `start` returns an error, the provider is still registered so
+    /// `Res<ProviderRegistry>` is always populated; callers that need to
+    /// confirm readiness should check the provider's `status()`.
+    pub fn register(
+        &mut self,
+        id: ProviderId,
+        role: ProviderRole,
+        mut inner: Box<dyn HandTrackingProvider>,
+    ) {
+        if let Err(err) = inner.start() {
+            tracing::warn!(?err, provider = id.label(), "provider failed to start");
+        }
+        if let Some(slot) = self.providers.iter_mut().find(|p| p.id == id) {
+            *slot = RegisteredProvider { id, role, inner };
+            return;
+        }
+        self.providers.push(RegisteredProvider { id, role, inner });
+    }
+
+    /// Iterate over registered providers.
+    pub fn iter(&self) -> impl Iterator<Item = &RegisteredProvider> + '_ {
+        self.providers.iter()
+    }
+
+    /// Iterate mutably (used by polling).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut RegisteredProvider> + '_ {
+        self.providers.iter_mut()
+    }
+
+    /// Look up a provider by ID.
     #[must_use]
-    pub fn new<P: HandTrackingProvider>(mut provider: P) -> Self {
-        if let Err(err) = provider.start() {
-            tracing::warn!(?err, "active provider failed to start");
-        }
-        Self {
-            inner: Box::new(provider),
-        }
+    pub fn provider(&self, id: ProviderId) -> Option<&RegisteredProvider> {
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    /// Status of the primary provider (or, if none, the first simulator).
+    /// What the status LED reads.
+    #[must_use]
+    pub fn primary_status(&self) -> crate::input::state::ProviderStatus {
+        self.providers
+            .iter()
+            .find(|p| p.role == ProviderRole::Primary)
+            .or_else(|| self.providers.iter().find(|p| p.role == ProviderRole::Simulator))
+            .map_or_else(crate::input::state::ProviderStatus::default, |p| p.inner.status())
+    }
+
+    /// Diagnostics of the primary provider, for the dev panel.
+    #[must_use]
+    pub fn primary_diagnostics(&self) -> crate::input::state::ProviderDiagnostics {
+        self.providers
+            .iter()
+            .find(|p| p.role == ProviderRole::Primary)
+            .or_else(|| self.providers.iter().find(|p| p.role == ProviderRole::Simulator))
+            .map_or_else(crate::input::state::ProviderDiagnostics::default, |p| p.inner.diagnostics())
+    }
+
+    /// ID of the primary provider, for the dev panel label.
+    #[must_use]
+    pub fn primary_id(&self) -> Option<ProviderId> {
+        self.providers
+            .iter()
+            .find(|p| p.role == ProviderRole::Primary)
+            .or_else(|| self.providers.iter().find(|p| p.role == ProviderRole::Simulator))
+            .map(|p| p.id)
     }
 }

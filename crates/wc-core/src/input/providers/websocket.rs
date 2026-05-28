@@ -14,7 +14,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use crate::input::provider::HandTrackingProvider;
-use crate::input::state::{HandTrackingError, HandTrackingFrame, HandTrackingStatus};
+use crate::input::state::{HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus};
 
 /// Stub `WebSocketProvider`. Real implementation deferred to a future plan.
 #[derive(Default)]
@@ -35,7 +35,11 @@ impl HandTrackingProvider for WebSocketProvider {
 
     fn poll(&mut self, _now: Duration, _out: &mut Messages<HandTrackingFrame>) {}
 
-    fn status(&self) -> HandTrackingStatus {
-        HandTrackingStatus::Disconnected
+    fn status(&self) -> ProviderStatus {
+        ProviderStatus::default()
+    }
+
+    fn diagnostics(&self) -> ProviderDiagnostics {
+        ProviderDiagnostics::default()
     }
 }

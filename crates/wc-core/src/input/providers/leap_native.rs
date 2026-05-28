@@ -6,18 +6,19 @@
 //!
 //! ## Why a stub instead of nothing
 //!
-//! The plugin's `ActiveProvider` resource is a `Box<dyn HandTrackingProvider>`.
+//! The plugin's `ProviderRegistry` accepts any `Box<dyn HandTrackingProvider>`.
 //! Until the real Leap impl exists, code that wants to *select* this provider
 //! at startup needs something to construct. The stub satisfies that surface,
-//! returns [`HandTrackingStatus::Disconnected`], and logs a clear warning when
-//! `start` is called, so misconfigurations surface immediately at runtime.
+//! returns [`crate::input::state::ProviderStatus::default()`], and logs a clear
+//! warning when `start` is called, so misconfigurations surface immediately at
+//! runtime.
 
 use std::time::Duration;
 
 use bevy::prelude::*;
 
 use crate::input::provider::HandTrackingProvider;
-use crate::input::state::{HandTrackingError, HandTrackingFrame, HandTrackingStatus};
+use crate::input::state::{HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus};
 
 /// Stub `LeaprsProvider`. Real implementation deferred to a future plan.
 #[derive(Default)]
@@ -38,7 +39,11 @@ impl HandTrackingProvider for LeaprsProvider {
 
     fn poll(&mut self, _now: Duration, _out: &mut Messages<HandTrackingFrame>) {}
 
-    fn status(&self) -> HandTrackingStatus {
-        HandTrackingStatus::Disconnected
+    fn status(&self) -> ProviderStatus {
+        ProviderStatus::default()
+    }
+
+    fn diagnostics(&self) -> ProviderDiagnostics {
+        ProviderDiagnostics::default()
     }
 }

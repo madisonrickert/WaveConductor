@@ -1,5 +1,5 @@
 //! Smoke test: open a leaprs connection, poll for one tracking frame, print
-//! a one-line summary, exit. Verifies the vendored LeapC + leap-sys +
+//! a one-line summary, exit. Verifies the vendored `LeapC` + leap-sys +
 //! .cargo/config.toml integration is wired correctly on the current host.
 //!
 //! Run with:
@@ -48,9 +48,8 @@ fn main() {
     let deadline = std::time::Instant::now() + timeout;
 
     while std::time::Instant::now() < deadline {
-        let msg = match conn.poll(100) {
-            Ok(m) => m,
-            Err(_) => continue, // Timeout or other transient — keep polling.
+        let Ok(msg) = conn.poll(100) else {
+            continue; // Timeout or other transient — keep polling.
         };
 
         if let EventRef::Tracking(tracking) = msg.event() {

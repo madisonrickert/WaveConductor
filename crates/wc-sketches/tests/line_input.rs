@@ -275,6 +275,7 @@ fn hand_pinch_activates_mouse_attractor() {
     };
 
     let frame = HandTrackingFrame {
+        provider: wc_core::input::provider::ProviderId::Mock,
         hands: smallvec::smallvec![hand],
         timestamp: Duration::from_millis(0),
     };
@@ -435,6 +436,7 @@ fn hand_pinch_release_zeros_attractor_power() {
     app.world_mut()
         .resource_mut::<HandTrackingState>()
         .ingest(&HandTrackingFrame {
+            provider: wc_core::input::provider::ProviderId::Mock,
             hands: smallvec::smallvec![hand_pressed],
             timestamp: Duration::from_millis(0),
         });
@@ -458,6 +460,7 @@ fn hand_pinch_release_zeros_attractor_power() {
     app.world_mut()
         .resource_mut::<HandTrackingState>()
         .ingest(&HandTrackingFrame {
+            provider: wc_core::input::provider::ProviderId::Mock,
             hands: smallvec::smallvec![hand_relaxed],
             timestamp: Duration::from_millis(100),
         });

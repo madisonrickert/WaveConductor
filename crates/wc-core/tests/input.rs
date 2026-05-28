@@ -11,7 +11,7 @@ use wc_core::input::{
     gesture::HandGestureEvent,
     hand::{Chirality, Hand, LandmarkIndex, LANDMARK_COUNT},
     pointer::{PointerSource, PointerState},
-    provider::ActiveProvider,
+    provider::{ProviderId, ProviderRegistry, ProviderRole},
     providers::mock::MockProvider,
     state::{HandTrackingFrame, HandTrackingState},
     HandTrackingPlugin,
@@ -32,6 +32,7 @@ fn fake_hand(chirality: Chirality, pinch: f32, grab: f32) -> Hand {
 
 fn frame(hands: impl IntoIterator<Item = Hand>, at_ms: u64) -> HandTrackingFrame {
     HandTrackingFrame {
+        provider: ProviderId::Mock,
         hands: hands.into_iter().collect(),
         timestamp: Duration::from_millis(at_ms),
     }
@@ -43,7 +44,9 @@ fn test_app_with_mock(mock: MockProvider) -> App {
     app.add_plugins(InputPlugin);
     app.add_plugins(StatesPlugin);
     app.add_plugins(HandTrackingPlugin);
-    app.insert_resource(ActiveProvider::new(mock));
+    let mut registry = ProviderRegistry::default();
+    registry.register(ProviderId::Mock, ProviderRole::Simulator, Box::new(mock));
+    app.insert_resource(registry);
     app
 }
 

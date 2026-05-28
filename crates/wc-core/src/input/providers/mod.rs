@@ -1,7 +1,7 @@
 //! Concrete [`super::provider::HandTrackingProvider`] implementations.
 //!
-//! - [`mock`] — scripted-frame playback, used by tests and the default
-//!   `ActiveProvider`.
+//! - [`mock`] — scripted-frame playback, used by tests and as a simulator
+//!   source in the [`super::provider::ProviderRegistry`].
 //! - [`leap_native`] — native `LeapC` FFI provider; stub in this plan, real
 //!   implementation in a future plan.
 //! - [`websocket`] — WebSocket-based provider (used for web target and as a
