@@ -71,9 +71,9 @@ rustfft = "6"
 symphonia = { version = "0.5", default-features = false, features = ["vorbis", "ogg"] }
 # Serde stack (used by settings persistence in Plan 2)
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 # Native config dirs
-dirs = "5"
+dirs = "6"
 # xtask
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
@@ -100,7 +100,7 @@ rand = "0.9"
 # Windows IFileDialog, GTK on Linux. Web build is out of scope (rfd has a
 # wasm backend but it returns a promise; would require a different code
 # path).
-rfd = "0.15"
+rfd = "0.17"
 # JSON for the wasm localStorage path
 serde_json = "1"
 # wasm-only web bindings (used by settings persistence on web targets)
