@@ -43,7 +43,7 @@ use super::registry::SettingsRegistry;
 use crate::lifecycle::state::AppState;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::{LastSettingsPanelRect, SettingsPanelVisible};
-use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
+use crate::ui::{backdrop_blur_frame, letter_spaced_label, FrameOptions, OverlayStyle};
 
 /// Inline stack snapshot of registered settings storage keys. Sized for the
 /// expected case of ≤8 settings types per app; spills to the heap above that.
@@ -145,13 +145,15 @@ fn draw_user_panel(world: &mut World) {
                     opacity_mul,
                 },
                 |ui| {
-                    // Title row: "SETTINGS" in dim chrome text.
-                    // Note: egui has no built-in letter-spacing; default spacing
-                    // is an approved deviation per Plan 11.5 Task 18.
-                    ui.label(
-                        egui::RichText::new("SETTINGS")
-                            .color(style.text_color_dim)
-                            .size(13.0),
+                    // Title row: "SETTINGS" with v4 letter-spacing.
+                    // v4 reference: overlayPanel.scss:25 `.overlay-panel-title {
+                    //   letter-spacing: 0.04em }` — 13 pt × 0.04 = 0.52 pt gap.
+                    letter_spaced_label(
+                        ui,
+                        "SETTINGS",
+                        egui::FontId::proportional(13.0),
+                        style.text_color_dim,
+                        13.0 * 0.04,
                     );
                     ui.separator();
                     for key in &keys {
@@ -295,10 +297,14 @@ fn render_user_fields_via_reflect(
             ui.add_space(8.0);
         }
         if !section_name.is_empty() {
-            ui.label(
-                egui::RichText::new(section_name.to_uppercase())
-                    .size(11.0)
-                    .strong(),
+            // Section headers use v4's `letter-spacing: 0.04em` (same token
+            // as `.overlay-panel-title` in overlayPanel.scss:25).
+            letter_spaced_label(
+                ui,
+                &section_name.to_uppercase(),
+                egui::FontId::proportional(11.0),
+                ui.visuals().text_color(),
+                11.0 * 0.04,
             );
             ui.add_space(4.0);
         }

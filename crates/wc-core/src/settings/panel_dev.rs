@@ -18,7 +18,7 @@ use leafwing_input_manager::prelude::ActionState;
 
 use crate::lifecycle::actions::WaveConductorAction;
 use crate::ui::auto_fade::UiOpacity;
-use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
+use crate::ui::{backdrop_blur_frame, letter_spaced_label, FrameOptions, OverlayStyle};
 
 /// True when the dev inspector window should be drawn.
 ///
@@ -110,10 +110,15 @@ fn draw_dev_panel(world: &mut World) {
                     opacity_mul,
                 },
                 |ui| {
-                    ui.label(
-                        bevy_egui::egui::RichText::new("DEV INSPECTOR")
-                            .color(style.text_color_dim)
-                            .size(13.0),
+                    // Title row: "DEV INSPECTOR" with v4 letter-spacing.
+                    // v4 reference: overlayPanel.scss:25 `.overlay-panel-title {
+                    //   letter-spacing: 0.04em }` — 13 pt × 0.04 = 0.52 pt gap.
+                    letter_spaced_label(
+                        ui,
+                        "DEV INSPECTOR",
+                        bevy_egui::egui::FontId::proportional(13.0),
+                        style.text_color_dim,
+                        13.0 * 0.04,
                     );
                     ui.separator();
                     bevy_egui::egui::ScrollArea::vertical()

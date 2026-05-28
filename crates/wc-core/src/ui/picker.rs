@@ -26,6 +26,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use super::style::OverlayStyle;
+use super::text::letter_spaced_label;
 use crate::lifecycle::reload::SketchReloadState;
 use crate::lifecycle::state::AppState;
 use crate::sketch::SketchManifest;
@@ -360,12 +361,15 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
     let top_pad = ((tile_size.y - CREDITS_CONTENT_HEIGHT) * 0.5).max(0.0);
     child_ui.add_space(top_pad);
 
-    // "WaveConductor" heading — Orbitron Bold, large.
-    child_ui.label(
-        egui::RichText::new("WaveConductor")
-            .size(28.0)
-            .family(egui::FontFamily::Name("orbitron".into()))
-            .color(style.text_color_bright),
+    // "WaveConductor" heading — Orbitron Bold, large, with v4 letter-spacing.
+    // v4 reference: homePage.scss:101 `.credits-content h2 {
+    //   letter-spacing: 0.1em }` — 28 pt × 0.1 = 2.8 pt gap.
+    letter_spaced_label(
+        &mut child_ui,
+        "WaveConductor",
+        egui::FontId::new(28.0, egui::FontFamily::Name("orbitron".into())),
+        style.text_color_bright,
+        28.0 * 0.1,
     );
     child_ui.add_space(8.0);
 

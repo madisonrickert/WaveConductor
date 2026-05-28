@@ -27,11 +27,13 @@ pub mod frame;
 pub mod picker;
 pub mod reload_overlay;
 pub mod style;
+pub mod text;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
 pub use buttons::PointerCoarse;
 pub use frame::{backdrop_blur_frame, FrameOptions};
 pub use style::OverlayStyle;
+pub use text::letter_spaced_label;
 
 /// Umbrella plugin for the overlay UI surface.
 pub struct WaveConductorUiPlugin;
