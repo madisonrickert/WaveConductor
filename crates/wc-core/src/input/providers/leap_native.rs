@@ -74,9 +74,15 @@ pub struct LeaprsProvider {
     /// Wall-clock instant of the most recent tracking frame, used for the
     /// `last_frame_ago` heartbeat.
     last_tracking_instant: Option<Instant>,
-    /// When `true`, `start()` requests the `BackgroundFrames` policy from
+    /// When `true`, the provider requests the `BackgroundFrames` policy from
     /// `LeapC` so frames continue flowing when the window loses focus.
     pub request_background: bool,
+    /// `true` once the `BackgroundFrames` policy has been successfully set
+    /// on the live connection. Used to gate the retry loop in `poll()` —
+    /// the policy call returns `NotConnected` if applied before the
+    /// `LeapC` service handshake completes, so we retry on each poll
+    /// until it sticks.
+    background_policy_applied: bool,
 }
 
 // ── HandTrackingProvider impl ────────────────────────────────────────────────
@@ -96,16 +102,11 @@ impl HandTrackingProvider for LeaprsProvider {
             HandTrackingError::Unavailable(format!("leaprs::Connection::open failed: {e}"))
         })?;
 
-        if self.request_background {
-            if let Err(e) = conn.set_policy_flags(
-                leaprs::PolicyFlags::BACKGROUND_FRAMES,
-                leaprs::PolicyFlags::empty(),
-            ) {
-                // Non-fatal — log and continue. Background frames are a
-                // best-effort enhancement, not a hard requirement.
-                tracing::warn!("failed to set BackgroundFrames policy: {e}");
-            }
-        }
+        // BackgroundFrames policy is NOT applied here. `conn.open()` returns
+        // before the `LeapC` service handshake completes, so a policy call
+        // here returns `NotConnected`. The retry loop in `poll()` applies it
+        // once the connection has settled into `ServiceConnection::Connected`.
+        self.background_policy_applied = false;
 
         self.connection = Some(conn);
         self.status.service = ServiceConnection::Connecting;
@@ -161,6 +162,45 @@ impl HandTrackingProvider for LeaprsProvider {
                     self.status.service = ServiceConnection::Errored;
                     self.diagnostics.last_error = Some(e.to_string());
                     break;
+                }
+            }
+        }
+
+        // Apply the deferred BackgroundFrames policy once the handshake is
+        // complete. The first attempt at `start()` time returns NotConnected
+        // because the service connection is still mid-handshake; retrying on
+        // each poll until success sidesteps that without needing to plumb a
+        // post-Connection callback through `dispatch_event`.
+        if self.request_background
+            && !self.background_policy_applied
+            && matches!(self.status.service, ServiceConnection::Connected)
+        {
+            if let Some(conn) = self.connection.as_mut() {
+                match conn.set_policy_flags(
+                    leaprs::PolicyFlags::BACKGROUND_FRAMES,
+                    leaprs::PolicyFlags::empty(),
+                ) {
+                    Ok(()) => {
+                        self.background_policy_applied = true;
+                        if !self
+                            .diagnostics
+                            .active_policies
+                            .iter()
+                            .any(|p| p == "BackgroundFrames")
+                        {
+                            self.diagnostics
+                                .active_policies
+                                .push("BackgroundFrames".to_string());
+                        }
+                    }
+                    Err(e) => {
+                        // Will retry on the next poll. Log once-quietly so
+                        // the warning doesn't spam if the service stays
+                        // half-connected for several seconds.
+                        tracing::debug!(
+                            "deferred BackgroundFrames policy set still failing: {e}"
+                        );
+                    }
                 }
             }
         }

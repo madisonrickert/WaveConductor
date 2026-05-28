@@ -27,8 +27,17 @@ use super::provider::ProviderId;
 /// Marker for any currently-tracked hand entity. Spawned by
 /// `sync_hand_entities` when a new `(provider, raw_id)` appears in a fused
 /// frame; despawned when that pair disappears.
+///
+/// `Transform` + `Visibility` are required components so Bevy's hierarchy
+/// system has a consistent set of ancestor transform/visibility components
+/// when child entities (e.g. `HandMesh` bone spheres in
+/// `wc_sketches::line::hand_mesh`) are spawned underneath. Without them,
+/// the engine emits a `B0004` warning every tick — and at production
+/// volume (one per child entity per tick) the warning storm noticeably
+/// stalls the main thread.
 #[derive(Component, Debug, Reflect)]
 #[reflect(Component)]
+#[require(Transform, Visibility)]
 pub struct TrackedHand;
 
 /// Provider-local stable identifier. Two consecutive frames with the same

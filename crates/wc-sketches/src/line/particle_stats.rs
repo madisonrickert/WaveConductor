@@ -39,7 +39,9 @@
 //! wrong on manual sign-off, adjust the relevant constant and re-test.
 
 use bevy::prelude::*;
+use wc_core::input::entity::TrackedHand;
 
+use super::leap_attractors::LineHandAttractor;
 use super::settings::LineSettings;
 use super::systems::mouse::{MouseAttractorState, MOUSE_POWER_FLOOR};
 
@@ -140,17 +142,48 @@ pub struct ParticleStats {
 
 /// Per-frame approximated CPU audio control signals.
 ///
-/// Reads [`MouseAttractorState::power`] and time, smooths them into envelopes
-/// shaped like v4's full per-particle reduction, and writes [`ParticleStats`].
-/// See module rustdoc for the perceptual-approximation rationale.
+/// Reads the effective attractor power (max of [`MouseAttractorState::power`]
+/// and any active [`LineHandAttractor`] scaled into the mouse-power range),
+/// smooths it into envelopes shaped like v4's full per-particle reduction,
+/// and writes [`ParticleStats`]. See module rustdoc for the
+/// perceptual-approximation rationale.
+///
+/// The hand-attractor branch closes the audio loop that Plan 11.6 Phase 11.3
+/// opened when it removed the pinch-stub bridge from `mouse.rs`. Without
+/// this, a Leap grab fed the sim's attractor uniform via
+/// [`super::leap_attractors::LineHandAttractor`] but never reached the
+/// audio envelope — so visually the particles converged on the hand while
+/// the synth stayed silent.
 pub fn update_particle_stats(
     mouse: Res<'_, MouseAttractorState>,
+    hand_attractors: Query<'_, '_, &LineHandAttractor, With<TrackedHand>>,
     time: Res<'_, Time>,
     settings: Res<'_, LineSettings>,
     mut stats: ResMut<'_, ParticleStats>,
 ) {
     let rates = EnvelopeRates::from_settings(&settings);
-    step_envelope(&mut stats, mouse.power, time.delta_secs(), &rates);
+    let effective_power = effective_attractor_power(mouse.power, &hand_attractors, &settings);
+    step_envelope(&mut stats, effective_power, time.delta_secs(), &rates);
+}
+
+/// Pick the loudest active attractor across the mouse and all tracked hands.
+///
+/// Hand attractor power is in raw v4 grab-power units (peak ~12 for a fully
+/// closed fist near the device); the mouse attractor power is in
+/// `gravity_constant`-scaled units (peak ~`gravity_constant * MOUSE_POWER_PRESS`).
+/// To compare them on equal footing, scale the hand power by
+/// `settings.gravity_constant` — matching how `update_sim_params` feeds
+/// hand attractors into the particle uniform.
+fn effective_attractor_power(
+    mouse_power: f32,
+    hand_attractors: &Query<'_, '_, &LineHandAttractor, With<TrackedHand>>,
+    settings: &LineSettings,
+) -> f32 {
+    let hand_max = hand_attractors
+        .iter()
+        .map(|a| a.power * settings.gravity_constant)
+        .fold(0.0_f32, f32::max);
+    mouse_power.max(hand_max)
 }
 
 /// Pure-function step: advance the envelope state by one frame of `dt` seconds

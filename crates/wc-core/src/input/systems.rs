@@ -273,8 +273,10 @@ pub fn sync_hand_entities(
     mut tracked: Query<'_, '_, TrackedHandComponents<'_>, With<TrackedHand>>,
 ) {
     let mut seen_this_tick: HashSet<(ProviderId, u32)> = HashSet::new();
+    let mut any_frame_received = false;
 
     for frame in reader.read() {
+        any_frame_received = true;
         for hand in &frame.hands {
             let key = (hand.provider, hand.raw_id);
             seen_this_tick.insert(key);
@@ -313,7 +315,17 @@ pub fn sync_hand_entities(
         }
     }
 
-    // Despawn entities whose key didn't appear in any frame this tick.
+    // Despawn pass: skip when no FusedHandFrame arrived this tick. The Leap
+    // provider's poll cadence and the Bevy schedule are independent, so a
+    // tick with zero events is normal and means "the hand is still there,
+    // we just didn't get a new sample yet" — NOT "the hand disappeared".
+    // The despawn signal is an explicitly empty frame (verified by the
+    // `tracked_hand_despawns_when_hand_leaves_frame_stream` test, which
+    // sends `frame_with(vec![], _)`).
+    if !any_frame_received {
+        return;
+    }
+
     let stale: Vec<((ProviderId, u32), Entity)> = entity_table
         .iter()
         .filter(|(key, _)| !seen_this_tick.contains(key))
