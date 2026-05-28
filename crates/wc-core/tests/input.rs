@@ -17,9 +17,18 @@ use wc_core::input::{
     HandTrackingPlugin,
 };
 
+// Distinct default ID per chirality so a frame containing both hands keys
+// to two distinct `(provider, raw_id)` slots in the entity table —
+// `sync_hand_entities` (Plan 11.6 Phase 6) treats colliding keys as "same
+// hand, update in place", which would silently collapse two hands into one
+// in the multi-hand test fixtures.
 fn fake_hand(chirality: Chirality, pinch: f32, grab: f32) -> Hand {
+    let id = match chirality {
+        Chirality::Left => 1,
+        Chirality::Right => 2,
+    };
     Hand {
-        id: 1,
+        id,
         chirality,
         palm_position: Vec3::ZERO,
         palm_normal: Vec3::Y,
