@@ -142,6 +142,105 @@ const _: fn() = || {
     assert_send_sync::<HandTrackingError>();
 };
 
+use bitflags::bitflags;
+
+bitflags! {
+    /// Device-side health conditions reported by the underlying transport.
+    /// Multiple flags can be set simultaneously (e.g., `STREAMING | SMUDGED`
+    /// when the sensor is producing degraded frames). Mirrors leaprs'
+    /// `DeviceStatus` bitflags 1:1, exposed in our own crate so the leaprs
+    /// type doesn't leak across the provider trait boundary.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct DeviceHealth: u32 {
+        /// Device is actively producing tracking frames.
+        const STREAMING       = 1 << 0;
+        /// Device streaming has been paused.
+        const PAUSED          = 1 << 1;
+        /// Known IR interference present; device has switched to robust mode.
+        const ROBUST          = 1 << 2;
+        /// Sensor window is smudged; tracking may be degraded.
+        const SMUDGED         = 1 << 3;
+        /// Device has entered low-resource mode.
+        const LOW_RESOURCE    = 1 << 4;
+        /// Unknown device failure.
+        const UNKNOWN_FAILURE = 1 << 5;
+        /// Device has a bad calibration record; cannot send frames.
+        const BAD_CALIBRATION = 1 << 6;
+        /// Corrupt firmware, or required firmware update cannot install.
+        const BAD_FIRMWARE    = 1 << 7;
+        /// USB transport is faulty.
+        const BAD_TRANSPORT   = 1 << 8;
+        /// USB control interface failed to initialize.
+        const BAD_CONTROL     = 1 << 9;
+    }
+}
+
+bitflags! {
+    /// Service-side health conditions reported by the LeapC service.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct ServiceHealth: u32 {
+        /// Service can't receive frames fast enough from the hardware.
+        const LOW_FPS_DETECTED       = 1 << 0;
+        /// Service paused itself due to insufficient hardware framerate.
+        const POOR_PERFORMANCE_PAUSE = 1 << 1;
+        /// Service failed to start tracking; reason unknown.
+        const TRACKING_ERROR_UNKNOWN = 1 << 2;
+    }
+}
+
+/// Reachability of the underlying transport (`LeapC` service for native;
+/// `WebSocket` endpoint for web).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ServiceConnection {
+    /// Provider has not started yet.
+    #[default]
+    NotStarted,
+    /// Connection handshake is in progress. Maps to leaprs
+    /// `ConnectionStatus::HandshakeIncomplete`.
+    Connecting,
+    /// Service reached. Maps to `ConnectionStatus::Connected`.
+    Connected,
+    /// The Ultraleap tracking service is not installed or not running
+    /// on this machine. Maps to `ConnectionStatus::NotRunning`.
+    ServiceMissing,
+    /// Was connected, then dropped.
+    Disconnected,
+    /// Unrecoverable provider-level error. Error reason is held in
+    /// `ProviderDiagnostics::last_error`.
+    Errored,
+}
+
+/// Whether a tracking device is currently attached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DevicePresence {
+    /// No device attached to the service.
+    #[default]
+    NoDevice,
+    /// A device is attached. Device serial + SDK version live in
+    /// [`ProviderDiagnostics`].
+    Attached,
+    /// A previously-attached device was unplugged.
+    Lost,
+    /// Device reported a failure condition. Failure reason is held in
+    /// [`ProviderDiagnostics::last_error`].
+    Failed,
+}
+
+/// Whether tracking frames are currently flowing, plus heartbeat metrics.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum TrackingFlow {
+    /// No tracking frames are currently arriving.
+    #[default]
+    NotStreaming,
+    /// Tracking frames are arriving.
+    Streaming {
+        /// Time elapsed since the most recent tracking frame.
+        last_frame_ago: Duration,
+        /// Cumulative count of dropped frames since `start()`.
+        dropped_since_start: u64,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

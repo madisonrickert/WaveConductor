@@ -21,6 +21,7 @@ hand-tracking-gestures = ["dep:leaprs"]
 
 [dependencies]
 bevy = { workspace = true }
+bitflags = { workspace = true }
 cpal = { workspace = true }
 fundsp = { workspace = true }
 leafwing-input-manager = { workspace = true }

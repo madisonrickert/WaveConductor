@@ -85,6 +85,9 @@ tempfile = "3"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
+# Bitflag types for hand-tracking device-side / service-side health
+# (DeviceHealth, ServiceHealth). Used by `input::state::ProviderStatus`.
+bitflags = "2"
 # GPU struct alignment helpers (used by Line sketch particle/uniform buffers)
 bytemuck = { version = "1", features = ["derive"] }
 # Image decode (Plan 10 Phase A): Line sketch's heatmap-image spawn template
