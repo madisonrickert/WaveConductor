@@ -13,21 +13,14 @@ pub struct SketchesPlugin;
 
 impl Plugin for SketchesPlugin {
     fn build(&self, app: &mut App) {
-        // `WireframePlugin` enables opt-in per-entity wireframe rendering used
-        // by the Line sketch's `hand_mesh` module. It is registered here in
-        // `SketchesPlugin` (not in `wc_core::CorePlugin`) because:
-        //
-        // 1. `bevy_pbr` is a heavy rendering dependency with no business in
-        //    the headless-friendly `wc-core` crate.
-        // 2. `WireframePlugin::build()` calls `init_asset::<WireframeMaterial>`,
-        //    which requires `AssetPlugin`; that is not part of `MinimalPlugins`
-        //    used in `wc-core`'s unit tests — placing it in `CorePlugin` would
-        //    break those tests.
-        //
-        // `WireframePlugin::finish()` checks `WgpuFeatures::POLYGON_MODE_LINE`
-        // and bails with a warning on hardware that doesn't support it; the
-        // rest of the app continues unaffected.
-        app.add_plugins(bevy::pbr::wireframe::WireframePlugin::default());
+        // Note: Bevy's `WireframePlugin` is intentionally NOT registered. It
+        // requires `WgpuFeatures::POLYGON_MODE_LINE`, which Metal does not
+        // support, so it no-ops on macOS and bones rendered solid. The Line
+        // sketch's `hand_mesh` module instead draws bones as `LineList` meshes
+        // with a custom `BoneWireframeMaterial` (see
+        // `line::bone_wireframe`), which is Metal-safe and — unlike the closed
+        // wireframe/gizmo pipelines — shader- and post-process-extensible. Its
+        // `MaterialPlugin` is registered by `LineHandMeshPlugin`.
         app.add_plugins(line::LinePlugin);
     }
 }

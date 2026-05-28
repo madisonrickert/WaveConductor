@@ -28,6 +28,7 @@
 
 pub mod attractor_visuals;
 pub mod audio_coupling;
+pub mod bone_wireframe;
 pub mod compute;
 pub mod hand_mesh;
 pub mod heatmap;

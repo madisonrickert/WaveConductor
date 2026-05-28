@@ -67,7 +67,7 @@
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{CameraOutputMode, ScalingMode};
-use bevy::pbr::wireframe::{Wireframe, WireframeColor};
+use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
 use bevy::render::view::Hdr;
@@ -75,6 +75,12 @@ use wc_core::input::entity::{BoneCenters, TrackedHand, BONE_COUNT};
 use wc_core::input::projection::palm_to_world;
 use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
+
+use super::bone_wireframe::{icosphere_line_mesh, BoneWireframeMaterial};
+
+/// Radius of each bone wireframe icosphere, in logical pixels (the overlay
+/// camera maps 1 world unit to 1 logical pixel).
+const BONE_RADIUS: f32 = 10.0;
 
 /// `RenderLayers` index for the Camera3d wireframe pass.
 ///
@@ -121,7 +127,8 @@ pub struct LineHandMeshPlugin;
 
 impl Plugin for LineHandMeshPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Line), spawn_hand_mesh_camera)
+        app.add_plugins(MaterialPlugin::<BoneWireframeMaterial>::default())
+            .add_systems(OnEnter(AppState::Line), spawn_hand_mesh_camera)
             .add_systems(
                 OnExit(AppState::Line),
                 (despawn_hand_mesh_camera, despawn_all_bone_children),
@@ -228,7 +235,7 @@ fn ensure_bone_meshes(
     mut commands: Commands<'_, '_>,
     new_hands: Query<'_, '_, Entity, (With<TrackedHand>, Without<HandMeshBones>)>,
     meshes: Option<ResMut<'_, Assets<Mesh>>>,
-    materials: Option<ResMut<'_, Assets<StandardMaterial>>>,
+    materials: Option<ResMut<'_, Assets<BoneWireframeMaterial>>>,
 ) {
     // Steady state: every tracked hand already has bones. Bail before touching
     // the asset stores so the common path does no work.
@@ -239,27 +246,14 @@ fn ensure_bone_meshes(
         return;
     };
 
-    let color = hand_mesh_color();
-
-    // Build the shared sphere mesh + bone material once per reconcile call and
-    // clone the handles onto every bone of every hand processed this call —
-    // avoids one mesh/material allocation per bone.
-    //
-    // `ico(1)` only fails on subdivisions ≥ 80; using 1 is statically safe.
-    #[allow(
-        clippy::expect_used,
-        reason = "ico(1) only fails if subdivisions >= 80; 1 is statically safe"
-    )]
-    let sphere_mesh = meshes.add(
-        Sphere::new(10.0)
-            .mesh()
-            .ico(1)
-            .expect("ico(1) is well within the 79-subdivision limit"),
-    );
-    let bone_material = materials.add(StandardMaterial {
-        base_color: color,
-        unlit: true,
-        ..default()
+    // Build the shared LineList wireframe mesh + bone material once per
+    // reconcile call and clone the handles onto every bone of every hand
+    // processed this call — avoids one mesh/material allocation per bone. The
+    // LineList mesh renders as a true wireframe on Metal (no
+    // `POLYGON_MODE_LINE`); see `super::bone_wireframe`.
+    let line_mesh = meshes.add(icosphere_line_mesh(BONE_RADIUS));
+    let bone_material = materials.add(BoneWireframeMaterial {
+        color: hand_mesh_color().to_linear(),
     });
 
     for hand in &new_hands {
@@ -269,10 +263,8 @@ fn ensure_bone_meshes(
             .with_children(|parent_builder| {
                 for i in 0..BONE_COUNT {
                     parent_builder.spawn((
-                        Mesh3d(sphere_mesh.clone()),
+                        Mesh3d(line_mesh.clone()),
                         MeshMaterial3d(bone_material.clone()),
-                        Wireframe,
-                        WireframeColor { color },
                         HAND_MESH_LAYER,
                         BoneIndex(i),
                         Transform::default(),

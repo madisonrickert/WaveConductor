@@ -42,10 +42,11 @@ bevy = { version = "0.18", default-features = false, features = [
     # not usable. We pick AgX to get soft highlight rolloff on the HDR
     # output of the Line gravity post-process before SDR clamp.
     "tonemapping_luts",
-    # `bevy_pbr` is required for wireframe rendering (Plan 11.6 Phase 13):
-    # `bevy::pbr::wireframe::WireframePlugin` lives in this sub-crate. Also
-    # enables `StandardMaterial`, `Camera3d`, and the core 3D render path used
-    # by the Line sketch's `hand_mesh` module for bone sphere visualization.
+    # `bevy_pbr` provides the 3D render path the Line sketch's `hand_mesh`
+    # module uses for bone visualization: `Camera3d`, `Mesh3d`/`MeshMaterial3d`,
+    # and the `Material`/`MaterialPlugin` infrastructure behind the custom
+    # `BoneWireframeMaterial` (LineList wireframe bones — Metal-safe, unlike
+    # `WireframePlugin`, which needs the unsupported `POLYGON_MODE_LINE`).
     "bevy_pbr",
     "x11",
     "wayland",
