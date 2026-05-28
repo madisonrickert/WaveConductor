@@ -95,6 +95,18 @@ fn draw_dev_panel(world: &mut World) {
     let ctx = ctx.clone();
     state.apply(world);
 
+    // Snapshot the provider registry before entering the egui closure so that
+    // `world` is free for `ui_for_world`'s exclusive `&mut World` borrow later.
+    // `Option<(ProviderId, ProviderStatus, ProviderDiagnostics)>` is `Clone` and
+    // cheap to copy for the diagnostic strings that live on the stack.
+    let registry_snapshot: Option<(
+        Option<crate::input::provider::ProviderId>,
+        crate::input::state::ProviderStatus,
+        crate::input::state::ProviderDiagnostics,
+    )> = world
+        .get_resource::<crate::input::provider::ProviderRegistry>()
+        .map(|r| (r.primary_id(), r.primary_status(), r.primary_diagnostics()));
+
     bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
         .order(bevy_egui::egui::Order::Foreground)
         .fixed_pos(bevy_egui::egui::pos2(16.0, 60.0))
@@ -116,6 +128,18 @@ fn draw_dev_panel(world: &mut World) {
                             .size(13.0),
                     );
                     ui.separator();
+
+                    // Hand Tracking section — curated diagnostics from the multi-axis
+                    // ProviderStatus + ProviderDiagnostics. Falls back silently if the
+                    // resource doesn't exist (e.g., feature off, or pre-install state).
+                    //
+                    // Snapshot into locals before the closure so `world` is fully
+                    // released by the time `ui_for_world` takes its `&mut World` borrow.
+                    if let Some((primary_id, status, diag)) = &registry_snapshot {
+                        draw_hand_tracking_section(ui, *primary_id, status, diag);
+                        ui.separator();
+                    }
+
                     bevy_egui::egui::ScrollArea::vertical()
                         .max_height((window_height - 200.0).max(100.0))
                         .show(ui, |ui| {
@@ -123,6 +147,122 @@ fn draw_dev_panel(world: &mut World) {
                         });
                 },
             );
+        });
+}
+
+/// Renders the curated "HAND TRACKING" diagnostic grid inside the dev panel.
+///
+/// Called only when `ProviderRegistry` exists in the world. Surfaces every
+/// axis of [`crate::input::state::ProviderStatus`] plus the string fields
+/// from [`crate::input::state::ProviderDiagnostics`] so developers can
+/// diagnose connection, device, and streaming issues without opening a
+/// separate tool.
+///
+/// `primary_id` is `None` when the registry exists but has no providers
+/// registered yet (e.g., early in a test harness setup).
+fn draw_hand_tracking_section(
+    ui: &mut bevy_egui::egui::Ui,
+    primary_id: Option<crate::input::provider::ProviderId>,
+    status: &crate::input::state::ProviderStatus,
+    diag: &crate::input::state::ProviderDiagnostics,
+) {
+    use crate::input::state::{DevicePresence, ServiceConnection, TrackingFlow};
+
+    ui.label(
+        bevy_egui::egui::RichText::new("HAND TRACKING")
+            .size(13.0),
+    );
+    ui.add_space(4.0);
+
+    bevy_egui::egui::Grid::new("hand_tracking_diag")
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Provider:");
+            ui.label(primary_id.map_or("(none)", |id| id.label()));
+            ui.end_row();
+
+            ui.label("Service:");
+            let s = match status.service {
+                ServiceConnection::NotStarted => "Not started",
+                ServiceConnection::Connecting => "Connecting",
+                ServiceConnection::Connected => "Connected",
+                ServiceConnection::ServiceMissing => "Service not running",
+                ServiceConnection::Disconnected => "Disconnected",
+                ServiceConnection::Errored => "Errored",
+            };
+            ui.label(s);
+            ui.end_row();
+
+            ui.label("Device:");
+            let d = match status.device {
+                DevicePresence::NoDevice => "No device",
+                DevicePresence::Attached => "Attached",
+                DevicePresence::Lost => "Lost",
+                DevicePresence::Failed => "Failed",
+            };
+            if matches!(status.device, DevicePresence::Attached) {
+                if let Some(serial) = diag.device_serial.as_deref() {
+                    ui.label(format!("{d} ({serial})"));
+                } else {
+                    ui.label(d);
+                }
+            } else {
+                ui.label(d);
+            }
+            ui.end_row();
+
+            ui.label("Health:");
+            if status.health.is_empty() {
+                ui.label("(none)");
+            } else {
+                ui.label(format!("{:?}", status.health));
+            }
+            ui.end_row();
+
+            ui.label("Streaming:");
+            match status.streaming {
+                TrackingFlow::NotStreaming => {
+                    ui.label("Not streaming");
+                }
+                TrackingFlow::Streaming {
+                    last_frame_ago,
+                    dropped_since_start,
+                } => {
+                    ui.label(format!(
+                        "Streaming  ·  last frame {} ms ago  ·  {} dropped",
+                        last_frame_ago.as_millis(),
+                        dropped_since_start
+                    ));
+                }
+            }
+            ui.end_row();
+
+            ui.label("Service health:");
+            if status.service_health.is_empty() {
+                ui.label("(none)");
+            } else {
+                ui.label(format!("{:?}", status.service_health));
+            }
+            ui.end_row();
+
+            ui.label("SDK version:");
+            ui.label(diag.sdk_version.as_deref().unwrap_or("(unknown)"));
+            ui.end_row();
+
+            ui.label("Active policies:");
+            if diag.active_policies.is_empty() {
+                ui.label("(none)");
+            } else {
+                ui.label(diag.active_policies.join(", "));
+            }
+            ui.end_row();
+
+            if let Some(err) = diag.last_error.as_deref() {
+                ui.label("Last error:");
+                ui.label(err);
+                ui.end_row();
+            }
         });
 }
 
