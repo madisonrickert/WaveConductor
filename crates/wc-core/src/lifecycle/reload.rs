@@ -183,7 +183,12 @@ mod tests {
     #[test]
     fn idle_alpha_is_zero() {
         let s = SketchReloadState::default();
-        assert_eq!(s.overlay_alpha(Duration::from_secs(0)), 0.0);
+        // Idle phase produces the constant 0.0 — strict equality is the
+        // right shape, matching the `switch_alpha_is_one` test below.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(s.overlay_alpha(Duration::from_secs(0)), 0.0);
+        }
     }
 
     #[test]
@@ -198,16 +203,26 @@ mod tests {
 
     #[test]
     fn switch_alpha_is_one() {
-        let mut s = SketchReloadState::default();
-        s.phase = ReloadPhase::Switch;
-        assert_eq!(s.overlay_alpha(Duration::from_secs(5)), 1.0);
+        let s = SketchReloadState {
+            phase: ReloadPhase::Switch,
+            ..Default::default()
+        };
+        // During Switch, the overlay sits at full opacity regardless of
+        // elapsed time — `overlay_alpha` returns the constant 1.0, so a
+        // strict equality check is the right shape here.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(s.overlay_alpha(Duration::from_secs(5)), 1.0);
+        }
     }
 
     #[test]
     fn fade_in_ramps_one_to_zero() {
-        let mut s = SketchReloadState::default();
-        s.phase = ReloadPhase::FadeIn;
-        s.started_at = Duration::ZERO;
+        let s = SketchReloadState {
+            phase: ReloadPhase::FadeIn,
+            started_at: Duration::ZERO,
+            ..Default::default()
+        };
         // At start of FadeIn: alpha should be ~1.
         assert!(s.overlay_alpha(Duration::ZERO) > 0.99);
         // At end of FadeIn: alpha should be ≤ 0.

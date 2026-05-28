@@ -115,7 +115,7 @@ fn load_line_background() -> BackgroundSampleAsset {
 /// pixels into a soft halo, then a tonemapping pass rolls highlights off
 /// into the displayable range before the SDR swapchain present.
 ///
-/// This is **not** HDR display output — WaveConductor targets SDR LCD TVs
+/// This is **not** HDR display output — `WaveConductor` targets SDR LCD TVs
 /// and projectors. We never write HDR signals to the cable.
 ///
 /// ### Why HDR is necessary
@@ -126,18 +126,18 @@ fn load_line_background() -> BackgroundSampleAsset {
 /// 1.0. Without HDR, those values clip in the view target before
 /// tonemapping has any chance to roll off highlights softly — the gravity
 /// rings render as dim instead of glowy. With HDR, the bright accumulator
-/// values flow into bloom (soft scatter) and AgX (perceptual rolloff)
+/// values flow into bloom (soft scatter) and `AgX` (perceptual rolloff)
 /// before being clamped to display range.
 ///
-/// ### Tonemapping choice: AgX
+/// ### Tonemapping choice: `AgX`
 ///
-/// AgX is a Sobotka tonemap that desaturates highlights as they brighten,
+/// `AgX` is a Sobotka tonemap that desaturates highlights as they brighten,
 /// matching how film and the human eye respond to overexposure. Compared
-/// to `TonyMcMapface` (the Bevy default) AgX has slightly more aggressive
+/// to `TonyMcMapface` (the Bevy default) `AgX` has slightly more aggressive
 /// desaturation and a more film-like response curve, which suits the
 /// Line sketch's saturated chromatic samples. The `tonemapping_luts`
 /// Bevy feature is required (enabled in the workspace `Cargo.toml`) to
-/// supply the AgX LUT KTX2 asset.
+/// supply the `AgX` LUT KTX2 asset.
 ///
 /// ### Bloom parameters
 ///
