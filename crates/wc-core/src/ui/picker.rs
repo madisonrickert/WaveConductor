@@ -343,15 +343,17 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
     //   12 px  spacing
     //   13 px  Madison Rickert hyperlink
     //   13 px  Rich Trapani hyperlink
+    //    8 px  spacing
+    //   12 px  Ultraleap attribution
     //   16 px  spacing
     //   11 px  Open Source Licenses label
     //   ──────
-    //  113 px  total
+    //  133 px  total
     #[allow(
         clippy::items_after_statements,
         reason = "constant is local to this function and belongs beside its usage context"
     )]
-    const CREDITS_CONTENT_HEIGHT: f32 = 113.0;
+    const CREDITS_CONTENT_HEIGHT: f32 = 133.0;
     let mut child_ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect)
@@ -429,6 +431,15 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
             .size(13.0)
             .color(style.text_color_dim),
         "https://lovetech.org",
+    );
+    child_ui.add_space(8.0);
+
+    // Ultraleap attribution (vendor/leapc/ATTRIBUTION.md short form).
+    // Required by the Ultraleap Enterprise Tracking Licence §5(b).
+    child_ui.label(
+        egui::RichText::new("Hand tracking by Ultraleap.")
+            .size(12.0)
+            .color(style.text_color_dim),
     );
     child_ui.add_space(16.0);
 
