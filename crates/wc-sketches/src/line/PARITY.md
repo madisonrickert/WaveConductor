@@ -58,7 +58,7 @@ Plan 10 landed the bulk of the parity work: multi-attractor physics, the gravity
 The first hands-on run on 2026-05-25 surfaced four parity gaps that Plan 11 will close before signing:
 
 1. **Attractor ring rotation invisible.** `bevy::math::primitives::Annulus` is rotationally symmetric, so the per-frame `(10 - idx) / 20 * power` rotation has no visible effect. v4's rings appear visibly spinning. Plan 11 swaps to a low-segment polygon (`RegularPolygon` with 6–8 sides) or a stroked custom mesh whose corners make rotation legible.
-2. **Touch and hand-tracking cannot activate the attractor.** `update_mouse_attractor` reads `Res<ButtonInput<MouseButton>>::just_pressed(Left)` only. Pointer position routes correctly from touch/hand into `PointerState`, but only the mouse triggers press/release. v4 used pointer events that fired for both. Plan 11 adds `Res<Touches>` for `TouchPhase::Started`/`Ended` and a hand-tracking gesture for synthetic press.
+2. ~~**Touch and hand-tracking cannot activate the attractor.**~~ **RESOLVED.** `update_mouse_attractor` now reads `Res<Touches>` (`iter_just_pressed`/`iter_just_released`) alongside the mouse, so touch presses activate the attractor (egui-capture-gated like the mouse). Hand activation is handled by the separate `LineHandAttractor` (grab → power) on `TrackedHand` entities. Touch still wants a touchscreen to confirm hands-on; the hand path is synthetically verified.
 3. **`spawn_template` lacks a file picker.** Currently a free-text input — typing absolute paths is a poor kiosk UX. Plan 11 adds an `rfd`-backed Browse… button next to the field.
 4. **Manual side-by-side capture not yet performed.** The human-in-the-loop step below is what flips this verdict from PENDING to PASS.
 
@@ -120,9 +120,17 @@ pass to flip the scenarios above to PASS, but the code-level gaps are closed:
   (previously the `Add<TrackedHand>` observers fired during `Home` and were
   missed).
 
-Remaining open parity gaps from the Verdict section unchanged by this pass:
-touch-event attractor activation (gap #2, needs a touchscreen to verify),
-`spawn_template` file picker (gap #3), and the human side-by-side capture
-(gap #4). Ring-rotation legibility (gap #1) is handled by the gyroscope's
-scale-oscillation + elliptical-Z spin rather than the polygon swap originally
-proposed.
+Remaining open parity gaps from the Verdict section after this pass:
+
+- **Gap #1 (ring rotation legibility + hand rings):** closed. Rotation reads via
+  the gyroscope's scale-oscillation + elliptical-Z spin (not the polygon swap
+  originally proposed), and hand attractors now show the gyroscope.
+- **Gap #2 (touch/hand activation):** code-complete (touch via `Res<Touches>`;
+  hand via `LineHandAttractor`). Touch wants a touchscreen for hands-on sign-off.
+- **Gap #3 (`spawn_template` file picker):** still open — needs an `rfd`-backed
+  Browse button (a new dependency + a native dialog that can't be verified
+  headlessly, so deferred to a session with Madison in the loop).
+- **Gap #4 (human side-by-side v4 capture):** human-bound, unchanged.
+
+The autonomously-achievable, verifiable parity gaps are now closed; gaps #3 and
+#4 need hardware / a GUI dialog / a human, so they await Madison's pass.
