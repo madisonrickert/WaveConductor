@@ -29,6 +29,21 @@ sudo apt-get install -y \
 
 macOS and Windows have no extra prerequisites beyond Rust.
 
+### LeapC SDK
+
+WaveConductor links directly to LeapC, with platform-specific runtime
+libraries vendored in `vendor/leapc/`. A fresh clone has everything
+needed to build and run — no separate Ultraleap SDK installation is
+required on the build host.
+
+End-users running the released binary still need the Ultraleap *tracking
+service* running on their machine for the device to be detected. See
+`https://www.ultraleap.com/downloads/leap-motion-controller/` for the
+service installer.
+
+To refresh the vendored libraries from a newer SDK release, see
+`vendor/leapc/README.md`.
+
 ## Deployment hardware
 
 WaveConductor's primary install target is an unattended gallery kiosk running for 8+ hours at a stretch. The constraints that shape the box: a WebGPU-class GPU (compute-shader particle path, no WebGL2/CPU fallback), a Leap Motion Controller as the primary input modality, and sustained thermal stability over peak FPS.
@@ -52,7 +67,7 @@ WaveConductor's primary install target is an unattended gallery kiosk running fo
 |---|---|---|
 | Windows 11 | ✓ Full | Ultraleap Gemini SDK — the well-trodden path. |
 | Ubuntu 22.04 LTS | ✓ Works | Gemini ships a `.deb`; only Ubuntu LTS is officially supported. |
-| macOS | ✗ | Ultraleap dropped macOS support with Gemini (V5). The Leap Motion Controller 2 has no macOS driver. A Mac mini is excellent for everything else, but cannot drive the kiosk's Leap input. |
+| macOS | ✓ Partial | Ultraleap 6.x retains driver support for the original Leap Motion Controller (V1) on macOS. The Leap Motion Controller 2 (Gemini-only) has no macOS driver — use V1 hardware. WaveConductor's macOS dev path uses this combination. |
 
 The 8-hour soak harness (`cargo xtask soak-test --duration 8h`) is the authoritative gate before any release tag — confirm any candidate box passes it on the deployment hardware before committing to an install.
 
@@ -66,3 +81,8 @@ The 8-hour soak harness (`cargo xtask soak-test --duration 8h`) is the authorita
 ## License
 
 See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+WaveConductor includes hand-tracking technology from Ultraleap
+(`https://www.ultraleap.com/`). Ultraleap Tracking SDK 6.2.0.
