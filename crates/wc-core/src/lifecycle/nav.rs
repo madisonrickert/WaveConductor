@@ -1,5 +1,5 @@
 //! Translates [`WaveConductorAction`] presses into [`AppState`] transitions and
-//! window-level effects (fullscreen toggle, quit).
+//! window-level effects (fullscreen toggle).
 
 use bevy::prelude::*;
 use bevy::window::WindowMode;
@@ -10,14 +10,11 @@ use super::state::AppState;
 
 /// Reads `Res<ActionState<WaveConductorAction>>` and translates `just_pressed`
 /// events into navigation transitions and side effects.
-///
-/// Note: Bevy 0.18 renamed `EventWriter` to `MessageWriter`.
 pub fn handle_navigation_actions(
     actions: Res<'_, ActionState<WaveConductorAction>>,
     current: Res<'_, State<AppState>>,
     mut next: ResMut<'_, NextState<AppState>>,
     mut windows: Query<'_, '_, &mut Window>,
-    mut exit: MessageWriter<'_, AppExit>,
 ) {
     use WaveConductorAction as A;
 
@@ -55,11 +52,6 @@ pub fn handle_navigation_actions(
             };
             tracing::info!(mode = ?window.mode, "toggle fullscreen");
         }
-    }
-
-    if actions.just_pressed(&A::Quit) {
-        tracing::info!("quit requested");
-        exit.write(AppExit::Success);
     }
 
     // ToggleVolume is handled by crate::audio::nav::handle_volume_toggle (Plan 4).

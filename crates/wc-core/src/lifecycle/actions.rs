@@ -35,8 +35,6 @@ pub enum WaveConductorAction {
     ToggleDevPanel,
     /// Toggle fullscreen (`F11`). Handled by the lifecycle plugin.
     ToggleFullscreen,
-    /// Quit the application (`Ctrl+Q`). macOS `Cmd+Q` is handled by the OS and never reaches the app.
-    Quit,
 }
 
 /// Build the default `InputMap<WaveConductorAction>` matching v4's hotkey table.
@@ -74,13 +72,6 @@ pub fn default_input_map() -> InputMap<WaveConductorAction> {
         ButtonlikeChord::modified(ModifierKey::Shift, KeyCode::KeyD),
     );
 
-    // Platform-specific quit: Ctrl+Q on all platforms (Cmd+Q is handled by macOS
-    // natively; the binding here fires on Ctrl+Q / Cmd+Q via ModifierKey::Control).
-    map.insert(
-        A::Quit,
-        ButtonlikeChord::modified(ModifierKey::Control, KeyCode::KeyQ),
-    );
-
     map
 }
 
@@ -104,7 +95,6 @@ mod tests {
             WaveConductorAction::ToggleVolume,
             WaveConductorAction::ToggleDevPanel,
             WaveConductorAction::ToggleFullscreen,
-            WaveConductorAction::Quit,
         ] {
             assert!(
                 map.get_buttonlike(&action).is_some(),
