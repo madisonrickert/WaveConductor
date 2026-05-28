@@ -1,15 +1,19 @@
 //! `PreUpdate` systems for the hand-tracking plugin.
 //!
-//! Three systems, chained:
+//! Systems, chained in order:
 //!
 //! 1. [`poll_all_providers`] — calls `poll()` on every registered provider,
 //!    stamping each emitted frame with the provider's [`super::provider::ProviderId`].
-//! 2. [`update_hand_tracking_state`] — folds raw frames into the
-//!    [`HandTrackingState`] resource and [`ButtonInput<HandButton>`] resource.
-//! 3. [`detect_gestures`] — examines previous-vs-current button state and
+//! 2. [`fuse_hand_frames`] — combines all provider frames into a single
+//!    [`super::state::FusedHandFrame`] stream.
+//! 3. [`sync_hand_entities`] — diffs fused frames against [`TrackedHand`]
+//!    entities, spawning / updating / despawning as needed.
+//! 4. [`mirror_state_resource`] — derives the [`HandTrackingState`] resource
+//!    and [`ButtonInput<HandButton>`] resource from the entity query each tick.
+//! 5. [`detect_gestures`] — examines previous-vs-current button state and
 //!    emits [`HandGestureEvent`] for each transition.
 //!
-//! All three run in `PreUpdate` under the same `InputSystems` set Bevy uses
+//! All systems run in `PreUpdate` under the same `InputSystems` set Bevy uses
 //! for its own input systems, so downstream `Update` consumers see fresh
 //! state.
 
@@ -51,43 +55,6 @@ pub fn poll_all_providers(
             frame.provider = slot.id;
             frames.write(frame);
         }
-    }
-}
-
-/// Folds raw frames into the [`HandTrackingState`] resource and updates the
-/// [`ButtonInput<HandButton>`] resource based on pinch/grab strength
-/// crossings.
-///
-/// Hysteresis: a button is `press`'d when strength rises above
-/// [`PRESS_THRESHOLD`], `release`'d when it falls below [`RELEASE_THRESHOLD`].
-/// The gap prevents flicker around the boundary.
-pub fn update_hand_tracking_state(
-    mut reader: MessageReader<'_, '_, HandTrackingFrame>,
-    mut state: ResMut<'_, HandTrackingState>,
-    mut buttons: ResMut<'_, ButtonInput<HandButton>>,
-) {
-    // Clear last-frame edge state before processing new events.
-    buttons.bypass_change_detection().clear();
-
-    // Process all frames that arrived this tick (typically 1).
-    for frame in reader.read() {
-        state.ingest(frame);
-    }
-
-    // Update button state from the now-current HandTrackingState. We re-derive
-    // every frame from continuous strengths rather than tracking edges in the
-    // provider — this keeps the truth in one place.
-    for hand in state.iter() {
-        update_button(
-            &mut buttons,
-            pick_button(hand.chirality, false),
-            hand.pinch_strength,
-        );
-        update_button(
-            &mut buttons,
-            pick_button(hand.chirality, true),
-            hand.grab_strength,
-        );
     }
 }
 
@@ -264,6 +231,18 @@ fn bone_centers_from_landmarks(
     ]
 }
 
+/// Read-only components fetched per [`TrackedHand`] entity during the
+/// mirror pass. Named to satisfy `clippy::type_complexity`.
+type TrackedHandReadComponents<'w> = (
+    &'w HandId,
+    &'w crate::input::hand::Chirality,
+    &'w PalmPosition,
+    &'w PalmVelocity,
+    &'w PinchStrength,
+    &'w GrabStrength,
+    &'w Landmarks,
+);
+
 /// Components fetched per [`TrackedHand`] entity during update.
 /// Named to satisfy `clippy::type_complexity`.
 type TrackedHandComponents<'w> = (
@@ -344,5 +323,70 @@ pub fn sync_hand_entities(
     for (key, entity) in stale {
         commands.entity(entity).despawn();
         entity_table.remove(&key);
+    }
+}
+
+/// Each tick, mirror [`HandTrackingState`] (and `ButtonInput<HandButton>`)
+/// from the current [`TrackedHand`] entity query.
+///
+/// This keeps existing resource-style consumers (`pointer_merge_system`,
+/// and any future systems that prefer the resource idiom) working without
+/// refactor while the new entity model becomes the source of truth.
+///
+/// Runs after `sync_hand_entities` in the input chain — derives state from
+/// queries, not from raw frames.
+pub fn mirror_state_resource(
+    tracked: Query<'_, '_, TrackedHandReadComponents<'_>, With<TrackedHand>>,
+    time: Res<'_, Time>,
+    mut state: ResMut<'_, HandTrackingState>,
+    mut buttons: ResMut<'_, ButtonInput<HandButton>>,
+) {
+    use smallvec::SmallVec;
+
+    use crate::input::hand::Hand;
+
+    let now = time.elapsed();
+
+    // Build a fresh frame snapshot from the entity query.
+    let mut hands: SmallVec<[Hand; MAX_HANDS]> = SmallVec::new();
+    for (id, chirality, palm, vel, pinch, grab, lms) in tracked.iter() {
+        hands.push(Hand {
+            id: id.0,
+            chirality: *chirality,
+            palm_position: palm.0,
+            // palm_normal isn't tracked per-entity yet — sketches that need
+            // it can extend this in a future plan. Default to Vec3::Y.
+            palm_normal: bevy::math::Vec3::Y,
+            palm_velocity: vel.0,
+            pinch_strength: pinch.0,
+            grab_strength: grab.0,
+            landmarks: lms.0,
+        });
+    }
+    let frame = HandTrackingFrame {
+        // Best-effort tag for the resource view — the resource doesn't
+        // expose provenance, so this stamping only matters for ingest()
+        // implementations that read frame.provider. None do today.
+        provider: ProviderId::Leap,
+        hands,
+        timestamp: now,
+    };
+    state.ingest(&frame);
+
+    // Re-derive `ButtonInput<HandButton>` from the just-mirrored state.
+    // bypass_change_detection().clear() resets just_pressed/just_released
+    // cleanly each frame so threshold-cross events fire on the right tick.
+    buttons.bypass_change_detection().clear();
+    for hand in state.iter() {
+        update_button(
+            &mut buttons,
+            pick_button(hand.chirality, false),
+            hand.pinch_strength,
+        );
+        update_button(
+            &mut buttons,
+            pick_button(hand.chirality, true),
+            hand.grab_strength,
+        );
     }
 }

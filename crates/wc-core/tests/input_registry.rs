@@ -9,7 +9,7 @@ use wc_core::input::entity::TrackedHand;
 use wc_core::input::hand::{Chirality, Hand, LANDMARK_COUNT};
 use wc_core::input::provider::{ProviderId, ProviderRegistry, ProviderRole};
 use wc_core::input::providers::mock::MockProvider;
-use wc_core::input::state::HandTrackingFrame;
+use wc_core::input::state::{HandTrackingFrame, HandTrackingState};
 use wc_core::input::HandTrackingPlugin;
 
 fn test_hand(id: u32, chirality: Chirality) -> Hand {
@@ -84,6 +84,29 @@ fn tracked_hand_despawns_when_hand_leaves_frame_stream() {
         let count_after_2 = world.query::<&TrackedHand>().iter(world).count();
         assert_eq!(count_after_2, 0);
     }
+}
+
+#[test]
+fn hand_tracking_state_mirrors_entity_query() {
+    let mut app = make_app();
+
+    let mut registry = ProviderRegistry::default();
+    let mock = MockProvider::with_frames([frame_with(
+        vec![
+            test_hand(1, Chirality::Right),
+            test_hand(2, Chirality::Left),
+        ],
+        10,
+    )]);
+    registry.register(ProviderId::Mock, ProviderRole::Simulator, Box::new(mock));
+    app.insert_resource(registry);
+
+    app.update();
+
+    let state = app.world().resource::<HandTrackingState>();
+    assert_eq!(state.active_hand_count(), 2);
+    assert!(state.right().is_some());
+    assert!(state.left().is_some());
 }
 
 #[test]

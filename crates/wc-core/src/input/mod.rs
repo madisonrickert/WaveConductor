@@ -13,7 +13,11 @@
 //! see fresh state.
 //!
 //! ```text
-//! Provider::poll → Messages<HandTrackingFrame> → systems::update_hand_tracking_state
+//! Provider::poll → Messages<HandTrackingFrame> → fuse_hand_frames
+//!                                                ↓
+//!                                                sync_hand_entities (TrackedHand ECS)
+//!                                                ↓
+//!                                                mirror_state_resource
 //!                                                ↓
 //!                                                Res<HandTrackingState>
 //!                                                Res<ButtonInput<HandButton>>
@@ -102,7 +106,7 @@ impl Plugin for HandTrackingPlugin {
                     systems::poll_all_providers,
                     systems::fuse_hand_frames,
                     systems::sync_hand_entities,
-                    systems::update_hand_tracking_state,
+                    systems::mirror_state_resource,
                     systems::detect_gestures,
                     pointer_merge_system,
                 )

@@ -18,8 +18,8 @@ pub const MAX_HANDS: usize = 2;
 
 /// Current snapshot of all active hands.
 ///
-/// Updated each `PreUpdate` by [`crate::input::systems::update_hand_tracking_state`]
-/// from the latest [`HandTrackingFrame`].
+/// Updated each `PreUpdate` by [`crate::input::systems::mirror_state_resource`]
+/// from the current [`TrackedHand`] entity query.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct HandTrackingState {
     /// Active hands as of [`Self::timestamp`]. Provider order; do not assume
@@ -71,10 +71,11 @@ impl HandTrackingState {
 
     /// Replace the state with the contents of a frame.
     ///
-    /// Production write path is [`crate::input::systems::update_hand_tracking_state`]
-    /// (driven from `Messages<HandTrackingFrame>`). Promoted to `pub` in Plan 11
-    /// so integration tests can synthesize hand frames without a fake provider —
-    /// see `crates/wc-sketches/tests/line_input.rs::hand_pinch_activates_mouse_attractor`.
+    /// Production write path is [`crate::input::systems::mirror_state_resource`]
+    /// (derives state from the [`crate::input::entity::TrackedHand`] entity query).
+    /// Promoted to `pub` in Plan 11 so integration tests can synthesize hand
+    /// frames without a fake provider — see
+    /// `crates/wc-sketches/tests/line_input.rs::hand_pinch_activates_mouse_attractor`.
     pub fn ingest(&mut self, frame: &HandTrackingFrame) {
         self.hands.clear();
         for hand in &frame.hands {
