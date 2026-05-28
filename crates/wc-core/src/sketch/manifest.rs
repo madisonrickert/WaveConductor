@@ -71,6 +71,11 @@ impl RegisterSketchManifestExt for App {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions — panicking on unexpected None is the correct behaviour"
+)]
 mod tests {
     use super::*;
 

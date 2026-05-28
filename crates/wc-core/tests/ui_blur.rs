@@ -20,6 +20,11 @@
 //! [`BackdropBlurNode`]: wc_core::ui::blur::node::BackdropBlurNode
 
 #![cfg(not(target_arch = "wasm32"))]
+#![allow(
+    clippy::expect_used,
+    clippy::map_unwrap_or,
+    reason = "test assertions and idiomatic Option handling in test code"
+)]
 
 use bevy::prelude::*;
 use bevy::render::RenderApp;

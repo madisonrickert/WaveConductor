@@ -150,8 +150,8 @@ fn line_soak_8h() {
 /// This exercises the `AutoFadePlugin` / `UiOpacity` code paths over the same
 /// ~1.7 M updates as the baseline soak, toggling `UiOpacity::current` between
 /// 1.0 (visible) and 0.0 (hidden) every 3600 ticks (≈ 60 seconds at 60 fps).
-/// The BackdropBlurPlugin, OverlayButtonsPlugin, and SketchPickerPlugin all
-/// run under `MinimalPlugins` (no RenderApp), so the GPU-side paths are not
+/// The `BackdropBlurPlugin`, `OverlayButtonsPlugin`, and `SketchPickerPlugin` all
+/// run under `MinimalPlugins` (no `RenderApp`), so the GPU-side paths are not
 /// exercised — the goal is CPU/schedule stability across enable/disable cycles.
 ///
 /// ## Running the soak
