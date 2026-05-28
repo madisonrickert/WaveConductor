@@ -45,6 +45,7 @@ pub mod entity;
 pub mod gesture;
 pub mod hand;
 pub mod pointer;
+pub mod projection;
 pub mod provider;
 pub mod providers;
 pub mod state;
