@@ -51,10 +51,13 @@ impl Plugin for LineLeapAttractorsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LineFocalHand>()
             .register_type::<LineHandAttractor>()
-            .add_observer(attach_line_attractor_on_spawn)
             .add_systems(
                 Update,
-                (update_line_hand_attractors, pick_line_focal_hand)
+                (
+                    ensure_line_attractors,
+                    update_line_hand_attractors,
+                    pick_line_focal_hand,
+                )
                     .chain()
                     .run_if(sketch_active(AppState::Line)),
             )
@@ -62,19 +65,24 @@ impl Plugin for LineLeapAttractorsPlugin {
     }
 }
 
-/// Observer: when a `TrackedHand` is spawned, attach `LineHandAttractor`
-/// IF Line is currently the active state.
-fn attach_line_attractor_on_spawn(
-    trigger: On<'_, '_, Add, TrackedHand>,
-    state: Res<'_, State<AppState>>,
+/// Reconcile pass (runs while Line is the active sketch): attach
+/// [`LineHandAttractor`] to every [`TrackedHand`] that doesn't already have it.
+///
+/// Replaces an earlier `Add<TrackedHand>` observer gated on `AppState::Line`.
+/// That observer missed hands that were already being tracked when Line began —
+/// hand-tracking runs in `PreUpdate`, *before* the `StateTransition` into Line,
+/// so those hands were added while the state was still `Home` and never got an
+/// attractor (no gravity pull from a hand held up as you entered the sketch).
+/// A `Without<LineHandAttractor>` reconcile is timing-independent and idempotent
+/// — see [`crate::line::hand_mesh::ensure_bone_meshes`], which fixes the
+/// identical issue for the bone visuals.
+fn ensure_line_attractors(
     mut commands: Commands<'_, '_>,
+    new_hands: Query<'_, '_, Entity, (With<TrackedHand>, Without<LineHandAttractor>)>,
 ) {
-    if *state.get() != AppState::Line {
-        return;
+    for hand in &new_hands {
+        commands.entity(hand).insert(LineHandAttractor::default());
     }
-    commands
-        .entity(trigger.event_target())
-        .insert(LineHandAttractor::default());
 }
 
 /// Cleanup: remove `LineHandAttractor` from all entities on Line exit.

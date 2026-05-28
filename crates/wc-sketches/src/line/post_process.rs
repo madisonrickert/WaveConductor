@@ -258,13 +258,17 @@ pub struct LinePostProcessNode;
 
 impl ViewNode for LinePostProcessNode {
     // `&'static Hdr` here is a query filter, not a payload — Bevy's view-node
-    // runner skips any camera that lacks `Hdr`, so the pipeline (which targets
-    // `Rgba16Float`) only ever runs against the main Camera2d's HDR
-    // intermediate. Without this, Plan 11.6's `HandMeshCompositorCamera`
-    // (a non-HDR Camera2d at `order = 2` that draws the off-screen bone
-    // image onto the swap chain) also got dispatched through Core2d and
-    // wgpu panicked on the `Rgba8UnormSrgb` ↔ `Rgba16Float` attachment
-    // mismatch.
+    // runner skips any Core2d camera that lacks `Hdr`, so the pipeline (which
+    // targets `Rgba16Float`) only ever runs against an HDR camera's
+    // intermediate. The main Line `Camera2d` is the only Core2d camera, so this
+    // matches just it. (The hand-mesh overlay is a `Camera3d` on the Core3d
+    // graph — see `crate::line::hand_mesh` — so it never reaches this Core2d
+    // node regardless of its HDR setting.) The gate is kept defensively: an
+    // earlier Plan 11.6 design added a second, non-HDR `Camera2d` to composite
+    // the overlay; without this filter that camera was also dispatched through
+    // Core2d and wgpu panicked on the `Rgba8UnormSrgb` ↔ `Rgba16Float`
+    // attachment mismatch. The filter stays so any future non-HDR `Camera2d`
+    // can coexist safely.
     type ViewQuery = (&'static ViewTarget, &'static Hdr);
 
     fn run<'w>(

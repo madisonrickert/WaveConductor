@@ -11,7 +11,7 @@
 //!
 //! - `sync_hand_entities` correctly updates existing entities in place
 //!   for a steady provider stream (key reused = entity reused).
-//! - `LineHandAttractor` observers and per-frame systems don't churn
+//! - `LineHandAttractor` reconcile + per-frame systems don't churn
 //!   memory across hundreds of thousands of ticks.
 //! - The `palm_to_world` projection + EMA power update don't drift.
 //!
@@ -85,7 +85,7 @@ fn leap_path_entity_count_stays_bounded() {
     let mut app = sketches_test_app();
     app.update();
 
-    // Enter Line so LineHandAttractor's OnEnter observers attach.
+    // Enter Line so the per-hand LineHandAttractor reconcile system runs.
     tap_key(&mut app, KeyCode::Digit1);
     for _ in 0..3 {
         app.update();
@@ -107,7 +107,7 @@ fn leap_path_entity_count_stays_bounded() {
     app.insert_resource(registry);
 
     // Settle a few ticks so the first frame flows through and the
-    // observer attaches the LineHandAttractor.
+    // reconcile system attaches the LineHandAttractor.
     for _ in 0..5 {
         app.update();
     }
