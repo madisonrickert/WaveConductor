@@ -20,7 +20,7 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 9 | Line audio + reactivity coupling | ✅ shipped | `v5-line-audio` |
 | 10 | Line polish + heatmap spawn + soak harness | 🟡 shipped, parity gaps deferred to Plan 11 | — |
 | 11 | Line parity completion (rings, touch/hand activation, file picker, audio re-tune) | ✅ code shipped | — (tag deferred) |
-| 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ⏳ Line parity gate | `v5-overlay-ui` |
+| 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ✅ code shipped | — (tag deferred to 11.7) |
 | 11.6 | Hand-tracking provider + Leap manual verification | ⏳ Line parity gate | `v5-leap-verified` |
 | 11.7 | Final `PARITY.md` sign-off + tag (after 11.5 + 11.6) | ⏳ closing step | `v5-line-parity` |
 | 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
@@ -52,7 +52,6 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
 - **Sketch-side `IsReadyToSleep` veto hook** in `crates/wc-core/src/lifecycle/idle.rs`. Currently `advance_activity` transitions on elapsed time alone; this plan adds a `bevy::ecs::system::SystemId` or `Resource<Option<fn(&World) -> bool>>` mechanism so a sketch can keep itself `Active` while attractor power is still decaying. Without it, Line will go `Idle` mid-fling.
 - **Architectural decision: CPU mirror of particle state.** Maintain `Vec<Particle>` on the host alongside the GPU storage buffer. The sim runs both — GPU for render, CPU as authoritative state for `ParticleStats` (Plan 9). Adds ~50µs/frame at 12k particles; trivial compared to the alternative of a per-frame GPU readback stall. Lock in this data shape now so Plan 9 doesn't churn it.
 
-**Est. effort:** 5–7 days.
 
 ### Plan 8 — Line rendering parity
 
@@ -67,8 +66,6 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
 - Render-graph integration: post-process node attached after the Core2d main pass, reads the rendered scene as input texture and writes the gravity-smeared output.
 - Uniforms wired from main world: `G`, `iMouseFactor`, `gamma`, `iMouse`, `iResolution`, `iGlobalTime` (driven from `Time` + temporary constants — Plan 9 plugs in the audio-reactive values).
 - New setting: `gamma: f32` (default 1.0, dev category, no restart).
-
-**Est. effort:** 3–5 days.
 
 ### Plan 9 — Line audio + reactivity coupling
 
@@ -104,7 +101,7 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
   - `(1/15) / (groupedUpness + 1) → shader iMouseFactor`
 - All synth-param writes flow through the `AudioCommandSender` ring; never block.
 
-**Est. effort:** 7–10 days. The big risks are fundsp API drift from v4 Web Audio semantics and the mp3 decoding decision.
+**Risks:** fundsp API drift from v4 Web Audio semantics and the mp3 decoding decision.
 
 ### Plan 10 — Line polish + PARITY sign-off
 
@@ -118,7 +115,6 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
 - Idle / screensaver behavioral parity check — v4 uses `idleTimeoutSeconds = 30` and `screenSaverTimeoutSeconds = 30` (additive). Match the totals in v5's `InteractionTimer` config.
 - 8-hour soak test on Line — required per AGENTS.md before any release tag. Lock in the harness now so subsequent sketches inherit it.
 
-**Est. effort:** 3–4 days.
 
 **Outcome:** Plan 10 shipped the heatmap-image spawn, the 8-hour soak harness, and the Phase-0 carry-forward drain. The first manual run (2026-05-25) surfaced four parity gaps that the implementation pass alone couldn't catch — they require eyes-on testing or out-of-scope features — and so deferred to Plan 11 rather than being shoehorned into Plan 10's "polish" scope.
 
@@ -143,9 +139,9 @@ The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the pos
 - **Overlay UI chrome** (translucent buttons, settings panel styling, nav, auto-fade) — kept out of the sketch scope and landed as **Plan 11.5**, the other Line parity gate.
 - **Manual side-by-side `PARITY.md` sign-off and `v5-line-parity` tag** — moved to the final step after 11.6 lands. The capture only makes sense against a build with the overlay UI and Leap operation in place.
 
-**Est. effort:** Shipped. Final breakdown: ~5 days (Phases A–D, the subagent-driven code passes) + ~3 days (Phase F, the audio re-tune that grew well past its original scope).
+**Status:** Shipped across Phases A–D (subagent-driven code passes) plus Phase F (audio re-tune that grew well past its original scope).
 
-**Total Line code parity:** ~20–29 days from Plan 7 start to Plan 11 code-complete. Plans 11.5 and 11.6 add another ~5–9 days of manual-gate work, and the final sign-off step closes the loop with the `v5-line-parity` tag.
+The final sign-off step closes the loop with the `v5-line-parity` tag once Plans 11.5, 11.6, and 11.7 land.
 
 ### Plan 11.5 — Overlay UI parity (Line parity gate)
 
@@ -162,9 +158,24 @@ One of the two manual gates that stand between Plan 11's code-complete tag and L
 
 **Why a parity gate:** Madison's first hands-on run after Plan 11 surfaced that the UI surface is still missing relative to v4 — without it, the kiosk install doesn't pass the "looks like v4" bar. Doing this before the next sketch port also means Plans 12+ wire into a finished UI shell instead of inheriting Line's minimal placeholder; doing it after every sketch would mean re-touching each one to retrofit the chrome.
 
-**Est. effort:** 3–5 days. Most of the cost is matching v4's pixel/animation feel rather than the underlying state machine.
+**Cost shape:** the bulk of the work was hands-on visual parity iteration after the initial implementation landed, not the underlying state machine. Plan-writing time estimates proved much too optimistic against the actual back-and-forth of matching v4's pixel/animation feel.
 
-**Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time.
+**Shipped:** All five sub-plugins (Style, BackdropBlur, AutoFade, Buttons, Picker) landed plus the `SketchManifest` registry. The two settings panels are restyled. The Line sketch gained the picker tile (display name "Gravity" per v4) with sheen-on-hover and play-icon overlay. Audio properly silences on Home (cpal stream pauses). Sketch reload routes through a fade-overlay state machine (FadeOut → Switch → FadeIn) so settings changes never flash the picker.
+
+**Approved deviations from v4** (record in `PARITY.md` when Plan 11.7 runs):
+- `panel_stroke` alpha 20 → 60 (v4 literal: rgba(255,255,255,0.08)); needed for visibility against the dark blurred backdrop.
+- `button_stroke` alpha 38 → 76 (v4 literal: rgba(255,255,255,0.15)); same reason.
+- `panel_fill` alpha 204 → 160 (v4 literal: rgba(0,0,0,0.8)); browser `backdrop-filter` compositing lifts apparent brightness in a way Bevy's straight-alpha pipeline does not — tint reduced so the blur is visibly present.
+- Overlay buttons use `backdrop_blur_frame` (v4 has no `backdrop-filter` on buttons); produces frosted-glass on buttons too.
+- Sketch reload uses a fade-overlay state machine; v4 applies settings instantly. v5's behavior is intentionally smoother.
+- Sheen-on-hover uses a horizontal-strip sweep with manually-applied 30° rotation; v4 uses CSS `transform: rotate(30deg)` on a vertical strip. Visually close.
+- Credits cell "Open Source Licenses" link is plain text; v4 has an internal `/licenses` route. v5 has no in-app licenses page.
+- Panel-title letter-spacing uses egui defaults; egui has no built-in letter-spacing knob (v4 used `letter-spacing: 0.04em`).
+
+**Scope items from the original 11.5 spec that did NOT ship** (rolled to `next-plan-carry-forwards.md`):
+- Fullscreen toggle overlay button (the `WaveConductorAction::ToggleFullscreen` keybinding exists; the button does not).
+- Info/About overlay button.
+- Section grouping in the dev panel (only the user panel renders sections; dev panel still flat).
 
 ### Plan 11.6 — Hand-tracking provider + Leap manual verification (Line parity gate)
 
@@ -187,7 +198,7 @@ The second of the two manual gates between Plan 11's code-complete tag and Line 
 - **Mediapipe / webcam fallback provider** — kiosk targets Leap exclusively. Mediapipe is a future hand-tracking option if Madison wants to demo on a laptop without the Leap controller, but not a parity gate.
 - **In-air gestures beyond pinch** (grab, swipe, point) — Line uses pinch only. Future sketches that need richer gestures will extend `HandGestureEvent` and the gesture-detection systems.
 
-**Est. effort:** 2–4 days. Risk lives in (1) `leaprs` crate ergonomics — last-touched several years ago, may need patching — and (2) the projection calibration against actual kiosk mounting.
+**Risks:** (1) `leaprs` crate ergonomics — last-touched several years ago, may need patching — and (2) the projection calibration against actual kiosk mounting.
 
 **Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time of writing.
 
@@ -206,7 +217,7 @@ The closing step of the Line workstream. Runs once 11.5 (overlay UI) and 11.6 (L
 - **`PARITY.md` verdict** flipped from PENDING → PASS. Pinned v4 reference commit recorded. Capture artifacts (screenshots + audio) checked into `docs/parity/line/` or linked from `PARITY.md`.
 - **Tag `v5-line-parity`** on `rewrite/bevy` at the verdict commit. Push to origin.
 
-**Est. effort:** 0.5–1 day. Mostly mechanical capture work — the substance lives in 11, 11.5, and 11.6.
+Mostly mechanical capture work — the substance lives in 11, 11.5, and 11.6.
 
 ## Beyond Line
 
