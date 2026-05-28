@@ -7,50 +7,75 @@
 //! (one per bone) on [`HAND_MESH_LAYER`]. A dedicated [`HandMeshCamera3d`]
 //! renders those bones and composites them on top of the Line scene.
 //!
-//! ## Compositing: a same-window overlay camera (native multi-camera path)
+//! ## Compositing: a glowing HDR overlay camera (native multi-camera path)
 //!
 //! [`HandMeshCamera3d`] targets the **same window** as the Line scene's main
-//! HDR `Camera2d`, at a higher [`Camera::order`], and uses
-//! [`CameraOutputMode::Write`] with [`BlendState::ALPHA_BLENDING`] to
-//! alpha-blend its output **over** the main camera's already-tonemapped frame.
+//! HDR `Camera2d`, at a higher [`Camera::order`]. It is itself an **HDR** camera
+//! with its own [`Tonemapping`] + [`Bloom`], so the bones — which emit values
+//! `> 1.0` (their colour × [`BONE_GLOW_INTENSITY`]) — bloom into a neon glow:
+//! the bright wireframe cores roll toward white under the tone curve while the
+//! halo keeps the `#add6b6` hue. It composites over the main camera's
+//! already-tonemapped frame via [`CameraOutputMode::Write`].
 //!
-//! This is Bevy's first-class multi-camera-same-window mechanism, not a custom
-//! render-graph node or a UI overlay:
+//! This is Bevy's first-class multi-camera-same-window mechanism (not a custom
+//! render-graph node or a UI overlay). `CameraDriverNode` runs camera sub-graphs
+//! in ascending `order` within one frame's command buffer, so the bones
+//! composite over the *current* frame — no inter-frame lag. The bone camera is
+//! a `Camera3d` (Core3d graph), so the Line gravity post-process (a Core2d node)
+//! never touches the bones.
 //!
-//! - Both cameras render into their own intermediate textures but blit to the
-//!   **one** window surface (keyed only by render target). The
-//!   `UpscalingNode` blit's blend state comes from `output_mode.blend_state`,
-//!   so `ALPHA_BLENDING` (`SrcAlpha / OneMinusSrcAlpha`) gives straight-alpha
-//!   OVER compositing — correct color (the engine's own blit, no egui gamma
-//!   round-trip) and correct edge blending.
-//! - `CameraDriverNode` runs camera sub-graphs in ascending `order` within a
-//!   single frame's command buffer, so the bones composite over the *current*
-//!   frame's scene — no inter-frame lag.
-//! - Because the bone camera is a `Camera3d` it renders through the **Core3d**
-//!   graph, so the Line gravity post-process (a **Core2d** node) and the main
-//!   camera's bloom never touch the bones.
+//! Three subtleties make this correct — each hard-won:
 //!
-//! ### HDR must match
+//! ### 1. `Msaa::Off` — the load-bearing scene-preservation fix
 //!
-//! The bone camera carries [`Hdr`] to match the main camera. Mixing HDR and
-//! non-HDR cameras on one window is a known-flaky Bevy path (bevyengine/bevy
-//! #18901, #17530); matching HDR and setting `output_mode` explicitly (rather
-//! than relying on the default auto-blend heuristic) is the supported
-//! configuration.
+//! Bevy caches each camera's intermediate ping-pong textures (and the atomic
+//! that swaps them) keyed by `(render target, usage, hdr, msaa)`. Two HDR
+//! cameras on the **same window with the same MSAA** therefore *share* one
+//! intermediate + swap atomic — and the overlay's tonemapping `post_process`
+//! swap then corrupts the main camera's frame (this was the "dim parts of the
+//! gravity scene disappear / tonemapping thrown off" bug). Giving the overlay
+//! `Msaa::Off` changes its cache key so it gets its **own** intermediate,
+//! isolated from the main camera. (Lines don't benefit from MSAA coverage
+//! anyway, so this is free.)
+//!
+//! ### 2. `PREMULTIPLIED_ALPHA_BLENDING` — so the glow halo survives compositing
+//!
+//! Bevy's bloom leaves the alpha channel untouched (its upsample blends alpha
+//! `Zero / One`) and tonemapping passes alpha through. The overlay clears to
+//! `(0,0,0,0)`, so after bloom the glow *halo* has bright RGB but alpha ≈ 0,
+//! while bone *cores* are opaque (alpha 1). Straight `ALPHA_BLENDING`
+//! (`SrcAlpha / …`) would multiply the halo by `≈0` and **drop the glow**.
+//! `PREMULTIPLIED_ALPHA_BLENDING` (`One / OneMinusSrcAlpha`) instead *adds* the
+//! halo over the scene (`src.rgb·1 + dst·(1−0)`) while opaque cores replace it
+//! (`src + dst·0`) — exactly neon-over-scene, in one blend.
+//!
+//! ### 3. Explicit `Tonemapping` + per-overlay `Bloom`
+//!
+//! `Camera3d` requires a `Tonemapping` component; we set it explicitly
+//! (`TonyMcMapface`, which desaturates highlights to a clean white core — the
+//! tonemapper Bevy's bloom docs recommend) rather than relying on the default.
+//! `Bloom` is per-camera; the main camera's doesn't reach this one, so the
+//! overlay carries its own. (`Tonemapping::None` is NOT an option — its node
+//! early-returns, leaving raw linear values mis-encoded to the SDR swapchain.)
 //!
 //! ### Why not earlier attempts
 //!
 //! 1. A `Camera3d` on the swap chain at `order = 1` with
 //!    `ClearColorConfig::None` *as the main-pass clear* — bones accumulated
-//!    (the camera's own target was never reset between frames). The fix is to
-//!    clear the main pass to transparent (`Custom(Color::NONE)`) while leaving
-//!    only the *output* write un-clearing (`output_mode.clear_color = None`).
+//!    (the camera's own target was never reset between frames). Fixed by
+//!    clearing the main pass to transparent (`Custom(Color::NONE)`) while
+//!    leaving only the *output* write un-clearing (`output_mode.clear_color`).
 //! 2. A second non-HDR compositor `Camera2d` drawing an off-screen image as a
-//!    sprite — never composited, because HDR/non-HDR mismatch on one window is
-//!    the open Bevy bug above.
+//!    sprite — never composited (relied on the default auto-blend heuristic;
+//!    the explicit `output_mode` is the fix).
 //! 3. An egui overlay painting an off-screen render target — worked, but egui
 //!    re-gamma-encodes user textures (wrong bone color), assumes premultiplied
 //!    alpha (edge fringing), and gave no same-frame ordering guarantee.
+//! 4. An HDR overlay with default MSAA (matching the main camera) — shared the
+//!    main camera's intermediate texture and corrupted the scene (see §1); and a
+//!    *non-HDR* overlay rendered the bones correctly but clamped to `[0,1]`,
+//!    foreclosing the HDR glow. The current design (HDR + `Msaa::Off`) keeps the
+//!    glow headroom without the corruption.
 //!
 //! ## Data flow
 //!
@@ -67,10 +92,12 @@
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{CameraOutputMode, ScalingMode};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::pbr::MaterialPlugin;
+use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
-use bevy::render::view::Hdr;
+use bevy::render::view::{Hdr, Msaa};
 use wc_core::input::entity::{BoneCenters, TrackedHand, BONE_COUNT};
 use wc_core::input::projection::palm_to_world;
 use wc_core::lifecycle::state::AppState;
@@ -81,6 +108,12 @@ use super::bone_wireframe::{icosphere_line_mesh, BoneWireframeMaterial};
 /// Radius of each bone wireframe icosphere, in logical pixels (the overlay
 /// camera maps 1 world unit to 1 logical pixel).
 const BONE_RADIUS: f32 = 10.0;
+
+/// Emissive multiplier on the bone colour. Pushing the linear `#add6b6` above
+/// `1.0` is what makes the bones bloom into a neon glow on the HDR overlay
+/// camera (the bright cores roll toward white under tonemapping; the halo keeps
+/// the hue). Tunable; `~3–8` is the tasteful range.
+const BONE_GLOW_INTENSITY: f32 = 5.0;
 
 /// `RenderLayers` index for the Camera3d wireframe pass.
 ///
@@ -142,37 +175,68 @@ impl Plugin for LineHandMeshPlugin {
     }
 }
 
-/// `OnEnter(AppState::Line)` — spawn the overlay `Camera3d` that rasterizes the
-/// bones and alpha-composites them over the Line scene.
+/// `OnEnter(AppState::Line)` — spawn the HDR overlay `Camera3d` that rasterizes
+/// the bones, blooms them into a glow, and composites them over the Line scene.
+///
+/// See the module docs for the three load-bearing details: `Msaa::Off` (so the
+/// overlay's intermediate texture doesn't collide with the main HDR camera's and
+/// corrupt the scene), `PREMULTIPLIED_ALPHA_BLENDING` (so the bloom glow halo —
+/// bright RGB, ~0 alpha — composites additively while opaque bone cores
+/// replace), and the explicit `Tonemapping` + per-overlay `Bloom` that produce
+/// the neon glow.
 fn spawn_hand_mesh_camera(mut commands: Commands<'_, '_>) {
     commands.spawn((
         HandMeshCamera3d,
         Camera3d::default(),
+        // HDR intermediate: gives the emissive bones (`> 1.0`) headroom to bloom
+        // instead of clamping at `1.0`.
+        Hdr,
+        // Critical: a distinct MSAA setting from the main HDR camera so this
+        // overlay gets its OWN intermediate ping-pong textures. Sharing them
+        // (same `(target, usage, hdr, msaa)` key) let the overlay's tonemapping
+        // swap corrupt the main scene — the "dim parts disappear" bug. Lines
+        // gain nothing from MSAA, so disabling it is free.
+        Msaa::Off,
+        // Explicit (not the required-component default). TonyMcMapface
+        // desaturates the bright bone cores to a clean white, leaving the halo
+        // hued — the neon look. Independent of the main camera's AgX.
+        Tonemapping::TonyMcMapface,
+        // Per-camera bloom: the main camera's bloom doesn't reach this one.
+        // `threshold: 0.0` blooms everything (the bones are the only content);
+        // EnergyConserving (from `Bloom::NATURAL`) pairs with a zero threshold.
+        Bloom {
+            intensity: 0.25,
+            low_frequency_boost: 0.7,
+            prefilter: BloomPrefilter {
+                threshold: 0.0,
+                threshold_softness: 0.0,
+            },
+            ..Bloom::NATURAL
+        },
         Camera {
             // Higher than the main Camera2d (order 0): `CameraDriverNode` runs
             // sub-graphs in ascending order within one frame's command buffer,
-            // so the bones blit *after* — and thus on top of — the scene.
+            // so the bones blit *after* — on top of — the scene.
             order: 1,
             // Main-pass clear: reset this camera's own intermediate to fully
             // transparent every frame so last frame's bones are gone before
-            // this frame draws. (Using `None` here was the original smear bug.)
+            // this frame draws, and so the cleared backdrop is premultiplied-
+            // valid `(0,0,0,0)`. (Using `None` here was the original smear.)
             clear_color: ClearColorConfig::Custom(Color::NONE),
-            // Output write: blit this camera's result onto the shared window
-            // surface with straight-alpha OVER (`ALPHA_BLENDING` =
-            // `SrcAlpha / OneMinusSrcAlpha`), and DON'T clear the window —
+            // Output write: blit onto the shared window surface with
+            // premultiplied-alpha OVER (`One / OneMinusSrcAlpha`) so the bloom
+            // glow halo (bright RGB, alpha ~0) adds over the scene while opaque
+            // bone cores (alpha 1) replace it. DON'T clear the window —
             // preserving the main camera's tonemapped frame underneath.
             output_mode: CameraOutputMode::Write {
-                blend_state: Some(BlendState::ALPHA_BLENDING),
+                blend_state: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 clear_color: ClearColorConfig::None,
             },
             ..default()
         },
-        // Match the main camera's HDR so both share a compatible window-output
-        // path (see module docs: HDR-mismatch multi-camera is a Bevy bug).
-        Hdr,
         // Orthographic, 1 world unit = 1 logical pixel (matches the main
-        // Camera2d and `palm_to_world`'s logical-pixel output), centred at the
-        // world origin. `near`/`far` straddle the bone z-plane (z = 0).
+        // Camera2d and `palm_to_world`'s logical-pixel output), centred at
+        // the world origin. `near`/`far` straddle the bone z-plane (z = 0).
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::WindowSize,
             near: -1000.0,
@@ -252,8 +316,17 @@ fn ensure_bone_meshes(
     // LineList mesh renders as a true wireframe on Metal (no
     // `POLYGON_MODE_LINE`); see `super::bone_wireframe`.
     let line_mesh = meshes.add(icosphere_line_mesh(BONE_RADIUS));
+    // Emissive bone colour: scale the linear `#add6b6` above 1.0 so the HDR
+    // overlay camera blooms it into a glow. Alpha stays 1.0 so bone cores are
+    // opaque for the premultiplied-alpha composite (the glow halo carries its
+    // own near-zero alpha; see the module docs).
+    let base = hand_mesh_color().to_linear();
     let bone_material = materials.add(BoneWireframeMaterial {
-        color: hand_mesh_color().to_linear(),
+        color: LinearRgba::rgb(
+            base.red * BONE_GLOW_INTENSITY,
+            base.green * BONE_GLOW_INTENSITY,
+            base.blue * BONE_GLOW_INTENSITY,
+        ),
     });
 
     for hand in &new_hands {

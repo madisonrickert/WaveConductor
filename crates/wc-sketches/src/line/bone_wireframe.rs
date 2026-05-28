@@ -41,9 +41,12 @@ const BONE_ICO_SUBDIVISIONS: u32 = 1;
 /// logic for richer effects without touching the overlay-compositing setup.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct BoneWireframeMaterial {
-    /// Flat line color in linear space. The shader writes it straight to the
-    /// overlay camera's HDR target; that camera's output blit handles the sRGB
-    /// encode, so `Color::to_linear()` round-trips to the intended on-screen hue.
+    /// Flat **emissive** line color in linear space, written straight to the
+    /// overlay camera's HDR target. Values `> 1.0` are intended: the caller
+    /// scales the base hue by an intensity (see
+    /// `crate::line::hand_mesh::BONE_GLOW_INTENSITY`) so the HDR overlay's bloom
+    /// turns the bones into a neon glow. Keep `alpha = 1.0` so bone cores are
+    /// opaque for the premultiplied-alpha composite.
     #[uniform(0)]
     pub color: LinearRgba,
 }
