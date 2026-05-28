@@ -21,7 +21,7 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 10 | Line polish + heatmap spawn + soak harness | 🟡 shipped, parity gaps deferred to Plan 11 | — |
 | 11 | Line parity completion (rings, touch/hand activation, file picker, audio re-tune) | ✅ code shipped | — (tag deferred) |
 | 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ✅ code shipped | — (tag deferred to 11.7) |
-| 11.6 | Hand-tracking provider + Leap manual verification | ⏳ Line parity gate | `v5-leap-verified` |
+| 11.6 | Hand-tracking provider + Leap manual verification | ✅ code shipped | — (tag deferred to 11.7) |
 | 11.7 | Final `PARITY.md` sign-off + tag (after 11.5 + 11.6) | ⏳ closing step | `v5-line-parity` |
 | 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
 

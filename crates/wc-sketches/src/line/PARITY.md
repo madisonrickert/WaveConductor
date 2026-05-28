@@ -74,3 +74,21 @@ The first hands-on run on 2026-05-25 surfaced four parity gaps that Plan 11 will
 3. **Mid-decay (~5s after release)** — power decays geometrically, idle veto holds the sketch Active, audio reactivity tracks `groupedUpness` back down through silence.
 
 **Known remaining parity deviations after Plan 11 closes:** none expected. The CPU mirror integration drift listed under "Approved deviations" is the only documented divergence and is bounded at ≤1% over long timescales — imperceptible at the festival-loop horizon.
+
+## Leap-path hands-on verification (Plan 11.6)
+
+Plan 11.6 lands the real `LeaprsProvider` + per-hand `LineHandAttractor` + HandMesh visualization. The nine scenarios below cover the Leap input surface end-to-end; Madison runs them with `cargo run -p waveconductor` and an Ultraleap-connected Mac. Each verdict starts PENDING and flips to PASS / FAIL / NEEDS_FIX with notes during the hands-on pass.
+
+| # | Scenario | v4 behaviour | v5 verdict | Notes |
+|---|---|---|---|---|
+| 1 | **Service detection.** Stop the Ultraleap service via Activity Monitor; status LED should turn red ("Ultraleap service not running"). Restart the service; LED should transition through `ServiceOnly` (orange) → `DeviceAttached` (blue) → `Streaming` (green) within a few seconds. | ✓ | PENDING | |
+| 2 | **Background-frames policy.** Toggle the `leap_background` setting in the user panel. Focus another window; with the setting OFF, the dev panel's `last_frame_ago` should freeze. With the setting ON, frames should keep arriving even when the WaveConductor window is not focused. | ✓ | PENDING | |
+| 3 | **Grab above threshold spawns attractor.** Close fist over the Leap; particles should converge to the projected hand position. Open the hand; particles should disperse as `LineHandAttractor.power` geometrically decays. | ✓ | PENDING | |
+| 4 | **Hold-with-motion.** Sustain a closed-fist grab while moving the hand laterally across the Leap's view; the attractor should follow the palm without visible lag. | ✓ | PENDING | |
+| 5 | **Two hands → two attractors.** Both fists closed simultaneously; two converging particle clusters should appear at the two projected palm positions, each driven by its own `LineHandAttractor`. | ✓ | PENDING | |
+| 6 | **Focal point follows first hand.** Hand A enters the tracking volume and grabs; gravity-smear focal point locks to A. Hand B enters later and grabs harder; focal point should stay on A (the lowest-index Entity). Drop A out of the volume; focal point should transfer to B on the next frame. | ✓ | PENDING | |
+| 7 | **HandMesh visual.** Confirm ~20 small green (#add6b6) wireframe spheres per hand, tracking bone positions. Scope note: bones render on top of the Camera2d output but NOT through the HDR/bloom/AgX pipeline (Phase 13 punt — see carry-forward below). | ✓ | PENDING | |
+| 8 | **Smudged sensor.** Smear the Leap sensor lens with a fingerprint; within a few seconds the status LED should turn yellow ("Tracking degraded") and the Shift+D dev panel's "Health:" row should show `SMUDGED`. | ✓ | PENDING | |
+| 9 | **USB unplug mid-session.** Pull the Leap's USB cable mid-session; status LED should red, all `TrackedHand` entities should despawn (including their HandMesh children — verify via dev panel entity count), no crash. Reconnect; tracking should recover within a few seconds. | ✓ | PENDING | |
+
+**FAIL or NEEDS_FIX entries:** any verdict that lands in those states gets a follow-up `fix:` commit. Once all nine flip to PASS, Plan 11.7 can perform the side-by-side capture and flip the top-level Verdict from PENDING to PASS.
