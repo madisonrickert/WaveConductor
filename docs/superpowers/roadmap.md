@@ -160,7 +160,7 @@ One of the two manual gates that stand between Plan 11's code-complete tag and L
 
 **Cost shape:** the bulk of the work was hands-on visual parity iteration after the initial implementation landed, not the underlying state machine. Plan-writing time estimates proved much too optimistic against the actual back-and-forth of matching v4's pixel/animation feel.
 
-**Shipped:** All five sub-plugins (Style, BackdropBlur, AutoFade, Buttons, Picker) landed plus the `SketchManifest` registry. The two settings panels are restyled. The Line sketch gained the picker tile (display name "Gravity" per v4) with sheen-on-hover and play-icon overlay. Audio properly silences on Home (cpal stream pauses). Sketch reload routes through a fade-overlay state machine (FadeOut → Switch → FadeIn) so settings changes never flash the picker.
+**Shipped:** All five sub-plugins (Style, BackdropBlur, AutoFade, Buttons, Picker) landed plus the `SketchManifest` registry. The two settings panels are restyled. The Line sketch gained the picker tile (display name "Gravity" per v4) with sheen-on-hover and play-icon overlay. Audio properly silences on Home (cpal stream pauses). Sketch reload routes through a fade-overlay state machine (FadeOut → Switch → FadeIn) so settings changes never flash the picker. Internal HDR rendering pipeline (`Rgba16Float` ViewTarget end-to-end, `Tonemapping::AgX`, `Bloom { intensity: 0.15, ..Bloom::NATURAL }`) landed alongside the chrome work to fix the gravity post-process being tonally compressed against an SDR target — verified at gamma 1.3 on 2026-05-27.
 
 **Approved deviations from v4** (record in `PARITY.md` when Plan 11.7 runs):
 - `panel_stroke` alpha 20 → 60 (v4 literal: rgba(255,255,255,0.08)); needed for visibility against the dark blurred backdrop.
@@ -171,6 +171,7 @@ One of the two manual gates that stand between Plan 11's code-complete tag and L
 - Sheen-on-hover uses a horizontal-strip sweep with manually-applied 30° rotation; v4 uses CSS `transform: rotate(30deg)` on a vertical strip. Visually close.
 - Credits cell "Open Source Licenses" link is plain text; v4 has an internal `/licenses` route. v5 has no in-app licenses page.
 - Panel-title letter-spacing uses egui defaults; egui has no built-in letter-spacing knob (v4 used `letter-spacing: 0.04em`).
+- v5 uses Bevy's HDR rendering pipeline + AgX tonemap + post-process bloom on the primary camera. v4's WebGL canvas effectively renders to float-precision and the browser tonemaps to display; the v5 HDR work matches that pipeline rather than deviating from it. Bloom (intensity 0.15, `Bloom::NATURAL` composite) is a deliberate v5-only enhancement sitting on top of v4's gravity-post-process glow — at low intensity it lifts the perceptual brightness of star sprites without blowing out highlights. Future sketches inherit this pipeline; bloom-per-sketch tuning is not yet user-exposed (param lives in `crates/waveconductor/src/main.rs`).
 
 **Scope items from the original 11.5 spec that did NOT ship** (rolled to `next-plan-carry-forwards.md`):
 - Fullscreen toggle overlay button (the `WaveConductorAction::ToggleFullscreen` keybinding exists; the button does not).
