@@ -87,8 +87,42 @@ Plan 11.6 lands the real `LeaprsProvider` + per-hand `LineHandAttractor` + HandM
 | 4 | **Hold-with-motion.** Sustain a closed-fist grab while moving the hand laterally across the Leap's view; the attractor should follow the palm without visible lag. | ✓ | PENDING | |
 | 5 | **Two hands → two attractors.** Both fists closed simultaneously; two converging particle clusters should appear at the two projected palm positions, each driven by its own `LineHandAttractor`. | ✓ | PENDING | |
 | 6 | **Focal point follows first hand.** Hand A enters the tracking volume and grabs; gravity-smear focal point locks to A. Hand B enters later and grabs harder; focal point should stay on A (the lowest-index Entity). Drop A out of the volume; focal point should transfer to B on the next frame. | ✓ | PENDING | |
-| 7 | **HandMesh visual.** Confirm ~20 small green (#add6b6) wireframe spheres per hand, tracking bone positions. Scope note: bones render on top of the Camera2d output but NOT through the HDR/bloom/AgX pipeline (Phase 13 punt — see carry-forward below). | ✓ | PENDING | |
+| 7 | **HandMesh visual.** Confirm ~20 small green (#add6b6) wireframe spheres per hand, tracking bone positions. Scope note (updated, see "Autonomous follow-up" below): bones now render as `LineList` wireframes through a **dedicated HDR + bloom overlay camera** and glow (the Phase-13 "not through any HDR/bloom" punt is resolved — they go through their own bloom pipeline, not the main camera's). | ✓ | PENDING | Synthetically verified; needs hardware sign-off. |
 | 8 | **Smudged sensor.** Smear the Leap sensor lens with a fingerprint; within a few seconds the status LED should turn yellow ("Tracking degraded") and the Shift+D dev panel's "Health:" row should show `SMUDGED`. | ✓ | PENDING | |
 | 9 | **USB unplug mid-session.** Pull the Leap's USB cable mid-session; status LED should red, all `TrackedHand` entities should despawn (including their HandMesh children — verify via dev panel entity count), no crash. Reconnect; tracking should recover within a few seconds. | ✓ | PENDING | |
 
 **FAIL or NEEDS_FIX entries:** any verdict that lands in those states gets a follow-up `fix:` commit. Once all nine flip to PASS, Plan 11.7 can perform the side-by-side capture and flip the top-level Verdict from PENDING to PASS.
+
+## Autonomous follow-up (post-11.6, hardware-free)
+
+Worked without a Leap, verified against the synthetic-hand fixture
+(`WAVECONDUCTOR_HAND_PROVIDER=synthetic`, which sweeps a grabbing hand across the
+full range) plus screenshot analysis. These still need Madison's hands-on Leap
+pass to flip the scenarios above to PASS, but the code-level gaps are closed:
+
+- **HandMesh now renders on Metal + glows.** `WireframePlugin` needs
+  `POLYGON_MODE_LINE` (unsupported on Metal), so bones rendered solid / not at
+  all. Bones are now `LineList` wireframe icospheres with a custom
+  `BoneWireframeMaterial`, drawn by a dedicated overlay `Camera3d`
+  (`Hdr` + `TonyMcMapface` + per-camera `Bloom`) and composited with
+  `PREMULTIPLIED_ALPHA_BLENDING`, so they glow neon. `Msaa::Off` on the overlay
+  keeps its intermediate texture from colliding with the main HDR camera's
+  (which had corrupted the scene's tonemapping — "dim parts disappear"). The
+  material/overlay are the shader/post-process extension point for the bones.
+- **Full range of motion (gap: hand clamped before the edge).** Removed the 20%
+  `SCREEN_DEADZONE`; the full Leap range now maps to the full window, so the hand
+  mesh + attractor reach the window edges.
+- **Ring gyroscope for hand attractors (gap #1 hand path).** The attractor ring
+  visual was mouse-only; it now spawns one gyroscope per source (mouse + each
+  grabbing hand), matching v4.
+- **Entry-time hand state.** Bones + `LineHandAttractor` are now reconciled each
+  frame, so a hand already tracked when Line begins gets bones + gravity
+  (previously the `Add<TrackedHand>` observers fired during `Home` and were
+  missed).
+
+Remaining open parity gaps from the Verdict section unchanged by this pass:
+touch-event attractor activation (gap #2, needs a touchscreen to verify),
+`spawn_template` file picker (gap #3), and the human side-by-side capture
+(gap #4). Ring-rotation legibility (gap #1) is handled by the gyroscope's
+scale-oscillation + elliptical-Z spin rather than the polygon swap originally
+proposed.
