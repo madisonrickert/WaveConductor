@@ -70,9 +70,11 @@ fn main() {
             CorePlugin,
             SketchesPlugin,
         ))
-        .add_systems(Startup, spawn_camera);
-
-    install_hand_tracking_providers(&mut app);
+        // `install_hand_tracking_providers` runs as a Startup system so it can
+        // read `Res<HandTrackingSettings>` after SettingsPlugin has loaded the
+        // persisted value. Running it pre-`App::run()` (the old approach) would
+        // force the setting to be read before persistence loads.
+        .add_systems(Startup, (spawn_camera, install_hand_tracking_providers));
 
     app.run();
 }
@@ -176,7 +178,7 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
     ));
 }
 
-/// Construct and install the [`wc_core::input::provider::ProviderRegistry`]
+/// Construct and insert the [`wc_core::input::provider::ProviderRegistry`]
 /// resource based on env-var preference plus auto-fallback semantics:
 ///
 /// - `WAVECONDUCTOR_HAND_PROVIDER=leap`: try Leap, error if it fails.
@@ -185,7 +187,11 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
 ///   mock on Err.
 /// - Any other value: log warning, treat as `auto`.
 ///
-/// Called from `main()` before `App::run()`.
+/// Runs as a `Startup` system so that `Res<HandTrackingSettings>` is
+/// available (settings persistence loads in `Startup` before any user-added
+/// system). The persisted `leap_background` value is forwarded to
+/// `LeaprsProvider` on construction so the first connection comes up with the
+/// correct policy state.
 ///
 /// Note: [`wc_core::input::provider::ProviderRegistry::register`] auto-starts
 /// each provider it receives. We check `status().service` after registration
@@ -193,7 +199,10 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
 /// [`wc_core::input::state::ServiceConnection::Errored`] on create/open
 /// failure).
 #[cfg(feature = "hand-tracking-gestures")]
-fn install_hand_tracking_providers(app: &mut App) {
+fn install_hand_tracking_providers(
+    mut commands: Commands<'_, '_>,
+    settings: Res<'_, wc_core::settings::HandTrackingSettings>,
+) {
     use wc_core::input::provider::{ProviderId, ProviderRegistry, ProviderRole};
     use wc_core::input::providers::leap_native::LeaprsProvider;
     use wc_core::input::providers::mock::MockProvider;
@@ -205,10 +214,9 @@ fn install_hand_tracking_providers(app: &mut App) {
 
     let mut registry = ProviderRegistry::default();
 
-    let try_leap = |registry: &mut ProviderRegistry| -> bool {
-        // `request_background` defaults to `false`; Phase 10 will set it
-        // to `true` through the settings path when the user opts in.
-        let leap = LeaprsProvider::default();
+    let try_leap = |registry: &mut ProviderRegistry, leap_background: bool| -> bool {
+        let mut leap = LeaprsProvider::default();
+        leap.request_background = leap_background;
         registry.register(ProviderId::Leap, ProviderRole::Primary, Box::new(leap));
         let started = registry.provider(ProviderId::Leap).is_some_and(|r| {
             !matches!(
@@ -238,7 +246,7 @@ fn install_hand_tracking_providers(app: &mut App) {
             install_mock(&mut registry);
         }
         "leap" => {
-            if !try_leap(&mut registry) {
+            if !try_leap(&mut registry, settings.leap_background) {
                 tracing::error!(
                     "hand-tracking: env forced 'leap' but provider failed to start; \
                      no provider will be registered, mouse and touch input still work"
@@ -246,7 +254,7 @@ fn install_hand_tracking_providers(app: &mut App) {
             }
         }
         "auto" => {
-            if !try_leap(&mut registry) {
+            if !try_leap(&mut registry, settings.leap_background) {
                 tracing::info!("hand-tracking: falling back to MockProvider");
                 install_mock(&mut registry);
             }
@@ -256,20 +264,20 @@ fn install_hand_tracking_providers(app: &mut App) {
                 value = %other,
                 "hand-tracking: unknown WAVECONDUCTOR_HAND_PROVIDER value; defaulting to auto"
             );
-            if !try_leap(&mut registry) {
+            if !try_leap(&mut registry, settings.leap_background) {
                 install_mock(&mut registry);
             }
         }
     }
 
-    app.insert_resource(registry);
+    commands.insert_resource(registry);
 }
 
 /// No-op stub when hand-tracking-gestures is compiled out.
 ///
-/// `mouse and touch input still work without any hand-tracking provider.`
+/// Mouse and touch input still work without any hand-tracking provider.
 #[cfg(not(feature = "hand-tracking-gestures"))]
-fn install_hand_tracking_providers(_app: &mut App) {
+fn install_hand_tracking_providers() {
     tracing::info!("hand-tracking: feature disabled at compile time; no providers");
 }
 

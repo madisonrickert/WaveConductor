@@ -95,6 +95,14 @@ pub trait HandTrackingProvider: Send + Sync + 'static {
     /// Provider-level diagnostic metadata for the dev panel. Updated each
     /// `poll()` (or `start()` for static fields like SDK version).
     fn diagnostics(&self) -> crate::input::state::ProviderDiagnostics;
+
+    /// Downcast helper for systems that need to call typed methods on a
+    /// concrete provider type (e.g., `apply_leap_background_setting`).
+    ///
+    /// Default returns `None`; only providers with typed-method needs override.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// Resource holding all currently-installed [`HandTrackingProvider`]s.

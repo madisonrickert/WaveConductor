@@ -118,5 +118,16 @@ impl Plugin for HandTrackingPlugin {
                     .chain()
                     .in_set(InputSystems),
             );
+
+        // When the Leap native provider is compiled in, watch for runtime
+        // changes to `leap_background` and propagate them to the live
+        // connection without requiring a restart.
+        #[cfg(feature = "hand-tracking-gestures")]
+        app.add_systems(
+            PreUpdate,
+            self::providers::leap_native::apply_leap_background_setting
+                .after(systems::poll_all_providers)
+                .in_set(InputSystems),
+        );
     }
 }

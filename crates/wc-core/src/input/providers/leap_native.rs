@@ -26,7 +26,7 @@
 use std::time::{Duration, Instant};
 
 use bevy::math::Vec3;
-use bevy::prelude::Messages;
+use bevy::prelude::{DetectChanges, Messages, Res, ResMut};
 use smallvec::SmallVec;
 
 use crate::input::hand::{Chirality, Hand, LandmarkIndex, LANDMARK_COUNT};
@@ -190,6 +190,48 @@ impl HandTrackingProvider for LeaprsProvider {
 
     fn diagnostics(&self) -> ProviderDiagnostics {
         self.diagnostics.clone()
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+}
+
+// ── LeaprsProvider typed-method extensions ───────────────────────────────────
+
+impl LeaprsProvider {
+    /// Apply or clear the `BackgroundFrames` policy on the open connection.
+    ///
+    /// No-op when the connection isn't open. Idempotent — applying the same
+    /// flag twice in a row is cheap. Diagnostics' `active_policies` list is
+    /// kept in sync.
+    pub fn apply_background_policy(&mut self, enabled: bool) {
+        let Some(conn) = self.connection.as_mut() else {
+            return;
+        };
+        let (set, clear) = if enabled {
+            (
+                leaprs::PolicyFlags::BACKGROUND_FRAMES,
+                leaprs::PolicyFlags::empty(),
+            )
+        } else {
+            (
+                leaprs::PolicyFlags::empty(),
+                leaprs::PolicyFlags::BACKGROUND_FRAMES,
+            )
+        };
+        if let Err(err) = conn.set_policy_flags(set, clear) {
+            tracing::warn!(?err, "leaprs: failed to update BackgroundFrames policy");
+            return;
+        }
+        self.diagnostics
+            .active_policies
+            .retain(|p| p != "BackgroundFrames");
+        if enabled {
+            self.diagnostics
+                .active_policies
+                .push("BackgroundFrames".to_string());
+        }
     }
 }
 
@@ -485,6 +527,34 @@ fn landmarks_from_hand(hand: leaprs::HandRef<'_>) -> [Vec3; LANDMARK_COUNT] {
 fn vec3_from_leaprs(v: leaprs::LeapVectorRef<'_>) -> Vec3 {
     let [x, y, z] = v.array();
     Vec3::new(x, y, z)
+}
+
+// ── live-update system ────────────────────────────────────────────────────────
+
+/// Watches [`crate::settings::HandTrackingSettings`] for changes to
+/// `leap_background` and re-applies the LeapC policy flag on the registered
+/// Leap provider.
+///
+/// Runs in `PreUpdate` after `poll_all_providers` so the connection state is
+/// fresh. Idempotent.
+pub fn apply_leap_background_setting(
+    settings: Res<'_, crate::settings::HandTrackingSettings>,
+    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+
+    for slot in registry.iter_mut() {
+        if slot.id != crate::input::provider::ProviderId::Leap {
+            continue;
+        }
+        if let Some(any) = slot.inner.as_any_mut() {
+            if let Some(leap) = any.downcast_mut::<LeaprsProvider>() {
+                leap.apply_background_policy(settings.leap_background);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
