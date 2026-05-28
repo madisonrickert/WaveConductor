@@ -29,6 +29,7 @@
 pub mod attractor_visuals;
 pub mod audio_coupling;
 pub mod compute;
+pub mod hand_mesh;
 pub mod heatmap;
 pub mod leap_attractors;
 pub mod material;
@@ -72,6 +73,9 @@ impl Plugin for LinePlugin {
 
         // Wire per-hand attractors (Plan 11.6 Phase 11.1).
         app.add_plugins(leap_attractors::LineLeapAttractorsPlugin);
+
+        // Wire wireframe bone visualization (Plan 11.6 Phase 13).
+        app.add_plugins(hand_mesh::LineHandMeshPlugin);
 
         // Lifecycle: spawn on enter, despawn on exit. Audio lifecycle joins
         // the same `OnEnter`/`OnExit` schedules — `enter_line_audio` builds
