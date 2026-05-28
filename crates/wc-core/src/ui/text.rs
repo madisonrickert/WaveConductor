@@ -16,6 +16,14 @@ use bevy_egui::egui;
 /// `letter_spacing` is in egui logical points (matches the units used
 /// by `FontId::size`). For v4 parity with CSS `letter-spacing: 0.04em`,
 /// pass `font_size * 0.04`.
+///
+/// # Note
+///
+/// Letter-spacing values that work out to less than ~1 logical point
+/// (e.g., `0.04em` at 11–13pt fonts) are sub-perceptual at 1× and add
+/// no visual benefit. Reserve this helper for headings at 24pt+ or
+/// for spacing values explicitly above 1pt. For small labels, prefer
+/// plain `ui.label(RichText::new(...))`.
 pub fn letter_spaced_label(
     ui: &mut egui::Ui,
     text: &str,
