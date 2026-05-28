@@ -76,6 +76,7 @@ impl Plugin for HandTrackingPlugin {
             .init_resource::<ProviderRegistry>()
             // Messages
             .add_message::<HandTrackingFrame>()
+            .add_message::<state::FusedHandFrame>()
             .add_message::<HandGestureEvent>()
             // `pointer_merge_system` reads `CursorMoved` (Plan 8 Phase 0
             // closed the test-fidelity gap by wiring it into the mouse-source
@@ -99,6 +100,8 @@ impl Plugin for HandTrackingPlugin {
                 PreUpdate,
                 (
                     systems::poll_all_providers,
+                    systems::fuse_hand_frames,
+                    systems::sync_hand_entities,
                     systems::update_hand_tracking_state,
                     systems::detect_gestures,
                     pointer_merge_system,
