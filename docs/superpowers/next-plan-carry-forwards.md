@@ -166,7 +166,7 @@ A running list of small, well-scoped items that surfaced after Plan 6 landed and
 
 69. **`text_color_dim` palette field is caller-only, not applied to global egui Style.** `OverlayStyle` exposes `text_color_dim` (≈ v4 `$gray3`) for explicit `RichText::new(...).color(style.text_color_dim)` calls. It is not wired into `Visuals::widgets.noninteractive.fg_stroke` or similar, so any egui-default text falls back to `text_color_bright`. Currently fine because all dim-coloured text is explicit; if a future widget needs dim text by default, wire the palette into Visuals.
 
-70. **Credits cell "Open Source Licenses" link is plain text.** v4 routes to an internal `/licenses` page; v5 has no equivalent. Either ship an in-app licenses modal (egui dialog with the workspace's `cargo about` output), or link to the public GitHub LICENSE file if/when the repo is published. Until then, the line is rendered as a non-clickable label.
+70. RESOLVED 2026-05-27: Tracked on the roadmap's Pre-release tier as the "Licenses surface" port item — a real v4 feature port, not a carry-forward polish.
 
 71. **`line_soak_with_overlay_ui` integration test is `#[ignore]`'d.** Required per AGENTS.md before any release tag. Run it once before Plan 11.7's final capture: `cargo test -p wc-sketches --test line_soak line_soak_with_overlay_ui -- --ignored --nocapture` (8 hours). Fold into the Plan 11.7 pre-tag checklist.
 

@@ -267,6 +267,7 @@ These land before tagging `v5.0.0` and merging `rewrite/bevy` → `main`. They a
 - **Perf audit harness** (spec §5.9) — FrameTimeDiagnosticsPlugin / EntityCountDiagnosticsPlugin / SystemInformationDiagnosticsPlugin readout into a CSV log. `bevy_framepace` spike (spec §5.12) — adopt if it improves thermal behavior, skip if free-running already meets the bar.
 - **v4 perf-mode shim** (spec §5.11) — small IPC + start/stop bridge so v4 can stay on `main` until v5.0 is feature-complete.
 - **Microphone capture + rustfft path** (deferred from Plan 4) — prerequisite for the Waves sketch.
+- **Licenses surface** — v4's homepage credits-block links to an internal `/licenses` route that renders the workspace's open-source license attributions. v5 has no equivalent; the credits cell currently renders "Open Source Licenses" as plain text. Port: generate the dependency-license bundle (e.g. via `cargo-about` or `cargo-bundle-licenses` in CI), ship it as an asset, and wire an in-app modal (or a dedicated `AppState` variant) that reads the bundle and renders it through the same overlay chrome. Reference the v4 component at `.worktrees/v4/src/routes/licensesPage/` for layout.
 
 ## Convention
 
