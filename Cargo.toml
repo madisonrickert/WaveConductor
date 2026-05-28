@@ -42,6 +42,8 @@ bevy = { version = "0.18", default-features = false, features = [
     # not usable. We pick AgX to get soft highlight rolloff on the HDR
     # output of the Line gravity post-process before SDR clamp.
     "tonemapping_luts",
+    # Note: wireframe rendering (Plan 11.6 Phase 13) uses `bevy_pbr::WireframePlugin` at runtime;
+    # there is no separate cargo feature gate in Bevy 0.18 — it's part of `bevy_pbr` already included.
     "x11",
     "wayland",
 ] }
@@ -95,6 +97,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Random sampling (Plan 10 Phase A): CDF inversion sampler for the heatmap
 # spawn. Already a transitive dep; declared here for a direct dependency edge.
 rand = "0.9"
+# Native LeapC FFI wrapper for hand tracking. The crate's build.rs reads
+# `LEAPSDK_LIB_PATH` to locate libLeapC at link time — see `.cargo/config.toml`
+# for the relative path into `vendor/leapc/<platform>/`. Default features
+# only (gemini is leaprs's only default and is what we want); the optional
+# `glam` feature is intentionally off because we convert Vec3 provider-side.
+leaprs = { version = "0.2.2", default-features = false, features = ["gemini"] }
 # Native file picker (Plan 11 Phase C): cross-platform Browse… dialog for
 # the Line sketch's `spawn_template` setting. Targets macOS NSOpenPanel,
 # Windows IFileDialog, GTK on Linux. Web build is out of scope (rfd has a

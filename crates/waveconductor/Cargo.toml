@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 description = "WaveConductor v5 — Rust + Bevy interactive art gallery."
 publish = false
+build = "build.rs"
 
 [[bin]]
 name = "waveconductor"
@@ -16,6 +17,17 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["hand-tracking-gestures"]
+# Propagates to wc-core and wc-sketches; always on for the waveconductor binary.
+# Declared here so that examples (e.g. leap_smoke) can gate on this feature name
+# without triggering `unexpected_cfg` warnings.
+hand-tracking-gestures = [
+    "dep:leaprs",
+    "wc-core/hand-tracking-gestures",
+    "wc-sketches/hand-tracking-gestures",
+]
+
 [dependencies]
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
@@ -23,3 +35,6 @@ wc-core = { workspace = true }
 wc-sketches = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Optional: pulled in when the `hand-tracking-gestures` feature is active.
+# Waveconductor is native-only so no wasm target table needed here.
+leaprs = { workspace = true, optional = true }

@@ -14,10 +14,10 @@ workspace = true
 
 [features]
 default = []
-# Enables HandTrackingState consumers (sketch gesture detection). Disabled by
-# default until a provider lands — turning this on with no provider means the
-# consumer reads an always-empty `HandTrackingState` and is a no-op.
-hand-tracking-gestures = []
+# Enables HandTrackingState consumers (sketch gesture detection) and brings
+# in the native LeapC FFI dependency. The waveconductor binary turns this on;
+# tests can opt in selectively.
+hand-tracking-gestures = ["dep:leaprs"]
 
 [dependencies]
 bevy = { workspace = true }
@@ -40,6 +40,7 @@ dirs.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
+leaprs = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true

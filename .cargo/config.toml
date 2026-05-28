@@ -5,3 +5,46 @@ xtask = "run --quiet --package xtask --"
 # Parallel frontend (rustc -Z threads=...) is nightly-only. Uncomment only when
 # building with a nightly override.
 # rustflags = ["-Z", "threads=8"]
+
+# Vendored LeapC SDK — see vendor/leapc/README.md for layout.
+#
+# `LEAPSDK_LIB_PATH` is read by `leaprs`'s build.rs (NOT `leap-sys`, which only
+# generates FFI bindings and does no linking — the link directive `-lLeapC`
+# lives in leaprs/build.rs at all crate versions ≥ 0.2.0). leaprs's default
+# fallback on macOS is `/Applications/Ultraleap Hand Tracking.app/...`, which
+# works for local dev but not for cloud CI builders that don't have Ultraleap
+# installed. Pointing at the vendored tree keeps the build reproducible
+# regardless of host install state.
+#
+# `[env]` in `.cargo/config.toml` is global (no per-target syntax), so we set
+# the path for Madison's primary platform (Apple Silicon) as the workspace
+# default. CI workflows for other targets must override LEAPSDK_LIB_PATH
+# explicitly (e.g., `LEAPSDK_LIB_PATH=vendor/leapc/linux-x86_64` for Linux
+# runners) — there's no way to express per-target env vars in this file.
+[env]
+LEAPSDK_LIB_PATH = { value = "vendor/leapc/macos-aarch64", relative = true, force = false }
+
+# Per-target rpath / RUNPATH so the linked binary finds libLeapC at runtime
+# without DYLD_LIBRARY_PATH / LD_LIBRARY_PATH. Windows uses a different
+# mechanism (DLL must be next to the .exe at runtime) — see
+# `crates/waveconductor/build.rs` for the copy step.
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../lib",
+    "-C", "link-arg=-Wl,-rpath,@loader_path",
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../../../vendor/leapc/macos-aarch64",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../lib",
+    "-C", "link-arg=-Wl,-rpath,@loader_path",
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../../../vendor/leapc/macos-x86_64",
+]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../lib",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../vendor/leapc/linux-x86_64",
+]
