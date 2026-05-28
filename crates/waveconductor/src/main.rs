@@ -35,7 +35,8 @@ const LINE_BACKGROUND_PATH: &str = "assets/sketches/line/line_background.ogg";
 
 fn main() {
     init_tracing();
-    App::new()
+    let mut app = App::new();
+    app
         // v4 Line renders against a black background; Bevy defaults to gray.
         // Setting the clear color globally is the simplest way to match —
         // future sketches can override per-state via `OnEnter`/`OnExit` if
@@ -69,8 +70,11 @@ fn main() {
             CorePlugin,
             SketchesPlugin,
         ))
-        .add_systems(Startup, spawn_camera)
-        .run();
+        .add_systems(Startup, spawn_camera);
+
+    install_hand_tracking_providers(&mut app);
+
+    app.run();
 }
 
 /// Read the Line background OGG into a `BackgroundSampleAsset` resource.
@@ -170,6 +174,103 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
             ..Bloom::NATURAL
         },
     ));
+}
+
+/// Construct and install the [`wc_core::input::provider::ProviderRegistry`]
+/// resource based on env-var preference plus auto-fallback semantics:
+///
+/// - `WAVECONDUCTOR_HAND_PROVIDER=leap`: try Leap, error if it fails.
+/// - `WAVECONDUCTOR_HAND_PROVIDER=mock`: register only the mock.
+/// - `WAVECONDUCTOR_HAND_PROVIDER=auto` (default): try Leap, fall back to
+///   mock on Err.
+/// - Any other value: log warning, treat as `auto`.
+///
+/// Called from `main()` before `App::run()`.
+///
+/// Note: [`wc_core::input::provider::ProviderRegistry::register`] auto-starts
+/// each provider it receives. We check `status().service` after registration
+/// to detect startup failure (`LeaprsProvider` sets
+/// [`wc_core::input::state::ServiceConnection::Errored`] on create/open
+/// failure).
+#[cfg(feature = "hand-tracking-gestures")]
+fn install_hand_tracking_providers(app: &mut App) {
+    use wc_core::input::provider::{ProviderId, ProviderRegistry, ProviderRole};
+    use wc_core::input::providers::leap_native::LeaprsProvider;
+    use wc_core::input::providers::mock::MockProvider;
+    use wc_core::input::state::ServiceConnection;
+
+    let pref = std::env::var("WAVECONDUCTOR_HAND_PROVIDER")
+        .ok()
+        .map_or_else(|| "auto".to_string(), |s| s.to_lowercase());
+
+    let mut registry = ProviderRegistry::default();
+
+    let try_leap = |registry: &mut ProviderRegistry| -> bool {
+        // `request_background` defaults to `false`; Phase 10 will set it
+        // to `true` through the settings path when the user opts in.
+        let leap = LeaprsProvider::default();
+        registry.register(ProviderId::Leap, ProviderRole::Primary, Box::new(leap));
+        let started = registry.provider(ProviderId::Leap).is_some_and(|r| {
+            !matches!(
+                r.inner.status().service,
+                ServiceConnection::Errored | ServiceConnection::NotStarted
+            )
+        });
+        if started {
+            tracing::info!("hand-tracking: LeaprsProvider started");
+        } else {
+            tracing::warn!("hand-tracking: LeaprsProvider failed to start");
+        }
+        started
+    };
+
+    let install_mock = |registry: &mut ProviderRegistry| {
+        registry.register(
+            ProviderId::Mock,
+            ProviderRole::Simulator,
+            Box::new(MockProvider::default()),
+        );
+        tracing::info!("hand-tracking: MockProvider installed");
+    };
+
+    match pref.as_str() {
+        "mock" => {
+            install_mock(&mut registry);
+        }
+        "leap" => {
+            if !try_leap(&mut registry) {
+                tracing::error!(
+                    "hand-tracking: env forced 'leap' but provider failed to start; \
+                     no provider will be registered, mouse and touch input still work"
+                );
+            }
+        }
+        "auto" => {
+            if !try_leap(&mut registry) {
+                tracing::info!("hand-tracking: falling back to MockProvider");
+                install_mock(&mut registry);
+            }
+        }
+        other => {
+            tracing::warn!(
+                value = %other,
+                "hand-tracking: unknown WAVECONDUCTOR_HAND_PROVIDER value; defaulting to auto"
+            );
+            if !try_leap(&mut registry) {
+                install_mock(&mut registry);
+            }
+        }
+    }
+
+    app.insert_resource(registry);
+}
+
+/// No-op stub when hand-tracking-gestures is compiled out.
+///
+/// `mouse and touch input still work without any hand-tracking provider.`
+#[cfg(not(feature = "hand-tracking-gestures"))]
+fn install_hand_tracking_providers(_app: &mut App) {
+    tracing::info!("hand-tracking: feature disabled at compile time; no providers");
 }
 
 /// Initialize the global tracing subscriber.
