@@ -38,6 +38,25 @@ impl AppState {
         !matches!(self, Self::Home)
     }
 
+    /// Parse a sketch name (case-insensitive, surrounding whitespace ignored)
+    /// into its [`AppState`]. Returns `None` for unknown names and for `home`
+    /// (Home is the implicit default, not a navigable sketch target here).
+    ///
+    /// Backs the `WAVECONDUCTOR_START_SKETCH` startup override (see the binary
+    /// crate) and is a convenient name→state mapping for any future CLI/config
+    /// plumbing.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "line" => Some(Self::Line),
+            "flame" => Some(Self::Flame),
+            "dots" => Some(Self::Dots),
+            "cymatics" => Some(Self::Cymatics),
+            "waves" => Some(Self::Waves),
+            _ => None,
+        }
+    }
+
     /// The next sketch in the cycle; wraps around. Returns `Self::Line`
     /// when called on `Home`.
     ///
@@ -115,6 +134,18 @@ mod tests {
         for s in AppState::SKETCH_ORDER {
             assert!(s.is_sketch(), "{s:?} should be a sketch");
         }
+    }
+
+    #[test]
+    fn from_name_parses_every_sketch_case_insensitively() {
+        assert_eq!(AppState::from_name("line"), Some(AppState::Line));
+        assert_eq!(AppState::from_name("Flame"), Some(AppState::Flame));
+        assert_eq!(AppState::from_name("  DOTS  "), Some(AppState::Dots));
+        assert_eq!(AppState::from_name("Cymatics"), Some(AppState::Cymatics));
+        assert_eq!(AppState::from_name("waves"), Some(AppState::Waves));
+        // Home and unknown names yield None.
+        assert_eq!(AppState::from_name("home"), None);
+        assert_eq!(AppState::from_name("nope"), None);
     }
 
     /// Guard against drift between the [`AppState::SKETCH_ORDER`] iteration

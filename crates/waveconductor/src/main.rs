@@ -74,7 +74,14 @@ fn main() {
         // read `Res<HandTrackingSettings>` after SettingsPlugin has loaded the
         // persisted value. Running it pre-`App::run()` (the old approach) would
         // force the setting to be read before persistence loads.
-        .add_systems(Startup, (spawn_camera, install_hand_tracking_providers));
+        .add_systems(
+            Startup,
+            (
+                spawn_camera,
+                install_hand_tracking_providers,
+                apply_startup_sketch_override,
+            ),
+        );
 
     app.run();
 }
@@ -182,7 +189,10 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
 /// resource based on env-var preference plus auto-fallback semantics:
 ///
 /// - `WAVECONDUCTOR_HAND_PROVIDER=leap`: try Leap, error if it fails.
-/// - `WAVECONDUCTOR_HAND_PROVIDER=mock`: register only the mock.
+/// - `WAVECONDUCTOR_HAND_PROVIDER=mock`: register only the (silent) mock.
+/// - `WAVECONDUCTOR_HAND_PROVIDER=synthetic`: register a mock that emits a
+///   stationary synthetic open hand, for testing hand visuals without
+///   hardware.
 /// - `WAVECONDUCTOR_HAND_PROVIDER=auto` (default): try Leap, fall back to
 ///   mock on Err.
 /// - Any other value: log warning, treat as `auto`.
@@ -245,6 +255,17 @@ fn install_hand_tracking_providers(
         "mock" => {
             install_mock(&mut registry);
         }
+        "synthetic" => {
+            // A stationary synthetic open hand, for exercising hand-driven
+            // visuals (bone mesh, attractor, future gesture sketches) with no
+            // Leap hardware attached. Distinct from `mock` (which is silent).
+            registry.register(
+                ProviderId::Mock,
+                ProviderRole::Simulator,
+                Box::new(MockProvider::synthetic_hand()),
+            );
+            tracing::info!("hand-tracking: synthetic MockProvider installed (open-hand fixture)");
+        }
         "leap" => {
             if !try_leap(&mut registry, settings.leap_background) {
                 tracing::error!(
@@ -279,6 +300,38 @@ fn install_hand_tracking_providers(
 #[cfg(not(feature = "hand-tracking-gestures"))]
 fn install_hand_tracking_providers() {
     tracing::info!("hand-tracking: feature disabled at compile time; no providers");
+}
+
+/// Apply the optional `WAVECONDUCTOR_START_SKETCH` override: when set to a
+/// sketch name (`line`, `flame`, `dots`, `cymatics`, `waves`, case-insensitive)
+/// the app navigates straight into that sketch at startup instead of showing
+/// the Home picker. Unset (the default) starts at Home.
+///
+/// This is a deployment + testing convenience: kiosk installs can boot directly
+/// into a fixed sketch, and automated screenshot/verification runs can land in
+/// the sketch under test without driving the keyboard. An unrecognised value
+/// logs a warning and falls back to Home.
+///
+/// Setting `NextState` in `Startup` triggers the matching `OnEnter` on the
+/// first frame.
+fn apply_startup_sketch_override(
+    mut next: ResMut<'_, NextState<wc_core::lifecycle::state::AppState>>,
+) {
+    let Ok(name) = std::env::var("WAVECONDUCTOR_START_SKETCH") else {
+        return;
+    };
+    match wc_core::lifecycle::state::AppState::from_name(&name) {
+        Some(state) => {
+            tracing::info!(sketch = %name, "WAVECONDUCTOR_START_SKETCH: starting in sketch");
+            next.set(state);
+        }
+        None => {
+            tracing::warn!(
+                value = %name,
+                "WAVECONDUCTOR_START_SKETCH: unknown sketch name; starting at Home"
+            );
+        }
+    }
 }
 
 /// Initialize the global tracing subscriber.

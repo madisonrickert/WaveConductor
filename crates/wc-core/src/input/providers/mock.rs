@@ -20,6 +20,11 @@ use crate::input::state::{
 pub struct MockProvider {
     /// Frames waiting to be emitted, in order. `poll` removes from the front.
     queue: std::collections::VecDeque<HandTrackingFrame>,
+    /// When set, `poll` emits a freshly-stamped copy of this frame on every
+    /// call once the scripted `queue` is drained, so a synthetic hand persists
+    /// indefinitely instead of vanishing after one frame. Set by
+    /// [`MockProvider::synthetic_hand`]; `None` for the default empty mock.
+    looping_frame: Option<HandTrackingFrame>,
     /// Whether `start()` has been called successfully.
     started: bool,
     /// Allow tests to inject specific device-health flags to exercise the
@@ -31,6 +36,7 @@ impl Default for MockProvider {
     fn default() -> Self {
         Self {
             queue: std::collections::VecDeque::new(),
+            looping_frame: None,
             started: false,
             injected_health: DeviceHealth::empty(),
         }
@@ -44,6 +50,25 @@ impl MockProvider {
     pub fn with_frames(frames: impl IntoIterator<Item = HandTrackingFrame>) -> Self {
         Self {
             queue: frames.into_iter().collect(),
+            looping_frame: None,
+            started: false,
+            injected_health: DeviceHealth::empty(),
+        }
+    }
+
+    /// A mock that continuously emits a single stationary synthetic open hand
+    /// (see [`crate::input::synthetic::synthetic_open_hand`]) on every `poll`,
+    /// for exercising hand-driven visuals with no Leap hardware attached.
+    /// Selected at runtime via `WAVECONDUCTOR_HAND_PROVIDER=synthetic`.
+    ///
+    /// Distinct from [`MockProvider::default`], which emits nothing — the empty
+    /// default is the silent auto-fallback used when no Leap is present, so it
+    /// must *not* conjure a phantom hand in production.
+    #[must_use]
+    pub fn synthetic_hand() -> Self {
+        Self {
+            queue: std::collections::VecDeque::new(),
+            looping_frame: Some(crate::input::synthetic::synthetic_hand_frame(Duration::ZERO)),
             started: false,
             injected_health: DeviceHealth::empty(),
         }
@@ -72,8 +97,14 @@ impl HandTrackingProvider for MockProvider {
         self.started = false;
     }
 
-    fn poll(&mut self, _now: Duration, out: &mut Messages<HandTrackingFrame>) {
+    fn poll(&mut self, now: Duration, out: &mut Messages<HandTrackingFrame>) {
         if let Some(frame) = self.queue.pop_front() {
+            out.write(frame);
+        } else if let Some(template) = &self.looping_frame {
+            // Re-stamp the persistent synthetic frame with the current clock so
+            // downstream consumers see a steady, present hand each tick.
+            let mut frame = template.clone();
+            frame.timestamp = now;
             out.write(frame);
         }
     }
@@ -171,5 +202,23 @@ mod tests {
         provider.push_frame(empty_frame(10));
         provider.push_frame(empty_frame(20));
         assert_eq!(provider.remaining_frames(), 2);
+    }
+
+    #[test]
+    fn synthetic_hand_emits_a_hand_every_poll() {
+        let mut provider = MockProvider::synthetic_hand();
+        provider.start().expect("mock provider start cannot fail");
+
+        // The synthetic hand is not a finite script — it persists across polls,
+        // re-stamped with the current clock each time.
+        for tick in 1..=3 {
+            let now = Duration::from_millis(tick * 10);
+            let mut msgs = Messages::<HandTrackingFrame>::default();
+            provider.poll(now, &mut msgs);
+            let frames: Vec<HandTrackingFrame> = msgs.drain().collect();
+            assert_eq!(frames.len(), 1, "synthetic mock emits one frame per poll");
+            assert_eq!(frames[0].hands.len(), 1, "exactly one synthetic hand");
+            assert_eq!(frames[0].timestamp, now, "frame re-stamped with current clock");
+        }
     }
 }

@@ -53,6 +53,7 @@ pub mod projection;
 pub mod provider;
 pub mod providers;
 pub mod state;
+pub mod synthetic;
 pub mod systems;
 
 use bevy::input::InputSystems;
