@@ -39,15 +39,12 @@
 //!    Camera3d, compositor camera, compositor sprite, and the `Image`
 //!    handle (asset is GC'd once the last handle drops).
 
-use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ImageRenderTarget, RenderTarget, ScalingMode};
 use bevy::image::Image;
 use bevy::pbr::wireframe::{Wireframe, WireframeColor};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureUsages,
-};
+use bevy::render::render_resource::TextureFormat;
 use wc_core::input::entity::{BoneCenters, TrackedHand, BONE_COUNT};
 use wc_core::input::projection::palm_to_world;
 use wc_core::lifecycle::state::AppState;
@@ -143,26 +140,19 @@ fn spawn_hand_mesh_camera(
     // always positive and well within `u32::MAX`.
     let width = f32_to_u32_lossy(window.width()).max(1);
     let height = f32_to_u32_lossy(window.height()).max(1);
-    let extent = Extent3d {
+
+    // Canonical Bevy 0.18 render-to-texture format pair (matches
+    // `examples/3d/render_to_texture.rs`): `Rgba8Unorm` as the storage
+    // format, with an `Rgba8UnormSrgb` view so sampling produces
+    // gamma-correct values. `Image::new_target_texture` sets the
+    // required `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT` usages
+    // for us.
+    let image = Image::new_target_texture(
         width,
         height,
-        depth_or_array_layers: 1,
-    };
-
-    // Bgra8UnormSrgb is the wgpu-preferred swap-chain format on macOS Metal;
-    // the same format on the off-screen target lets the compositor sample
-    // it without a re-encode. Rgba8Unorm would also work but introduces a
-    // sRGB encoding mismatch when sampled.
-    let mut image = Image::new_fill(
-        extent,
-        TextureDimension::D2,
-        &[0, 0, 0, 0],
-        TextureFormat::Bgra8UnormSrgb,
-        RenderAssetUsages::default(),
+        TextureFormat::Rgba8Unorm,
+        Some(TextureFormat::Rgba8UnormSrgb),
     );
-    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-        | TextureUsages::COPY_DST
-        | TextureUsages::RENDER_ATTACHMENT;
     let image_handle = images.add(image);
 
     // Camera3d — wireframe bone pass.
@@ -180,7 +170,11 @@ fn spawn_hand_mesh_camera(
         HandMeshCamera3d,
         Camera3d::default(),
         Camera {
-            order: 1,
+            // Negative order = renders before the main Camera2d (order 0).
+            // Per Bevy's canonical `render_to_texture` example: image-target
+            // cameras run with negative order so their output is available
+            // when subsequent passes read the texture in the same frame.
+            order: -1,
             clear_color: ClearColorConfig::Custom(Color::NONE),
             ..default()
         },
@@ -215,10 +209,11 @@ fn spawn_hand_mesh_camera(
     ));
 
     // Compositor Camera2d — `order = 2` runs after the main Camera2d
-    // (`order = 0`) and after `HandMeshCamera3d` (`order = 1`), so the
-    // sprite reads a freshly-rendered image. `ClearColorConfig::None`
-    // preserves the main Camera2d's tonemapped swap-chain output;
-    // sprites alpha-blend over it by default.
+    // (`order = 0`). `HandMeshCamera3d` (`order = -1`) has already
+    // populated the off-screen image by the time this camera renders.
+    // `ClearColorConfig::None` preserves the main Camera2d's
+    // tonemapped swap-chain output; sprites alpha-blend over it by
+    // default.
     commands.spawn((
         HandMeshCompositorCamera,
         Camera2d,
