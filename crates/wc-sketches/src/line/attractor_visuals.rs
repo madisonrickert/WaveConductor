@@ -2,23 +2,29 @@
 //!
 //! ## Role
 //!
-//! For each attractor with `power > 0`, spawn 10 concentric ring mesh entities
-//! arranged as a multi-axis gyroscope: each ring is assigned to one of three
-//! "gimbals" (X-axis, Y-axis, or Z-axis rotation) by `index % 3`, with a
-//! per-gimbal rate multiplier and an outer-rings-slower base speed.
+//! For each active attractor — the singleton mouse/touch attractor *and* each
+//! grabbing Leap hand — spawn a 10-ring multi-axis gyroscope: each ring is
+//! assigned to one of three "gimbals" (X-axis, Y-axis, or Z-axis rotation) by
+//! `index % 3`, with a per-gimbal rate multiplier and an outer-rings-slower base
+//! speed. This matches v4, which drew the gyroscope at every attractor (Plan 8
+//! shipped only the mouse path; the per-hand path closes that parity gap).
 //!
 //! ## Data flow
 //!
-//! 1. [`spawn_attractor_visual`] watches [`MouseAttractorState`]. When power
-//!    becomes positive and no [`AttractorVisual`] exists yet, it spawns a
-//!    parent entity (the visual group) under [`LineRoot`] and 10 child
-//!    entities (one per ring, tagged [`AttractorRing`]) under the parent.
-//! 2. [`animate_attractor_visual`] runs every frame while `power > 0`,
-//!    updating the group's translation + scale and each ring's transform
-//!    according to its assigned gimbal axis.
-//! 3. [`despawn_attractor_visual`] watches for `power == 0` and despawns the
-//!    parent — Bevy 0.18's `EntityCommands::despawn()` recursively despawns
-//!    children via the `ChildOf` relationship.
+//! Each visual group carries an [`AttractorSource`] tagging which attractor it
+//! tracks ([`AttractorSource::Mouse`] or [`AttractorSource::Hand`] keyed by the
+//! `TrackedHand` entity), so the mouse and any number of hands coexist.
+//!
+//! 1. [`spawn_attractor_visual`] spawns a group (parent + 10 [`AttractorRing`]
+//!    children under [`LineRoot`]) for every source whose power exceeds
+//!    [`VISUAL_POWER_EPSILON`] and that doesn't already have a visual.
+//! 2. [`animate_attractor_visual`] runs every frame, updating each group's
+//!    translation + scale from its source's position + power and advancing each
+//!    ring's transform along its gimbal axis.
+//! 3. [`despawn_attractor_visual`] despawns a group once its source's power
+//!    drops back below the epsilon (mouse released, hand opened, or hand left
+//!    the volume) — Bevy 0.18's `EntityCommands::despawn()` recursively despawns
+//!    the ring children via the `ChildOf` relationship.
 //!
 //! ## Gyroscope geometry
 //!
@@ -57,7 +63,9 @@
 use bevy::color::Color;
 use bevy::prelude::*;
 use bevy::sprite_render::ColorMaterial;
+use wc_core::input::entity::TrackedHand;
 
+use super::leap_attractors::LineHandAttractor;
 use super::systems::MouseAttractorState;
 use super::LineRoot;
 
@@ -68,6 +76,21 @@ use super::LineRoot;
 /// Bevy's transform-propagation system.
 #[derive(Component)]
 pub struct AttractorVisual;
+
+/// Which attractor a given [`AttractorVisual`] group is bound to.
+///
+/// v4 drew the ring gyroscope at *every* attractor; v5 now matches that by
+/// spawning one visual per source — the singleton mouse/touch attractor plus
+/// one per grabbing Leap hand — each tracking its own position + power. Keying
+/// hand visuals by the `TrackedHand` entity lets two hands show two gyroscopes
+/// and lets a visual despawn cleanly when its hand leaves the tracking volume.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum AttractorSource {
+    /// The singleton mouse/touch attractor ([`MouseAttractorState`]).
+    Mouse,
+    /// A per-hand Leap attractor, keyed by its `TrackedHand` entity.
+    Hand(Entity),
+}
 
 /// Marker on each individual ring child. Carries:
 ///
@@ -122,6 +145,12 @@ const ROTATION_SPEED_DIVISOR: f32 = 20.0;
 /// Z offset for the attractor visual parent — sits just behind particles
 /// (which render at z=0) so the rings appear underneath the star sprites.
 const VISUAL_Z: f32 = -1.0;
+
+/// Power below which an attractor shows no ring visual. The mouse attractor is
+/// zeroed exactly on release, but a hand attractor decays geometrically and
+/// only approaches zero, so a small epsilon despawns its rings once the pull is
+/// imperceptible (rather than leaving a vanishingly-faint gyroscope forever).
+const VISUAL_POWER_EPSILON: f32 = 0.01;
 
 /// Number of segments around each ring. 32 produces a smooth ring at the
 /// scales used here (matches v4's `RingGeometry(15, 18, 32)`).
@@ -229,34 +258,96 @@ fn ring_transform_for_gimbal(gimbal: u8, phi: f32, base: f32) -> Transform {
     }
 }
 
-/// Spawn the 10-ring gyroscope visual for the (single) mouse attractor when
-/// its power becomes positive and no visual already exists.
+/// World-space position + power for an [`AttractorSource`].
 ///
-/// **Invariant:** the early-return on `!visuals.is_empty()` is load-bearing.
-/// Without it, this system would spawn 10 new ring entities every frame the
-/// button is held, exhausting entity IDs and tanking the frame rate.
+/// A `Hand` whose entity has gone (left the tracking volume) reports zero power
+/// so its visual despawns on the next tick.
+fn source_state(
+    source: AttractorSource,
+    mouse: &MouseAttractorState,
+    hand_attractors: &Query<'_, '_, &LineHandAttractor>,
+) -> (Vec2, f32) {
+    match source {
+        AttractorSource::Mouse => (
+            Vec2::new(mouse.position[0], mouse.position[1]),
+            mouse.power,
+        ),
+        AttractorSource::Hand(entity) => hand_attractors
+            .get(entity)
+            .map_or((Vec2::ZERO, 0.0), |attractor| {
+                (attractor.position, attractor.power)
+            }),
+    }
+}
+
+/// Spawn the 10-ring gyroscope visual for every attractor that has power and
+/// doesn't yet have a visual: the singleton mouse/touch attractor plus one per
+/// grabbing Leap hand.
 ///
-/// Plan 8 Phase B handles only the single mouse attractor. Multi-attractor
-/// support (Leap hands) lands in a later plan that will likely re-shape this
-/// system to key visuals by attractor ID rather than the
-/// "any visual exists?" guard used here.
+/// **Invariant:** a source is skipped if a visual already bound to it exists.
+/// Without that guard this system would spawn 10 new ring entities every frame
+/// the attractor is active, exhausting entity IDs and tanking the frame rate.
 pub fn spawn_attractor_visual(
     mut commands: Commands<'_, '_>,
     mouse: Res<'_, MouseAttractorState>,
-    visuals: Query<'_, '_, Entity, With<AttractorVisual>>,
+    hands: Query<'_, '_, (Entity, &LineHandAttractor), With<TrackedHand>>,
+    existing: Query<'_, '_, &AttractorSource, With<AttractorVisual>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
     mut materials: ResMut<'_, Assets<ColorMaterial>>,
     line_root: Query<'_, '_, Entity, With<LineRoot>>,
 ) {
-    if mouse.power <= 0.0 || !visuals.is_empty() {
-        return;
-    }
     let Some(root) = line_root.iter().next() else {
         // The sketch hasn't spawned yet (or has been torn down). Nothing to
         // parent the visual onto — try again next frame.
         return;
     };
 
+    // Sources that already have a visual this frame, so we don't double-spawn.
+    let mouse_has_visual = existing
+        .iter()
+        .any(|source| matches!(source, AttractorSource::Mouse));
+    let hand_has_visual = |entity: Entity| {
+        existing
+            .iter()
+            .any(|source| matches!(source, AttractorSource::Hand(e) if *e == entity))
+    };
+
+    if mouse.power > VISUAL_POWER_EPSILON && !mouse_has_visual {
+        let pos = Vec2::new(mouse.position[0], mouse.position[1]);
+        spawn_ring_group(
+            &mut commands,
+            root,
+            AttractorSource::Mouse,
+            pos,
+            &mut meshes,
+            &mut materials,
+        );
+    }
+
+    for (entity, attractor) in &hands {
+        if attractor.power > VISUAL_POWER_EPSILON && !hand_has_visual(entity) {
+            spawn_ring_group(
+                &mut commands,
+                root,
+                AttractorSource::Hand(entity),
+                attractor.position,
+                &mut meshes,
+                &mut materials,
+            );
+        }
+    }
+}
+
+/// Spawn one gyroscope group (parent + 10 ring children) for `source` at `pos`,
+/// parented under the Line root. Shared by the mouse and per-hand spawn paths.
+fn spawn_ring_group(
+    commands: &mut Commands<'_, '_>,
+    root: Entity,
+    source: AttractorSource,
+    pos: Vec2,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
     // One mesh + one material shared across all 10 rings of this visual.
     // Per-ring `Transform` carries the index-dependent scale, gimbal axis,
     // and starting phase.
@@ -270,7 +361,8 @@ pub fn spawn_attractor_visual(
     let parent = commands
         .spawn((
             AttractorVisual,
-            Transform::from_translation(Vec3::new(mouse.position[0], mouse.position[1], VISUAL_Z)),
+            source,
+            Transform::from_translation(Vec3::new(pos.x, pos.y, VISUAL_Z)),
             GlobalTransform::default(),
             Visibility::Visible,
         ))
@@ -331,41 +423,59 @@ pub fn spawn_attractor_visual(
 /// keep their final transform until they vanish.
 pub fn animate_attractor_visual(
     mouse: Res<'_, MouseAttractorState>,
-    mut visuals: Query<'_, '_, &mut Transform, (With<AttractorVisual>, Without<AttractorRing>)>,
-    mut rings: Query<'_, '_, (&mut AttractorRing, &mut Transform), With<AttractorRing>>,
+    hand_attractors: Query<'_, '_, &LineHandAttractor>,
+    mut visuals: Query<
+        '_,
+        '_,
+        (&AttractorSource, &mut Transform, &Children),
+        (With<AttractorVisual>, Without<AttractorRing>),
+    >,
+    mut rings: Query<
+        '_,
+        '_,
+        (&mut AttractorRing, &mut Transform),
+        (With<AttractorRing>, Without<AttractorVisual>),
+    >,
 ) {
-    let power = mouse.power;
-    if power <= 0.0 {
-        return;
-    }
-    let group_scale = power.sqrt() / GROUP_SCALE_DIVISOR;
-    for mut t in &mut visuals {
-        t.translation.x = mouse.position[0];
-        t.translation.y = mouse.position[1];
-        // Z stays at VISUAL_Z (set at spawn); only XY tracks the pointer.
-        t.scale = Vec3::splat(group_scale);
-    }
+    for (source, mut group_t, children) in &mut visuals {
+        let (pos, power) = source_state(*source, &mouse, &hand_attractors);
+        if power <= VISUAL_POWER_EPSILON {
+            // Source is gone / released; `despawn_attractor_visual` removes this
+            // group on the same tick. Leave the rings at their last transform.
+            continue;
+        }
 
-    for (mut ring, mut t) in &mut rings {
-        #[allow(
-            clippy::as_conversions,
-            clippy::cast_precision_loss,
-            reason = "ring.index ∈ 0..NUM_RINGS=10; u32→f32 round-trip is lossless"
-        )]
-        let index_f = ring.index as f32;
-        // Per-gimbal rate multiplier desynchronises the three axes so the
-        // rings never lock into a periodic group pattern.
-        let gimbal_idx = usize::from(ring.gimbal.min(2));
-        let gimbal_rate = GIMBAL_RATE[gimbal_idx];
-        let speed = (10.0 - index_f) / ROTATION_SPEED_DIVISOR * gimbal_rate * power;
-        ring.phi += speed;
+        group_t.translation.x = pos.x;
+        group_t.translation.y = pos.y;
+        // Z stays at VISUAL_Z (set at spawn); only XY tracks the attractor.
+        group_t.scale = Vec3::splat(power.sqrt() / GROUP_SCALE_DIVISOR);
 
-        let base = ring_base_scale(index_f);
-        *t = ring_transform_for_gimbal(ring.gimbal, ring.phi, base);
+        for child in children.iter() {
+            let Ok((mut ring, mut ring_t)) = rings.get_mut(child) else {
+                continue;
+            };
+            #[allow(
+                clippy::as_conversions,
+                clippy::cast_precision_loss,
+                reason = "ring.index ∈ 0..NUM_RINGS=10; u32→f32 round-trip is lossless"
+            )]
+            let index_f = ring.index as f32;
+            // Per-gimbal rate multiplier desynchronises the three axes so the
+            // rings never lock into a periodic group pattern.
+            let gimbal_idx = usize::from(ring.gimbal.min(2));
+            let gimbal_rate = GIMBAL_RATE[gimbal_idx];
+            let speed = (10.0 - index_f) / ROTATION_SPEED_DIVISOR * gimbal_rate * power;
+            ring.phi += speed;
+
+            let base = ring_base_scale(index_f);
+            *ring_t = ring_transform_for_gimbal(ring.gimbal, ring.phi, base);
+        }
     }
 }
 
-/// Despawn the gyroscope visual once attractor power drops back to zero.
+/// Despawn each gyroscope visual once its bound attractor's power drops back to
+/// (near) zero — the mouse released, a hand stopped grabbing, or a hand left the
+/// tracking volume (its `LineHandAttractor` lookup fails → zero power).
 ///
 /// Bevy 0.18's `EntityCommands::despawn()` recursively despawns descendants
 /// linked through the `ChildOf` relationship, so a single `despawn()` on the
@@ -373,13 +483,14 @@ pub fn animate_attractor_visual(
 pub fn despawn_attractor_visual(
     mut commands: Commands<'_, '_>,
     mouse: Res<'_, MouseAttractorState>,
-    visuals: Query<'_, '_, Entity, With<AttractorVisual>>,
+    hand_attractors: Query<'_, '_, &LineHandAttractor>,
+    visuals: Query<'_, '_, (Entity, &AttractorSource), With<AttractorVisual>>,
 ) {
-    if mouse.power > 0.0 {
-        return;
-    }
-    for entity in &visuals {
-        commands.entity(entity).despawn();
+    for (entity, source) in &visuals {
+        let (_pos, power) = source_state(*source, &mouse, &hand_attractors);
+        if power <= VISUAL_POWER_EPSILON {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
