@@ -241,6 +241,119 @@ pub enum TrackingFlow {
     },
 }
 
+/// Coarse-grained state for the status LED dot. Derived from the multi-axis
+/// [`ProviderStatus`]; the dev panel reads the axes directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrimaryState {
+    /// Provider has not started.
+    #[default]
+    NotStarted,
+    /// Ultraleap service (or WS server, on web) not running.
+    ServiceMissing,
+    /// Connecting / handshake / dropped. Surface as one user-facing state.
+    Disconnected,
+    /// Service reachable, no Leap device attached.
+    ServiceOnly,
+    /// Device attached but not currently streaming frames.
+    DeviceAttached,
+    /// Streaming and the device reports no degraded-health flags.
+    Streaming,
+    /// Streaming, but `health` contains a degradation flag (smudged, robust,
+    /// low-resource) or `service_health` contains `LOW_FPS_DETECTED` /
+    /// `POOR_PERFORMANCE_PAUSE`.
+    DeviceDegraded,
+    /// Device reported a failure (`BAD_TRANSPORT` / `BAD_FIRMWARE` /
+    /// `BAD_CALIBRATION` / `BAD_CONTROL` / `UNKNOWN_FAILURE`) or
+    /// [`DevicePresence::Failed`].
+    DeviceFailed,
+}
+
+/// Multi-axis snapshot of a provider's lifecycle and health, updated each
+/// `poll()`. The status LED reads [`Self::primary`]; the dev panel reads
+/// every field.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderStatus {
+    /// Reachability of the underlying transport.
+    pub service: ServiceConnection,
+    /// Whether a tracking device is currently attached.
+    pub device: DevicePresence,
+    /// Device-side health conditions. Multiple flags possible simultaneously.
+    pub health: DeviceHealth,
+    /// Whether tracking frames are currently flowing.
+    pub streaming: TrackingFlow,
+    /// Service-side health conditions.
+    pub service_health: ServiceHealth,
+}
+
+impl ProviderStatus {
+    /// Coarse-grained derived state for UI status indicators.
+    ///
+    /// Precedence (first matching rule wins):
+    /// 1. `service == NotStarted` → `NotStarted`
+    /// 2. Device failure conditions → `DeviceFailed`
+    /// 3. Service-level reachability problems → `ServiceMissing` / `Disconnected`
+    /// 4. Streaming with any health/service-health degradation → `DeviceDegraded`
+    /// 5. Streaming clean → `Streaming`
+    /// 6. Device attached but no streaming → `DeviceAttached`
+    /// 7. Service connected, no device → `ServiceOnly`
+    /// 8. Anything else → `Disconnected` (catch-all)
+    #[must_use]
+    pub fn primary(&self) -> PrimaryState {
+        // Rule 1
+        if matches!(self.service, ServiceConnection::NotStarted) {
+            return PrimaryState::NotStarted;
+        }
+
+        // Rule 2 — device failure or hard-failure health flags
+        let hard_failure = DeviceHealth::UNKNOWN_FAILURE
+            | DeviceHealth::BAD_CALIBRATION
+            | DeviceHealth::BAD_FIRMWARE
+            | DeviceHealth::BAD_TRANSPORT
+            | DeviceHealth::BAD_CONTROL;
+        if matches!(self.device, DevicePresence::Failed) || self.health.intersects(hard_failure) {
+            return PrimaryState::DeviceFailed;
+        }
+
+        // Rule 3 — service-level reachability
+        match self.service {
+            ServiceConnection::ServiceMissing => return PrimaryState::ServiceMissing,
+            ServiceConnection::Errored
+            | ServiceConnection::Disconnected
+            | ServiceConnection::Connecting => return PrimaryState::Disconnected,
+            ServiceConnection::Connected | ServiceConnection::NotStarted => {}
+        }
+
+        // From here `service == Connected`.
+
+        // Rules 4-5: streaming branch
+        if matches!(self.streaming, TrackingFlow::Streaming { .. }) {
+            let soft_degrade =
+                DeviceHealth::SMUDGED | DeviceHealth::ROBUST | DeviceHealth::LOW_RESOURCE;
+            let service_degrade =
+                ServiceHealth::LOW_FPS_DETECTED | ServiceHealth::POOR_PERFORMANCE_PAUSE;
+            if self.health.intersects(soft_degrade)
+                || self.service_health.intersects(service_degrade)
+            {
+                return PrimaryState::DeviceDegraded;
+            }
+            return PrimaryState::Streaming;
+        }
+
+        // Rule 6
+        if matches!(self.device, DevicePresence::Attached) {
+            return PrimaryState::DeviceAttached;
+        }
+
+        // Rule 7
+        if matches!(self.device, DevicePresence::NoDevice) {
+            return PrimaryState::ServiceOnly;
+        }
+
+        // Rule 8 — catch-all (e.g., DevicePresence::Lost with no streaming)
+        PrimaryState::Disconnected
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +370,75 @@ mod tests {
             grab_strength: 0.0,
             landmarks: [Vec3::ZERO; LANDMARK_COUNT],
         }
+    }
+
+    #[test]
+    fn provider_status_primary_streaming_healthy() {
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Attached,
+            health: DeviceHealth::STREAMING,
+            streaming: TrackingFlow::Streaming {
+                last_frame_ago: Duration::from_millis(10),
+                dropped_since_start: 0,
+            },
+            service_health: ServiceHealth::empty(),
+        };
+        assert_eq!(s.primary(), PrimaryState::Streaming);
+    }
+
+    #[test]
+    fn provider_status_primary_streaming_smudged_is_degraded() {
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Attached,
+            health: DeviceHealth::STREAMING | DeviceHealth::SMUDGED,
+            streaming: TrackingFlow::Streaming {
+                last_frame_ago: Duration::from_millis(10),
+                dropped_since_start: 0,
+            },
+            service_health: ServiceHealth::empty(),
+        };
+        assert_eq!(s.primary(), PrimaryState::DeviceDegraded);
+    }
+
+    #[test]
+    fn provider_status_primary_service_missing() {
+        let s = ProviderStatus {
+            service: ServiceConnection::ServiceMissing,
+            ..ProviderStatus::default()
+        };
+        assert_eq!(s.primary(), PrimaryState::ServiceMissing);
+    }
+
+    #[test]
+    fn provider_status_primary_device_failed() {
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Failed,
+            ..ProviderStatus::default()
+        };
+        assert_eq!(s.primary(), PrimaryState::DeviceFailed);
+    }
+
+    #[test]
+    fn provider_status_primary_service_health_low_fps_is_degraded() {
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Attached,
+            health: DeviceHealth::STREAMING,
+            streaming: TrackingFlow::Streaming {
+                last_frame_ago: Duration::from_millis(10),
+                dropped_since_start: 0,
+            },
+            service_health: ServiceHealth::LOW_FPS_DETECTED,
+        };
+        assert_eq!(s.primary(), PrimaryState::DeviceDegraded);
+    }
+
+    #[test]
+    fn provider_status_primary_not_started_default() {
+        assert_eq!(ProviderStatus::default().primary(), PrimaryState::NotStarted);
     }
 
     #[test]
