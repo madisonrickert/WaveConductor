@@ -4,69 +4,78 @@
 //!
 //! Ports v4's `HandMesh` wireframe rendering onto v5's `TrackedHand` entity
 //! model. Each tracked hand entity spawns 20 wireframe icosphere children
-//! (one per bone), rendered by a dedicated [`HandMeshCamera3d`] on
-//! [`HAND_MESH_LAYER`] at `order = 1` with [`ClearColorConfig::None`] on top of
-//! Camera2d's output.
+//! (one per bone). The bones render to an off-screen `Image` via a dedicated
+//! [`HandMeshCamera3d`] on [`HAND_MESH_LAYER`], and a separate compositor
+//! [`HandMeshCompositorCamera`] draws that image as a sprite on top of the
+//! Camera2d output of the Line scene.
+//!
+//! ## Why the off-screen image
+//!
+//! A first attempt rendered Camera3d directly to the swap chain at `order = 1`
+//! with `ClearColorConfig::None`. With the Line scene's HDR Camera2d (gravity
+//! post-process + bloom + `AgX` tonemap) drawing at `order = 0`, Bevy 0.18's
+//! per-frame swap chain content was not being fully reset between the two
+//! cameras — bones accumulated in opaque pixels, eventually covering the
+//! particles + UI. Cropping at window edges matched the Camera3d frustum.
+//!
+//! Routing through an alpha-aware off-screen target severs that contention:
+//! Camera3d clears the image to fully-transparent each frame, draws the
+//! bones, and the compositor sprite alpha-blends over the swap chain
+//! exactly where bones are.
 //!
 //! ## Data flow
 //!
-//! 1. `OnEnter(AppState::Line)`: [`spawn_hand_mesh_camera`] creates the
-//!    `Camera3d` with an orthographic projection matching the window's logical
-//!    size, `order = 1`, and `ClearColorConfig::None` so it composites over the
-//!    2D layer without clearing.
+//! 1. `OnEnter(AppState::Line)`: [`spawn_hand_mesh_camera`] allocates the
+//!    off-screen `Image` sized to the window, then spawns
+//!    `HandMeshCamera3d` (targeting the image), `HandMeshCompositorSprite`
+//!    (textured with the image), and `HandMeshCompositorCamera` (a Camera2d
+//!    at `order = 2` that draws only the compositor sprite layer onto the
+//!    swap chain without clearing).
 //! 2. `On<Add, TrackedHand>` observer: [`spawn_bones_on_tracked_hand_added`]
-//!    calls [`spawn_bones`] to attach 20 wireframe-sphere `Mesh3d` children to
-//!    the `TrackedHand` entity. Only fires while `AppState::Line` is active.
-//! 3. Every `Update` frame (while Line is active): [`update_bone_transforms`]
-//!    reads [`wc_core::input::entity::BoneCenters`] from each `TrackedHand` and
-//!    projects each center through [`wc_core::input::projection::palm_to_world`]
-//!    to align with the attractor coordinate convention, writing the result to
-//!    the corresponding bone sphere's `Transform`.
-//! 4. `OnExit(AppState::Line)`: [`despawn_hand_mesh_camera`] drops the Camera3d.
-//!    Bone entities are children of `TrackedHand`; they despawn automatically
-//!    with their parent when `sync_hand_entities` removes the `TrackedHand`
-//!    entity. [`despawn_all_bone_children`] catches any orphaned bones if the
-//!    sketch exits before all hands depart.
-//!
-//! ## Scope limit (Phase 13)
-//!
-//! The `HandMeshCamera3d` does NOT carry `Hdr`, `Bloom`, or `Tonemapping`.
-//! Wireframes render at full forward-3D brightness but are not bloomed; they
-//! composite over Camera2d's already-bloomed + AgX-tonemapped output. Bloom
-//! parity with v4 requires a shared `Image` render target + final-blit camera,
-//! which is deferred to a follow-up plan.
+//!    attaches 20 wireframe-sphere children to the new `TrackedHand`.
+//! 3. Every `Update`: [`update_bone_transforms`] writes the projected
+//!    bone-center world coords to each sphere's `Transform`.
+//! 4. `OnExit(AppState::Line)`: [`despawn_hand_mesh_camera`] tears down the
+//!    Camera3d, compositor camera, compositor sprite, and the `Image`
+//!    handle (asset is GC'd once the last handle drops).
 
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::ScalingMode;
+use bevy::camera::{ImageRenderTarget, RenderTarget, ScalingMode};
+use bevy::image::Image;
 use bevy::pbr::wireframe::{Wireframe, WireframeColor};
 use bevy::prelude::*;
+use bevy::render::render_resource::{
+    Extent3d, TextureDimension, TextureFormat, TextureUsages,
+};
 use wc_core::input::entity::{BoneCenters, TrackedHand, BONE_COUNT};
 use wc_core::input::projection::palm_to_world;
 use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
 
-/// `RenderLayers` index used for the 3D wireframe pass.
+/// `RenderLayers` index for the Camera3d wireframe pass.
 ///
-/// Layer 0 is the default layer used by Camera2d and all 2D content. Layer 1
-/// is reserved exclusively for bone mesh spheres + `HandMeshCamera3d` so the
-/// two passes stay independent and `ClearColorConfig::None` composites cleanly.
+/// Layer 0 is the default layer used by the main `Camera2d` and all 2D
+/// content. Layer 1 is reserved exclusively for bone-sphere children +
+/// `HandMeshCamera3d`.
 pub const HAND_MESH_LAYER_INDEX: usize = 1;
 
-/// The [`RenderLayers`] value for bone spheres and the `HandMeshCamera3d`.
+/// `RenderLayers` index for the compositor `Camera2d` and its sprite.
 ///
-/// `RenderLayers::layer` is const so this is a zero-cost constant.
+/// Layer 2 is reserved exclusively for the single fullscreen
+/// `HandMeshCompositorSprite` that displays the off-screen render target,
+/// drawn only by `HandMeshCompositorCamera`.
+pub const HAND_MESH_COMPOSITOR_LAYER_INDEX: usize = 2;
+
+/// The [`RenderLayers`] value for bone spheres and the Camera3d.
 pub const HAND_MESH_LAYER: RenderLayers = RenderLayers::layer(HAND_MESH_LAYER_INDEX);
 
-/// Wireframe color matching v4's `HandMesh` `defaultMaterial` (`#add6b6`,
-/// a muted green). Precomputed as `f32` fractions to avoid `as` casts (which
-/// the `as_conversions` lint would flag).
-///
-/// `Color::srgb` is not a `const fn` in Bevy 0.18, so this is a regular
-/// function; call sites cache the result or accept the trivial construction cost.
+/// The [`RenderLayers`] value for the compositor sprite + compositor camera.
+pub const HAND_MESH_COMPOSITOR_LAYER: RenderLayers =
+    RenderLayers::layer(HAND_MESH_COMPOSITOR_LAYER_INDEX);
+
+/// Wireframe color matching v4's `HandMesh` `defaultMaterial` (`#add6b6`).
 fn hand_mesh_color() -> Color {
-    // #add6b6 = (0xad / 255, 0xd6 / 255, 0xb6 / 255)
-    // Precomputed: 0xad = 173 → 173/255 ≈ 0.6784; 0xd6 = 214 → 214/255 ≈ 0.8392;
-    //              0xb6 = 182 → 182/255 ≈ 0.7137.
     Color::srgb(
         f32::from(0xad_u8) / 255.0,
         f32::from(0xd6_u8) / 255.0,
@@ -74,11 +83,20 @@ fn hand_mesh_color() -> Color {
     )
 }
 
-/// Marker component for the Camera3d entity that renders wireframe bones.
-///
-/// Spawned in `OnEnter(AppState::Line)`, despawned in `OnExit`.
+/// Marker for the off-screen `Camera3d` that rasterizes the wireframe bones
+/// into the shared image target.
 #[derive(Component)]
 pub struct HandMeshCamera3d;
+
+/// Marker for the `Camera2d` that composites the off-screen image over the
+/// Line scene's swap chain output.
+#[derive(Component)]
+pub struct HandMeshCompositorCamera;
+
+/// Marker for the `Sprite` that carries the off-screen image and feeds the
+/// compositor camera.
+#[derive(Component)]
+pub struct HandMeshCompositorSprite;
 
 /// Index of a bone sphere child on a `TrackedHand` entity.
 ///
@@ -87,19 +105,10 @@ pub struct HandMeshCamera3d;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BoneIndex(pub usize);
 
-/// Plugin registering the wireframe bone visualization.
-///
-/// Appended to [`super::LinePlugin`] via `app.add_plugins(LineHandMeshPlugin)`.
+/// Plugin wiring the wireframe bone visualization.
 pub struct LineHandMeshPlugin;
 
 impl Plugin for LineHandMeshPlugin {
-    /// Register Camera3d lifecycle, bone spawn observer, and per-frame transform
-    /// update.
-    ///
-    /// Camera is spawned in `OnEnter(Line)` and despawned in `OnExit(Line)`.
-    /// Bones are children of each `TrackedHand`; they despawn with the parent
-    /// automatically. `despawn_all_bone_children` is an `OnExit` guard for
-    /// bones whose parent hands hadn't despawned by the time the sketch exits.
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::Line), spawn_hand_mesh_camera)
             .add_systems(
@@ -114,32 +123,73 @@ impl Plugin for LineHandMeshPlugin {
     }
 }
 
-/// `OnEnter(AppState::Line)` — spawn the orthographic Camera3d used for
-/// wireframe bone rendering.
-///
-/// The camera uses `ScalingMode::WindowSize` (the `default_3d` default) so
-/// world units match logical pixels, consistent with Camera2d's coordinate
-/// space. Positioned at `z = 500`, looking toward the origin, so that bone
-/// spheres placed at `z = 0` land in view.
-///
-/// `order = 1` means this camera's pass executes after Camera2d's pass (order
-/// 0). `ClearColorConfig::None` skips the clear so the 3D output composites
-/// over the already-rendered 2D layer instead of painting over it.
-fn spawn_hand_mesh_camera(mut commands: Commands<'_, '_>) {
+/// `OnEnter(AppState::Line)` — allocate the off-screen image and spawn the
+/// three entities that drive the bone overlay: Camera3d (writes), compositor
+/// sprite (carries the image), compositor Camera2d (composites onto the
+/// swap chain).
+fn spawn_hand_mesh_camera(
+    mut commands: Commands<'_, '_>,
+    mut images: ResMut<'_, Assets<Image>>,
+    window: Single<'_, '_, &Window>,
+) {
+    // Logical-pixel sizing keeps the off-screen image, the Camera3d
+    // frustum, the Camera2d compositor frustum, and the sprite all on the
+    // same coordinate convention. HiDPI sharpness for the bones is a
+    // non-goal (wireframes are thin lines; the resolution penalty isn't
+    // visible at viewing distance). `.round() + max(1, ..)` clamps the
+    // edge case where the window's logical size has not been resolved yet
+    // (zero-size would trigger a wgpu validation error). The truncation
+    // via `as_u32_lossy` is acceptable here because window dimensions are
+    // always positive and well within `u32::MAX`.
+    let width = f32_to_u32_lossy(window.width()).max(1);
+    let height = f32_to_u32_lossy(window.height()).max(1);
+    let extent = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+
+    // Bgra8UnormSrgb is the wgpu-preferred swap-chain format on macOS Metal;
+    // the same format on the off-screen target lets the compositor sample
+    // it without a re-encode. Rgba8Unorm would also work but introduces a
+    // sRGB encoding mismatch when sampled.
+    let mut image = Image::new_fill(
+        extent,
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Bgra8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::RENDER_ATTACHMENT;
+    let image_handle = images.add(image);
+
+    // Camera3d — wireframe bone pass.
+    //
+    // Clears its render-target image to fully transparent each frame, so
+    // bones from the previous frame are gone before this frame's geometry
+    // is drawn. Without the image-based clear, the swap chain accumulates
+    // opaque bone pixels and eventually hides everything underneath.
+    //
+    // `RenderTarget` is a Bevy-0.18 component required by `Camera` (via
+    // `#[require]`); it's no longer a field of `Camera` as in earlier
+    // versions. Setting it explicitly here overrides the default of
+    // `RenderTarget::Window(PrimaryWindow)`.
     commands.spawn((
         HandMeshCamera3d,
         Camera3d::default(),
         Camera {
             order: 1,
-            clear_color: ClearColorConfig::None,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
             ..default()
         },
+        RenderTarget::Image(ImageRenderTarget {
+            handle: image_handle.clone(),
+            scale_factor: 1.0,
+        }),
         Projection::Orthographic(OrthographicProjection {
-            // ScalingMode::WindowSize is `default_3d()`'s default: 1 world
-            // unit = 1 logical pixel. Matches Camera2d's coordinate space.
             scaling_mode: ScalingMode::WindowSize,
-            // Give the frustum plenty of depth so all bone z-values (0.0) are
-            // well within view from the camera at z = 500.
             near: -1000.0,
             far: 1000.0,
             ..OrthographicProjection::default_3d()
@@ -147,25 +197,65 @@ fn spawn_hand_mesh_camera(mut commands: Commands<'_, '_>) {
         Transform::from_xyz(0.0, 0.0, 500.0).looking_at(Vec3::ZERO, Vec3::Y),
         HAND_MESH_LAYER,
     ));
+
+    // Compositor sprite — textured with the off-screen image, sized to
+    // match the window in world units. Sits at origin so the compositor
+    // Camera2d sees it centred. `custom_size` overrides the implicit
+    // physical-pixel sizing of the image to keep the sprite in logical
+    // units (matches Camera2d's default orthographic scaling).
+    commands.spawn((
+        HandMeshCompositorSprite,
+        Sprite {
+            image: image_handle,
+            custom_size: Some(Vec2::new(window.width(), window.height())),
+            ..default()
+        },
+        Transform::default(),
+        HAND_MESH_COMPOSITOR_LAYER,
+    ));
+
+    // Compositor Camera2d — `order = 2` runs after the main Camera2d
+    // (`order = 0`) and after `HandMeshCamera3d` (`order = 1`), so the
+    // sprite reads a freshly-rendered image. `ClearColorConfig::None`
+    // preserves the main Camera2d's tonemapped swap-chain output;
+    // sprites alpha-blend over it by default.
+    commands.spawn((
+        HandMeshCompositorCamera,
+        Camera2d,
+        Camera {
+            order: 2,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        HAND_MESH_COMPOSITOR_LAYER,
+    ));
 }
 
-/// `OnExit(AppState::Line)` — despawn the `HandMeshCamera3d`.
+/// `OnExit(AppState::Line)` — despawn all three compositor entities. The
+/// off-screen `Image` asset reference count drops to zero when the Camera3d
+/// and Sprite both despawn, and Bevy's asset GC frees the GPU texture
+/// shortly after.
 fn despawn_hand_mesh_camera(
     mut commands: Commands<'_, '_>,
-    query: Query<'_, '_, Entity, With<HandMeshCamera3d>>,
+    cameras: Query<'_, '_, Entity, With<HandMeshCamera3d>>,
+    compositor_cameras: Query<'_, '_, Entity, With<HandMeshCompositorCamera>>,
+    compositor_sprites: Query<'_, '_, Entity, With<HandMeshCompositorSprite>>,
 ) {
-    for entity in &query {
+    for entity in &cameras {
+        commands.entity(entity).despawn();
+    }
+    for entity in &compositor_cameras {
+        commands.entity(entity).despawn();
+    }
+    for entity in &compositor_sprites {
         commands.entity(entity).despawn();
     }
 }
 
-/// `OnExit(AppState::Line)` — despawn any `BoneIndex` entities that were not
-/// already despawned by their `TrackedHand` parent leaving the tracking volume.
-///
-/// This is a safety guard: under normal operation, bones despawn with their
-/// `TrackedHand` parent. But if the sketch exits while hands are still tracked,
-/// `BoneIndex` children might outlive `OnExit` if the parent's despawn hasn't
-/// cascaded yet. Querying directly for `BoneIndex` entities ensures a clean slate.
+/// `OnExit(AppState::Line)` — despawn orphaned bone-sphere children that
+/// outlived their `TrackedHand` parent. Under normal operation Bevy's
+/// hierarchy cleanup handles this; the explicit query is a guard against
+/// any race where the sketch exits mid-frame.
 fn despawn_all_bone_children(
     mut commands: Commands<'_, '_>,
     query: Query<'_, '_, Entity, With<BoneIndex>>,
@@ -175,18 +265,13 @@ fn despawn_all_bone_children(
     }
 }
 
-/// Observer — reacts to `Add<TrackedHand>` and spawns wireframe bone spheres as
-/// children of the new `TrackedHand` entity, but only while `AppState::Line` is
-/// active.
+/// Observer — on `Add<TrackedHand>` while Line is active, spawn 20 bone
+/// children. Bones inherit the parent `TrackedHand`'s hierarchy and despawn
+/// with it.
 ///
-/// Using an observer rather than a system means the bones appear on the same
-/// frame the hand entity is spawned, with no one-frame gap.
-///
-/// `meshes` and `materials` are `Option`-wrapped because headless test apps
-/// (using `MinimalPlugins` without `PbrPlugin`) do not register these asset
-/// stores. When running without a real `RenderApp` the observer skips spawning
-/// rather than panicking — the bones are purely visual and their absence does
-/// not affect hand-tracking logic.
+/// `meshes` and `materials` are `Option`-wrapped so the observer also runs
+/// cleanly in headless `MinimalPlugins` test apps where the asset stores
+/// aren't registered.
 fn spawn_bones_on_tracked_hand_added(
     trigger: On<'_, '_, Add, TrackedHand>,
     state: Res<'_, State<AppState>>,
@@ -198,25 +283,12 @@ fn spawn_bones_on_tracked_hand_added(
         return;
     }
     let (Some(meshes), Some(materials)) = (meshes, materials) else {
-        // Headless test context: asset stores not present; skip visual spawn.
         return;
     };
     spawn_bones(trigger.event_target(), commands, meshes, materials);
 }
 
-/// Spawn 20 wireframe icosphere children on `parent` (a `TrackedHand` entity).
-///
-/// Each child carries:
-/// - [`Mesh3d`] + [`MeshMaterial3d<StandardMaterial>`]: the icosphere geometry
-///   with `unlit = true` so the wireframe color is not shaded by lights.
-/// - [`Wireframe`] + [`WireframeColor`]: opt-in wireframe rendering. The
-///   [`Wireframe`] component enables wireframe mode for this specific entity
-///   regardless of the global [`bevy::pbr::wireframe::WireframeConfig`].
-/// - [`HAND_MESH_LAYER`]: restricts rendering to the `HandMeshCamera3d`.
-/// - [`BoneIndex`]: records which bone center in `BoneCenters` this sphere
-///   represents, used by [`update_bone_transforms`].
-/// - [`Transform::default()`]: positioned at the origin until the first
-///   `update_bone_transforms` run; this only lasts one frame.
+/// Spawn 20 wireframe icosphere children on `parent` (a `TrackedHand`).
 fn spawn_bones(
     parent: Entity,
     mut commands: Commands<'_, '_>,
@@ -225,26 +297,20 @@ fn spawn_bones(
 ) {
     let color = hand_mesh_color();
 
-    // ico(1) on a small sphere: 1 subdivision keeps the geometry light (80
-    // triangles) while still reading as a sphere at bone-visualization scale.
-    // `ico` returns `Err` only for subdivisions >= 80; using 1 is provably safe.
-    // The allow is intentional and narrowly scoped — this exact call site is
-    // the only place in the module where `ico` is called.
+    // `ico(1)` only fails on subdivisions ≥ 80; using 1 is statically safe.
     #[allow(
         clippy::expect_used,
-        reason = "ico(1) only fails if subdivisions >= 80; using 1 is statically safe"
+        reason = "ico(1) only fails if subdivisions >= 80; 1 is statically safe"
     )]
     let sphere_mesh = meshes.add(
         Sphere::new(10.0)
             .mesh()
             .ico(1)
-            .expect("ico(1) is well within the 79-subdivision limit; unreachable"),
+            .expect("ico(1) is well within the 79-subdivision limit"),
     );
 
     let bone_material = materials.add(StandardMaterial {
         base_color: color,
-        // Unlit so wireframe color is not dimmed by the absence of a 3D light
-        // source in the scene. Bones should appear at their nominal color.
         unlit: true,
         ..default()
     });
@@ -264,17 +330,30 @@ fn spawn_bones(
     });
 }
 
-/// Per-frame: project each hand's bone centers to world space and write to the
-/// corresponding bone sphere's `Transform`.
+/// Cast a non-negative `f32` (a logical window dimension in pixels) to `u32`.
 ///
-/// Queries `TrackedHand` entities that have both `BoneCenters` (filled by the
-/// provider) and `Children` (the 20 bone spheres). For each child that carries
-/// a `BoneIndex`, looks up the bone center, projects through `palm_to_world`,
-/// and sets the sphere's translation.
-///
-/// `BoneIndex.0` is always in `0..BONE_COUNT` by construction (20 spheres
-/// spawned with indices 0..20); the `continue` is a defensive guard against any
-/// edge case where the index is somehow out of range.
+/// The workspace lint suite denies bare `as` casts and the floating-point
+/// truncation variants. This helper localises the lossy conversion to one
+/// site with a documented invariant: window dimensions are always finite,
+/// non-negative, and well below `u32::MAX`. Saturates to `u32::MAX` if the
+/// value is implausibly large (NaN clamps to 0).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "window dimensions are non-negative finite f32 within u32 range; \
+              checked at runtime via `is_finite` + `>= 0.0`"
+)]
+fn f32_to_u32_lossy(v: f32) -> u32 {
+    if v.is_finite() && v >= 0.0 {
+        v as u32
+    } else {
+        0
+    }
+}
+
+/// Per-frame: project each hand's bone centres to world space and write the
+/// projected position to each child sphere's `Transform.translation`.
 fn update_bone_transforms(
     hands: Query<'_, '_, (&BoneCenters, &Children), With<TrackedHand>>,
     mut bones: Query<'_, '_, (&BoneIndex, &mut Transform), Without<TrackedHand>>,
@@ -289,8 +368,6 @@ fn update_bone_transforms(
             };
             let idx = bone_index.0;
             if idx >= BONE_COUNT {
-                // Defensive: should never happen since spawn_bones only creates
-                // indices 0..BONE_COUNT, but guard rather than panic.
                 continue;
             }
             let center_mm = bone_centers.0[idx];
