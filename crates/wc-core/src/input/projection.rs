@@ -18,9 +18,15 @@ pub const LEAP_Y_MIN_MM: f32 = 40.0;
 /// Highest palm height (mm above device) we map to screen-top.
 pub const LEAP_Y_MAX_MM: f32 = 350.0;
 
-/// Fraction of the screen reserved as deadzone at each edge. v4 uses 20%,
-/// so the usable region is the centered 60% of the viewport.
-pub const SCREEN_DEADZONE: f32 = 0.2;
+/// Fraction of the screen reserved as deadzone at each edge.
+///
+/// v4 reserved 20% on each side (usable centre 60%), but that clamps the hand
+/// to a box well inside the window — the full range of hand motion can't reach
+/// the edges. We map the full Leap range to the full viewport (`0.0` deadzone)
+/// so the hand mesh and attractor can travel to the window edges. This is an
+/// intentional divergence from v4 (per the "full range of motion" requirement);
+/// the constant stays so a deadzone can be reintroduced if desired.
+pub const SCREEN_DEADZONE: f32 = 0.0;
 
 /// Maps a Leap palm position to centered world-space coordinates.
 ///
@@ -32,9 +38,9 @@ pub const SCREEN_DEADZONE: f32 = 0.2;
 /// Output: world-space `Vec2` with origin at screen center, +y up. Compatible
 /// with v5's existing mouse-attractor coordinate system.
 ///
-/// v4 mapping:
-/// - X: `-200..+200 mm` → `20%..80%` of canvas width.
-/// - Y: `350..40 mm` (high to low) → `20%..80%` of canvas height (inverted —
+/// Mapping (with the default `SCREEN_DEADZONE = 0.0`):
+/// - X: `-200..+200 mm` → `0%..100%` of canvas width.
+/// - Y: `350..40 mm` (high to low) → `0%..100%` of canvas height (inverted —
 ///   raising the hand moves the attractor toward screen-top).
 #[must_use]
 pub fn palm_to_world(palm_mm: Vec3, window: Vec2) -> Vec2 {
@@ -69,35 +75,37 @@ mod tests {
         // X should be exactly center
         assert!(approx(world.x, 0.0), "x = {}", world.x);
         // Y: Y range is [40..350], mid is 195 (not 200). So palm Y=200 is
-        // slightly above mid -> world Y slightly positive.
-        // y_norm = (350 - 200) / 310 = 0.4839; canvas_y = 720 * (0.2 + 0.6*0.4839) = 720 * 0.4903 = 353.0
-        // world_y = -(353.0 - 360.0) = 7.0
-        assert!(approx(world.y, 7.0), "y = {}", world.y);
+        // slightly above mid -> world Y slightly positive. With deadzone 0:
+        // y_norm = (350 - 200) / 310 = 0.4839; canvas_y = 720 * 0.4839 = 348.4
+        // world_y = -(348.4 - 360.0) = 11.6
+        assert!(approx(world.y, 11.6), "y = {}", world.y);
     }
 
     #[test]
-    fn upper_left_extreme_maps_to_upper_left_usable_corner() {
-        // palm at (-200, 350, _) — hand far left, hand high
+    fn upper_left_extreme_maps_to_window_corner() {
+        // palm at (-200, 350, _) — hand far left, hand high → top-left corner.
         let world = palm_to_world(Vec3::new(-LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, 0.0), WINDOW);
-        // X: canvas_x = 0.2 * 1280 = 256; world_x = 256 - 640 = -384
-        assert!(approx(world.x, -384.0), "x = {}", world.x);
-        // Y: canvas_y = 0.2 * 720 = 144; world_y = -(144 - 360) = 216
-        assert!(approx(world.y, 216.0), "y = {}", world.y);
+        // X: canvas_x = 0 * 1280 = 0; world_x = 0 - 640 = -640 (left edge).
+        assert!(approx(world.x, -640.0), "x = {}", world.x);
+        // Y: canvas_y = 0; world_y = -(0 - 360) = 360 (top edge).
+        assert!(approx(world.y, 360.0), "y = {}", world.y);
     }
 
     #[test]
-    fn lower_right_extreme_maps_to_lower_right_usable_corner() {
-        // palm at (+200, 40, _) — hand far right, hand low
+    fn lower_right_extreme_maps_to_window_corner() {
+        // palm at (+200, 40, _) — hand far right, hand low → bottom-right corner.
         let world = palm_to_world(Vec3::new(LEAP_X_HALFRANGE_MM, LEAP_Y_MIN_MM, 0.0), WINDOW);
-        assert!(approx(world.x, 384.0), "x = {}", world.x);
-        assert!(approx(world.y, -216.0), "y = {}", world.y);
+        // X: canvas_x = 1280; world_x = 1280 - 640 = 640 (right edge).
+        assert!(approx(world.x, 640.0), "x = {}", world.x);
+        // Y: canvas_y = 720; world_y = -(720 - 360) = -360 (bottom edge).
+        assert!(approx(world.y, -360.0), "y = {}", world.y);
     }
 
     #[test]
-    fn out_of_range_palm_clamps_to_usable_edge() {
+    fn out_of_range_palm_clamps_to_window_edge() {
         // palm at (-300, 500, _) — beyond Leap's stated range
         let world = palm_to_world(Vec3::new(-300.0, 500.0, 0.0), WINDOW);
-        // Both axes should clamp to the usable edge — same as -200, 350.
+        // Both axes should clamp to the window edge — same as -200, 350.
         let edge = palm_to_world(Vec3::new(-LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, 0.0), WINDOW);
         assert!(approx(world.x, edge.x));
         assert!(approx(world.y, edge.y));
