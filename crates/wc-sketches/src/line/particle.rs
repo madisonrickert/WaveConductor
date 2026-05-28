@@ -54,6 +54,10 @@ pub struct Attractor {
 /// Maximum simultaneous attractors. Index 0 is the mouse; indices 1..=N are
 /// reserved for future Leap-tracked hands (Plan 11+).
 // TODO(plan-11): consider dynamic-sized storage buffer if MAX_ATTRACTORS > ~16
+// TODO(plan-11.6-followup): Plan 11.6 feeds N=1 mouse attractor + up to 2
+// Leap hand attractors. Future sketches with richer multi-source input may
+// push MAX_ATTRACTORS past ~16, at which point the uniform-buffer cost
+// argues for switching to a dynamic-sized storage buffer.
 pub const MAX_ATTRACTORS: usize = 8;
 
 /// Compute kernel uniforms pushed every frame.
