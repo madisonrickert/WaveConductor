@@ -354,6 +354,32 @@ impl ProviderStatus {
     }
 }
 
+/// Provider-level diagnostic metadata, separate from per-poll status.
+///
+/// Updated by the provider during `poll()` (or `start()` for static fields
+/// like `sdk_version`). Surfaced through
+/// `HandTrackingProvider::diagnostics()`. Read by the dev panel; not consumed
+/// by the status LED.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderDiagnostics {
+    /// Device serial number (e.g., "LP00012345"). None on providers that
+    /// don't expose it (mock; `WebSocket` before deviceEvent).
+    pub device_serial: Option<String>,
+    /// SDK / runtime version string. Example: "Ultraleap Gemini 6.2.0".
+    pub sdk_version: Option<String>,
+    /// Currently-active policy flags as human-readable strings (e.g.
+    /// `"BackgroundFrames"`). Empty when no policies are set.
+    pub active_policies: Vec<String>,
+    /// Cumulative dropped-frames count since `start()`. Mirrors the value
+    /// inside [`TrackingFlow::Streaming::dropped_since_start`] when streaming;
+    /// kept here so the dev panel can render it across all states.
+    pub dropped_frames: u64,
+    /// Short reason string for the most recent
+    /// [`ServiceConnection::Errored`] or [`DevicePresence::Failed`]. None when
+    /// no error has occurred.
+    pub last_error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
