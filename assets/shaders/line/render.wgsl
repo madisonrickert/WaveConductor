@@ -22,13 +22,13 @@ struct Particle {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) brightness: f32,
-    @location(2) alpha: f32,
+    @location(1) alpha: f32,
 };
 
-// Quad half-size in world units. Plan 10 may tune this; v4's screen-space
-// 13px sprite is approximated here in world space.
-const QUAD_HALF: f32 = 8.0;
+// Quad half-size in world units. Bevy Camera2d default projection is 1 world
+// unit = 1 screen pixel, so 6.5 gives a 13×13 px quad — matching v4's
+// `THREE.PointsMaterial { size: 13, sizeAttenuation: false }`.
+const QUAD_HALF: f32 = 6.5;
 
 // One corner of the triangle-list quad: world-space offset plus the UV
 // coordinate that samples the star sprite. UVs are laid out so v=1 lies at
@@ -66,9 +66,6 @@ fn vertex(
     var out: VertexOutput;
     out.clip_position = view.clip_from_world * world_pos;
     out.uv = c.uv;
-    // velocity-driven warm-color brightness — same ramp as the pre-texture
-    // path, matching v4 starMaterial's color tint logic.
-    out.brightness = clamp(length(p.velocity) * 0.005, 0.05, 1.0);
     out.alpha = p.alpha;
     return out;
 }
@@ -76,10 +73,12 @@ fn vertex(
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(star_texture, star_sampler, in.uv);
-    let b = in.brightness;
-    // Warm-tinted velocity color (red > green > blue) modulated by the star
-    // sprite's RGB. Final alpha = sprite-alpha × particle-alpha so quad
-    // corners fade out smoothly.
-    let color = vec3<f32>(b, b * 0.85, b * 0.6);
-    return vec4<f32>(color * texel.rgb, texel.a * in.alpha);
+    // v4 uses THREE.PointsMaterial with vertexColors:true and a vertex color
+    // of (1, 1, 1). The texture RGB is multiplied by the vertex color, which
+    // is a no-op — the star sprite's own RGB (near-white at centre) is used
+    // directly. Velocity-based dimming was NOT present in v4 and caused
+    // stationary particles to render at 5% brightness instead of the correct
+    // ~89% (the star.png centre pixel is RGBA(228,221,222,237)).
+    // Final alpha = sprite-alpha × particle-alpha so quad corners fade smoothly.
+    return vec4<f32>(texel.rgb, texel.a * in.alpha);
 }
