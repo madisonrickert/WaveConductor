@@ -164,13 +164,25 @@ impl FromWorld for CompositePipeline {
                     shader_defs: vec![],
                     entry_point: Some("fs_main".into()),
                     targets: vec![Some(ColorTargetState {
-                        // The egui pass renders to the viewport's colour
-                        // attachment, which is sRGB. We match that format
-                        // so the compositor blends in the same colour space.
+                        // The composite pipeline writes back into the
+                        // camera's view target, which is `Rgba16Float`
+                        // while internal-HDR rendering is on (see
+                        // `spawn_camera` in the binary crate). The format
+                        // here MUST match the view target — wgpu validates
+                        // pipeline target formats against the bound
+                        // attachment at draw time and rejects mismatches.
+                        //
+                        // egui's own pass also renders into this same HDR
+                        // target. Because backdrop blur runs *after*
+                        // tonemapping in the Core2d graph, the values we
+                        // sample are already mapped into the SDR range
+                        // (clamped softly to ~[0, 1] by AgX) but still
+                        // stored as float — the blend below works the same
+                        // way it did in 8-bit sRGB, just with more headroom.
                         //
                         // Using ALPHA_BLENDING means coverage from the
                         // corner-radius SDF masks the edges of the panel.
-                        format: TextureFormat::Rgba8UnormSrgb,
+                        format: TextureFormat::Rgba16Float,
                         blend: Some(bevy::render::render_resource::BlendState::ALPHA_BLENDING),
                         write_mask: ColorWrites::ALL,
                     })],

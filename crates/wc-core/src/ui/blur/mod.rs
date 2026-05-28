@@ -154,9 +154,13 @@ impl Plugin for BackdropBlurPlugin {
 /// - [`BackdropBlurScratch`] with textures at 1/2, 1/4, and 1/8 resolution
 ///   (intermediate Kawase chain stages).
 ///
-/// All textures use `Rgba8UnormSrgb` format with `RENDER_ATTACHMENT |
-/// TEXTURE_BINDING` usages. The shared sampler on [`BackdropBlurTexture`] is
-/// bilinear clamp-to-edge.
+/// All textures use `Rgba16Float` format with `RENDER_ATTACHMENT |
+/// TEXTURE_BINDING` usages — matching the camera's HDR view target, which
+/// is unconditionally `Rgba16Float` while internal-HDR rendering is on.
+/// The blur node samples *from* the view target into these scratch
+/// textures and the composite pipeline writes *back* into the view target;
+/// any format mismatch on either side produces a wgpu validation error.
+/// The shared sampler on [`BackdropBlurTexture`] is bilinear clamp-to-edge.
 ///
 /// Runs in [`RenderSystems::PrepareResources`] so resources are ready before
 /// any bind-group creation.
@@ -196,6 +200,16 @@ pub(super) fn ensure_blur_texture(
     }
 
     // Helper: create one scratch texture at the given dimensions.
+    //
+    // `Rgba16Float` is mandatory while internal-HDR rendering is on — the
+    // camera's view target is `Rgba16Float` (see `spawn_camera` in the
+    // binary crate), and the Kawase chain samples from that target via
+    // `ViewTarget::post_process_write().source`. wgpu refuses to sample
+    // from an `Rgba16Float` source with a pipeline that declares an sRGB
+    // 8-bit target attachment, so the scratch textures and the composite
+    // pipeline's `ColorTargetState` must all match the view target's HDR
+    // format. If we ever add an SDR build, this becomes a runtime read
+    // from `ViewTarget::main_texture_format()` instead of a constant.
     let make_scratch = |dim: UVec2, label: &'static str| -> (Texture, TextureView) {
         let tex = device.create_texture(&TextureDescriptor {
             label: Some(label),
@@ -207,7 +221,7 @@ pub(super) fn ensure_blur_texture(
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
+            format: TextureFormat::Rgba16Float,
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -235,7 +249,9 @@ pub(super) fn ensure_blur_texture(
         _eighth_tex: eighth_tex,
     });
 
-    // Final output texture.
+    // Final output texture. Format matches the scratch chain and the
+    // camera's HDR view target — see the `make_scratch` comment above for
+    // why this is unconditional `Rgba16Float`.
     let descriptor = TextureDescriptor {
         label: Some("backdrop_blur_texture"),
         size: Extent3d {
@@ -246,7 +262,7 @@ pub(super) fn ensure_blur_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba8UnormSrgb,
+        format: TextureFormat::Rgba16Float,
         usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     };

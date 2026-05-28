@@ -25,11 +25,23 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_winit",
     "bevy_render",
     "bevy_core_pipeline",
+    # Bloom + other built-in post-process effects live in the
+    # `bevy_post_process` sub-crate as of 0.18; gating it behind its own
+    # feature keeps it out of headless builds that don't render. Enabled here
+    # because WaveConductor draws an internal-HDR scene that needs bloom to
+    # turn the Line gravity post-process accumulator into a perceptual glow.
+    "bevy_post_process",
     "bevy_sprite",
     "bevy_sprite_render",
     "bevy_mesh",
     "bevy_asset",
     "png",
+    # AgX (and TonyMcMapface, BlenderFilmic) require a sampled lookup table.
+    # The `tonemapping_luts` feature pulls in the LUT KTX2 assets and the
+    # `bevy_image/zstd` decoder; without it, those Tonemapping variants are
+    # not usable. We pick AgX to get soft highlight rolloff on the HDR
+    # output of the Line gravity post-process before SDR clamp.
+    "tonemapping_luts",
     "x11",
     "wayland",
 ] }

@@ -34,7 +34,6 @@ use std::num::NonZeroU64;
 
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::ecs::query::QueryItem;
-use bevy::image::BevyDefault as _;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_graph::{
@@ -214,8 +213,20 @@ impl FromWorld for PostProcessPipeline {
                         shader,
                         shader_defs: vec![],
                         entry_point: Some("fragment".into()),
+                        // The pipeline writes into the camera's view target,
+                        // which is `Rgba16Float` while internal-HDR rendering
+                        // is on (see `spawn_camera` in the binary crate).
+                        // wgpu validates pipeline target formats against the
+                        // bound attachment at draw time, so this MUST match
+                        // the view target's HDR format.
+                        //
+                        // We previously used `TextureFormat::bevy_default()`
+                        // here, which returns `Rgba8UnormSrgb` and clipped
+                        // the gravity ray-march accumulator at 1.0. The
+                        // float target now preserves the over-bright values
+                        // for bloom + AgX tonemap to handle downstream.
                         targets: vec![Some(ColorTargetState {
-                            format: TextureFormat::bevy_default(),
+                            format: TextureFormat::Rgba16Float,
                             blend: None,
                             write_mask: ColorWrites::ALL,
                         })],

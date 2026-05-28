@@ -198,8 +198,15 @@ impl FromWorld for BackdropBlurPipeline {
                     shader,
                     shader_defs: vec![],
                     entry_point: Some("fs_main".into()),
+                    // `Rgba16Float` matches both the scratch textures created
+                    // in `ensure_blur_texture` and the camera's HDR view
+                    // target. The Kawase chain runs entirely in linear HDR
+                    // (no gamma/sRGB conversion in the WGSL — the shaders are
+                    // straight weighted averages), so the upsample output is
+                    // already in the right colour space for the composite
+                    // pipeline downstream.
                     targets: vec![Some(ColorTargetState {
-                        format: TextureFormat::Rgba8UnormSrgb,
+                        format: TextureFormat::Rgba16Float,
                         blend: None,
                         write_mask: ColorWrites::ALL,
                     })],
