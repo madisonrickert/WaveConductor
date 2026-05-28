@@ -82,18 +82,36 @@ pub fn synthetic_open_hand() -> Hand {
         palm_normal: Vec3::Z,
         palm_velocity: Vec3::ZERO,
         pinch_strength: 0.0,
-        grab_strength: 0.0,
+        // A moderate grab so the fixture actually drives the Line attractor /
+        // gravity shader — this makes the synthetic hand exercise the full
+        // hand → attractor → gravity → bone-overlay pipeline, not just the bone
+        // geometry. (Grab is independent of finger spread in the Leap model.)
+        grab_strength: 0.6,
         landmarks,
     }
 }
 
 /// Wrap [`synthetic_open_hand`] in a single-hand [`HandTrackingFrame`] stamped
-/// at `timestamp`.
+/// at `timestamp`, translated by a gentle 2D sweep derived from `timestamp`.
+///
+/// The sweep carries the hand across the full usable Leap range over time
+/// (edge to edge), so the fixture exercises the projection range, the attractor
+/// follow, and bone tracking — not just one fixed pose. Amplitudes are chosen
+/// so the extremes reach the window edges (`palm_to_world` clamps anything
+/// beyond).
 #[must_use]
 pub fn synthetic_hand_frame(timestamp: Duration) -> HandTrackingFrame {
+    let mut hand = synthetic_open_hand();
+    // Lissajous sweep (different X/Y frequencies) in millimetres.
+    let t = timestamp.as_secs_f32();
+    let offset = Vec3::new(175.0 * (t * 0.45).sin(), 110.0 * (t * 0.31).sin(), 0.0);
+    hand.palm_position += offset;
+    for landmark in &mut hand.landmarks {
+        *landmark += offset;
+    }
     HandTrackingFrame {
         provider: ProviderId::Mock,
-        hands: smallvec![synthetic_open_hand()],
+        hands: smallvec![hand],
         timestamp,
     }
 }

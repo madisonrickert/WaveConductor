@@ -20,11 +20,13 @@ use crate::input::state::{
 pub struct MockProvider {
     /// Frames waiting to be emitted, in order. `poll` removes from the front.
     queue: std::collections::VecDeque<HandTrackingFrame>,
-    /// When set, `poll` emits a freshly-stamped copy of this frame on every
-    /// call once the scripted `queue` is drained, so a synthetic hand persists
-    /// indefinitely instead of vanishing after one frame. Set by
-    /// [`MockProvider::synthetic_hand`]; `None` for the default empty mock.
-    looping_frame: Option<HandTrackingFrame>,
+    /// When `true`, `poll` emits a freshly-generated synthetic hand frame on
+    /// every call once the scripted `queue` is drained (see
+    /// [`crate::input::synthetic::synthetic_hand_frame`]), so a synthetic hand
+    /// persists indefinitely and sweeps across the tracking range over time.
+    /// Set by [`MockProvider::synthetic_hand`]; `false` for the default empty
+    /// mock.
+    emit_synthetic: bool,
     /// Whether `start()` has been called successfully.
     started: bool,
     /// Allow tests to inject specific device-health flags to exercise the
@@ -36,7 +38,7 @@ impl Default for MockProvider {
     fn default() -> Self {
         Self {
             queue: std::collections::VecDeque::new(),
-            looping_frame: None,
+            emit_synthetic: false,
             started: false,
             injected_health: DeviceHealth::empty(),
         }
@@ -50,16 +52,17 @@ impl MockProvider {
     pub fn with_frames(frames: impl IntoIterator<Item = HandTrackingFrame>) -> Self {
         Self {
             queue: frames.into_iter().collect(),
-            looping_frame: None,
+            emit_synthetic: false,
             started: false,
             injected_health: DeviceHealth::empty(),
         }
     }
 
-    /// A mock that continuously emits a single stationary synthetic open hand
-    /// (see [`crate::input::synthetic::synthetic_open_hand`]) on every `poll`,
-    /// for exercising hand-driven visuals with no Leap hardware attached.
-    /// Selected at runtime via `WAVECONDUCTOR_HAND_PROVIDER=synthetic`.
+    /// A mock that continuously emits a synthetic hand on every `poll` (see
+    /// [`crate::input::synthetic::synthetic_hand_frame`]), sweeping across the
+    /// tracking range over time, for exercising hand-driven visuals with no Leap
+    /// hardware attached. Selected at runtime via
+    /// `WAVECONDUCTOR_HAND_PROVIDER=synthetic`.
     ///
     /// Distinct from [`MockProvider::default`], which emits nothing — the empty
     /// default is the silent auto-fallback used when no Leap is present, so it
@@ -68,7 +71,7 @@ impl MockProvider {
     pub fn synthetic_hand() -> Self {
         Self {
             queue: std::collections::VecDeque::new(),
-            looping_frame: Some(crate::input::synthetic::synthetic_hand_frame(Duration::ZERO)),
+            emit_synthetic: true,
             started: false,
             injected_health: DeviceHealth::empty(),
         }
@@ -100,12 +103,10 @@ impl HandTrackingProvider for MockProvider {
     fn poll(&mut self, now: Duration, out: &mut Messages<HandTrackingFrame>) {
         if let Some(frame) = self.queue.pop_front() {
             out.write(frame);
-        } else if let Some(template) = &self.looping_frame {
-            // Re-stamp the persistent synthetic frame with the current clock so
-            // downstream consumers see a steady, present hand each tick.
-            let mut frame = template.clone();
-            frame.timestamp = now;
-            out.write(frame);
+        } else if self.emit_synthetic {
+            // Generate a fresh synthetic hand stamped at `now`; its position
+            // sweeps over time so the fixture exercises the full range.
+            out.write(crate::input::synthetic::synthetic_hand_frame(now));
         }
     }
 
