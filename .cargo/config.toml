@@ -28,10 +28,19 @@ LEAPSDK_LIB_PATH = { value = "vendor/leapc/macos-aarch64", relative = true, forc
 # without DYLD_LIBRARY_PATH / LD_LIBRARY_PATH. Windows uses a different
 # mechanism (DLL must be next to the .exe at runtime) — see
 # `crates/waveconductor/build.rs` for the copy step.
+#
+# Two vendor-path entries per platform because binaries land at different
+# depths under `target/`:
+# - `target/<profile>/<bin>`           — main binary; two `..` to repo root.
+# - `target/<profile>/examples/<bin>`  — examples;    three `..` to repo root.
+# dyld / ld searches all rpaths in order until one resolves, so listing both
+# covers both layouts without per-binary configuration. Release bundles
+# ship the dylib at `@executable_path/../lib` (covered by the entries above).
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/../lib",
     "-C", "link-arg=-Wl,-rpath,@loader_path",
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../../vendor/leapc/macos-aarch64",
     "-C", "link-arg=-Wl,-rpath,@executable_path/../../../vendor/leapc/macos-aarch64",
 ]
 
@@ -39,6 +48,7 @@ rustflags = [
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/../lib",
     "-C", "link-arg=-Wl,-rpath,@loader_path",
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../../vendor/leapc/macos-x86_64",
     "-C", "link-arg=-Wl,-rpath,@executable_path/../../../vendor/leapc/macos-x86_64",
 ]
 
@@ -46,5 +56,6 @@ rustflags = [
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,$ORIGIN/../lib",
     "-C", "link-arg=-Wl,-rpath,$ORIGIN",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../vendor/leapc/linux-x86_64",
     "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../vendor/leapc/linux-x86_64",
 ]
