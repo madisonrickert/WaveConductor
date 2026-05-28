@@ -92,8 +92,6 @@ impl Plugin for LinePlugin {
         // Mouse attractor state (independent of sketch active/idle so the
         // attractor's decay continues during the screensaver-fade window).
         app.init_resource::<systems::MouseAttractorState>();
-        #[cfg(feature = "hand-tracking-gestures")]
-        app.init_resource::<systems::mouse::LastPinchState>();
         // Register an idle veto that keeps Line `Active` while the mouse
         // attractor's power is still decaying — otherwise the sketch would
         // transition to `Idle` mid-decay and the (gated) `decay_mouse_attractor`

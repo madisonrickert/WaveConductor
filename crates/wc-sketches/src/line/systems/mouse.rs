@@ -3,7 +3,7 @@
 //! - [`update_mouse_attractor`] tracks pointer button transitions and updates
 //!   [`MouseAttractorState`]: press rising edge sets `power = MOUSE_POWER_PRESS`,
 //!   release falling edge immediately zeros power, and position follows the
-//!   cursor every frame. Covers mouse, touch, and (feature-gated) hand pinch.
+//!   cursor every frame. Covers mouse and touch.
 //! - [`decay_mouse_attractor`] decays the attractor's power geometrically each
 //!   frame. While the button is held, power asymptotes toward
 //!   `MOUSE_POWER_FLOOR = 2.0` but never reaches zero — only an explicit
@@ -37,30 +37,8 @@ pub const MOUSE_POWER_FLOOR: f32 = 2.0;
 /// v4 `enableMouseAttractor`: `power = 10` on click.
 pub const MOUSE_POWER_PRESS: f32 = 10.0;
 
-/// Pinch strength at which a hand counts as "pressed" (analogous to a finger
-/// touching the screen). Leap Motion's `pinch_strength` ranges `[0, 1]`; this
-/// threshold gives a comfortable "pinched" pose without false-triggering on
-/// half-closed hands.
-#[cfg(feature = "hand-tracking-gestures")]
-pub const PINCH_PRESS_THRESHOLD: f32 = 0.85;
 
-/// Tracks last-frame pinch state per chirality so we can detect press AND
-/// release *edges* (rising = transition from below-threshold to above;
-/// falling = transition from above to below). Without edge detection,
-/// holding a pinched fist would re-trigger `MOUSE_POWER_PRESS` every frame,
-/// and a slowly-relaxing pinch would never trigger the release path that
-/// zeros power.
-#[cfg(feature = "hand-tracking-gestures")]
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct LastPinchState {
-    /// Was the left hand above [`PINCH_PRESS_THRESHOLD`] last frame?
-    pub left_pinched: bool,
-    /// Was the right hand above [`PINCH_PRESS_THRESHOLD`] last frame?
-    pub right_pinched: bool,
-}
-
-/// Tracks pointer-button-equivalent transitions across mouse, touch, and
-/// (under the `hand-tracking-gestures` feature) tracked-hand pinch, and
+/// Tracks pointer-button-equivalent transitions across mouse and touch, and
 /// updates [`MouseAttractorState`].
 ///
 /// Matches v4's `pointerdown`/`pointerup`: only the rising edge of "any
@@ -80,23 +58,15 @@ pub struct LastPinchState {
 /// has captured the pointer, we suppress only the press edge — release
 /// events and continuous position updates still fire so an attractor that
 /// was activated outside the panel and then dragged over it still releases
-/// cleanly. Hand-pinch presses are NOT gated; egui doesn't see hand input.
+/// cleanly.
 ///
-/// Hand-tracking gesture (feature-gated, since `HandTrackingState` has no
-/// writer until Plan 12+ lands a provider): pinch strength ≥
-/// [`PINCH_PRESS_THRESHOLD`] = 0.85 counts as pressed. [`LastPinchState`]
-/// tracks per-chirality edges so a held pinch doesn't re-trigger every frame,
-/// and a relaxing pinch triggers the release path that zeros power.
+/// Hand tracking is handled separately by Plan 11.6's `LineHandAttractor`
+/// component on `TrackedHand` entities (see `crate::line::leap_attractors`).
 pub fn update_mouse_attractor(
     pointer: Res<'_, PointerState>,
     mouse_buttons: Res<'_, bevy::input::ButtonInput<bevy::input::mouse::MouseButton>>,
     touches: Res<'_, bevy::input::touch::Touches>,
     egui_captured: Option<Res<'_, EguiPointerCaptured>>,
-    #[cfg(feature = "hand-tracking-gestures")] hands: Res<
-        '_,
-        wc_core::input::state::HandTrackingState,
-    >,
-    #[cfg(feature = "hand-tracking-gestures")] mut last_pinch: ResMut<'_, LastPinchState>,
     window: Single<'_, '_, &Window>,
     mut state: ResMut<'_, MouseAttractorState>,
 ) {
@@ -105,34 +75,10 @@ pub fn update_mouse_attractor(
     let touch_just_pressed = touches.iter_just_pressed().next().is_some();
     let touch_just_released = touches.iter_just_released().next().is_some();
 
-    #[cfg(feature = "hand-tracking-gestures")]
-    let (hand_just_pressed, hand_just_released) = {
-        let right_now = hands
-            .right()
-            .is_some_and(|h| h.pinch_strength >= PINCH_PRESS_THRESHOLD);
-        let left_now = hands
-            .left()
-            .is_some_and(|h| h.pinch_strength >= PINCH_PRESS_THRESHOLD);
-        let right_pressed_edge = right_now && !last_pinch.right_pinched;
-        let left_pressed_edge = left_now && !last_pinch.left_pinched;
-        let right_released_edge = !right_now && last_pinch.right_pinched;
-        let left_released_edge = !left_now && last_pinch.left_pinched;
-        last_pinch.right_pinched = right_now;
-        last_pinch.left_pinched = left_now;
-        (
-            right_pressed_edge || left_pressed_edge,
-            right_released_edge || left_released_edge,
-        )
-    };
-    #[cfg(not(feature = "hand-tracking-gestures"))]
-    let (hand_just_pressed, hand_just_released) = (false, false);
-
-    // Pointer (mouse + touch) presses are suppressed when egui owns the
-    // pointer this frame; hand-pinch presses ignore the gate.
     let pointer_captured = egui_captured.is_some_and(|c| c.0);
     let pointer_press_active = (mouse_just_pressed || touch_just_pressed) && !pointer_captured;
-    let just_pressed = pointer_press_active || hand_just_pressed;
-    let just_released = mouse_just_released || touch_just_released || hand_just_released;
+    let just_pressed = pointer_press_active;
+    let just_released = mouse_just_released || touch_just_released;
 
     if let Some(cursor_window) = pointer.primary {
         let w = window.width();
