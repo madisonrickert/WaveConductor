@@ -15,11 +15,22 @@ mod common;
 use common::input::{move_pointer, press_left, release_left, tap_key};
 use common::{arm_idle_timeline, sketches_test_app};
 
+use std::time::Duration;
+
 use bevy::input::keyboard::KeyCode;
+use bevy::input::ButtonInput;
 use bevy::math::Vec2;
 use bevy::prelude::*;
+use wc_core::input::button::HandButton;
+use wc_core::input::gesture::HandGestureEvent;
+use wc_core::input::hand::{Chirality, Hand, LANDMARK_COUNT};
+use wc_core::input::provider::{ProviderId, ProviderRegistry, ProviderRole};
+use wc_core::input::providers::mock::MockProvider;
+use wc_core::input::state::{FusedHandFrame, HandTrackingFrame};
+use wc_core::input::systems::{fuse_hand_frames, poll_all_providers, sync_hand_entities};
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_sketches::line::compute::LineSimParams;
+use wc_sketches::line::leap_attractors::{LineHandAttractor, LINE_HAND_DECAY_SPEED};
 use wc_sketches::line::systems::MouseAttractorState;
 
 /// Drive the keyboard-nav action that selects Line.
@@ -353,5 +364,204 @@ fn touch_release_zeros_attractor_power() {
     {
         assert_eq!(power, 0.0, "touch release should zero power; got {power}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 11.6 Phase 12: LineHandAttractor integration tests.
+//
+// These tests wire the full provider → fuse → sync → observer →
+// update_line_hand_attractors chain end-to-end.  `sketches_test_app` does
+// NOT include `HandTrackingPlugin` (to avoid double-registering
+// `pointer_merge_system`), so a local `hand_tracking_test_app` helper adds
+// just the three pipeline systems that the attractor tests require.
+// ---------------------------------------------------------------------------
+
+/// Build a test app that includes the full hand-tracking pipeline on top of
+/// the standard `sketches_test_app`.
+///
+/// Adds the three `PreUpdate` systems (`poll_all_providers`,
+/// `fuse_hand_frames`, `sync_hand_entities`) plus the messages and resources
+/// they depend on that `sketches_test_app` does not already provide.
+///
+/// `HandTrackingPlugin` is intentionally NOT used here because
+/// `sketches_test_app` already registers `pointer_merge_system` under
+/// `InputSystems`; adding the full plugin would duplicate that registration.
+fn hand_tracking_test_app() -> App {
+    let mut app = sketches_test_app();
+
+    // Messages the pipeline reads / writes.  `add_message` is idempotent.
+    app.add_message::<HandTrackingFrame>();
+    app.add_message::<FusedHandFrame>();
+    app.add_message::<HandGestureEvent>();
+
+    // Resource consumed by `detect_gestures` (not added here, but
+    // `ButtonInput<T>` must be present so `sync_hand_entities` can compile
+    // its system params — it is transitively required through the type
+    // bounds even though only `mirror_state_resource` reads it directly).
+    app.init_resource::<ButtonInput<HandButton>>();
+
+    // Empty registry; tests replace this with `insert_resource` before the
+    // frames are needed.
+    app.init_resource::<ProviderRegistry>();
+
+    // Chain the three pipeline systems in `PreUpdate`, ordered after
+    // `InputSystems` so Bevy's own input flush has already run.
+    app.add_systems(
+        PreUpdate,
+        (poll_all_providers, fuse_hand_frames, sync_hand_entities).chain(),
+    );
+
+    app
+}
+
+/// Build a `Hand` with all fields set, with grab strength as the only
+/// variable.  All landmarks are zeroed; palm normal faces up (+Y).
+fn hand_with_grab(id: u32, chirality: Chirality, palm: Vec3, grab: f32) -> Hand {
+    Hand {
+        id,
+        chirality,
+        palm_position: palm,
+        palm_normal: Vec3::Y,
+        palm_velocity: Vec3::ZERO,
+        pinch_strength: 0.0,
+        grab_strength: grab,
+        landmarks: [Vec3::ZERO; LANDMARK_COUNT],
+    }
+}
+
+/// Build a [`HandTrackingFrame`] for the mock provider.
+fn hand_frame(hands: Vec<Hand>, t_ms: u64) -> HandTrackingFrame {
+    HandTrackingFrame {
+        provider: ProviderId::Mock,
+        hands: hands.into_iter().collect(),
+        timestamp: Duration::from_millis(t_ms),
+    }
+}
+
+/// Replace the registry in `app` with a `MockProvider` scripted from
+/// `frames`.  Calls `registry.register`, which eagerly calls `start()`.
+fn install_mock_with_frames(app: &mut App, frames: Vec<HandTrackingFrame>) {
+    let mut registry = ProviderRegistry::default();
+    let mock = MockProvider::with_frames(frames);
+    registry.register(ProviderId::Mock, ProviderRole::Simulator, Box::new(mock));
+    app.insert_resource(registry);
+}
+
+/// A single grab-strength=0.9 right-hand frame repeated 200 times ramps
+/// `LineHandAttractor::power` above a detectable threshold.
+///
+/// v4 formula: `wanted = grab^1.5 * 5^((-z + 350) / 160)`.
+/// With palm at `(0, 200, 0)`: `depth_modulator` = 5^(350/160) ≈ 14.3,
+/// `grab_component` = 0.9^1.5 ≈ 0.854, wanted ≈ 12.2.
+/// EMA at attack = 0.005: after 200 ticks, power ≈ 12.2 * (1 - 0.995^200)
+/// ≈ 12.2 * 0.632 ≈ 7.7.  The assertion threshold of 0.1 is very
+/// conservative.
+#[test]
+fn one_hand_grab_yields_non_zero_power_after_many_ticks() {
+    let mut app = hand_tracking_test_app();
+    app.update();
+    enter_line(&mut app);
+
+    let h = hand_with_grab(1, Chirality::Right, Vec3::new(0.0, 200.0, 0.0), 0.9);
+    let frames: Vec<_> = (0..200u64).map(|t| hand_frame(vec![h.clone()], 10 * t)).collect();
+    install_mock_with_frames(&mut app, frames);
+
+    for _ in 0..200 {
+        app.update();
+    }
+
+    let world = app.world_mut();
+    let attractor_powers: Vec<f32> = world
+        .query::<&LineHandAttractor>()
+        .iter(world)
+        .map(|a| a.power)
+        .collect();
+    assert_eq!(attractor_powers.len(), 1, "exactly one hand attractor");
+    assert!(
+        attractor_powers[0] > 0.1,
+        "power = {}, expected > 0.1 after ramp",
+        attractor_powers[0]
+    );
+}
+
+/// Two hands with distinct IDs each get their own `LineHandAttractor`
+/// component — the attractor model is per-hand, not a shared singleton.
+#[test]
+fn two_hands_yield_two_independent_attractors() {
+    let mut app = hand_tracking_test_app();
+    app.update();
+    enter_line(&mut app);
+
+    let h1 = hand_with_grab(1, Chirality::Right, Vec3::new(100.0, 200.0, 0.0), 0.9);
+    let h2 = hand_with_grab(2, Chirality::Left, Vec3::new(-100.0, 200.0, 0.0), 0.7);
+    let frames: Vec<_> = (0..30u64)
+        .map(|t| hand_frame(vec![h1.clone(), h2.clone()], 10 * t))
+        .collect();
+    install_mock_with_frames(&mut app, frames);
+
+    for _ in 0..30 {
+        app.update();
+    }
+    let world = app.world_mut();
+    let count = world.query::<&LineHandAttractor>().iter(world).count();
+    assert_eq!(count, 2, "expected two independent LineHandAttractors");
+}
+
+/// After a ramp phase (grab=0.9 × 200 ticks), dropping grab to 0.0 causes
+/// power to decay geometrically by `LINE_HAND_DECAY_SPEED` per tick.
+///
+/// The generous ±0.5 absolute tolerance accounts for EMA settling and the
+/// small number of extra ticks that `enter_line` introduces before the decay
+/// phase begins.  The assertion only fails if the decay constant changes.
+#[test]
+fn release_decays_power_geometrically() {
+    let mut app = hand_tracking_test_app();
+    app.update();
+    enter_line(&mut app);
+
+    let mut frames = Vec::<HandTrackingFrame>::new();
+    for t in 0..200u64 {
+        let h = hand_with_grab(1, Chirality::Right, Vec3::new(0.0, 200.0, 0.0), 0.9);
+        frames.push(hand_frame(vec![h], 10 * t));
+    }
+    for t in 200..220u64 {
+        let h = hand_with_grab(1, Chirality::Right, Vec3::new(0.0, 200.0, 0.0), 0.0);
+        frames.push(hand_frame(vec![h], 10 * t));
+    }
+    install_mock_with_frames(&mut app, frames);
+
+    // Ramp phase.
+    for _ in 0..200 {
+        app.update();
+    }
+    let p_at_release = app
+        .world_mut()
+        .query::<&LineHandAttractor>()
+        .iter(app.world())
+        .next()
+        .map(|a| a.power)
+        .expect("LineHandAttractor present after ramp");
+    assert!(p_at_release > 0.05, "p_at_release={p_at_release}");
+
+    // Decay phase: 10 ticks of grab=0 → power *= LINE_HAND_DECAY_SPEED each tick.
+    for _ in 0..10 {
+        app.update();
+    }
+    let p_after_decay = app
+        .world_mut()
+        .query::<&LineHandAttractor>()
+        .iter(app.world())
+        .next()
+        .map(|a| a.power)
+        .expect("LineHandAttractor still present after decay");
+    let expected = p_at_release * LINE_HAND_DECAY_SPEED.powi(10);
+
+    // Generous tolerance — the per-tick decay multiplier compounds, so a
+    // small drift from extra updates compounds geometrically too. 0.5 is
+    // wide enough that the test only fails if the decay constant changed.
+    assert!(
+        (p_after_decay - expected).abs() < 0.5,
+        "p_after_decay={p_after_decay} expected={expected} (p_at_release={p_at_release})"
+    );
 }
 
