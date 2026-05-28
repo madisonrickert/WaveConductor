@@ -95,6 +95,16 @@ pub struct HandMeshCompositorCamera;
 #[derive(Component)]
 pub struct HandMeshCompositorSprite;
 
+/// Marker for the temporary red debug sprite used to confirm the compositor
+/// layer is rendering.
+///
+/// **Remove before shipping.** Spawned by [`spawn_hand_mesh_camera`] alongside
+/// the real compositor sprite. If this square appears, the compositor Camera2d
+/// is drawing layer 2 correctly and the investigation should focus on the
+/// off-screen image / Camera3d chain.
+#[derive(Component)]
+struct DebugCompositorRect;
+
 /// Index of a bone sphere child on a `TrackedHand` entity.
 ///
 /// Value is `0..BONE_COUNT` (20). Set once at spawn; used by
@@ -208,6 +218,26 @@ fn spawn_hand_mesh_camera(
         HAND_MESH_COMPOSITOR_LAYER,
     ));
 
+    // DEBUG TEST 1: solid red square on the compositor layer.
+    //
+    // If this appears (as a 200×200 red square centred at roughly (0, 200)
+    // — above mid-screen), the compositor Camera2d is working and the
+    // problem is in the Camera3d→Image chain, not the compositor.
+    // If it does NOT appear, the compositor camera or its render layer is
+    // broken and that is the thing to fix first.
+    //
+    // Remove this block once the root cause is identified.
+    commands.spawn((
+        DebugCompositorRect,
+        Sprite {
+            color: Color::srgb(1.0, 0.0, 0.0),
+            custom_size: Some(Vec2::splat(200.0)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 200.0, 1.0),
+        HAND_MESH_COMPOSITOR_LAYER,
+    ));
+
     // Compositor Camera2d — `order = 2` runs after the main Camera2d
     // (`order = 0`). `HandMeshCamera3d` (`order = -1`) has already
     // populated the off-screen image by the time this camera renders.
@@ -235,6 +265,7 @@ fn despawn_hand_mesh_camera(
     cameras: Query<'_, '_, Entity, With<HandMeshCamera3d>>,
     compositor_cameras: Query<'_, '_, Entity, With<HandMeshCompositorCamera>>,
     compositor_sprites: Query<'_, '_, Entity, With<HandMeshCompositorSprite>>,
+    debug_rects: Query<'_, '_, Entity, With<DebugCompositorRect>>,
 ) {
     for entity in &cameras {
         commands.entity(entity).despawn();
@@ -243,6 +274,9 @@ fn despawn_hand_mesh_camera(
         commands.entity(entity).despawn();
     }
     for entity in &compositor_sprites {
+        commands.entity(entity).despawn();
+    }
+    for entity in &debug_rects {
         commands.entity(entity).despawn();
     }
 }
