@@ -86,7 +86,9 @@ impl Plugin for OverlayButtonsPlugin {
             // left-to-right matching v4's layout). All three share EguiContexts
             // so they cannot run in parallel regardless; `.chain()` makes the
             // ordering explicit rather than relying on Bevy's conflict resolution.
-            (draw_home_button, draw_settings_button, draw_volume_button).chain(),
+            // `draw_leap_status_led` runs last so it is always on top (overlaid
+            // on the other buttons' z-order in the same pass).
+            (draw_home_button, draw_settings_button, draw_volume_button, draw_leap_status_led).chain(),
         );
     }
 }
@@ -474,6 +476,69 @@ pub fn draw_volume_button(
             let _ = s.push(AudioCommand::SetMuted(new_muted));
         }
     }
+}
+
+/// Maps [`crate::input::state::PrimaryState`] to a dot color and one-line
+/// tooltip string for the status LED.
+///
+/// Color semantics mirror the v4 connection-status conventions:
+/// - Green → fully operational (Streaming, clean health)
+/// - Yellow-green → soft degradation (smudged/robust/low-resource / low FPS)
+/// - Blue → device present but idle (attached, not yet streaming)
+/// - Orange → service reachable but no device
+/// - Red → not reachable (service missing, disconnected, device error)
+/// - Dark gray → not started (LED is present but muted)
+fn leap_led_color_and_tooltip(
+    state: crate::input::state::PrimaryState,
+) -> (bevy_egui::egui::Color32, &'static str) {
+    use bevy_egui::egui::Color32;
+    use crate::input::state::PrimaryState;
+    match state {
+        PrimaryState::NotStarted => (Color32::DARK_GRAY, "Not started"),
+        PrimaryState::ServiceMissing => (Color32::RED, "Ultraleap service not running"),
+        PrimaryState::Disconnected => (Color32::RED, "Connection lost"),
+        PrimaryState::ServiceOnly => {
+            (Color32::from_rgb(0xf3, 0x9c, 0x12), "Service up, no device attached")
+        }
+        PrimaryState::DeviceAttached => {
+            (Color32::from_rgb(0x34, 0x98, 0xdb), "Device attached, not streaming")
+        }
+        PrimaryState::Streaming => (Color32::from_rgb(0x2e, 0xcc, 0x71), "Streaming"),
+        PrimaryState::DeviceDegraded => {
+            (Color32::from_rgb(0xf1, 0xc4, 0x0f), "Tracking degraded")
+        }
+        PrimaryState::DeviceFailed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "Device error"),
+    }
+}
+
+/// Draws a small status LED in the top-right corner reflecting the
+/// primary hand-tracking provider's coarse state. Hover for tooltip.
+///
+/// Runs in `EguiPrimaryContextPass` so the egui context is active. The
+/// registry is `Option<Res<...>>` so tests without `HandTrackingPlugin`
+/// (e.g., the `MinimalPlugins`-based UI test harness) don't panic.
+pub fn draw_leap_status_led(
+    mut contexts: EguiContexts<'_, '_>,
+    registry: Option<Res<'_, crate::input::provider::ProviderRegistry>>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let Some(registry) = registry else { return };
+
+    let status = registry.primary_status();
+    let (color, tooltip) = leap_led_color_and_tooltip(status.primary());
+
+    egui::Area::new(egui::Id::new("leap_status_led"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-16.0, 16.0))
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::Vec2::splat(12.0),
+                egui::Sense::hover(),
+            );
+            ui.painter().circle_filled(rect.center(), 6.0, color);
+            response.on_hover_text(tooltip);
+        });
 }
 
 #[cfg(test)]
