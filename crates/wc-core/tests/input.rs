@@ -223,8 +223,12 @@ fn pointer_merge_priority_hand_over_mouse_when_window_present() {
     let mut app = test_app_with_mock(MockProvider::with_frames([frame(
         [{
             let mut h = fake_hand(Chirality::Right, 0.0, 0.0);
-            // Place the index fingertip in NDC at (0.0, 0.0) → center of window.
-            h.landmarks[LandmarkIndex::IndexTip.as_index()] = Vec3::ZERO;
+            // Index fingertip in Leap device millimetres at the centre of the
+            // usable range: x = 0 mm (centre), y = 195 mm (mid of [40, 350]).
+            // `pointer_merge_system` projects this via `palm_to_world`, so the
+            // pointer lands at the window centre. (The landmark is in mm, NOT
+            // NDC — treating it as NDC was the bug this projection fix corrects.)
+            h.landmarks[LandmarkIndex::IndexTip.as_index()] = Vec3::new(0.0, 195.0, 0.0);
             h
         }],
         100,
@@ -245,7 +249,7 @@ fn pointer_merge_priority_hand_over_mouse_when_window_present() {
     let pos = pointer
         .primary
         .expect("hand pointer should have a position");
-    // NDC (0, 0) projects to the window center: x = 400, y = 300.
+    // Leap (0 mm, 195 mm) projects to the window center: x = 400, y = 300.
     assert!(
         (pos.x - 400.0).abs() < 0.5,
         "expected x near 400, got {pos:?}"

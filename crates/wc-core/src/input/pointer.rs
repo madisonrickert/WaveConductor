@@ -8,6 +8,7 @@
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
 
+use super::projection::palm_to_world;
 use super::state::HandTrackingState;
 
 /// Where the user is pointing, normalized to window logical coordinates
@@ -19,9 +20,21 @@ use super::state::HandTrackingState;
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Reflect)]
 pub struct PointerState {
     /// Primary pointer position in window logical coordinates, or `None`.
+    ///
+    /// Unified across all sources with priority hand > touch > mouse — for
+    /// sketches that want a single "wherever the user is pointing" stream.
     pub primary: Option<Vec2>,
     /// Which source produced [`Self::primary`].
     pub source: PointerSource,
+    /// Mouse/touch pointer position **excluding hand-tracking**, in window
+    /// logical coordinates, or `None`.
+    ///
+    /// This is the cursor a user drives with a mouse or finger, independent of
+    /// any tracked hand. Sketches that run a hand attractor *and* a separate
+    /// pointer attractor (e.g. Line) read this so the two stay independent —
+    /// otherwise a tracked hand would hijack [`Self::primary`] and drag the
+    /// mouse attractor onto the hand.
+    pub cursor: Option<Vec2>,
 }
 
 /// Which input source produced the [`PointerState::primary`] value this frame.
@@ -68,49 +81,45 @@ pub fn pointer_merge_system(
     // need motion deltas should read `CursorMoved` events directly instead of
     // going through PointerState.
     let cursor_msg_position: Option<Vec2> = cursor_moved_reader.read().last().map(|c| c.position);
+    let window = windows.iter().next();
 
-    // Hand wins if any hand is present. Use the right-hand index-finger tip
-    // if available, otherwise the left.
-    if let Some(hand) = hands.right().or_else(|| hands.left()) {
-        // Project landmark NDC (x in [-1, 1], y in [-1, 1] with +y up) onto
-        // the primary window's logical size, with +y down.
-        if let Some(window) = windows.iter().next() {
-            let landmark = hand.landmark(super::hand::LandmarkIndex::IndexTip);
-            let w = window.width();
-            let h = window.height();
-            let x = (landmark.x * 0.5 + 0.5) * w;
-            let y = (1.0 - (landmark.y * 0.5 + 0.5)) * h;
-            *pointer = PointerState {
-                primary: Some(Vec2::new(x, y)),
-                source: PointerSource::Hand,
-            };
-            return;
-        }
-    }
-
-    // Touch (any active touch).
-    if let Some(touch) = touches.iter().next() {
-        *pointer = PointerState {
-            primary: Some(touch.position()),
-            source: PointerSource::Touch,
-        };
-        return;
-    }
-
-    // Mouse — latest `CursorMoved` this tick beats `Window::cursor_position()`
-    // (which only updates in production via winit, not in tests). Either path
-    // produces the same value during normal operation; the message path is
-    // what makes synthetic-event tests work end-to-end.
+    // --- Mouse/touch cursor (hand-independent) -------------------------------
+    // Touch beats mouse. Mouse uses the latest `CursorMoved` this tick (so
+    // synthetic-event tests work end-to-end) and falls back to
+    // `Window::cursor_position()` (winit's persistent state) in production.
+    let touch_position = touches.iter().next().map(bevy::input::touch::Touch::position);
     let mouse_position =
-        cursor_msg_position.or_else(|| windows.iter().next().and_then(Window::cursor_position));
-    if let Some(pos) = mouse_position {
-        *pointer = PointerState {
-            primary: Some(pos),
-            source: PointerSource::Mouse,
-        };
-        return;
-    }
+        cursor_msg_position.or_else(|| window.and_then(Window::cursor_position));
+    let cursor = touch_position.or(mouse_position);
 
-    // No source.
-    *pointer = PointerState::default();
+    // --- Unified primary: hand > touch > mouse -------------------------------
+    let (primary, source) = if let (Some(hand), Some(window)) =
+        (hands.right().or_else(|| hands.left()), window)
+    {
+        // The index-fingertip landmark is in Leap device millimetres (same
+        // convention as `palm_to_world` and the bone-mesh projection) — NOT
+        // NDC. Project it through `palm_to_world` (mm → centered world, +y up),
+        // then convert to window-logical coords (top-left origin, +y down).
+        // (The earlier code treated the mm landmark as NDC and produced wildly
+        // out-of-window positions — e.g. a fingertip at -56 mm mapped to
+        // x ≈ -35200 px — which corrupted any consumer of the pointer.)
+        let landmark = hand.landmark(super::hand::LandmarkIndex::IndexTip);
+        let size = Vec2::new(window.width(), window.height());
+        let world = palm_to_world(landmark, size);
+        let x = world.x + size.x * 0.5;
+        let y = size.y * 0.5 - world.y;
+        (Some(Vec2::new(x, y)), PointerSource::Hand)
+    } else if let Some(t) = touch_position {
+        (Some(t), PointerSource::Touch)
+    } else if let Some(m) = mouse_position {
+        (Some(m), PointerSource::Mouse)
+    } else {
+        (None, PointerSource::None)
+    };
+
+    *pointer = PointerState {
+        primary,
+        source,
+        cursor,
+    };
 }

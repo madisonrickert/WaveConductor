@@ -80,7 +80,12 @@ pub fn update_mouse_attractor(
     let just_pressed = pointer_press_active;
     let just_released = mouse_just_released || touch_just_released;
 
-    if let Some(cursor_window) = pointer.primary {
+    // Use the hand-independent `cursor` (mouse/touch only), NOT `primary` (which
+    // is hijacked by a tracked hand). The hand drives its own `LineHandAttractor`
+    // separately; reading `primary` here would drag the mouse attractor onto the
+    // hand — and (before the projection fix) onto a wildly off-window position —
+    // breaking the "mouse and hand attractors are independent" contract.
+    if let Some(cursor_window) = pointer.cursor {
         let w = window.width();
         let h = window.height();
         let wx = cursor_window.x - w * 0.5;

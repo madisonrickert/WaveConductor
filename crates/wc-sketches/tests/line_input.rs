@@ -565,3 +565,55 @@ fn release_decays_power_geometrically() {
     );
 }
 
+
+/// The Line mouse attractor follows the **mouse cursor**, not a tracked hand —
+/// the two attractors are independent. Regression test for a
+/// `pointer_merge_system` bug that treated the hand's millimetre index-tip
+/// landmark as NDC, hijacking the unified pointer with a wildly off-window
+/// position; the mouse attractor (and the gravity smear's `i_mouse`, which reads
+/// the same `MouseAttractorState`) inherited that garbage, killing the smear and
+/// flinging particles offscreen on click. The mouse attractor now reads the
+/// hand-independent `PointerState::cursor`.
+#[test]
+fn mouse_attractor_independent_of_present_hand() {
+    let mut app = hand_tracking_test_app();
+    app.update();
+    enter_line(&mut app);
+
+    // A present (open, non-grabbing) hand is enough to win `PointerState::primary`.
+    // Landmarks are zeroed → the index-tip projects to ≈(0, -360) in world space,
+    // i.e. window-logical ≈(640, 720); if the mouse attractor (wrongly) followed
+    // the hand it would land there.
+    let h = hand_with_grab(1, Chirality::Right, Vec3::new(0.0, 200.0, 0.0), 0.0);
+    let frames: Vec<_> = (0..30u64)
+        .map(|t| hand_frame(vec![h.clone()], 10 * t))
+        .collect();
+    install_mock_with_frames(&mut app, frames);
+    for _ in 0..6 {
+        app.update(); // establish the hand in HandTrackingState
+    }
+
+    // Move the mouse cursor to a distinct window position and click.
+    move_pointer(&mut app, 200.0, 200.0, Vec2::ZERO);
+    app.update();
+    press_left(&mut app);
+    app.update();
+
+    let state = *app.world().resource::<MouseAttractorState>();
+    // Cursor (200,200) in the 1280x720 test window → world (-440, 160).
+    // The hand would put it at ≈(0, -360); the attractor must follow the cursor.
+    assert!(
+        (state.position[0] - (-440.0)).abs() < 1.0,
+        "mouse attractor x should follow the cursor (-440), not the hand (0); got {}",
+        state.position[0]
+    );
+    assert!(
+        (state.position[1] - 160.0).abs() < 1.0,
+        "mouse attractor y should follow the cursor (160), not the hand (-360); got {}",
+        state.position[1]
+    );
+    assert!(
+        state.power > 0.0,
+        "left click should activate the mouse attractor even with a hand present"
+    );
+}
