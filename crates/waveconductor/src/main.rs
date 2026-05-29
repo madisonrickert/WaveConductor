@@ -7,7 +7,7 @@
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::render::view::{Hdr, Msaa};
 use tracing_subscriber::EnvFilter;
 use wc_core::audio::background::BackgroundSampleAsset;
 use wc_core::CorePlugin;
@@ -171,6 +171,15 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
         // 0.18 moved it to a separate component to make HDR opt-in per
         // camera entity without touching the `Camera` struct.
         Hdr,
+        // Pinned explicitly: the Line hand-mesh overlay `Camera3d` is also HDR
+        // and targets this same window, so its MSAA MUST differ from this one
+        // (it uses `Msaa::Sample4`) — otherwise Bevy gives the two cameras a
+        // *shared* intermediate texture (keyed on `(target, usage, hdr, msaa)`)
+        // and the overlay's tonemapping corrupts this camera's gravity-smear
+        // post-process. See `wc_sketches::line::hand_mesh`. Keep this `Off`
+        // (it was the implicit 2D default anyway) unless you also change the
+        // overlay's MSAA to stay distinct.
+        Msaa::Off,
         // See module-level comment for why AgX over TonyMcMapface.
         Tonemapping::AgX,
         Bloom {

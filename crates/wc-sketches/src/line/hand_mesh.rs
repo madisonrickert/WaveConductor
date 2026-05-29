@@ -26,19 +26,20 @@
 //!
 //! Three subtleties make this correct — each hard-won:
 //!
-//! ### 1. `Msaa::Off` — defensive intermediate isolation
+//! ### 1. Distinct MSAA from the main camera — the load-bearing scene fix
 //!
-//! Bevy caches each camera's intermediate ping-pong textures (and the atomic
-//! that swaps them) keyed by `(render target, usage, hdr, msaa)`. Two HDR
-//! cameras on the **same window with the same MSAA** would *share* one
-//! intermediate + swap atomic — and mixing HDR cameras on one window is a
-//! documented Bevy fragility (#18901/#17530). Giving the overlay `Msaa::Off`
-//! changes its cache key so it gets its **own** intermediate, isolated from the
-//! main camera. (Lines don't benefit from MSAA coverage, so this is free.) This
-//! is a precaution: a deterministic overlay-on/off and MSAA-match/Off capture
-//! comparison did not show the overlay altering the main gravity composite in
-//! the current pipeline, so `Msaa::Off` is kept as a safeguard rather than a
-//! confirmed fix for a reproduced symptom.
+//! Bevy caches each view's intermediate ping-pong textures (and the atomic that
+//! swaps them) keyed by `(render target, usage, hdr, msaa)`. Two HDR cameras on
+//! the **same window with the same MSAA** *share* one intermediate + swap
+//! atomic — and this overlay's tonemapping `post_process` swap then corrupts the
+//! **main** camera's gravity-smear post-process, so the gravity shader "mostly
+//! disappears" whenever the hand mesh is on screen. The overlay therefore uses
+//! `Msaa::Sample4`, which **must differ** from the main `Camera2d`'s `Msaa::Off`
+//! (pinned in `waveconductor::main::spawn_camera`) so the two get separate
+//! intermediates. Confirmed empirically: with a frozen `g_constant`, `Msaa::Off`
+//! on the overlay cut the gravity-smear coverage to ~⅓ of the no-overlay
+//! baseline, while `Sample4` restored it. (An earlier `Msaa::Off` here was the
+//! *bug*, not the fix — it matched the main camera.)
 //!
 //! ### 2. `PREMULTIPLIED_ALPHA_BLENDING` — so the glow halo survives compositing
 //!
@@ -193,16 +194,19 @@ fn spawn_hand_mesh_camera(mut commands: Commands<'_, '_>) {
         // HDR intermediate: gives the emissive bones (`> 1.0`) headroom to bloom
         // instead of clamping at `1.0`.
         Hdr,
-        // Defensive: a distinct MSAA setting from the main HDR camera so this
-        // overlay gets its OWN intermediate ping-pong textures rather than
-        // sharing the main camera's (Bevy keys them on
-        // `(target, usage, hdr, msaa)`). Two HDR cameras sharing one window is a
-        // documented Bevy fragility (#18901/#17530); keeping the overlay's
-        // intermediate isolated is a cheap safeguard (lines gain nothing from
-        // MSAA anyway). Note: a deterministic capture comparison did NOT show
-        // this affecting the composite either way in the current pipeline, so
-        // it's a precaution, not a confirmed fix for a reproduced symptom.
-        Msaa::Off,
+        // CRITICAL: MUST differ from the main `Camera2d`'s MSAA (which is
+        // `Msaa::Off`, pinned in `waveconductor::main::spawn_camera`). Bevy keys
+        // each view's intermediate ping-pong textures + their swap atomic on
+        // `(target, usage, hdr, msaa)`. With the SAME key, this overlay and the
+        // main HDR camera share one intermediate, and this camera's tonemapping
+        // `post_process` swap then corrupts the main camera's gravity-smear
+        // post-process — the gravity shader "mostly disappears" with the hand on
+        // screen. A distinct MSAA (`Sample4` here vs the main's `Off`) gives the
+        // overlay its own intermediate. Confirmed via a frozen-`g_constant`
+        // capture: `Msaa::Off` here cut the smear coverage to ~⅓; `Sample4`
+        // restores it fully. (Sample4 also anti-aliases the wireframe lines —
+        // a bonus, not a cost.)
+        Msaa::Sample4,
         // Explicit (not the required-component default). TonyMcMapface
         // desaturates the bright bone cores to a clean white, leaving the halo
         // hued — the neon look. Independent of the main camera's AgX.
