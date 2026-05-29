@@ -421,6 +421,11 @@ fn spawn_ring_group(
 /// Despawn is handled by [`despawn_attractor_visual`] on the same tick the
 /// power reaches zero; this system early-returns in that case so the rings
 /// keep their final transform until they vanish.
+#[allow(
+    clippy::type_complexity,
+    reason = "Bevy multi-component/multi-filter queries are inherently verbose; \
+              factoring these into type aliases would obscure the system's data dependencies"
+)]
 pub fn animate_attractor_visual(
     mouse: Res<'_, MouseAttractorState>,
     hand_attractors: Query<'_, '_, &LineHandAttractor>,

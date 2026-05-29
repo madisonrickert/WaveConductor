@@ -26,17 +26,19 @@
 //!
 //! Three subtleties make this correct — each hard-won:
 //!
-//! ### 1. `Msaa::Off` — the load-bearing scene-preservation fix
+//! ### 1. `Msaa::Off` — defensive intermediate isolation
 //!
 //! Bevy caches each camera's intermediate ping-pong textures (and the atomic
 //! that swaps them) keyed by `(render target, usage, hdr, msaa)`. Two HDR
-//! cameras on the **same window with the same MSAA** therefore *share* one
-//! intermediate + swap atomic — and the overlay's tonemapping `post_process`
-//! swap then corrupts the main camera's frame (this was the "dim parts of the
-//! gravity scene disappear / tonemapping thrown off" bug). Giving the overlay
-//! `Msaa::Off` changes its cache key so it gets its **own** intermediate,
-//! isolated from the main camera. (Lines don't benefit from MSAA coverage
-//! anyway, so this is free.)
+//! cameras on the **same window with the same MSAA** would *share* one
+//! intermediate + swap atomic — and mixing HDR cameras on one window is a
+//! documented Bevy fragility (#18901/#17530). Giving the overlay `Msaa::Off`
+//! changes its cache key so it gets its **own** intermediate, isolated from the
+//! main camera. (Lines don't benefit from MSAA coverage, so this is free.) This
+//! is a precaution: a deterministic overlay-on/off and MSAA-match/Off capture
+//! comparison did not show the overlay altering the main gravity composite in
+//! the current pipeline, so `Msaa::Off` is kept as a safeguard rather than a
+//! confirmed fix for a reproduced symptom.
 //!
 //! ### 2. `PREMULTIPLIED_ALPHA_BLENDING` — so the glow halo survives compositing
 //!
@@ -191,11 +193,15 @@ fn spawn_hand_mesh_camera(mut commands: Commands<'_, '_>) {
         // HDR intermediate: gives the emissive bones (`> 1.0`) headroom to bloom
         // instead of clamping at `1.0`.
         Hdr,
-        // Critical: a distinct MSAA setting from the main HDR camera so this
-        // overlay gets its OWN intermediate ping-pong textures. Sharing them
-        // (same `(target, usage, hdr, msaa)` key) let the overlay's tonemapping
-        // swap corrupt the main scene — the "dim parts disappear" bug. Lines
-        // gain nothing from MSAA, so disabling it is free.
+        // Defensive: a distinct MSAA setting from the main HDR camera so this
+        // overlay gets its OWN intermediate ping-pong textures rather than
+        // sharing the main camera's (Bevy keys them on
+        // `(target, usage, hdr, msaa)`). Two HDR cameras sharing one window is a
+        // documented Bevy fragility (#18901/#17530); keeping the overlay's
+        // intermediate isolated is a cheap safeguard (lines gain nothing from
+        // MSAA anyway). Note: a deterministic capture comparison did NOT show
+        // this affecting the composite either way in the current pipeline, so
+        // it's a precaution, not a confirmed fix for a reproduced symptom.
         Msaa::Off,
         // Explicit (not the required-component default). TonyMcMapface
         // desaturates the bright bone cores to a clean white, leaving the halo

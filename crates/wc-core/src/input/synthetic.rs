@@ -82,11 +82,14 @@ pub fn synthetic_open_hand() -> Hand {
         palm_normal: Vec3::Z,
         palm_velocity: Vec3::ZERO,
         pinch_strength: 0.0,
-        // A moderate grab so the fixture actually drives the Line attractor /
-        // gravity shader — this makes the synthetic hand exercise the full
-        // hand → attractor → gravity → bone-overlay pipeline, not just the bone
-        // geometry. (Grab is independent of finger spread in the Leap model.)
-        grab_strength: 0.6,
+        // Open hand: grab 0 so the fixture does NOT drive the Line attractor.
+        // A grabbing synthetic hand spawns a strong (and, with the sweep, moving)
+        // attractor that fights the mouse attractor and drags particles to the
+        // window edge — the "particles fly to the upper-left" bug. A real hand
+        // only pulls when the user closes a fist; an idle on-screen hand should
+        // not. Grab-driven behavior (gravity, attractor rings) is covered by
+        // tests + the one-off `handrings` capture, not by the always-on fixture.
+        grab_strength: 0.0,
         landmarks,
     }
 }
