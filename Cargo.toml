@@ -82,7 +82,12 @@ toml = "1"
 dirs = "6"
 # xtask
 clap = { version = "4", features = ["derive"] }
-walkdir = "2"
+# Gitignore-aware directory walker (ripgrep's engine). `check-secrets` uses it
+# so the scan honors .gitignore / .git/info/exclude (gitignored caches and
+# worktrees can't be committed, so a match there is a false positive). With the
+# default `require_git = true`, gitignore rules apply only inside a git repo, so
+# temp-dir unit tests still scan every planted file.
+ignore = "0.4"
 regex = "1"
 tempfile = "3"
 # proc-macro toolchain (settings derive)
@@ -154,6 +159,12 @@ debug = "line-tables-only"
 opt-level = 3
 
 [profile.release]
+# GUARD — do NOT set `debug-assertions = true` here (or on any release/soak
+# profile). The visual-debugging scaffold (`wc_core::capture`,
+# `wc_core::debug`) and all its plugin/system registration are
+# `#[cfg(debug_assertions)]`-gated, so they compile out of release ONLY while
+# debug-assertions stays false. Flipping it true reintroduces per-frame capture
+# work and the WC_DEBUG_* parsing into the long-running soak/release binary.
 opt-level = 3
 lto = "fat"
 codegen-units = 1

@@ -1,13 +1,20 @@
 //! `cargo xtask check-secrets` — regex-scan the working tree for forbidden
 //! secrets and local absolute paths.
 //!
+//! The scan honors `.gitignore` / `.git/info/exclude` / the global gitignore
+//! (via the `ignore` crate): gitignored files can't be committed, so a match
+//! there would be a false positive. Hidden directories are NOT skipped wholesale
+//! — committed `.github/` CI configs and `.cargo/config.toml` must still be
+//! scanned — so the explicit [`SKIP_DIRS`] prune handles `.git`, `target`,
+//! `vendor`, `docs`, and `tests`.
+//!
 //! Exits 0 when no findings; exits 1 when one or more findings are reported.
 
 use std::path::{Path, PathBuf};
 
 use clap::Args as ClapArgs;
+use ignore::WalkBuilder;
 use regex::Regex;
-use walkdir::WalkDir;
 
 /// Arguments for the check-secrets subcommand.
 #[derive(ClapArgs)]
@@ -71,8 +78,14 @@ struct Finding {
 // `tests/` is excluded because integration-test fixtures intentionally plant
 // bad patterns to verify the scanner catches them.
 //
+// `vendor/` holds git-tracked third-party code (e.g. the Ultraleap LICENSE with
+// its public `legal@` contact) that is not ours to scrub — gitignore can't skip
+// it because it is tracked, so it is pruned by name here.
+//
 // The remaining entries (`.git`, `target`, `node_modules`, etc.) are
-// VCS/build/cache noise that should never be scanned.
+// VCS/build/cache noise that should never be scanned. Most are also gitignored
+// (and skipped on that basis), but pruning them by name avoids descending into
+// them even when running with `--root` outside the repo.
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".cargo",
@@ -82,6 +95,7 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     "node_modules",
     "target",
+    "vendor",
     "docs",
     "tests",
 ];
@@ -155,12 +169,26 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut findings: Vec<Finding> = Vec::new();
 
-    'file: for entry in WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-    {
+    // Honor gitignore (defaults: `require_git = true`, so gitignore rules apply
+    // only inside a repo — temp-dir tests scan everything). `hidden(false)`
+    // keeps committed dotfiles (.github/, .cargo/config.toml) in scope; the
+    // `filter_entry` prune drops the `SKIP_DIRS` directories outright.
+    let walker = WalkBuilder::new(&root)
+        .hidden(false)
+        .filter_entry(|entry| {
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    return !SKIP_DIRS.contains(&name);
+                }
+            }
+            true
+        })
+        .build();
+
+    'file: for entry in walker.filter_map(Result::ok) {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue 'file;
+        }
         let path = entry.path();
         if should_skip(path) {
             continue 'file;

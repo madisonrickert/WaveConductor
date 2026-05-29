@@ -66,6 +66,9 @@ pub fn spawn_line(
     mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
     mut materials: ResMut<'_, Assets<LineMaterial>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
+    // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
+    // only in debug builds). Placed last so the release signature is unchanged.
+    #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
 ) {
     let w = window.width();
     let win_h = window.height();
@@ -144,9 +147,21 @@ pub fn spawn_line(
     // becomes valid once the asset finishes loading.
     let star_texture: Handle<Image> = asset_server.load("sketches/line/star.png");
 
+    // Debug-only: `WC_DEBUG_SOLID_PARTICLES` paints every particle a flat
+    // colour for render-stage isolation. Off-sentinel (alpha 0) in normal
+    // runs and always off in release (no `DebugToggles`).
+    #[cfg(debug_assertions)]
+    let solid_color = debug_toggles
+        .as_ref()
+        .and_then(|t| t.solid_particles)
+        .map_or_else(LineMaterial::solid_off, |[r, g, b, a]| Vec4::new(r, g, b, a));
+    #[cfg(not(debug_assertions))]
+    let solid_color = LineMaterial::solid_off();
+
     let material_handle = materials.add(LineMaterial {
         particles: particles_handle.clone(),
         star_texture,
+        solid_color,
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

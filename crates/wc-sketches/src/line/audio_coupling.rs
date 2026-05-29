@@ -77,6 +77,9 @@ pub fn drive_audio_and_shader(
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     mut post: ResMut<'_, LinePostParams>,
     settings: Res<'_, super::settings::LineSettings>,
+    // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
+    // only in debug builds). Placed last so the release signature is unchanged.
+    #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
 ) {
     // --- Audio modulation (matches v4 LineSketch.step()) ---
     //
@@ -166,6 +169,12 @@ pub fn drive_audio_and_shader(
     // bring the value into the gravity-smear shader's expected range.
     let t = time.elapsed_secs();
     post.g_constant = triangle_wave_approx(t / 5.0) * (stats.grouped_upness + 0.5) * 15_000.0;
+    // WC_DEBUG_FORCE_G pins the gravity constant, eliminating the triangle-wave
+    // phase variable for deterministic render-stage isolation (debug only).
+    #[cfg(debug_assertions)]
+    if let Some(forced) = debug_toggles.as_ref().and_then(|t| t.force_g) {
+        post.g_constant = forced;
+    }
     // `i_mouse_factor` softens the mouse-pull contribution as upness rises:
     // 1/15 baseline, halved as groupedUpness approaches 1.
     post.i_mouse_factor = (1.0 / 15.0) / (stats.grouped_upness + 1.0);

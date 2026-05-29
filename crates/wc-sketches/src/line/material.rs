@@ -40,6 +40,21 @@ pub struct LineMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub star_texture: Handle<Image>,
+    /// Debug solid-particle override (linear RGBA). When `a > 0` the fragment
+    /// shader returns this flat colour instead of the star texel — the
+    /// "magenta isolation" trick (`WC_DEBUG_SOLID_PARTICLES`). [`Vec4::ZERO`]
+    /// (the [`Self::solid_off`] sentinel) means "off"; normal runs and release
+    /// builds always seed this with the off sentinel.
+    #[uniform(3)]
+    pub solid_color: Vec4,
+}
+
+impl LineMaterial {
+    /// The `solid_color` sentinel meaning "off" (use the star texture). Shared
+    /// by the spawn site and the tests so they agree on the off value.
+    pub fn solid_off() -> Vec4 {
+        Vec4::ZERO
+    }
 }
 
 impl Material2d for LineMaterial {
@@ -56,5 +71,17 @@ impl Material2d for LineMaterial {
     /// no specialization needed.
     fn alpha_mode(&self) -> AlphaMode2d {
         AlphaMode2d::Blend
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_solid_color_is_off() {
+        // alpha == 0 means "off" (use the star texture). Constructed via the
+        // helper so spawn.rs and tests agree on the off-sentinel.
+        assert_eq!(LineMaterial::solid_off(), Vec4::ZERO);
     }
 }

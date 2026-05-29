@@ -1,0 +1,22 @@
+# Visual-capture scenarios for `cargo xtask capture`. See tests/visual/CLAUDE.md.
+#
+# Each [scenarios.<name>] is a deterministic launch. Baselines live under
+# tests/visual/baselines/<name>/. `config = "clean"` means a fresh temp config
+# dir (no stale on-disk settings); a path value pins WAVECONDUCTOR_CONFIG_DIR.
+
+[scenarios.line-synthetic]
+sketch = "line"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+
+[scenarios.line-synthetic-no-bloom]
+sketch = "line"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+
+[scenarios.line-synthetic-no-bloom.debug]
+DISABLE_BLOOM = "1"

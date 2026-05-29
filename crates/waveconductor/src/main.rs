@@ -83,6 +83,12 @@ fn main() {
             ),
         );
 
+    // Debug-only: `WC_DEBUG_DISABLE_BLOOM` zeroes the main camera bloom for
+    // render-stage isolation. Compiled out of release (relies on
+    // `debug-assertions = false` in the release/soak profiles).
+    #[cfg(debug_assertions)]
+    app.add_systems(Update, apply_debug_bloom_toggle);
+
     app.run();
 }
 
@@ -192,6 +198,32 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
             ..Bloom::NATURAL
         },
     ));
+}
+
+/// Apply `WC_DEBUG_DISABLE_BLOOM`: zero the main camera's bloom intensity for
+/// render-stage isolation (debug builds only).
+///
+/// Runs each `Update`; cheap because it early-returns when no `DebugToggles`
+/// resource is present (the normal-run case) or the toggle is off, and only
+/// writes `Bloom.intensity` when it is non-zero. The override never restores a
+/// non-default value because nothing else writes bloom intensity at runtime in
+/// this app.
+#[cfg(debug_assertions)]
+fn apply_debug_bloom_toggle(
+    toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
+    mut query: Query<'_, '_, &mut Bloom, With<Camera2d>>,
+) {
+    let Some(toggles) = toggles else {
+        return;
+    };
+    if !toggles.disable_bloom {
+        return;
+    }
+    for mut bloom in &mut query {
+        if bloom.intensity != 0.0 {
+            bloom.intensity = 0.0;
+        }
+    }
 }
 
 /// Construct and insert the [`wc_core::input::provider::ProviderRegistry`]

@@ -32,6 +32,10 @@ const SUBCOMMANDS: &[Entry] = &[
         name: "check-secrets",
         description: "Regex-scan the working tree for forbidden secrets and local paths.",
     },
+    Entry {
+        name: "capture",
+        description: "Deterministic visual capture + baseline regression for a scenario.",
+    },
 ];
 
 /// Execute the manifest subcommand.

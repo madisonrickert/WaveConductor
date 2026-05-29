@@ -98,7 +98,7 @@ use wc_core::input::projection::palm_to_world;
 use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
 
-use super::bone_composite::{HandMeshTarget, LineBoneCompositePlugin};
+use super::bone_composite::HandMeshTarget;
 use super::bone_wireframe::{icosphere_line_mesh, BoneWireframeMaterial};
 
 /// Radius of each bone wireframe icosphere, in logical pixels (the overlay
@@ -158,25 +158,39 @@ pub struct LineHandMeshPlugin;
 
 impl Plugin for LineHandMeshPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<BoneWireframeMaterial>::default())
-            // The additive composite node that adds the off-screen bone image
-            // into the main camera's HDR target before bloom.
-            .add_plugins(LineBoneCompositePlugin)
-            .add_systems(OnEnter(AppState::Line), spawn_hand_mesh_camera)
-            .add_systems(
-                OnExit(AppState::Line),
-                (despawn_hand_mesh_camera, despawn_all_bone_children),
-            )
-            .add_systems(
-                Update,
-                (ensure_bone_meshes, update_bone_transforms)
-                    .chain()
-                    .run_if(sketch_active(AppState::Line)),
-            )
-            // Keep the off-screen target sized to the window. Not gated on
-            // `sketch_active` so a resize while idle is still tracked; it no-ops
-            // when the target resource is absent (outside Line).
-            .add_systems(Update, resize_bone_target.run_if(in_state(AppState::Line)));
+        // NOTE: `LineBoneCompositePlugin` is registered by `LinePlugin::build`
+        // (so `WC_DEBUG_DISABLE_BONE_COMPOSITE` can gate the composite node at
+        // the Line render-stage level), not here.
+        app.add_plugins(MaterialPlugin::<BoneWireframeMaterial>::default());
+
+        // In debug builds, `WC_DEBUG_DISABLE_BONE_CAMERA` skips spawning the
+        // off-screen bone camera for render-stage isolation. Always spawns in
+        // release (no `DebugToggles`).
+        #[cfg(debug_assertions)]
+        let spawn_camera = !app
+            .world()
+            .get_resource::<wc_core::debug::DebugToggles>()
+            .is_some_and(|t| t.disable_bone_camera);
+        #[cfg(not(debug_assertions))]
+        let spawn_camera = true;
+        if spawn_camera {
+            app.add_systems(OnEnter(AppState::Line), spawn_hand_mesh_camera);
+        }
+
+        app.add_systems(
+            OnExit(AppState::Line),
+            (despawn_hand_mesh_camera, despawn_all_bone_children),
+        )
+        .add_systems(
+            Update,
+            (ensure_bone_meshes, update_bone_transforms)
+                .chain()
+                .run_if(sketch_active(AppState::Line)),
+        )
+        // Keep the off-screen target sized to the window. Not gated on
+        // `sketch_active` so a resize while idle is still tracked; it no-ops
+        // when the target resource is absent (outside Line).
+        .add_systems(Update, resize_bone_target.run_if(in_state(AppState::Line)));
     }
 }
 

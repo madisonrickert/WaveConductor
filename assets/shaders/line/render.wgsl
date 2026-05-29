@@ -18,6 +18,10 @@ struct Particle {
 @group(2) @binding(0) var<storage, read> particles: array<Particle>;
 @group(2) @binding(1) var star_texture: texture_2d<f32>;
 @group(2) @binding(2) var star_sampler: sampler;
+// Debug solid-particle override (linear RGBA). a > 0 => return the flat colour
+// instead of the star texel. Set from `LineMaterial.solid_color`
+// (WC_DEBUG_SOLID_PARTICLES). Vec4(0) means "off" in normal runs and release.
+@group(2) @binding(3) var<uniform> solid_color: vec4<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -72,6 +76,12 @@ fn vertex(
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Debug isolation: when a solid override colour is set (alpha > 0), render
+    // every particle as that flat colour, modulated only by per-particle alpha.
+    // Separates particle geometry from the star texture / smear contribution.
+    if (solid_color.a > 0.0) {
+        return vec4<f32>(solid_color.rgb, solid_color.a * in.alpha);
+    }
     let texel = textureSample(star_texture, star_sampler, in.uv);
     // v4 uses THREE.PointsMaterial with vertexColors:true and a vertex color
     // of (1, 1, 1). The texture RGB is multiplied by the vertex color, which

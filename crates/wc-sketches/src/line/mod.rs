@@ -46,6 +46,8 @@ pub use systems::LineRoot;
 
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
+#[cfg(debug_assertions)]
+use wc_core::debug::DebugToggles;
 use wc_core::audio::state::AudioState;
 use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::AppState;
@@ -70,8 +72,33 @@ impl Plugin for LinePlugin {
         // Wire the compute pipeline.
         app.add_plugins(compute::LineComputePlugin);
 
-        // Wire the gravity-smear post-process render-graph node.
-        app.add_plugins(post_process::LinePostProcessPlugin);
+        // Wire the gravity-smear post-process render-graph node. In debug
+        // builds, `WC_DEBUG_DISABLE_SMEAR` skips it for render-stage isolation.
+        // `DebugPlugin` (in `CorePlugin`) ran earlier, so `DebugToggles` is
+        // present iff a `WC_DEBUG_*` var was set; absence means "all toggles
+        // off" (and release has no `DebugToggles` at all).
+        #[cfg(debug_assertions)]
+        let toggles = app.world().get_resource::<DebugToggles>().copied();
+        #[cfg(debug_assertions)]
+        let register_smear = should_register_smear(toggles.as_ref());
+        #[cfg(not(debug_assertions))]
+        let register_smear = true;
+        if register_smear {
+            app.add_plugins(post_process::LinePostProcessPlugin);
+        }
+
+        // Wire the additive bone-glow composite node here (hoisted out of
+        // `LineHandMeshPlugin` so `WC_DEBUG_DISABLE_BONE_COMPOSITE` can gate it
+        // at the Line render-stage level). The composite reads `HandMeshTarget`
+        // (extracted from the main world) and no-ops cleanly when that resource
+        // is absent, so registering it independently of the bone camera is safe.
+        #[cfg(debug_assertions)]
+        let register_bone_composite = should_register_bone_composite(toggles.as_ref());
+        #[cfg(not(debug_assertions))]
+        let register_bone_composite = true;
+        if register_bone_composite {
+            app.add_plugins(bone_composite::LineBoneCompositePlugin);
+        }
 
         // Wire per-hand attractors (Plan 11.6 Phase 11.1).
         app.add_plugins(leap_attractors::LineLeapAttractorsPlugin);
@@ -310,6 +337,20 @@ fn exit_line_audio(
     }
 }
 
+/// Whether to register the gravity-smear post-process node. On unless
+/// `WC_DEBUG_DISABLE_SMEAR` is set. Always on in release (no [`DebugToggles`]).
+#[cfg(debug_assertions)]
+fn should_register_smear(toggles: Option<&DebugToggles>) -> bool {
+    !toggles.is_some_and(|t| t.disable_smear)
+}
+
+/// Whether to register the additive bone-composite node. On unless
+/// `WC_DEBUG_DISABLE_BONE_COMPOSITE` is set. Always on in release.
+#[cfg(debug_assertions)]
+fn should_register_bone_composite(toggles: Option<&DebugToggles>) -> bool {
+    !toggles.is_some_and(|t| t.disable_bone_composite)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -318,6 +359,35 @@ fn exit_line_audio(
 mod tests {
     use super::*;
     use wc_core::sketch::SketchManifest;
+
+    /// `LinePlugin` decides whether to register the bone-composite + smear
+    /// nodes by reading `DebugToggles`; this guards the gating predicate.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn render_stage_gating_predicate() {
+        use wc_core::debug::DebugToggles;
+        let all_off = DebugToggles {
+            force_g: None,
+            disable_smear: false,
+            disable_bloom: false,
+            disable_bone_composite: false,
+            disable_bone_camera: false,
+            solid_particles: None,
+        };
+        assert!(should_register_smear(Some(&all_off)));
+        assert!(should_register_bone_composite(Some(&all_off)));
+        assert!(should_register_smear(None)); // no toggles → everything on
+        let no_smear = DebugToggles {
+            disable_smear: true,
+            ..all_off
+        };
+        assert!(!should_register_smear(Some(&no_smear)));
+        let no_comp = DebugToggles {
+            disable_bone_composite: true,
+            ..all_off
+        };
+        assert!(!should_register_bone_composite(Some(&no_comp)));
+    }
 
     /// Verifies that `register_line_manifest` appends an entry for
     /// `AppState::Line` with the correct display name.

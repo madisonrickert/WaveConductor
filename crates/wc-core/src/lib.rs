@@ -16,6 +16,14 @@
 extern crate self as wc_core;
 
 pub mod audio;
+// Visual-debugging scaffold: compiled out of release entirely (Option A hybrid
+// gating). Both modules rely on `debug-assertions = false` in the release/soak
+// profiles — see each module's docs and the guard comment on
+// `[profile.release]` in the workspace `Cargo.toml`.
+#[cfg(debug_assertions)]
+pub mod capture;
+#[cfg(debug_assertions)]
+pub mod debug;
 pub mod input;
 pub mod lifecycle;
 pub mod settings;
@@ -35,6 +43,15 @@ impl Plugin for CorePlugin {
         app.add_plugins(input::HandTrackingPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
+        // Visual-debugging scaffold — debug builds only (compiled out of
+        // release). DebugPlugin inserts DebugToggles only when a WC_DEBUG_* var
+        // is set; CapturePlugin wires the capture systems only when WC_CAPTURE
+        // is set. A normal debug run with neither env carries essentially
+        // nothing.
+        #[cfg(debug_assertions)]
+        app.add_plugins(capture::CapturePlugin);
+        #[cfg(debug_assertions)]
+        app.add_plugins(debug::DebugPlugin);
         app.add_plugins(ui::WaveConductorUiPlugin);
     }
 }
@@ -70,5 +87,21 @@ mod tests {
         // WaveConductorUiPlugin should at least be addable without panic.
         // Concrete behavior is tested in each sub-plugin's own tests.
         assert!(app.is_plugin_added::<crate::ui::WaveConductorUiPlugin>());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn core_plugin_does_not_insert_debug_toggles_without_env() {
+        // No WC_DEBUG_* set in the test process → DebugPlugin inserts nothing.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::input::InputPlugin);
+        app.add_plugins(StatesPlugin);
+        app.add_plugins(CorePlugin);
+        assert!(app
+            .world()
+            .get_resource::<crate::debug::DebugToggles>()
+            .is_none());
+        // CaptureState is only meaningful with WC_CAPTURE; CorePlugin must still build.
     }
 }

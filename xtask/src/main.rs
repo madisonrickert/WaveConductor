@@ -7,6 +7,7 @@
 
 #![allow(clippy::print_stdout, reason = "xtask is a CLI; printing is its job")]
 
+mod capture;
 mod check_secrets;
 mod manifest;
 
@@ -25,6 +26,8 @@ enum Command {
     Manifest(manifest::Args),
     /// Regex-scan the working tree for forbidden secrets and local paths.
     CheckSecrets(check_secrets::Args),
+    /// Deterministic visual capture + baseline regression for a scenario.
+    Capture(capture::Args),
 }
 
 fn main() {
@@ -35,6 +38,7 @@ fn main() {
             Ok(())
         }
         Command::CheckSecrets(args) => check_secrets::run(args),
+        Command::Capture(args) => capture::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");
