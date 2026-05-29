@@ -106,6 +106,10 @@ pub fn sketches_test_app() -> App {
     // `common::input::move_pointer` actually land in a channel
     // `pointer_merge_system`'s `MessageReader` can read.
     app.add_message::<bevy::window::CursorMoved>();
+    // Likewise `WindowResized` — `WindowPlugin` registers it in production; the
+    // Line hand-mesh's `resize_bone_target` system reads it, so the harness must
+    // register the channel or that system's `MessageReader` fails validation.
+    app.add_message::<bevy::window::WindowResized>();
 
     // Install the production pointer-merge system so synthetic `CursorMoved`
     // messages from `common::input::move_pointer` reach `PointerState` —
