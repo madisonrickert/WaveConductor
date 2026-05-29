@@ -37,6 +37,12 @@ These coding standards apply to all source contributions to WaveConductor v5. CI
 - Compute shader dispatch sizes scale with settings; do not dispatch unused workgroups.
 - An 8-hour soak test is required before any release tag.
 
+## Visual testing
+
+- Rendered sketches have a deterministic capture + regression harness: `cargo xtask capture <scenario>`. Run `cargo xtask manifest` to see all xtask subcommands, `cargo xtask capture --list` for scenarios, and read `tests/visual/CLAUDE.md` for the full surface (flags, `--json` shape, the `WC_DEBUG_*` render-stage isolation toggles, and how to add a scenario or update baselines).
+- Prefer it over ad-hoc screenshot scripts when diagnosing or regression-testing a sketch's rendered output. It pins a fixed sim timestep (so captures are reproducible) and writes a self-describing `run.json`; the operating agent reviews the captured PNGs itself (no LLM API spend).
+- The capture system and `WC_DEBUG_*` toggles are `#[cfg(debug_assertions)]`-gated and absent from release builds; never enable `debug-assertions` on a release/soak profile (see the guard on `[profile.release]` in `Cargo.toml`).
+
 ## Security and privacy
 
 - No private personal information in the repo. No real email addresses (use `noreply.github.com` or placeholder), no phone numbers, no API keys, no tokens, no session IDs, no analytics IDs tied to a real account. Secrets go in environment variables loaded at runtime, never committed.
