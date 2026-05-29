@@ -125,7 +125,7 @@ fn draw_user_panel(world: &mut World) {
 
     // Position: top-right, 16 px inset, 60 px from the top (below the cog).
     // Width bumped from 320 px to 420 px so the spawn_template file-picker row
-    // (text edit + Browse… button) fits on one line without overflowing.
+    // (file name + Browse… button) fits on one line without overflowing.
     // This is a minor intentional deviation from v4's exact panel width.
     let area_pos = egui::pos2(window_width - 16.0 - 420.0, 60.0);
 
@@ -436,18 +436,15 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
     }
 }
 
-/// Render the filesystem-path widget (`[text edit][Browse…]`) for a field.
+/// Render the filesystem-path widget (`[file name][Browse…]`) for a field.
 ///
-/// No label — Grid column 1 already holds it. On Browse, opens
-/// [`rfd::FileDialog`] filtered to `extensions`; the selected path replaces
-/// the field value. Available only on native platforms — the wasm build renders
-/// a text-edit only (no picker).
-///
-/// The text edit is constrained to 180 px with `clip_text(true)` so it
-/// scrolls horizontally inside its box rather than expanding the Grid column
-/// and pushing the Browse… button off the panel. 180 px + 12 px spacing +
-/// ~70 px button ≈ 262 px — fits comfortably in the 420 px panel's second
-/// column after 20 px padding on each side.
+/// No label — Grid column 1 already holds it. The field stores the full path,
+/// but the widget shows only the selected file's *name* (read-only); the path
+/// is set entirely through the Browse… button — typing absolute paths is poor
+/// kiosk UX. On Browse, opens [`rfd::FileDialog`] filtered to `extensions`; the
+/// selected path replaces the field value, and an empty field reads as
+/// `(none)`. Native only — the wasm build shows the file name without a picker
+/// (web is out of scope; see `Cargo.toml`).
 fn render_file_path(
     field: &mut dyn bevy::reflect::PartialReflect,
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] filter_label: &str,
@@ -458,15 +455,16 @@ fn render_file_path(
         ui.label("(expected String for file path)");
         return;
     };
-    // Wrap text-edit + Browse in a horizontal so the Browse button sits inline.
-    // desired_width constrains the text field so the Browse button has room
-    // beside it without overflowing the 420 px panel.
     ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(v)
-                .desired_width(180.0)
-                .clip_text(true),
-        );
+        // Display the file name only (or "(none)"), not the full editable path.
+        let file_name = if v.is_empty() {
+            "(none)".to_owned()
+        } else {
+            std::path::Path::new(v.as_str())
+                .file_name()
+                .map_or_else(|| v.clone(), |name| name.to_string_lossy().into_owned())
+        };
+        ui.label(file_name);
         #[cfg(not(target_arch = "wasm32"))]
         if ui.button("Browse…").clicked() {
             let mut dlg = rfd::FileDialog::new();

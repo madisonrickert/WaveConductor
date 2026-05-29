@@ -59,7 +59,7 @@ The first hands-on run on 2026-05-25 surfaced four parity gaps that Plan 11 will
 
 1. **Attractor ring rotation invisible.** `bevy::math::primitives::Annulus` is rotationally symmetric, so the per-frame `(10 - idx) / 20 * power` rotation has no visible effect. v4's rings appear visibly spinning. Plan 11 swaps to a low-segment polygon (`RegularPolygon` with 6–8 sides) or a stroked custom mesh whose corners make rotation legible.
 2. ~~**Touch and hand-tracking cannot activate the attractor.**~~ **RESOLVED.** `update_mouse_attractor` now reads `Res<Touches>` (`iter_just_pressed`/`iter_just_released`) alongside the mouse, so touch presses activate the attractor (egui-capture-gated like the mouse). Hand activation is handled by the separate `LineHandAttractor` (grab → power) on `TrackedHand` entities. Touch still wants a touchscreen to confirm hands-on; the hand path is synthetically verified.
-3. **`spawn_template` lacks a file picker.** Currently a free-text input — typing absolute paths is a poor kiosk UX. Plan 11 adds an `rfd`-backed Browse… button next to the field.
+3. ~~**`spawn_template` lacks a file picker.**~~ **RESOLVED.** The user panel's filesystem-path widget (`crates/wc-core/src/settings/panel_user.rs::render_file_path`) has an `rfd`-backed Browse… button. It now shows the selected file's *name* (read-only) and relies entirely on Browse — the editable free-text path entry was dropped (poor kiosk UX).
 4. **Manual side-by-side capture not yet performed.** The human-in-the-loop step below is what flips this verdict from PENDING to PASS.
 
 **Tag points for the side-by-side capture (when Plan 11 performs it):**
@@ -127,10 +127,10 @@ Remaining open parity gaps from the Verdict section after this pass:
   originally proposed), and hand attractors now show the gyroscope.
 - **Gap #2 (touch/hand activation):** code-complete (touch via `Res<Touches>`;
   hand via `LineHandAttractor`). Touch wants a touchscreen for hands-on sign-off.
-- **Gap #3 (`spawn_template` file picker):** still open — needs an `rfd`-backed
-  Browse button (a new dependency + a native dialog that can't be verified
-  headlessly, so deferred to a session with Madison in the loop).
+- **Gap #3 (`spawn_template` file picker):** closed — the `rfd` Browse button
+  exists and now shows just the file name (the editable path entry was dropped).
+  The native dialog itself is the only part needing a human to click through.
 - **Gap #4 (human side-by-side v4 capture):** human-bound, unchanged.
 
-The autonomously-achievable, verifiable parity gaps are now closed; gaps #3 and
-#4 need hardware / a GUI dialog / a human, so they await Madison's pass.
+Gaps #1–#3 are closed in code; #4 (and the native Browse dialog click-through +
+the nine Leap scenarios) need Madison's hands-on / hardware pass.
