@@ -77,7 +77,7 @@ impl WindowGeom {
     }
 }
 
-/// **Plan 12 Condition A1 (shared bake fn).** Build the full [`SimParams`] for a
+/// **Plan 11.8 Condition A1 (shared bake fn).** Build the full [`SimParams`] for a
 /// frame from a baked attractor array, the frame `dt`, and the window geometry.
 /// Both the live writer ([`update_sim_params`]) and the screensaver's
 /// phantom-hand writer (`crate::line::screensaver`) call this so the two
@@ -123,7 +123,7 @@ pub fn bake_sim_params(
     }
 }
 
-/// **Plan 12 Condition A1 (shared post-process base).** Set the geometry- and
+/// **Plan 11.8 Condition A1 (shared post-process base).** Set the geometry- and
 /// time-derived fields of [`LinePostParams`] both writers share: `i_resolution`,
 /// `i_mouse` (focal point in window-pixel space), `i_global_time`, and `gamma`.
 /// `g_constant` / `i_mouse_factor` are left for the caller (live:

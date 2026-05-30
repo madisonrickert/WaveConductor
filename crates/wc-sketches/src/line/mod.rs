@@ -104,7 +104,7 @@ impl Plugin for LinePlugin {
         // Wire per-hand attractors (Plan 11.6 Phase 11.1).
         app.add_plugins(leap_attractors::LineLeapAttractorsPlugin);
 
-        // Wire the attract-mode / screensaver driver (Plan 12, Seam 3). Its
+        // Wire the attract-mode / screensaver driver (Plan 11.8, Seam 3). Its
         // systems are gated on `in_screensaver(AppState::Line)`, so they run
         // only while Line's screensaver is showing — zero cost otherwise.
         app.add_plugins(screensaver::LineScreensaverPlugin);

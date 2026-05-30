@@ -1,4 +1,4 @@
-//! Integration tests for the screensaver / attract-mode framework (Plan 12).
+//! Integration tests for the screensaver / attract-mode framework (Plan 11.8).
 //!
 //! Exercises the framework end-to-end against the real lifecycle plugin (state
 //! machine + `ScreensaverPlugin`) under `MinimalPlugins`:

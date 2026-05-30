@@ -1,4 +1,4 @@
-//! The [`in_screensaver`] run-condition (Plan 12, Seam 2).
+//! The [`in_screensaver`] run-condition (Plan 11.8, Seam 2).
 //!
 //! The attract-mode analogue of [`crate::sketch::sketch_active`], factored into
 //! its own file (one concept per file) so each sketch gates its attract-driver

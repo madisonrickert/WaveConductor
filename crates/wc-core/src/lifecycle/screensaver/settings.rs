@@ -1,4 +1,4 @@
-//! Operator-customizable screensaver / attract-mode settings (Plan 12, Seam 2).
+//! Operator-customizable screensaver / attract-mode settings (Plan 11.8, Seam 2).
 //!
 //! A core (not per-sketch) [`SketchSettings`](crate::settings::SketchSettings)
 //! resource persisted by the normal settings layer. Today it carries only the

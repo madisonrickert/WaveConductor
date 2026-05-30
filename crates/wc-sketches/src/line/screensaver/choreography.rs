@@ -1,4 +1,4 @@
-//! Pure attract-mode choreography math for the Line sketch (Plan 12, Seam 3).
+//! Pure attract-mode choreography math for the Line sketch (Plan 11.8, Seam 3).
 //!
 //! All functions here are deterministic functions of elapsed time and window
 //! geometry — no `World`, no resources — so the phantom-hand paths and the

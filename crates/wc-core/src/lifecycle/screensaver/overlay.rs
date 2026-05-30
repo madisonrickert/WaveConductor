@@ -1,4 +1,4 @@
-//! Instruction-caption overlay for attract mode (Plan 12, Seam 2).
+//! Instruction-caption overlay for attract mode (Plan 11.8, Seam 2).
 //!
 //! Renders an operator-set lower-third caption (headline + optional subline)
 //! while the screensaver is active. The caption is pure opt-in: it draws only

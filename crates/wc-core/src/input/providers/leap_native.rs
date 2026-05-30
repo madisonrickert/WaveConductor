@@ -85,7 +85,7 @@ pub struct LeaprsProvider {
     background_policy_applied: bool,
     /// `true` once the `AllowPauseResume` policy has been successfully set on the
     /// live connection. The screensaver pauses the service during idle as a
-    /// thermal lever (Plan 12, Seam 4 — the Ultraleap tracking service is a heavy
+    /// thermal lever (Plan 11.8, Seam 4 — the Ultraleap tracking service is a heavy
     /// constant CPU load); `Connection::set_pause` only works after this policy
     /// is granted, so it is armed via the same deferred-retry handshake as
     /// `BackgroundFrames`.
@@ -224,7 +224,7 @@ impl LeaprsProvider {
     ///
     /// - **`BackgroundFrames`** — only when `request_background` is set.
     /// - **`AllowPauseResume`** — always (the screensaver's idle-pause lever
-    ///   needs it; Plan 12, Seam 4), independent of `request_background`.
+    ///   needs it; Plan 11.8, Seam 4), independent of `request_background`.
     fn apply_deferred_policies(&mut self) {
         if !matches!(self.status.service, ServiceConnection::Connected) {
             return;
@@ -297,7 +297,7 @@ impl LeaprsProvider {
         }
     }
 
-    /// Pause or resume the Ultraleap tracking service (Plan 12, Seam 4).
+    /// Pause or resume the Ultraleap tracking service (Plan 11.8, Seam 4).
     ///
     /// Pausing reliably cuts *host CPU* — the tracking service is a heavy
     /// constant load (~44% of a core while tracking), the likely M1-overheating
@@ -659,7 +659,7 @@ pub fn apply_leap_background_setting(
     }
 }
 
-// ── screensaver idle-pause (Plan 12, Seam 4) ─────────────────────────────────
+// ── screensaver idle-pause (Plan 11.8, Seam 4) ─────────────────────────────────
 
 /// Set the pause state on every registered Leap provider. Shared by the
 /// enter/leave-screensaver systems below so the downcast/iterate boilerplate
@@ -678,7 +678,7 @@ fn set_all_leap_paused(registry: &mut crate::input::provider::ProviderRegistry, 
 }
 
 /// `OnEnter(SketchActivity::Screensaver)` — pause the Leap tracking service to
-/// shed host CPU during idle (Plan 12, Seam 4, D8).
+/// shed host CPU during idle (Plan 11.8, Seam 4, D8).
 ///
 /// The Ultraleap service is a heavy constant CPU load; pausing it is a parallel
 /// thermal lever to the renderer cooldown. We pause only on `Screensaver` (not

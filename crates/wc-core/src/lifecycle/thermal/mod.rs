@@ -1,4 +1,4 @@
-//! Adaptive thermal signal for the screensaver / attract mode (Plan 12, Seam 1).
+//! Adaptive thermal signal for the screensaver / attract mode (Plan 11.8, Seam 1).
 //!
 //! ## Role
 //!

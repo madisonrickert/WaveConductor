@@ -1,4 +1,4 @@
-//! Line attract-mode driver (Plan 12, Seam 3).
+//! Line attract-mode driver (Plan 11.8, Seam 3).
 //!
 //! Drives the **real** Line pipeline from synthetic attractors while the
 //! screensaver is showing, so the attract visual is unmistakably the actual

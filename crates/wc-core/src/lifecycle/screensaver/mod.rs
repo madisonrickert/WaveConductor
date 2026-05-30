@@ -1,4 +1,4 @@
-//! Screensaver / attract-mode framework (Plan 12, Seam 2).
+//! Screensaver / attract-mode framework (Plan 11.8, Seam 2).
 //!
 //! Promotes the old behavioral placeholder into the framework each sketch plugs
 //! its attract visual into. It provides:

@@ -64,7 +64,7 @@ Scenarios defined today:
 | `line-screensaver-warm` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "warm"` |
 | `line-screensaver-hot` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "hot"` |
 
-The `line-screensaver-*` scenarios drive Line's attract mode (Plan 12). They force
+The `line-screensaver-*` scenarios drive Line's attract mode (Plan 11.8). They force
 `SketchActivity::Screensaver` at startup and pin a thermal tier so each tier's
 attract visual is reproducible (the live sensor is hardware/load-dependent). The
 frame spread (0 / 270 / 540 / 810 at dt=1/60) samples the ~9 s invitation pulse

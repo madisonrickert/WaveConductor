@@ -21,7 +21,7 @@ dt = 0.016666667
 [scenarios.line-synthetic-no-bloom.debug]
 DISABLE_BLOOM = "1"
 
-# ── Line screensaver / attract mode (Plan 12) ────────────────────────────────
+# ── Line screensaver / attract mode (Plan 11.8) ────────────────────────────────
 # Forces the app into SketchActivity::Screensaver at startup (FORCE_SCREENSAVER)
 # so the attract visual is captured deterministically. provider = "mock" (silent,
 # no synthetic hand): the attract gesture is performed by the sketch's own

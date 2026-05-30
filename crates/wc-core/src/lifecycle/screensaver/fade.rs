@@ -1,4 +1,4 @@
-//! Screensaver fade envelope (Plan 12, Seam 2).
+//! Screensaver fade envelope (Plan 11.8, Seam 2).
 //!
 //! A single 0..1 value that ramps toward `1.0` while the screensaver is active
 //! and back toward `0.0` when it is not. The caption overlay (and any future

@@ -1,4 +1,4 @@
-//! Platform selection for the temperature sensor (Plan 12, Seam 1).
+//! Platform selection for the temperature sensor (Plan 11.8, Seam 1).
 //!
 //! Per AGENTS.md, platform-specific code lives behind a `platform` module; the
 //! portable [`super::sensor`] loop never contains `cfg` blocks. [`create_sensor`]

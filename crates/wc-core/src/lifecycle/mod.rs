@@ -68,12 +68,12 @@ impl Plugin for LifecyclePlugin {
                     .chain(),
             );
 
-        // Adaptive thermal signal (Plan 12, Seam 1). Spawns the background
+        // Adaptive thermal signal (Plan 11.8, Seam 1). Spawns the background
         // temperature sampler and maintains `Res<ThermalState>`. Built before
         // the screensaver framework so the latter can read the tier.
         app.add_plugins(thermal::ThermalMonitorPlugin);
 
-        // Screensaver / attract-mode framework (Plan 12, Seam 2). Owns the
+        // Screensaver / attract-mode framework (Plan 11.8, Seam 2). Owns the
         // `in_screensaver` run-condition, the `ScreensaverSettings` resource,
         // the instruction overlay, and the per-tier present-rate throttle.
         app.add_plugins(screensaver::ScreensaverPlugin);
