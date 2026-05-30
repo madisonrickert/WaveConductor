@@ -227,10 +227,10 @@ mod tests {
         // in a single tick.
         app.world_mut()
             .resource_mut::<bevy::time::Time<bevy::time::Virtual>>()
-            .set_max_delta(Duration::from_secs(120));
+            .set_max_delta(Duration::from_mins(2));
         // Use ManualDuration(60 s) — one warmup tick has delta=0, the second
         // tick advances elapsed by 60 s.
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(60)));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_mins(1)));
         app.update(); // warmup: delta=0, elapsed=0
         app.update(); // actual: elapsed += 60 s → idle_for(60 s) > 30 s threshold
         let elapsed = app.world().resource::<Time>().elapsed();
@@ -255,7 +255,9 @@ mod tests {
             .backdrop_blur_enabled = false;
         app.update();
         assert!(
-            !app.world().resource::<crate::ui::blur::BackdropBlurEnabled>().0,
+            !app.world()
+                .resource::<crate::ui::blur::BackdropBlurEnabled>()
+                .0,
             "BackdropBlurEnabled should be false when settings has false"
         );
 
@@ -265,7 +267,9 @@ mod tests {
             .backdrop_blur_enabled = true;
         app.update();
         assert!(
-            app.world().resource::<crate::ui::blur::BackdropBlurEnabled>().0,
+            app.world()
+                .resource::<crate::ui::blur::BackdropBlurEnabled>()
+                .0,
             "BackdropBlurEnabled should be true when settings has true"
         );
     }
@@ -289,9 +293,9 @@ mod tests {
         // Install ManualDuration so each update advances delta by exactly
         // `duration` seconds. First update is a warmup (delta=0); second
         // bakes the full duration into Time::delta_secs().
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f32(duration),
-        ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            duration,
+        )));
         app.update(); // warmup: delta=0
         app.update(); // bakes delta = duration into Time
 

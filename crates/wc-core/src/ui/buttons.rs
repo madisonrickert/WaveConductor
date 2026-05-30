@@ -25,12 +25,12 @@ use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::render::EguiBevyPaintCallback;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::audio::command::AudioCommand;
-use crate::audio::state::AudioState;
-use crate::lifecycle::state::AppState;
 use super::auto_fade::UiOpacity;
 use super::blur::callback::BackdropBlurPaintCallback;
 use super::style::OverlayStyle;
+use crate::audio::command::AudioCommand;
+use crate::audio::state::AudioState;
+use crate::lifecycle::state::AppState;
 
 // Re-export so Tasks 14/15 can reach the icon glyph constants via this module.
 pub use egui_phosphor::regular as phosphor;
@@ -88,7 +88,13 @@ impl Plugin for OverlayButtonsPlugin {
             // ordering explicit rather than relying on Bevy's conflict resolution.
             // `draw_leap_status_led` runs last so it is always on top (overlaid
             // on the other buttons' z-order in the same pass).
-            (draw_home_button, draw_settings_button, draw_volume_button, draw_leap_status_led).chain(),
+            (
+                draw_home_button,
+                draw_settings_button,
+                draw_volume_button,
+                draw_leap_status_led,
+            )
+                .chain(),
         );
     }
 }
@@ -164,15 +170,24 @@ pub fn draw_home_button(
         return;
     };
 
-    let size = if coarse.0 { style.button_size_coarse } else { style.button_size_fine };
+    let size = if coarse.0 {
+        style.button_size_coarse
+    } else {
+        style.button_size_fine
+    };
 
     let mut clicked = false;
     egui::Area::new(egui::Id::new("wc-home-button"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(12.0, 12.0))
         .show(ctx, |ui| {
-            let response =
-                overlay_icon_button(ui, &style, egui_phosphor::regular::HOUSE, size, opacity.current);
+            let response = overlay_icon_button(
+                ui,
+                &style,
+                egui_phosphor::regular::HOUSE,
+                size,
+                opacity.current,
+            );
             if response.clicked() {
                 clicked = true;
             }
@@ -215,16 +230,25 @@ pub fn draw_settings_button(
     };
 
     // Read window width; fall back to 1280 if no primary window is present yet.
-    let window_width = windows.single().map(Window::width).unwrap_or(1280.0);
-    let size = if coarse.0 { style.button_size_coarse } else { style.button_size_fine };
+    let window_width = windows.single().map_or(1280.0, Window::width);
+    let size = if coarse.0 {
+        style.button_size_coarse
+    } else {
+        style.button_size_fine
+    };
 
     let mut clicked = false;
     egui::Area::new(egui::Id::new("wc-settings-button"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(window_width - 12.0 - size, 12.0))
         .show(ctx, |ui| {
-            let response =
-                overlay_icon_button(ui, &style, egui_phosphor::regular::GEAR, size, opacity.current);
+            let response = overlay_icon_button(
+                ui,
+                &style,
+                egui_phosphor::regular::GEAR,
+                size,
+                opacity.current,
+            );
             if response.clicked() {
                 clicked = true;
             }
@@ -273,9 +297,9 @@ pub fn overlay_icon_button(
     // Lerp fill colour by hover state. `animate_value_with_time` uses the
     // response's widget id as the animation key so each button animates
     // independently. The 0.2 s duration matches v4's `transition: 0.2s ease`.
-    let t = ui
-        .ctx()
-        .animate_value_with_time(response.id, if hovered { 1.0_f32 } else { 0.0_f32 }, 0.2);
+    let t =
+        ui.ctx()
+            .animate_value_with_time(response.id, if hovered { 1.0_f32 } else { 0.0_f32 }, 0.2);
 
     // Paint the frosted blur background + tint using backdrop_blur_frame.
     // The tint alpha lerps between inactive and hovered fills via the hover
@@ -443,8 +467,12 @@ pub fn draw_volume_button(
     };
 
     // Read window width; fall back to 1280 if no primary window is present yet.
-    let window_width = windows.single().map(Window::width).unwrap_or(1280.0);
-    let size = if coarse.0 { style.button_size_coarse } else { style.button_size_fine };
+    let window_width = windows.single().map_or(1280.0, Window::width);
+    let size = if coarse.0 {
+        style.button_size_coarse
+    } else {
+        style.button_size_fine
+    };
 
     // Volume sits just left of Settings, with an 8 px gap between them.
     let pos_x = window_width - 12.0 - size - 8.0 - size;
@@ -491,22 +519,22 @@ pub fn draw_volume_button(
 fn leap_led_color_and_tooltip(
     state: crate::input::state::PrimaryState,
 ) -> (bevy_egui::egui::Color32, &'static str) {
-    use bevy_egui::egui::Color32;
     use crate::input::state::PrimaryState;
+    use bevy_egui::egui::Color32;
     match state {
         PrimaryState::NotStarted => (Color32::DARK_GRAY, "Not started"),
         PrimaryState::ServiceMissing => (Color32::RED, "Ultraleap service not running"),
         PrimaryState::Disconnected => (Color32::RED, "Connection lost"),
-        PrimaryState::ServiceOnly => {
-            (Color32::from_rgb(0xf3, 0x9c, 0x12), "Service up, no device attached")
-        }
-        PrimaryState::DeviceAttached => {
-            (Color32::from_rgb(0x34, 0x98, 0xdb), "Device attached, not streaming")
-        }
+        PrimaryState::ServiceOnly => (
+            Color32::from_rgb(0xf3, 0x9c, 0x12),
+            "Service up, no device attached",
+        ),
+        PrimaryState::DeviceAttached => (
+            Color32::from_rgb(0x34, 0x98, 0xdb),
+            "Device attached, not streaming",
+        ),
         PrimaryState::Streaming => (Color32::from_rgb(0x2e, 0xcc, 0x71), "Streaming"),
-        PrimaryState::DeviceDegraded => {
-            (Color32::from_rgb(0xf1, 0xc4, 0x0f), "Tracking degraded")
-        }
+        PrimaryState::DeviceDegraded => (Color32::from_rgb(0xf1, 0xc4, 0x0f), "Tracking degraded"),
         PrimaryState::DeviceFailed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "Device error"),
     }
 }
@@ -532,10 +560,8 @@ pub fn draw_leap_status_led(
     egui::Area::new(egui::Id::new("leap_status_led"))
         .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-16.0, 16.0))
         .show(ctx, |ui| {
-            let (rect, response) = ui.allocate_exact_size(
-                egui::Vec2::splat(12.0),
-                egui::Sense::hover(),
-            );
+            let (rect, response) =
+                ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::hover());
             ui.painter().circle_filled(rect.center(), 6.0, color);
             response.on_hover_text(tooltip);
         });

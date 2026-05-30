@@ -64,9 +64,9 @@ pub fn letter_spaced_label(
     if ui.is_rect_visible(rect) {
         let mut cursor_x = rect.left();
         for ch in &chars {
-            let galley = ui.ctx().fonts_mut(|fonts| {
-                fonts.layout_no_wrap(ch.to_string(), font_id.clone(), color)
-            });
+            let galley = ui
+                .ctx()
+                .fonts_mut(|fonts| fonts.layout_no_wrap(ch.to_string(), font_id.clone(), color));
             let glyph_width = galley.rect.width();
             ui.painter()
                 .galley(egui::pos2(cursor_x, rect.top()), galley, color);

@@ -282,8 +282,15 @@ pub fn sync_hand_entities(
             seen_this_tick.insert(key);
 
             if let Some(&entity) = entity_table.get(&key) {
-                if let Ok((_chirality, mut palm, mut vel, mut pinch, mut grab, mut lms, mut bones)) =
-                    tracked.get_mut(entity)
+                if let Ok((
+                    _chirality,
+                    mut palm,
+                    mut vel,
+                    mut pinch,
+                    mut grab,
+                    mut lms,
+                    mut bones,
+                )) = tracked.get_mut(entity)
                 {
                     palm.0 = hand.palm_position;
                     vel.0 = hand.palm_velocity;

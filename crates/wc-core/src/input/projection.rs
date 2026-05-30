@@ -50,8 +50,7 @@ pub fn palm_to_world(palm_mm: Vec3, window: Vec2) -> Vec2 {
     let canvas_x = window.x * (SCREEN_DEADZONE + usable * x_norm);
     let world_x = canvas_x - window.x * 0.5;
 
-    let y_norm =
-        ((LEAP_Y_MAX_MM - palm_mm.y) / (LEAP_Y_MAX_MM - LEAP_Y_MIN_MM)).clamp(0.0, 1.0);
+    let y_norm = ((LEAP_Y_MAX_MM - palm_mm.y) / (LEAP_Y_MAX_MM - LEAP_Y_MIN_MM)).clamp(0.0, 1.0);
     let canvas_y = window.y * (SCREEN_DEADZONE + usable * y_norm);
     let world_y = -(canvas_y - window.y * 0.5);
 

@@ -105,7 +105,8 @@ pub fn draw_sketch_picker(world: &mut World) {
                 AppState::SKETCH_ORDER
                     .iter()
                     .filter_map(|&s| {
-                        m.get(s).map(|e| (e.state, e.display_name, e.screenshot.id()))
+                        m.get(s)
+                            .map(|e| (e.state, e.display_name, e.screenshot.id()))
                     })
                     .collect()
             })
@@ -220,9 +221,9 @@ fn render_active_tile(
     // 0.3 s — same timeline as the play icon. Painted before the sheen sweep
     // so the layer order is: screenshot → name gradient → tint → sheen → play.
     // Matches the "bit of a light overlay" effect from v4's sheen hover.
-    let hover_t = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("play"), response.hovered(), 0.3);
+    let hover_t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("play"), response.hovered(), 0.3);
     if hover_t > 0.0 {
         #[allow(
             clippy::as_conversions,
@@ -243,17 +244,17 @@ fn render_active_tile(
     //   opacity transition  → 0.15 s (quick flash in/out, v4: `transition: 0.15s`)
     // Using distinct animation keys (suffixed with "pos"/"alpha") so each
     // parameter animates independently on the same widget id.
-    let position_t_linear = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("pos"), response.hovered(), 0.5);
+    let position_t_linear =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("pos"), response.hovered(), 0.5);
     // Apply cubic ease-out to match CSS `ease` (which decelerates toward the end).
     // Formula: 1 - (1 - t)³  produces fast start, slow finish — the same feel
     // as CSS `transition-timing-function: ease`.
     let position_t = 1.0 - (1.0 - position_t_linear).powi(3);
 
-    let opacity_t = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("alpha"), response.hovered(), 0.15);
+    let opacity_t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("alpha"), response.hovered(), 0.15);
     if opacity_t > 0.0 {
         paint_sheen(ui, rect, position_t, opacity_t);
     }
@@ -504,14 +505,14 @@ fn paint_sheen(ui: &egui::Ui, rect: egui::Rect, position_t: f32, opacity_t: f32)
     // Peak alpha boosted from 0.5 (128) → ~0.7 (180) so the highlight reads
     // clearly over dark screenshot thumbnails.
     let xs: [f32; 4] = [
-        center_x - half,         // left edge: transparent
-        center_x - half * 0.3,   // dim entry
-        center_x + half * 0.0,   // bright peak at strip centre
-        center_x + half,         // right edge: transparent
+        center_x - half,       // left edge: transparent
+        center_x - half * 0.3, // dim entry
+        center_x + half * 0.0, // bright peak at strip centre
+        center_x + half,       // right edge: transparent
     ];
     let base_colors: [egui::Color32; 4] = [
         egui::Color32::TRANSPARENT,
-        egui::Color32::from_white_alpha(33),  // ≈ 0.13 × 255 (dim shoulder)
+        egui::Color32::from_white_alpha(33), // ≈ 0.13 × 255 (dim shoulder)
         egui::Color32::from_white_alpha(180), // ≈ 0.7 × 255 (bright peak, up from 0.5)
         egui::Color32::TRANSPARENT,
     ];
@@ -576,7 +577,13 @@ fn scale_sheen_alpha(c: egui::Color32, mul: f32) -> egui::Color32 {
 ///    `Color32::from_black_alpha(165)` at `rect.bottom`, softening the contrast
 ///    between the tile content and the name.
 /// 2. The name text in Orbitron at `(rect.left + 24, rect.bottom - 48)`.
-fn paint_tile_name(ui: &egui::Ui, style: &OverlayStyle, rect: egui::Rect, name: &str, color: egui::Color32) {
+fn paint_tile_name(
+    ui: &egui::Ui,
+    style: &OverlayStyle,
+    rect: egui::Rect,
+    name: &str,
+    color: egui::Color32,
+) {
     let painter = ui.painter();
 
     // Gradient: transparent → black-alpha at the lower 30% of the tile.

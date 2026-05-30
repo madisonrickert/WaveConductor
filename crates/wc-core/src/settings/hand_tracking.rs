@@ -10,9 +10,7 @@ use wc_core_macros::SketchSettings;
 /// `BackgroundFrames` policy at start? When `true`, tracking frames keep
 /// arriving even when the `WaveConductor` window is not focused. Default
 /// `false` per v4.
-#[derive(
-    SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq,
-)]
+#[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
 #[settings(storage_key = "hand_tracking")]
 pub struct HandTrackingSettings {

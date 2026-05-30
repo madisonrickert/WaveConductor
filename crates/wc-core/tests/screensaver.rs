@@ -125,7 +125,9 @@ fn fade_rises_in_screensaver_and_falls_on_return() {
 
     let mut app = test_app();
     // Fixed 100 ms per frame: ~15 frames spans the 1.5 s fade duration.
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(100)));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        100,
+    )));
 
     enter_line_activity(&mut app, SketchActivity::Screensaver);
     for _ in 0..30 {

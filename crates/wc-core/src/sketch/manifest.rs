@@ -112,6 +112,10 @@ mod tests {
         let manifest = app.world().resource::<SketchManifest>();
         let entry = manifest.get(AppState::Line).unwrap();
         assert_eq!(entry.display_name, "Line v2");
-        assert_eq!(manifest.entries.len(), 1, "duplicate state must not duplicate entries");
+        assert_eq!(
+            manifest.entries.len(),
+            1,
+            "duplicate state must not duplicate entries"
+        );
     }
 }

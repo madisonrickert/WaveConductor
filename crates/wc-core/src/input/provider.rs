@@ -166,8 +166,14 @@ impl ProviderRegistry {
         self.providers
             .iter()
             .find(|p| p.role == ProviderRole::Primary)
-            .or_else(|| self.providers.iter().find(|p| p.role == ProviderRole::Simulator))
-            .map_or_else(crate::input::state::ProviderStatus::default, |p| p.inner.status())
+            .or_else(|| {
+                self.providers
+                    .iter()
+                    .find(|p| p.role == ProviderRole::Simulator)
+            })
+            .map_or_else(crate::input::state::ProviderStatus::default, |p| {
+                p.inner.status()
+            })
     }
 
     /// Diagnostics of the primary provider, for the dev panel.
@@ -176,8 +182,14 @@ impl ProviderRegistry {
         self.providers
             .iter()
             .find(|p| p.role == ProviderRole::Primary)
-            .or_else(|| self.providers.iter().find(|p| p.role == ProviderRole::Simulator))
-            .map_or_else(crate::input::state::ProviderDiagnostics::default, |p| p.inner.diagnostics())
+            .or_else(|| {
+                self.providers
+                    .iter()
+                    .find(|p| p.role == ProviderRole::Simulator)
+            })
+            .map_or_else(crate::input::state::ProviderDiagnostics::default, |p| {
+                p.inner.diagnostics()
+            })
     }
 
     /// ID of the primary provider, for the dev panel label.
@@ -186,7 +198,11 @@ impl ProviderRegistry {
         self.providers
             .iter()
             .find(|p| p.role == ProviderRole::Primary)
-            .or_else(|| self.providers.iter().find(|p| p.role == ProviderRole::Simulator))
+            .or_else(|| {
+                self.providers
+                    .iter()
+                    .find(|p| p.role == ProviderRole::Simulator)
+            })
             .map(|p| p.id)
     }
 }

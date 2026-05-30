@@ -55,9 +55,9 @@ use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
     BufferBindingType, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
     FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
-    SamplerBindingType, ShaderStages, ShaderType, StoreOp, TextureFormat,
-    TextureSampleType, TextureView, TextureViewDimension, VertexState,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType,
+    ShaderStages, ShaderType, StoreOp, TextureFormat, TextureSampleType, TextureView,
+    TextureViewDimension, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderQueue};
 use bevy::render::view::ViewTarget;
@@ -175,8 +175,7 @@ impl FromWorld for BackdropBlurPipeline {
         // are in use.
         let downsample_shader: Handle<Shader> =
             world.resource::<AssetServer>().load(DOWNSAMPLE_SHADER);
-        let upsample_shader: Handle<Shader> =
-            world.resource::<AssetServer>().load(UPSAMPLE_SHADER);
+        let upsample_shader: Handle<Shader> = world.resource::<AssetServer>().load(UPSAMPLE_SHADER);
 
         // Queue both pipelines. `queue_render_pipeline` returns immediately
         // with a `CachedRenderPipelineId`; the actual GPU compilation is
@@ -218,19 +217,21 @@ impl FromWorld for BackdropBlurPipeline {
             }
         };
 
-        let downsample = world
-            .resource_mut::<PipelineCache>()
-            .queue_render_pipeline(make_descriptor(
-                "backdrop_blur_downsample",
-                downsample_shader.clone(),
-            ));
+        let downsample =
+            world
+                .resource_mut::<PipelineCache>()
+                .queue_render_pipeline(make_descriptor(
+                    "backdrop_blur_downsample",
+                    downsample_shader.clone(),
+                ));
 
-        let upsample = world
-            .resource_mut::<PipelineCache>()
-            .queue_render_pipeline(make_descriptor(
-                "backdrop_blur_upsample",
-                upsample_shader.clone(),
-            ));
+        let upsample =
+            world
+                .resource_mut::<PipelineCache>()
+                .queue_render_pipeline(make_descriptor(
+                    "backdrop_blur_upsample",
+                    upsample_shader.clone(),
+                ));
 
         Self {
             bind_group_layout_descriptor,
@@ -288,7 +289,10 @@ pub struct BackdropBlurNode;
 impl ViewNode for BackdropBlurNode {
     type ViewQuery = &'static ViewTarget;
 
-    #[allow(clippy::too_many_lines, reason = "six-pass Kawase chain is linear and shouldn't be split")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "six-pass Kawase chain is linear and shouldn't be split"
+    )]
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext<'_>,
@@ -378,7 +382,9 @@ impl ViewNode for BackdropBlurNode {
             // `BlurUniforms::min_size()`, so this is an invariant violation and a
             // panic is correct.
             #[allow(clippy::expect_used)]
-            staging.write(&uniforms).expect("BlurUniforms: write to staging buffer");
+            staging
+                .write(&uniforms)
+                .expect("BlurUniforms: write to staging buffer");
             render_queue.write_buffer(&buf, 0, staging.as_ref());
             buf
         };
@@ -389,28 +395,28 @@ impl ViewNode for BackdropBlurNode {
         // borrowed from outer scope. `render_context` is passed in mutably so
         // the closure does not need to capture it (avoids the simultaneous
         // borrow conflict with `make_uniform_buffer`).
-        let encode_pass =
-            |render_context: &mut RenderContext<'w>,
-             input_view: &TextureView,
-             output_view: &TextureView,
-             pipeline: &bevy::render::render_resource::RenderPipeline,
-             input_size: UVec2,
-             pass_label: &'static str| {
-                let texel = Vec2::new(
-                    1.0 / input_size.x.max(1) as f32,
-                    1.0 / input_size.y.max(1) as f32,
-                );
-                let uniform_buf = make_uniform_buffer(texel);
-                let bind_group = device.create_bind_group(
-                    Some(pass_label),
-                    &layout,
-                    &BindGroupEntries::sequential((
-                        input_view,
-                        &blur_texture.sampler,
-                        uniform_buf.as_entire_binding(),
-                    )),
-                );
-                let mut pass = render_context
+        let encode_pass = |render_context: &mut RenderContext<'w>,
+                           input_view: &TextureView,
+                           output_view: &TextureView,
+                           pipeline: &bevy::render::render_resource::RenderPipeline,
+                           input_size: UVec2,
+                           pass_label: &'static str| {
+            let texel = Vec2::new(
+                1.0 / input_size.x.max(1) as f32,
+                1.0 / input_size.y.max(1) as f32,
+            );
+            let uniform_buf = make_uniform_buffer(texel);
+            let bind_group = device.create_bind_group(
+                Some(pass_label),
+                &layout,
+                &BindGroupEntries::sequential((
+                    input_view,
+                    &blur_texture.sampler,
+                    uniform_buf.as_entire_binding(),
+                )),
+            );
+            let mut pass =
+                render_context
                     .command_encoder()
                     .begin_render_pass(&RenderPassDescriptor {
                         label: Some(pass_label),
@@ -429,10 +435,10 @@ impl ViewNode for BackdropBlurNode {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.draw(0..3, 0..1);
-            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        };
 
         // --- Six-pass Kawase chain (3 down + 3 up) ---
         //

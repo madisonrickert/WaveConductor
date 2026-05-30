@@ -154,7 +154,9 @@ pub fn spawn_line(
     let solid_color = debug_toggles
         .as_ref()
         .and_then(|t| t.solid_particles)
-        .map_or_else(LineMaterial::solid_off, |[r, g, b, a]| Vec4::new(r, g, b, a));
+        .map_or_else(LineMaterial::solid_off, |[r, g, b, a]| {
+            Vec4::new(r, g, b, a)
+        });
     #[cfg(not(debug_assertions))]
     let solid_color = LineMaterial::solid_off();
 

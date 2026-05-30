@@ -76,11 +76,9 @@ fn draw_dev_panel(world: &mut World) {
     let style = *world.resource::<OverlayStyle>();
     let opacity_mul = world.resource::<UiOpacity>().current;
     let window_height = {
-        let mut q = world
-            .query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world)
-            .map(bevy::window::Window::height)
-            .unwrap_or(720.0)
+        let mut q =
+            world.query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world).map_or(720.0, bevy::window::Window::height)
     };
 
     let mut state: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
@@ -168,10 +166,7 @@ fn draw_hand_tracking_section(
 ) {
     use crate::input::state::{DevicePresence, ServiceConnection, TrackingFlow};
 
-    ui.label(
-        bevy_egui::egui::RichText::new("HAND TRACKING")
-            .size(13.0),
-    );
+    ui.label(bevy_egui::egui::RichText::new("HAND TRACKING").size(13.0));
     ui.add_space(4.0);
 
     bevy_egui::egui::Grid::new("hand_tracking_diag")

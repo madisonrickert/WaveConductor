@@ -87,35 +87,36 @@ pub fn pointer_merge_system(
     // Touch beats mouse. Mouse uses the latest `CursorMoved` this tick (so
     // synthetic-event tests work end-to-end) and falls back to
     // `Window::cursor_position()` (winit's persistent state) in production.
-    let touch_position = touches.iter().next().map(bevy::input::touch::Touch::position);
-    let mouse_position =
-        cursor_msg_position.or_else(|| window.and_then(Window::cursor_position));
+    let touch_position = touches
+        .iter()
+        .next()
+        .map(bevy::input::touch::Touch::position);
+    let mouse_position = cursor_msg_position.or_else(|| window.and_then(Window::cursor_position));
     let cursor = touch_position.or(mouse_position);
 
     // --- Unified primary: hand > touch > mouse -------------------------------
-    let (primary, source) = if let (Some(hand), Some(window)) =
-        (hands.right().or_else(|| hands.left()), window)
-    {
-        // The index-fingertip landmark is in Leap device millimetres (same
-        // convention as `palm_to_world` and the bone-mesh projection) — NOT
-        // NDC. Project it through `palm_to_world` (mm → centered world, +y up),
-        // then convert to window-logical coords (top-left origin, +y down).
-        // (The earlier code treated the mm landmark as NDC and produced wildly
-        // out-of-window positions — e.g. a fingertip at -56 mm mapped to
-        // x ≈ -35200 px — which corrupted any consumer of the pointer.)
-        let landmark = hand.landmark(super::hand::LandmarkIndex::IndexTip);
-        let size = Vec2::new(window.width(), window.height());
-        let world = palm_to_world(landmark, size);
-        let x = world.x + size.x * 0.5;
-        let y = size.y * 0.5 - world.y;
-        (Some(Vec2::new(x, y)), PointerSource::Hand)
-    } else if let Some(t) = touch_position {
-        (Some(t), PointerSource::Touch)
-    } else if let Some(m) = mouse_position {
-        (Some(m), PointerSource::Mouse)
-    } else {
-        (None, PointerSource::None)
-    };
+    let (primary, source) =
+        if let (Some(hand), Some(window)) = (hands.right().or_else(|| hands.left()), window) {
+            // The index-fingertip landmark is in Leap device millimetres (same
+            // convention as `palm_to_world` and the bone-mesh projection) — NOT
+            // NDC. Project it through `palm_to_world` (mm → centered world, +y up),
+            // then convert to window-logical coords (top-left origin, +y down).
+            // (The earlier code treated the mm landmark as NDC and produced wildly
+            // out-of-window positions — e.g. a fingertip at -56 mm mapped to
+            // x ≈ -35200 px — which corrupted any consumer of the pointer.)
+            let landmark = hand.landmark(super::hand::LandmarkIndex::IndexTip);
+            let size = Vec2::new(window.width(), window.height());
+            let world = palm_to_world(landmark, size);
+            let x = world.x + size.x * 0.5;
+            let y = size.y * 0.5 - world.y;
+            (Some(Vec2::new(x, y)), PointerSource::Hand)
+        } else if let Some(t) = touch_position {
+            (Some(t), PointerSource::Touch)
+        } else if let Some(m) = mouse_position {
+            (Some(m), PointerSource::Mouse)
+        } else {
+            (None, PointerSource::None)
+        };
 
     *pointer = PointerState {
         primary,

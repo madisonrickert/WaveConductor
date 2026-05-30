@@ -123,7 +123,9 @@ pub fn drive_reload_state(
     mut state: ResMut<'_, SketchReloadState>,
     time: Res<'_, Time>,
     mut next_app: ResMut<'_, NextState<super::state::AppState>>,
-    mut audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, crate::audio::ring::AudioCommandSender>>,
+    mut audio_cmd: Option<
+        bevy::ecs::system::NonSendMut<'_, crate::audio::ring::AudioCommandSender>,
+    >,
 ) {
     let now = time.elapsed();
     let alpha = state.overlay_alpha(now);

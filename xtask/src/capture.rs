@@ -302,7 +302,11 @@ fn launch(
 }
 
 /// `--watch`: launch for hands-on inspection (no `WC_CAPTURE`), kill after N s.
-fn run_watch(root: &Path, scenario: &Scenario, secs: u64) -> Result<(), Box<dyn std::error::Error>> {
+fn run_watch(
+    root: &Path,
+    scenario: &Scenario,
+    secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root)
         .args(["run", "-p", "waveconductor"])

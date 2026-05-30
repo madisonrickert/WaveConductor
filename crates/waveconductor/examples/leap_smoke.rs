@@ -65,9 +65,7 @@ fn main() {
                 // f32 fields into locals before passing to format args.
                 let pinch = h.pinch_strength;
                 let grab = h.grab_strength;
-                print!(
-                    ", palm0 = ({px:.1}, {py:.1}, {pz:.1}) mm, pinch={pinch:.2} grab={grab:.2}"
-                );
+                print!(", palm0 = ({px:.1}, {py:.1}, {pz:.1}) mm, pinch={pinch:.2} grab={grab:.2}");
             }
             println!();
             return;
@@ -81,7 +79,11 @@ fn main() {
 /// Poll the connection until `predicate` returns true for an event, or until
 /// `timeout_secs` seconds elapse (in which case we exit with an error).
 #[cfg(feature = "hand-tracking-gestures")]
-fn poll_until(conn: &mut leaprs::Connection, timeout_secs: u64, predicate: impl Fn(&leaprs::EventRef<'_>) -> bool) {
+fn poll_until(
+    conn: &mut leaprs::Connection,
+    timeout_secs: u64,
+    predicate: impl Fn(&leaprs::EventRef<'_>) -> bool,
+) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
         if let Ok(msg) = conn.poll(250) {

@@ -1,5 +1,5 @@
 # MSRV used by clippy for lint behavior; matches rust-version in workspace Cargo.toml
-msrv = "1.89"
+msrv = "1.96"
 # Cap the cognitive complexity of a single function before clippy::cognitive_complexity warns
 cognitive-complexity-threshold = 25
 # Cap arguments per function

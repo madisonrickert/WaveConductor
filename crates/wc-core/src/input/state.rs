@@ -486,7 +486,10 @@ mod tests {
 
     #[test]
     fn provider_status_primary_not_started_default() {
-        assert_eq!(ProviderStatus::default().primary(), PrimaryState::NotStarted);
+        assert_eq!(
+            ProviderStatus::default().primary(),
+            PrimaryState::NotStarted
+        );
     }
 
     #[test]

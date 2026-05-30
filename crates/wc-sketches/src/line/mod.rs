@@ -47,9 +47,9 @@ pub use systems::LineRoot;
 
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
+use wc_core::audio::state::AudioState;
 #[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
-use wc_core::audio::state::AudioState;
 use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;

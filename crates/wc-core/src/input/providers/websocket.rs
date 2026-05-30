@@ -14,7 +14,9 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use crate::input::provider::HandTrackingProvider;
-use crate::input::state::{HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus};
+use crate::input::state::{
+    HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
+};
 
 /// Stub `WebSocketProvider`. Real implementation deferred to a future plan.
 #[derive(Default)]

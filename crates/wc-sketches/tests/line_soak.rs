@@ -191,8 +191,7 @@ fn line_soak_with_overlay_ui() {
         // not to test the lerp convergence (that is covered by the unit tests
         // in `wc_core::ui::auto_fade::tests`).
         let phase = (i / OPACITY_CYCLE_TICKS) % 2;
-        app.world_mut().resource_mut::<UiOpacity>().current =
-            if phase == 0 { 1.0 } else { 0.0 };
+        app.world_mut().resource_mut::<UiOpacity>().current = if phase == 0 { 1.0 } else { 0.0 };
 
         if i % POINTER_TICK_PERIOD == 0 {
             #[allow(

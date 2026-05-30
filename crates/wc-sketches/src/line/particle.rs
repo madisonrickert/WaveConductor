@@ -105,7 +105,7 @@ pub struct SimParams {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<SimParams>() % 16 == 0);
-    assert!(std::mem::size_of::<Attractor>() % 16 == 0);
-    assert!(std::mem::size_of::<Particle>() % 16 == 0);
+    assert!(std::mem::size_of::<SimParams>().is_multiple_of(16));
+    assert!(std::mem::size_of::<Attractor>().is_multiple_of(16));
+    assert!(std::mem::size_of::<Particle>().is_multiple_of(16));
 };

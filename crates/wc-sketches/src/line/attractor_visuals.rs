@@ -268,10 +268,7 @@ fn source_state(
     hand_attractors: &Query<'_, '_, &LineHandAttractor>,
 ) -> (Vec2, f32) {
     match source {
-        AttractorSource::Mouse => (
-            Vec2::new(mouse.position[0], mouse.position[1]),
-            mouse.power,
-        ),
+        AttractorSource::Mouse => (Vec2::new(mouse.position[0], mouse.position[1]), mouse.power),
         AttractorSource::Hand(entity) => hand_attractors
             .get(entity)
             .map_or((Vec2::ZERO, 0.0), |attractor| {
@@ -565,7 +562,11 @@ mod tests {
     #[test]
     fn gimbal_x_edge_on_at_phi_half_pi() {
         let t = ring_transform_for_gimbal(0, std::f32::consts::FRAC_PI_2, 1.0);
-        assert!(t.scale.y.abs() < 1e-6, "scale.y should be ≈0; got {}", t.scale.y);
+        assert!(
+            t.scale.y.abs() < 1e-6,
+            "scale.y should be ≈0; got {}",
+            t.scale.y
+        );
         assert!((t.scale.x - 1.0).abs() < 1e-6);
     }
 
@@ -574,7 +575,11 @@ mod tests {
     #[test]
     fn gimbal_y_edge_on_at_phi_half_pi() {
         let t = ring_transform_for_gimbal(1, std::f32::consts::FRAC_PI_2, 1.0);
-        assert!(t.scale.x.abs() < 1e-6, "scale.x should be ≈0; got {}", t.scale.x);
+        assert!(
+            t.scale.x.abs() < 1e-6,
+            "scale.x should be ≈0; got {}",
+            t.scale.x
+        );
         assert!((t.scale.y - 1.0).abs() < 1e-6);
     }
 

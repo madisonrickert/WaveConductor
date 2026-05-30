@@ -145,53 +145,54 @@ impl FromWorld for CompositePipeline {
 
         // Queue the pipeline. Compilation is deferred; `render` checks
         // `get_render_pipeline` before issuing draw calls.
-        let pipeline = world
-            .resource_mut::<PipelineCache>()
-            .queue_render_pipeline(RenderPipelineDescriptor {
-                label: Some("backdrop_blur_composite".into()),
-                layout: vec![bind_group_layout_descriptor.clone()],
-                push_constant_ranges: vec![],
-                vertex: VertexState {
-                    shader: shader.clone(),
-                    shader_defs: vec![],
-                    // Quad triangulation is handled in the vertex shader by
-                    // indexing into a const array of 6 corner positions.
-                    entry_point: Some("vs_main".into()),
-                    buffers: vec![],
-                },
-                fragment: Some(FragmentState {
-                    shader: shader.clone(),
-                    shader_defs: vec![],
-                    entry_point: Some("fs_main".into()),
-                    targets: vec![Some(ColorTargetState {
-                        // The composite pipeline writes back into the
-                        // camera's view target, which is `Rgba16Float`
-                        // while internal-HDR rendering is on (see
-                        // `spawn_camera` in the binary crate). The format
-                        // here MUST match the view target — wgpu validates
-                        // pipeline target formats against the bound
-                        // attachment at draw time and rejects mismatches.
-                        //
-                        // egui's own pass also renders into this same HDR
-                        // target. Because backdrop blur runs *after*
-                        // tonemapping in the Core2d graph, the values we
-                        // sample are already mapped into the SDR range
-                        // (clamped softly to ~[0, 1] by AgX) but still
-                        // stored as float — the blend below works the same
-                        // way it did in 8-bit sRGB, just with more headroom.
-                        //
-                        // Using ALPHA_BLENDING means coverage from the
-                        // corner-radius SDF masks the edges of the panel.
-                        format: TextureFormat::Rgba16Float,
-                        blend: Some(bevy::render::render_resource::BlendState::ALPHA_BLENDING),
-                        write_mask: ColorWrites::ALL,
-                    })],
-                }),
-                primitive: PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: MultisampleState::default(),
-                zero_initialize_workgroup_memory: false,
-            });
+        let pipeline =
+            world
+                .resource_mut::<PipelineCache>()
+                .queue_render_pipeline(RenderPipelineDescriptor {
+                    label: Some("backdrop_blur_composite".into()),
+                    layout: vec![bind_group_layout_descriptor.clone()],
+                    push_constant_ranges: vec![],
+                    vertex: VertexState {
+                        shader: shader.clone(),
+                        shader_defs: vec![],
+                        // Quad triangulation is handled in the vertex shader by
+                        // indexing into a const array of 6 corner positions.
+                        entry_point: Some("vs_main".into()),
+                        buffers: vec![],
+                    },
+                    fragment: Some(FragmentState {
+                        shader: shader.clone(),
+                        shader_defs: vec![],
+                        entry_point: Some("fs_main".into()),
+                        targets: vec![Some(ColorTargetState {
+                            // The composite pipeline writes back into the
+                            // camera's view target, which is `Rgba16Float`
+                            // while internal-HDR rendering is on (see
+                            // `spawn_camera` in the binary crate). The format
+                            // here MUST match the view target — wgpu validates
+                            // pipeline target formats against the bound
+                            // attachment at draw time and rejects mismatches.
+                            //
+                            // egui's own pass also renders into this same HDR
+                            // target. Because backdrop blur runs *after*
+                            // tonemapping in the Core2d graph, the values we
+                            // sample are already mapped into the SDR range
+                            // (clamped softly to ~[0, 1] by AgX) but still
+                            // stored as float — the blend below works the same
+                            // way it did in 8-bit sRGB, just with more headroom.
+                            //
+                            // Using ALPHA_BLENDING means coverage from the
+                            // corner-radius SDF masks the edges of the panel.
+                            format: TextureFormat::Rgba16Float,
+                            blend: Some(bevy::render::render_resource::BlendState::ALPHA_BLENDING),
+                            write_mask: ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: MultisampleState::default(),
+                    zero_initialize_workgroup_memory: false,
+                });
 
         Self {
             bind_group_layout_descriptor,
@@ -280,8 +281,14 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
 
         let ppp = info.pixels_per_point;
         // Convert panel rect (points) → physical pixels → [0,1] UVs.
-        let uv_min = Vec2::new(self.rect.min.x * ppp / screen_w, self.rect.min.y * ppp / screen_h);
-        let uv_max = Vec2::new(self.rect.max.x * ppp / screen_w, self.rect.max.y * ppp / screen_h);
+        let uv_min = Vec2::new(
+            self.rect.min.x * ppp / screen_w,
+            self.rect.min.y * ppp / screen_h,
+        );
+        let uv_max = Vec2::new(
+            self.rect.max.x * ppp / screen_w,
+            self.rect.max.y * ppp / screen_h,
+        );
 
         // Half-extent in physical pixels, used by the SDF in the shader.
         let half_extent = Vec2::new(

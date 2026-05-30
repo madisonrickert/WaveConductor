@@ -232,7 +232,10 @@ fn build_engine(encoded_background: &[u8]) -> Result<BuiltEngine, EngineBuildErr
     // does not fire before the first rendered frame.
     stream.play()?;
     if let Err(err) = stream.pause() {
-        tracing::warn!(?err, "initial stream pause failed; audio may play on home screen");
+        tracing::warn!(
+            ?err,
+            "initial stream pause failed; audio may play on home screen"
+        );
     } else {
         tracing::debug!("cpal stream started in paused state");
     }

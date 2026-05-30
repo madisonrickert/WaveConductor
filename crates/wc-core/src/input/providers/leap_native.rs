@@ -230,12 +230,16 @@ impl LeaprsProvider {
             return;
         }
         if self.request_background && !self.background_policy_applied {
-            self.background_policy_applied = self
-                .try_set_deferred_policy(leaprs::PolicyFlags::BACKGROUND_FRAMES, "BackgroundFrames");
+            self.background_policy_applied = self.try_set_deferred_policy(
+                leaprs::PolicyFlags::BACKGROUND_FRAMES,
+                "BackgroundFrames",
+            );
         }
         if !self.pause_policy_applied {
-            self.pause_policy_applied = self
-                .try_set_deferred_policy(leaprs::PolicyFlags::ALLOW_PAUSE_RESUME, "AllowPauseResume");
+            self.pause_policy_applied = self.try_set_deferred_policy(
+                leaprs::PolicyFlags::ALLOW_PAUSE_RESUME,
+                "AllowPauseResume",
+            );
         }
     }
 
@@ -392,7 +396,8 @@ fn dispatch_event(
             let ds = failure.status();
             // DeviceStatus is a bitflags struct without Debug; use bits() for
             // a stable, human-readable representation in the error string.
-            diagnostics.last_error = Some(format!("DeviceFailure status bits: 0x{:08X}", ds.bits()));
+            diagnostics.last_error =
+                Some(format!("DeviceFailure status bits: 0x{:08X}", ds.bits()));
         }
 
         leaprs::EventRef::DeviceStatusChange(change) => {
@@ -408,7 +413,8 @@ fn dispatch_event(
             // Streaming, or keep the running total if already streaming.
             let dropped = match status.streaming {
                 TrackingFlow::Streaming {
-                    dropped_since_start, ..
+                    dropped_since_start,
+                    ..
                 } => dropped_since_start,
                 TrackingFlow::NotStreaming => 0,
             };
@@ -693,9 +699,7 @@ pub fn pause_leap_on_screensaver(
 /// `OnEnter(SketchActivity::Active)` — resume the Leap tracking service so hands
 /// are detected again the instant a visitor returns. Idempotent; resuming an
 /// already-running service is a cheap no-op inside `set_pause`.
-pub fn resume_leap_on_active(
-    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
-) {
+pub fn resume_leap_on_active(mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>) {
     set_all_leap_paused(&mut registry, false);
 }
 

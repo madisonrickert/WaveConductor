@@ -219,7 +219,10 @@ mod tests {
             let frames: Vec<HandTrackingFrame> = msgs.drain().collect();
             assert_eq!(frames.len(), 1, "synthetic mock emits one frame per poll");
             assert_eq!(frames[0].hands.len(), 1, "exactly one synthetic hand");
-            assert_eq!(frames[0].timestamp, now, "frame re-stamped with current clock");
+            assert_eq!(
+                frames[0].timestamp, now,
+                "frame re-stamped with current clock"
+            );
         }
     }
 }

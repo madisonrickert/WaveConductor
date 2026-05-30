@@ -107,8 +107,9 @@ fn draw_user_panel(world: &mut World) {
 
     // Read window width for top-right positioning; fall back to 1280.
     let window_width = {
-        let mut q = world.query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world).map(bevy::window::Window::width).unwrap_or(1280.0)
+        let mut q =
+            world.query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
+        q.single(world).map_or(1280.0, bevy::window::Window::width)
     };
 
     let mut state: bevy::ecs::system::SystemState<EguiContexts<'_, '_>> =

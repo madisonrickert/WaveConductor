@@ -261,7 +261,10 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     }
     if let Some(tier) = t.force_tier {
         // Lower-case the tier name to match the `WC_DEBUG_FORCE_TIER` input form.
-        parts.push(format!("\"force_tier\":\"{}\"", format!("{tier:?}").to_lowercase()));
+        parts.push(format!(
+            "\"force_tier\":\"{}\"",
+            format!("{tier:?}").to_lowercase()
+        ));
     }
     format!("{{{}}}", parts.join(","))
 }

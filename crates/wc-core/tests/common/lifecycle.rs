@@ -37,5 +37,5 @@ pub fn arm_idle_timeline(app: &mut App) {
         .resource_mut::<wc_core::lifecycle::idle::InteractionTimer>();
     timer.mark(now);
     timer.idle_threshold = Duration::from_millis(50);
-    timer.screensaver_threshold = Duration::from_secs(60);
+    timer.screensaver_threshold = Duration::from_mins(1);
 }

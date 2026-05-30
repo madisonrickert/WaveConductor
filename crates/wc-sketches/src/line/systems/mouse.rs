@@ -37,7 +37,6 @@ pub const MOUSE_POWER_FLOOR: f32 = 2.0;
 /// v4 `enableMouseAttractor`: `power = 10` on click.
 pub const MOUSE_POWER_PRESS: f32 = 10.0;
 
-
 /// Tracks pointer-button-equivalent transitions across mouse and touch, and
 /// updates [`MouseAttractorState`].
 ///

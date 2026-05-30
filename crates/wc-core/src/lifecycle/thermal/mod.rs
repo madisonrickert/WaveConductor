@@ -330,7 +330,10 @@ mod tests {
     fn exact_enter_threshold_transitions() {
         let t = ThermalThresholds::default();
         // `>=` semantics: exactly enter_warm enters Warm.
-        assert_eq!(t.classify(ThermalTier::Cool, t.enter_warm), ThermalTier::Warm);
+        assert_eq!(
+            t.classify(ThermalTier::Cool, t.enter_warm),
+            ThermalTier::Warm
+        );
         assert_eq!(t.classify(ThermalTier::Warm, t.enter_hot), ThermalTier::Hot);
     }
 

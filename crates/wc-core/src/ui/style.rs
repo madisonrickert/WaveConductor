@@ -165,9 +165,10 @@ pub(super) fn apply_overlay_style(
         .insert(0, "fira_code".to_owned());
     // Named family for sketch titles — callers reference it as
     // `FontFamily::Name("orbitron".into())`.
-    fonts
-        .families
-        .insert(egui::FontFamily::Name("orbitron".into()), vec!["orbitron".to_owned()]);
+    fonts.families.insert(
+        egui::FontFamily::Name("orbitron".into()),
+        vec!["orbitron".to_owned()],
+    );
     // Register Phosphor icon font so PUA glyphs (HOUSE, GEAR, SPEAKER_HIGH, etc.)
     // resolve correctly.
     //
@@ -235,9 +236,15 @@ mod tests {
         // overlayPanel.scss:7 border-radius 10px
         assert_eq!(style.panel_corner_radius, 10);
         // overlayButton.scss:9 rgba(0,0,0,0.4) → ~102/255
-        assert_eq!(style.button_fill_inactive, egui::Color32::from_black_alpha(102));
+        assert_eq!(
+            style.button_fill_inactive,
+            egui::Color32::from_black_alpha(102)
+        );
         // overlayButton.scss:18 rgba(0,0,0,0.6) → ~153/255
-        assert_eq!(style.button_fill_hovered, egui::Color32::from_black_alpha(153));
+        assert_eq!(
+            style.button_fill_hovered,
+            egui::Color32::from_black_alpha(153)
+        );
         // overlayButton.scss:5–6 width/height 32px
         assert_eq!(style.button_size_fine, 32.0);
         // overlayButton.scss:23–24 @media (pointer: coarse) → 44px

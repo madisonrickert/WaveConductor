@@ -117,8 +117,8 @@ fn update_line_hand_attractors(
             let depth_modulator = 5.0_f32.powf((-palm.0.z + 350.0) / 160.0);
             let wanted = grab_component * depth_modulator;
             // EMA toward wanted at the attack rate.
-            attractor.power = attractor.power * (1.0 - LINE_HAND_ATTACK_SPEED)
-                + wanted * LINE_HAND_ATTACK_SPEED;
+            attractor.power =
+                attractor.power * (1.0 - LINE_HAND_ATTACK_SPEED) + wanted * LINE_HAND_ATTACK_SPEED;
         } else {
             // v4: power *= decay (geometric decay, no floor for Line).
             attractor.power *= LINE_HAND_DECAY_SPEED;

@@ -118,10 +118,7 @@ fn same_hand_id_across_frames_updates_in_place_no_respawn() {
     h.palm_position = Vec3::new(-100.0, 150.0, 0.0);
     let mut h2 = h.clone();
     h2.palm_position = Vec3::new(100.0, 250.0, 0.0);
-    let mock = MockProvider::with_frames([
-        frame_with(vec![h], 10),
-        frame_with(vec![h2], 20),
-    ]);
+    let mock = MockProvider::with_frames([frame_with(vec![h], 10), frame_with(vec![h2], 20)]);
     registry.register(ProviderId::Mock, ProviderRole::Simulator, Box::new(mock));
     app.insert_resource(registry);
 

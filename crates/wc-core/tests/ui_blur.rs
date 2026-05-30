@@ -86,7 +86,10 @@ fn backdrop_blur_node_skips_when_disabled() {
         .get_resource::<wc_core::ui::blur::node::BlurNodeRunCount>()
         .map(|c| c.0)
         .unwrap_or(0);
-    assert_eq!(counter, 0, "node must skip when BackdropBlurEnabled is false");
+    assert_eq!(
+        counter, 0,
+        "node must skip when BackdropBlurEnabled is false"
+    );
 }
 
 /// Verify that [`BlurNodeRunCount`] is incremented when blur is enabled and
@@ -125,5 +128,8 @@ fn backdrop_blur_node_runs_when_enabled() {
         .get_resource::<wc_core::ui::blur::node::BlurNodeRunCount>()
         .map(|c| c.0)
         .unwrap_or(0);
-    assert!(counter >= 1, "node must run at least once when enabled and opacity >= 0.01");
+    assert!(
+        counter >= 1,
+        "node must run at least once when enabled and opacity >= 0.01"
+    );
 }

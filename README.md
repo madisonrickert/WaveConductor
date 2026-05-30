@@ -14,7 +14,7 @@ Interactive art gallery. Five generative-art sketches with hand-tracking and aud
 cargo run -p waveconductor
 ```
 
-Requires Rust 1.89+. Pinned via `rust-toolchain.toml`.
+Requires Rust 1.96+. Pinned via `rust-toolchain.toml`.
 
 ### Linux build prerequisites
 

@@ -67,8 +67,11 @@ impl DebugToggles {
     /// whenever their var is present (value ignored). Pure for testability.
     pub fn from_env_vars(vars: &[(String, String)]) -> Self {
         let present = |name: &str| vars.iter().any(|(k, _)| k == name);
-        let value =
-            |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        let value = |name: &str| {
+            vars.iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
 
         let force_g = value("WC_DEBUG_FORCE_G").and_then(|v| v.trim().parse::<f32>().ok());
         let solid_particles =
@@ -184,7 +187,10 @@ mod tests {
             ("WC_DEBUG_FORCE_G".to_string(), "8000".to_string()),
             ("WC_DEBUG_DISABLE_SMEAR".to_string(), "1".to_string()),
             ("WC_DEBUG_DISABLE_BLOOM".to_string(), String::new()),
-            ("WC_DEBUG_SOLID_PARTICLES".to_string(), "ff00ffff".to_string()),
+            (
+                "WC_DEBUG_SOLID_PARTICLES".to_string(),
+                "ff00ffff".to_string(),
+            ),
         ];
         let t = DebugToggles::from_env_vars(&vars);
         assert_eq!(t.force_g, Some(8000.0));
@@ -196,10 +202,7 @@ mod tests {
 
     #[test]
     fn solid_particles_rgb_defaults_alpha_to_one() {
-        let vars = vec![(
-            "WC_DEBUG_SOLID_PARTICLES".to_string(),
-            "00ff00".to_string(),
-        )];
+        let vars = vec![("WC_DEBUG_SOLID_PARTICLES".to_string(), "00ff00".to_string())];
         let t = DebugToggles::from_env_vars(&vars);
         assert_eq!(t.solid_particles, Some([0.0, 1.0, 0.0, 1.0]));
     }

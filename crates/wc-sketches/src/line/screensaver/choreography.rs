@@ -238,7 +238,10 @@ mod tests {
         assert!(f.hands[1].position[0] > f.focal_world[0]);
         let left_off = f.focal_world[0] - f.hands[0].position[0];
         let right_off = f.hands[1].position[0] - f.focal_world[0];
-        assert!((left_off - right_off).abs() < 1e-4, "hands must be symmetric");
+        assert!(
+            (left_off - right_off).abs() < 1e-4,
+            "hands must be symmetric"
+        );
     }
 
     #[test]

@@ -22,7 +22,10 @@ fn manifest_distinguishes_registered_vs_unregistered_sketches() {
         screenshot: Handle::default(),
     });
     let manifest = app.world().resource::<SketchManifest>();
-    assert!(manifest.get(AppState::Line).is_some(), "Line should be registered");
+    assert!(
+        manifest.get(AppState::Line).is_some(),
+        "Line should be registered"
+    );
     for state in [
         AppState::Flame,
         AppState::Dots,

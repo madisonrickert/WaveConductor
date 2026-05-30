@@ -463,7 +463,9 @@ fn one_hand_grab_yields_non_zero_power_after_many_ticks() {
     enter_line(&mut app);
 
     let h = hand_with_grab(1, Chirality::Right, Vec3::new(0.0, 200.0, 0.0), 0.9);
-    let frames: Vec<_> = (0..200u64).map(|t| hand_frame(vec![h.clone()], 10 * t)).collect();
+    let frames: Vec<_> = (0..200u64)
+        .map(|t| hand_frame(vec![h.clone()], 10 * t))
+        .collect();
     install_mock_with_frames(&mut app, frames);
 
     for _ in 0..200 {
@@ -564,7 +566,6 @@ fn release_decays_power_geometrically() {
         "p_after_decay={p_after_decay} expected={expected} (p_at_release={p_at_release})"
     );
 }
-
 
 /// The Line mouse attractor follows the **mouse cursor**, not a tracked hand —
 /// the two attractors are independent. Regression test for a
