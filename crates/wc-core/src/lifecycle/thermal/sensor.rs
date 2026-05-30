@@ -2,10 +2,10 @@
 //!
 //! The [`TemperatureSensor`] trait is the seam between the platform-specific
 //! reader (a zero-dependency `std::fs` sysfs reader on Linux; `macmon` on Apple
-//! Silicon when its dormant feature is enabled — see [`super::platform`]) and
-//! the platform-agnostic sampler loop here. Sampling runs on a dedicated OS
-//! thread so a blocking reader (the macOS `macmon` sampler) never stalls the
-//! Bevy main thread; readings are published over a `std::sync::mpsc` channel the
+//! Silicon when its macOS feature is enabled — see [`super::platform`]) and the
+//! platform-agnostic sampler loop here. Sampling runs on a dedicated OS thread
+//! so a blocking reader (the macOS `macmon` sampler) never stalls the Bevy main
+//! thread; readings are published over a `std::sync::mpsc` channel the
 //! main-thread drain system consumes.
 
 use std::thread;
@@ -26,7 +26,10 @@ pub struct ThermalReadingReceiver(pub std::sync::mpsc::Receiver<ThermalReading>)
 /// whenever the sensor is unavailable or produced no usable value, so the
 /// caller can degrade gracefully (never panic — the deployment must survive a
 /// missing/erroring sensor for days).
-pub trait TemperatureSensor: Send {
+///
+/// Sensors are constructed inside the sampler thread, so platform backends that
+/// wrap thread-affine handles do not need to be [`Send`].
+pub trait TemperatureSensor {
     /// Read the current representative temperature in Celsius, or `None` if the
     /// sensor is unavailable this sample. May block (the macOS sampler does);
     /// always called from the background thread, never the main thread.
@@ -38,24 +41,29 @@ pub trait TemperatureSensor: Send {
 /// no temperature sensor at all (web), in which case the caller leaves
 /// [`super::ThermalState`] at its Cool/Schedule default.
 ///
-/// The thread loops forever: read → (maybe) send → sleep `interval`. It exits
-/// silently when the receiver is dropped (app shutdown), because `send`
-/// returns `Err` and we break the loop. A failed read is skipped (no send), so
-/// a transiently-erroring sensor simply produces gaps rather than bogus values.
+/// The thread constructs the platform sensor, then loops forever: read → (maybe)
+/// send → sleep `interval`. It exits silently when the receiver is dropped (app
+/// shutdown), because `send` returns `Err` and we break the loop. A failed read
+/// is skipped (no send), so a transiently-erroring sensor simply produces gaps
+/// rather than bogus values.
 #[must_use]
 pub fn spawn_sampler(interval: Duration) -> Option<ThermalReadingReceiver> {
-    let mut sensor = super::platform::create_sensor()?;
     let (tx, rx) = std::sync::mpsc::channel::<ThermalReading>();
     let spawned = thread::Builder::new()
         .name("wc-thermal-sampler".to_owned())
-        .spawn(move || loop {
-            if let Some(temp_c) = sensor.read_celsius() {
-                // `send` errors only once the receiver is dropped (shutdown).
-                if tx.send(ThermalReading { temp_c }).is_err() {
-                    break;
+        .spawn(move || {
+            let Some(mut sensor) = super::platform::create_sensor() else {
+                return;
+            };
+            loop {
+                if let Some(temp_c) = sensor.read_celsius() {
+                    // `send` errors only once the receiver is dropped (shutdown).
+                    if tx.send(ThermalReading { temp_c }).is_err() {
+                        break;
+                    }
                 }
+                thread::sleep(interval);
             }
-            thread::sleep(interval);
         });
     match spawned {
         Ok(_handle) => Some(ThermalReadingReceiver(rx)),
@@ -69,7 +77,9 @@ pub fn spawn_sampler(interval: Duration) -> Option<ThermalReadingReceiver> {
 /// Drain helper used by tests to assert channel semantics without a real sensor.
 /// Returns the most recent reading, discarding older ones, or `None` if empty.
 #[cfg(test)]
-pub(crate) fn drain_latest(rx: &std::sync::mpsc::Receiver<ThermalReading>) -> Option<ThermalReading> {
+pub(crate) fn drain_latest(
+    rx: &std::sync::mpsc::Receiver<ThermalReading>,
+) -> Option<ThermalReading> {
     let mut latest = None;
     while let Ok(r) = rx.try_recv() {
         latest = Some(r);

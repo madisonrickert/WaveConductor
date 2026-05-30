@@ -31,11 +31,9 @@ hand-tracking-gestures = [
 [dependencies]
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
-# `thermal-sensor` gives the deployment binary real OS temperature readings.
-# On the Linux NUC this reads the hottest hardware component via `sysinfo`; on
-# the macOS dev box it falls through to the Cool/Schedule no-sensor model (the
-# Apple-Silicon `macmon` backend is behind the dormant `thermal-sensor-macos`
-# feature, not enabled here, so this stays buildable on macOS).
+# `thermal-sensor` gives the deployment binary real OS temperature readings. On
+# the Linux NUC this reads the hottest hardware component via zero-dependency
+# sysfs probing; macOS adds `thermal-sensor-macos` below for Apple Silicon.
 wc-core = { workspace = true, features = ["thermal-sensor"] }
 wc-sketches = { workspace = true }
 tracing = { workspace = true }
@@ -43,3 +41,6 @@ tracing-subscriber = { workspace = true }
 # Optional: pulled in when the `hand-tracking-gestures` feature is active.
 # Waveconductor is native-only so no wasm target table needed here.
 leaprs = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wc-core = { workspace = true, features = ["thermal-sensor", "thermal-sensor-macos"] }

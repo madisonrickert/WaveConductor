@@ -22,10 +22,8 @@
 //! - **wasm** → `None` (no thermal API in the browser).
 //! - **macOS** → `None` *unless* the separate `thermal-sensor-macos` feature is
 //!   also enabled, in which case [`macos::MacmonSensor`] reads the Apple-Silicon
-//!   `SoC` temperature via `macmon` (Apple `IOReport`, no sudo). That feature is
-//!   **dormant**: `macmon`'s MSRV exceeds the pinned rustc 1.89, so it is not a
-//!   declared dependency and the feature pulls nothing today. Plain
-//!   `thermal-sensor` therefore compiles on macOS and falls through to `None`.
+//!   `SoC` temperature via `macmon` (Apple `IOReport`, no sudo). Plain
+//!   `thermal-sensor` compiles on macOS and falls through to `None`.
 //!
 //! Exactly one `create_sensor` body is compiled, selected by `cfg`, so there are
 //! no unreachable-expression warnings across the feature/target matrix.
@@ -67,7 +65,7 @@ pub fn create_sensor() -> Option<Box<dyn TemperatureSensor>> {
 }
 
 /// No compiled sensor for this build: feature off, wasm, or macOS without the
-/// dormant `thermal-sensor-macos` feature. Degrade to the schedule fallback.
+/// `thermal-sensor-macos` feature. Degrade to the schedule fallback.
 #[cfg(not(any(
     all(
         feature = "thermal-sensor",

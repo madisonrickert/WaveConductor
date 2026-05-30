@@ -35,11 +35,11 @@
 //!
 //! ## Why not `sysinfo`
 //!
-//! `sysinfo` would pull ~30 transitive crates and a frozen `=0.33.1` MSRV pin to
-//! wrap the same file reads, and its generic component list mixes NVMe/WiFi/
-//! chipset sensors that must be filtered by name anyway. The cross-platform
-//! breadth is moot here (the NUC is Linux; Apple-Silicon returns empty from
-//! `sysinfo` regardless and uses [`super::macos`] in a future toolchain).
+//! `sysinfo` would pull ~30 transitive crates to wrap the same file reads, and
+//! its generic component list mixes NVMe/WiFi/chipset sensors that must be
+//! filtered by name anyway. The cross-platform breadth is moot here (the NUC is
+//! Linux; Apple-Silicon returns empty from `sysinfo` regardless and uses
+//! [`super::macos`] once the optional macOS sensor dependency is enabled).
 
 use std::fs;
 use std::path::Path;

@@ -222,8 +222,8 @@ impl Plugin for ThermalMonitorPlugin {
 
         // Spawn the sampler thread and hold its receiver as a non-send resource
         // (the `Receiver` is `!Sync`; only the main-thread drain system reads
-        // it). `spawn_sampler` returns `None` on platforms with no sensor
-        // (web), in which case the state simply holds Cool/Schedule forever.
+        // it). If the platform sensor cannot initialize inside the thread, no
+        // readings are sent and the state simply holds Cool/Schedule forever.
         match sensor::spawn_sampler(SAMPLE_INTERVAL) {
             Some(receiver) => {
                 app.insert_non_send_resource(receiver);
