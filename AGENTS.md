@@ -8,6 +8,20 @@ These coding standards apply to all source contributions to WaveConductor v5. CI
 - The `cargo rund` binary is **not self-contained** (libstd + `libbevy_dylib` are dynamically linked) — launch it via `cargo rund`, never the bare `target/` binary. `cargo run -p waveconductor` is the plain, statically-linked fallback.
 - Dynamic linking is **dev-only**: never put `bevy/dynamic_linking` in a manifest `[features]` table — CI's `--all-features` would leak it into CI/release/WASM (it is incompatible with the release profile's fat-LTO + strip). Reserve `cargo build -p waveconductor --release` (~5–8 min) for explicit release-binary requests or pre-tag verification.
 
+## Verifying changes
+
+Run the gates CI enforces (`.github/workflows/ci.yml`) before claiming work done:
+
+- `cargo fmt --all -- --check` — formatting. The `rustfmt.toml` "unstable features … only available in nightly" warnings are expected on stable and harmless.
+- `cargo clippy --all-targets --all-features --workspace -- -D warnings` — lints are hard errors.
+- `cargo nextest run --workspace --all-features` — tests (CI's runner). nextest does **not** run doctests; cover those with `cargo test --doc --workspace`. If nextest is absent, `cargo test --workspace --all-features` is a superset fallback.
+- `cargo doc --no-deps --workspace --document-private-items` — rustdoc build; catches broken intra-doc links (note: ~29 pre-existing doc-link warnings are non-fatal on stable).
+- `cargo deny check` — advisories, licenses, bans, sources (CI also runs `cargo audit`, which `deny`'s advisory check largely subsumes).
+- `cargo xtask check-secrets` — blocks home-dir paths, emails, and secret prefixes.
+- Rendered-sketch output: `cargo xtask capture <scenario>` — see the **Visual testing** section below and `tests/visual/CLAUDE.md`.
+
+`--all-features` is deliberate — it exercises `hand-tracking-gestures` (leaprs) and, on macOS, `thermal-sensor-macos` (macmon). It does **not** enable `bevy/dynamic_linking`, which is alias-only (see above).
+
 ## In-code documentation
 
 - `///` rustdoc on every public item (struct, enum, trait, fn, module).
