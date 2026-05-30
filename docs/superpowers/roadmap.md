@@ -23,7 +23,10 @@ This is the index. Detailed implementation plans live under `docs/superpowers/pl
 | 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ✅ code shipped | — (tag deferred to 11.7) |
 | 11.6 | Hand-tracking provider + Leap manual verification | ✅ code shipped | — (tag deferred to 11.7) |
 | 11.7 | Final `PARITY.md` sign-off + tag (after 11.5 + 11.6) | ⏳ closing step | `v5-line-parity` |
+| post‑11.7 † | Line screensaver / attract mode + adaptive thermal | ✅ code shipped | — (untagged; carry-forwards in "Screensaver & adaptive thermal" below) |
 | 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
+
+> † **Plan number pending your call.** The screensaver work was authored calling itself "Plan 12" in its in-source `//!` doc headers, but this roadmap already reserves **Plan 12 for the next-sketch port** (and "Plan 12+" is referenced across the codebase for the sketch ports). I did **not** unilaterally renumber. Pick one and I'll reconcile the in-code labels to match: (a) make the screensaver **11.8** (fits the interjected Line-polish pattern of 11.5/11.6/11.7) and leave next-sketch at 12; or (b) make it **12** and bump next-sketch to **13+**. Design spec: `specs/2026-05-29-line-screensaver-attract-mode-design.md` (incl. the §10 as-built addendum).
 
 > **Line is most of the way there.** Plans 7–10 carried the sketch from scaffolding through multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph, the audio↔visual reactivity coupling, the heatmap-image spawn template, and the AGENTS.md-required 8-hour soak harness. The first hands-on run on 2026-05-25 surfaced parity gaps that don't fit cleanly inside Plan 10's "polish" scope and so deferred to Plan 11: rotationally-symmetric attractor `Annulus` rings (no visible spin), no touch / hand-tracking pathway to attractor press, no file picker for `spawn_template`, and the manual side-by-side sign-off that flips `PARITY.md` from "PENDING" to a real PASS. Plan 11 closes those and earns the `v5-line-parity` tag. The architectural pattern established here — per-sketch plugin under `wc-sketches`, settings via the `wc-core` registry, `OnEnter`/`OnExit` lifecycle, audio reactivity via `AudioCommand`, a `PARITY.md` per module closing with a tagged verdict — generalizes cleanly to Flame, Dots, Cymatics, and Waves (Plan 12+).
 >
@@ -258,6 +261,27 @@ Implications per sketch:
 - **Future post-v4 sketches**: design with this pattern from day one. If you need a per-particle reduction for audio, that's a smell — derive from inputs instead.
 
 The synthesis registration shape established for Line (`AudioCommand::AddLineSynth` / `RemoveLineSynth` + per-synth-param messages over a lock-free ring) is the right pattern; future sketches add their own `Add<Sketch>Synth` variants with sketch-specific param keys.
+
+## Screensaver & adaptive thermal (shipped — carry-forwards)
+
+The Line screensaver / attract mode shipped its four seams (thermal signal, screensaver framework, Line attract driver, Leap idle-pause). See the design spec at `specs/2026-05-29-line-screensaver-attract-mode-design.md`, especially the §10 as-built addendum, for the two deviations made during verification (Hot tier = "Low-Rate Ember" not a frozen dispatch; thermal sensing = zero-dependency Linux sysfs reader, not `sysinfo`).
+
+The items below were **intentionally** scoped out (spec §6 and §10). None block the screensaver shipping or a `v5-screensaver` tag on their own; each is a clean follow-up.
+
+### Hardware / soak verification (do these on the NUC before relying on adaptive throttling)
+
+- **NUC thermal sensor sign-off + threshold tuning.** The Linux sysfs reader (`wc-core` `lifecycle::thermal::platform::native`) is compile- and ABI-verified but has not run against live `/sys`. On the actual NUC: `cat /sys/class/hwmon/hwmon*/name` and the matching `temp*_input`, confirm a CPU chip (`coretemp`/`k10temp`) is found, then tune the placeholder bands (`enter_warm` 75 / `enter_hot` 90 °C in `lifecycle::thermal::mod.rs`) against observed steady-state-vs-throttle temperatures.
+- **8-hour `DefaultPlugins` (full-render), never-exited screensaver soak.** The existing soak runs `MinimalPlugins` (no renderer) and exercises spawn/despawn churn; the screensaver runs the *full* pipeline resident for hours without hitting `OnExit`. A full-render soak held in the Screensaver state is what actually de-risks long-uptime stability — and produces the temperature log that tunes the thresholds above. (Supersedes the generic "8-hour soak with `DefaultPlugins`" item in the pre-release tier for the screensaver's purposes.)
+- **Leap controller-heat hardware verification.** The idle-pause (`ALLOW_PAUSE_RESUME` + `set_paused` on entering the screensaver) reliably sheds *host* CPU, but its effect on the *controller's* IR-LED heat is inconsistent across SDK builds. Verify on hardware with an IR-viewer (does pause extinguish the LEDs?) and measure resume latency. If controller heat must drop, the only guaranteed fix is cutting USB power (a switchable powered hub) during deep idle.
+
+### Deferred features (build when the need / evidence arrives)
+
+- **Hot-tier "warm-up-then-freeze" escalation.** Hot currently ships as the "Low-Rate Ember" (full pipeline at ~3 fps present rate) because a from-start dispatch freeze black-screens (particle alpha only rises inside the compute shader). If the soak shows 3 fps + the Leap idle-pause still runs the NUC too hot, add a true dispatch freeze that first runs the dispatch until alpha saturates, *then* latches `particle_count = 0`. Gated on that evidence — YAGNI until then.
+- **Real macOS thermal sensing (`macmon`).** Apple-Silicon stays on the Cool/Schedule fallback because `macmon`'s MSRV (1.95) exceeds the pinned rustc 1.89. The reader is written and preserved behind the dormant, `compile_error!`-guarded `thermal-sensor-macos` feature; enabling it is a one-spot change after a toolchain bump (see below).
+- **Toolchain bump (1.89 → current stable).** The 1.89 pin is incidental — "whatever stable was current on 2026-05-22", not a feature requirement (edition is 2021). Bumping to current stable (1.95/1.96) keeps the reproducibility + lint-stability benefits of pinning and unblocks the `macmon` macOS sensor and latest `sysinfo`/deps. Do it as its own isolated commit (`rust-toolchain.toml` + `clippy.toml` `msrv` + workspace `rust-version`), then re-run the full gate.
+- **Presence-reactive attract layer (#4).** Particles lean toward an approaching visitor *before* they engage; the seam is left open in the choreography. Two tiers: (a) react to a hand entering the tracking volume pre-grab (free, no new SDK surface); (b) tap the raw Leap IR images (`IMAGES` policy) for near-field approach detection (more work, per-frame image bandwidth).
+- **Per-sketch attract visuals for the other sketches.** The framework (`in_screensaver(AppState)` run-condition + per-tier present throttle + caption overlay) already supports them; only Line authored a performer. Flame/Dots/Cymatics/Waves each register their own when built.
+- **In-sketch (live) thermal auto-adaptation.** *Live* sketches self-throttle (particle count / dispatch / fps) under sustained load during play, reading the same `ThermalState` signal the screensaver consumes (the signal was built minimal-but-general for exactly this — design-for-but-defer, spec D9). Distinct from the screensaver's own throttling, which already ships.
 
 ## Pre-release tier
 
