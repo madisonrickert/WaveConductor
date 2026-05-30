@@ -2,6 +2,12 @@
 
 These coding standards apply to all source contributions to WaveConductor v5. CI enforces them where it can; human and AI reviewers enforce the rest.
 
+## Local development
+
+- **Run the app:** `cargo rund` — the dev fast-iteration alias (`.cargo/config.toml`). It links Bevy as a shared library (`bevy/dynamic_linking`) so every rebuild after the first is a small incremental link instead of a full Bevy relink. Debug build; this is the default for "does the change work / sound right" smoke tests, and the command to prompt Madison with for manual testing.
+- The `cargo rund` binary is **not self-contained** (libstd + `libbevy_dylib` are dynamically linked) — launch it via `cargo rund`, never the bare `target/` binary. `cargo run -p waveconductor` is the plain, statically-linked fallback.
+- Dynamic linking is **dev-only**: never put `bevy/dynamic_linking` in a manifest `[features]` table — CI's `--all-features` would leak it into CI/release/WASM (it is incompatible with the release profile's fat-LTO + strip). Reserve `cargo build -p waveconductor --release` (~5–8 min) for explicit release-binary requests or pre-tag verification.
+
 ## In-code documentation
 
 - `///` rustdoc on every public item (struct, enum, trait, fn, module).
