@@ -16,6 +16,11 @@ cargo run -p waveconductor
 
 Requires Rust 1.96+. Pinned via `rust-toolchain.toml`.
 
+For faster iteration, `cargo rund` runs the binary with Bevy linked as a shared
+library (`bevy/dynamic_linking`) — a large incremental-link speedup. It is
+**dev-only** (never release or WASM), and the resulting binary is not
+self-contained, so launch it via `cargo rund`, not the bare `target/` binary.
+
 ### Linux build prerequisites
 
 On Debian/Ubuntu, install Bevy's native dependencies:

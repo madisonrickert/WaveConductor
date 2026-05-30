@@ -1,5 +1,22 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+# Dev-only fast iteration: `cargo rund` runs the binary with Bevy linked as a
+# shared library (`libbevy_dylib`), which turns the slow full relink of Bevy's
+# dep tree into a small incremental link. Drop-in for `cargo run -p
+# waveconductor`; trailing args append (`cargo rund -- --flag`). The built
+# binary is NOT self-contained — it dynamically links libstd and libbevy_dylib,
+# whose search paths `cargo run` injects — so always launch via `cargo rund`,
+# never the bare `target/debug/waveconductor`.
+#
+# MUST stay dev-only. `bevy/dynamic_linking` is incompatible with the release
+# profile's `lto = "fat"` + `strip`, and WASM has no dylib. It is passed here
+# as a CLI feature, NEVER declared in a crate `[features]` table — a forwarding
+# feature would be switched on by CI's `cargo {clippy,nextest,deny,doc}
+# --all-features`, leaking dynamic linking into CI/release. The alias keeps it
+# scoped to explicit local invocation only. Layers on top of the per-target
+# rpath rustflags below (libbevy_dylib resolves via Cargo, libLeapC via the
+# `@executable_path`/`$ORIGIN` rpaths). CF #85.
+rund = "run --package waveconductor --features bevy/dynamic_linking"
 
 [build]
 # Parallel frontend (rustc -Z threads=...) is nightly-only. Uncomment only when
