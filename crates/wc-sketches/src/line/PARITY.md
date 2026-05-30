@@ -64,8 +64,8 @@ The first hands-on run on 2026-05-25 surfaced four parity gaps that Plan 11 will
 
 **Tag points for the side-by-side capture (when Plan 11 performs it):**
 
-- **v5** — `v5-line-parity` tag on this repository (`rewrite/bevy` branch HEAD at the time Plan 11 tags). Plan 10's commits are reachable via plain branch history; no Plan 10 tag was created since parity was incomplete.
-- **v4** — `main` branch on this same repository at commit `3b85676` ("Bump version to 4.2.0"). The v4 codebase lives at the repository root prior to the `rewrite/bevy` branch — `npm run dev` on `main` boots it.
+- **v5** — `v5-line-parity` tag on this repository (`v5-alpha` branch HEAD at the time the sign-off tags). Plan 10's commits are reachable via plain branch history; no Plan 10 tag was created since parity was incomplete.
+- **v4** — `main` branch on this same repository at commit `3b85676` ("Bump version to 4.2.0"). The v4 codebase lives at the repository root prior to the v5 rewrite branch (`v5-alpha`, formerly `rewrite/bevy`) — `npm run dev` on `main` boots it.
 
 **Human-in-the-loop step (Plan 11):** Madison runs both apps at 1280×720 and confirms perceptual parity in three states:
 

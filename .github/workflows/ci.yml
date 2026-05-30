@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, rewrite/bevy]
+    branches: [main, v5-alpha]
     tags: ["v*"]
   pull_request:
-    branches: [main, rewrite/bevy]
+    branches: [main, v5-alpha]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

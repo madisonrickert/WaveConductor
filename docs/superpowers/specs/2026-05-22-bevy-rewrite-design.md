@@ -486,9 +486,9 @@ A single dispatcher script under `xtask/` (its own workspace member) provides th
 
 ### 5.11 Branch and migration strategy
 
-- Development on a `rewrite/bevy` branch from `main`.
+- Development on the `v5-alpha` branch (renamed from `rewrite/bevy` 2026-05-30) from `main`.
 - v4 stays on `main` until v5.0.0 is feature-complete and parity-validated per sketch.
-- When v5.0.0 ships: squash-merge `rewrite/bevy` into `main`. Tag `v4-final` on the pre-merge `main` so v4 sources are recoverable.
+- When v5.0.0 ships: squash-merge `v5-alpha` into `main`. Tag `v4-final` on the pre-merge `main` so v4 sources are recoverable.
 - v4 binaries remain on the releases page (versioned `v4.x.y`); they are not removed.
 - No settings migration; v5 ships with defaults on every platform.
 - `bin/Ultraleap-Tracking-WS-*`, `scripts/leap-websocket.ts`, and the `electron/` directory delete during the rewrite. The external `UltraleapTrackingWebSocket` repo continues to exist independently for web users.

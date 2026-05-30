@@ -1,306 +1,277 @@
 # WaveConductor v5 roadmap
 
-The plan-by-plan sequence for shipping v5.0 with full parity to the v4 React/Three.js gallery. Each entry is a distinct plan with a clear end-state and an estimated effort window. Plans land in order on `rewrite/bevy`; each closes with a tag (`v5-<name>`).
-
-This is the index. Detailed implementation plans live under `docs/superpowers/plans/`; the design spec is `docs/superpowers/specs/2026-05-22-bevy-rewrite-design.md`; per-plan housekeeping items accumulate in `docs/superpowers/next-plan-carry-forwards.md`.
-
-## Status
-
-| Plan | Topic | Status | Tag |
-| ---- | ----- | ------ | --- |
-| 1 | Foundation (workspace, CI, lint gates) | ✅ shipped | `v5-foundation` |
-| 2 | Lifecycle (state machine, leafwing keyboard actions) | ✅ shipped | `v5-lifecycle` |
-| 3 | Input (mouse, touch, hand-tracking provider, pointer state) | ✅ shipped | `v5-input` |
-| 4 | Audio scaffolding (cpal stream, ring buffers, default-silent DspHost) | ✅ shipped | `v5-audio` |
-| 5 | Settings (Reflect-based, persistence, dev/user panels, derive macro) | ✅ shipped | `v5-settings` |
-| 6 | Line skeleton + sketch scaffolding pattern | ✅ shipped | `v5-line` |
-| 7 | Line simulation parity + idle veto hook | ✅ shipped | `v5-line-sim` |
-| 7.5 | Test harness: synthetic input + shared `tests/common/` | ✅ shipped | `v5-test-harness` |
-| 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | ✅ shipped | `v5-line-render` |
-| 9 | Line audio + reactivity coupling | ✅ shipped | `v5-line-audio` |
-| 10 | Line polish + heatmap spawn + soak harness | 🟡 shipped, parity gaps deferred to Plan 11 | — |
-| 11 | Line parity completion (rings, touch/hand activation, file picker, audio re-tune) | ✅ code shipped | — (tag deferred) |
-| 11.5 | Overlay UI parity (translucent buttons, settings panel chrome, nav, auto-fade) | ✅ code shipped | — (tag deferred to 11.7) |
-| 11.6 | Hand-tracking provider + Leap manual verification | ✅ code shipped | — (tag deferred to 11.7) |
-| 11.7 | Final `PARITY.md` sign-off + tag (after 11.5 + 11.6) | ⏳ closing step | `v5-line-parity` |
-| 11.8 | Line screensaver / attract mode + adaptive thermal | ✅ code shipped | — (untagged; carry-forwards in "Screensaver & adaptive thermal" below) |
-| 12 | Next sketch (Flame / Dots / Cymatics / Waves — order TBD) | future | — |
+WaveConductor v5 is the Rust/Bevy rewrite of the v4 React/Three.js generative-art gallery. The near-term goal is **parity with v4** (then better) for the unattended kiosk installation; the longer arc adds an iPad deployment, new sketches, and a web showcase.
 
-> **Why 11.8, not 12.** The screensaver is numbered in the Line workstream's interjected 11.x series (alongside 11.5 overlay UI and 11.6 hand-tracking — both Line-driven work that also built cross-cutting `wc-core` infrastructure). This keeps **Plan 12 = the next-sketch port**, a convention referenced as "Plan 12+" across the codebase (`sketch/manifest.rs`, design specs) for the open-ended sketch sequence. The screensaver landed as feature work before the still-pending 11.7 parity tag; it is not itself a parity gate. In-source `//!` headers, the design spec, and the capture harness all say "Plan 11.8" to match. Design spec: `specs/2026-05-29-line-screensaver-attract-mode-design.md` (incl. the §10 as-built addendum).
+This is the index. Detailed per-item plans live under `docs/superpowers/plans/`; the design spec is `docs/superpowers/specs/2026-05-22-bevy-rewrite-design.md`; per-item housekeeping accumulates in `docs/superpowers/next-plan-carry-forwards.md`. Work lands on the `v5-alpha` branch.
 
-> **Line is most of the way there.** Plans 7–10 carried the sketch from scaffolding through multi-attractor physics, the gravity-smear post-process, the fundsp synthesis graph, the audio↔visual reactivity coupling, the heatmap-image spawn template, and the AGENTS.md-required 8-hour soak harness. The first hands-on run on 2026-05-25 surfaced parity gaps that don't fit cleanly inside Plan 10's "polish" scope and so deferred to Plan 11: rotationally-symmetric attractor `Annulus` rings (no visible spin), no touch / hand-tracking pathway to attractor press, no file picker for `spawn_template`, and the manual side-by-side sign-off that flips `PARITY.md` from "PENDING" to a real PASS. Plan 11 closes those and earns the `v5-line-parity` tag. The architectural pattern established here — per-sketch plugin under `wc-sketches`, settings via the `wc-core` registry, `OnEnter`/`OnExit` lifecycle, audio reactivity via `AudioCommand`, a `PARITY.md` per module closing with a tagged verdict — generalizes cleanly to Flame, Dots, Cymatics, and Waves (Plan 12+).
->
-> **Three steps still stand between Line and "shipped":** Plan 11.5 (overlay UI parity — the v4 button chrome, settings panel styling, nav, and auto-fade), Plan 11.6 (hand-tracking provider + on-hardware Leap verification — the kiosk install's primary input modality), and Plan 11.7 (the closing side-by-side capture, `PARITY.md` sign-off, and `v5-line-parity` tag). Plan 11 shipped the code; the tag is held until 11.7 because a capture against a build still missing the UI and Leap path wouldn't carry weight. No Plan-12 sketch port begins until 11.7 lands.
+## How this roadmap works
 
-## Line parity (Plans 7–11.7)
-
-The Plan 6 ship is the sketch *scaffolding* — multi-attractor physics, the post-process shader, audio synthesis, and visual sign-off are all still ahead. Four plans bring v5 Line to functional and perceptual parity with v4.
+- **Forward work is tracked as slugged items** (`kebab-case`), not numbered steps. Numbering bakes priority into every label and makes re-prioritising a rename cascade; slugs are stable identifiers you never renumber.
+- **Ordering and dependencies live in one place — *Sequence & priorities* below**, which references slugs. Re-prioritising is editing that one list, not re-touching every item, commit, and comment.
+- **Shipped work is a ledger** (*Shipped history*, near the bottom) — immutable record + tags. The detail lives in the per-plan docs under `plans/`.
+- Discrete shippables close with a commit + a `v5-<slug>` tag; sketch-touching items also update `crates/wc-sketches/src/<sketch>/PARITY.md`.
 
-### Plan 7 — Line simulation parity + idle veto hook
+## Kiosk interaction model (applies to every sketch)
 
-**Goal:** v5 Line simulates particles with the same physics as v4. Visual layer still flat-shaded; audio still silent. End-state: side-by-side trajectory comparison against v4 looks right *if you ignore the chromatic glow.*
+The installation drives a **projector** — the kiosk's display is projected, not a touchscreen. So:
 
-**Carry-forwards Phase 0:** Absorb the 9 items in `docs/superpowers/next-plan-carry-forwards.md` (save-on-exit flush, reflection panel type coverage, auto-reenter on `requires_restart`, render-graph trace logs, `min_binding_size`, drop `test_settings.rs` from production, `Single<&Window>`, asset-path release config, gravity tuning + remove 1Hz diagnostic).
-
-**New scope:**
+- **Touchless hand-tracking is the *primary* interaction.** On the desktop kiosk that's the Leap Motion Controller; on an iPad it's Apple Vision (camera-based).
+- **Touch and mouse are *secondary* control modes** — supported, but not the main experience (you can't touch a projection).
+- **Hand-Z is not required.** No current sketch's key interaction fails without depth (confirmed 2026-05-30), so 2D hand landmarks (e.g. Apple Vision without LiDAR fusion) are acceptable across the whole deck. 3D depth is a future enhancement, never a blocker.
 
-- Multi-attractor support — up to N=8 attractors in the SimParams uniform, each with `(x, y, power: f32)`. Mouse is one entry; future Leap hands fill the rest.
-- Mouse attractor lifecycle: power=10 on press, geometric decay (0.9/frame) with floor=2, zeroed on release.
-- Dual drag constants — `PULLING_DRAG=0.93075` (any attractor active), `INERTIAL_DRAG=0.53914` (idle). Both baked via `pow(C, timeStep)` for framerate independence.
-- Size-scaled gravity — `G *= min(2^(width/836 - 1), 1)` so the sketch feels consistent across canvas sizes.
-- Per-particle `original_xy` + `constrainToBox` reset semantics — out-of-bounds particles teleport home.
-- Per-particle fade-in alpha over `FADE_DURATION = 3s`.
-- Horizontal-line initial spawn at mid-Y with `((i % 5) - 2) * 2` sawtooth jitter — replaces v5's square grid.
-- `particleDensity: f32` (per canvas-px) replaces `particle_count: u32`. Setting handles window resize cleanly; no `requires_restart` flicker on resize.
-- **Sketch-side `IsReadyToSleep` veto hook** in `crates/wc-core/src/lifecycle/idle.rs`. Currently `advance_activity` transitions on elapsed time alone; this plan adds a `bevy::ecs::system::SystemId` or `Resource<Option<fn(&World) -> bool>>` mechanism so a sketch can keep itself `Active` while attractor power is still decaying. Without it, Line will go `Idle` mid-fling.
-- **Architectural decision: CPU mirror of particle state.** Maintain `Vec<Particle>` on the host alongside the GPU storage buffer. The sim runs both — GPU for render, CPU as authoritative state for `ParticleStats` (Plan 9). Adds ~50µs/frame at 12k particles; trivial compared to the alternative of a per-frame GPU readback stall. Lock in this data shape now so Plan 9 doesn't churn it.
+## Sequence & priorities
 
+The orderable list. Five phases in priority order; within each, slugs roughly in dependency order. **Re-prioritise by editing here** — the slugs are stable, so nothing downstream renumbers.
 
-### Plan 8 — Line rendering parity
+**Phase 1 — Desktop v4 parity** *(optimise opportunistically; leave architectural hooks open)*
+- 1.A Screensaver / attract / compute-saver: `screensaver-attract` · `leap-idle-pause`
+- 1.B Port the remaining four sketches: `sketch-flame` → `sketch-dots` → `sketch-cymatics` → (`mic-fft` →) `sketch-waves`
+- Close Line: `line-parity-signoff`
+- Opportunistic / anytime (not phase-gated): `dev-velocity-build` · `thermal-seam-generalization` · `perf-soak-telemetry`
 
-**Goal:** v5 Line *looks like* v4 Line. The gravity post-process is the single most important visual element — concentric ring trails emanating from the focal point with chromatic-shifted color separation. Screenshots in `src/sketches/line/screenshots/` on `main` show the target.
+**Phase 2 — Deep optimisation pass** *(after parity / better-than-v4)*
+- `perf-soak-telemetry` → `frametime-percentiles` → `perf-governor` → `dynamic-resolution`
 
-**Scope:**
+**Phase 3 — iOS / iPad port**
+- `ios-foundations` → `ios-first-light` → `ios-thermal-soak` → `ios-vision-hands` → `ios-dynamic-resolution` → `ios-kiosk-hardening`
 
-- Port `star.png` (64×64 RGBA soft-diamond glow) — load as a Bevy `Image`, route into the line particle material.
-- Replace flat-quad fragment shader with **textured point-sprite path**: sprite alpha-blended, 13px screen-space (matching v4's `size: 13, sizeAttenuation: false`), `vertexColors: true`.
-- Attractor visual entity: 10 nested rings (mesh from `Annulus` or compute-shader-generated geometry), `0xC5E2CC` color, additive blending, rotation speed `(10 - idx) / 20 * power` per ring, scale `sqrt(power) / 5`. Spawned on attractor activation, despawned at power=0.
-- **Gravity post-process pipeline** — WGSL port of `src/sketches/line/shaders/gravity/fragment.glsl`. 11-iteration ray-march of incoming + outgoing UV samples, distorted by `gravity(p, attractionCenter, G) = delta * (G / max(dot(delta, delta), 1e-4))`. Per-iteration chromatic shift via incoming `(1.0417, 1.0, 0.96, 1.0)` and outgoing `(0.96, 1.0, 1.0417, 1.0)` color factor accumulators. Mouse pull blend via `iMouseFactor`. Final gamma curve.
-- Render-graph integration: post-process node attached after the Core2d main pass, reads the rendered scene as input texture and writes the gravity-smeared output.
-- Uniforms wired from main world: `G`, `iMouseFactor`, `gamma`, `iMouse`, `iResolution`, `iGlobalTime` (driven from `Time` + temporary constants — Plan 9 plugs in the audio-reactive values).
-- New setting: `gamma: f32` (default 1.0, dev category, no restart).
+**Phase 4 — New sketches & major features**
+- `face-body-tracking` · `new-sketches` · (other major features TBD)
 
-### Plan 9 — Line audio + reactivity coupling
+**Phase 5 — Web showcase** *(lowest priority — v4 already covers web; this is portfolio, not the kiosk)*
+- `web-showcase`
 
-**Goal:** v5 Line is audibly indistinguishable from v4 Line at fixed input, and the particle-stats feedback loop drives both the synth params and the shader uniforms. This is the biggest plan in the Line stack.
+**Release gate — tag `v5.0.0`, merge `v5-alpha` → `main`** *(cuts across; see Release gates)*
 
-**Plan 4 left these explicitly deferred:** `DspHost::render` writes zeros (see the `// TODO Plan 6` at `crates/wc-core/src/audio/dsp.rs:74`). The cpal stream, ring buffers, and `SetMasterVolume`/`SetMuted` commands are real; per-sketch synthesis is not yet wired.
+Key dependencies:
+- `sketch-waves` depends on `mic-fft` (microphone capture + rustfft, deferred from the audio scaffolding).
+- `perf-governor` depends on `perf-soak-telemetry` + `frametime-percentiles` — you can't tune a governor without the data it reacts to.
+- `dynamic-resolution` is evidence-gated on `perf-soak-telemetry`; its priority rises sharply if the iPad is chosen (fanless + retina).
+- `ios-thermal-soak` depends on `thermal-seam-generalization` + `perf-soak-telemetry`; `ios-dynamic-resolution` depends on `dynamic-resolution` + the iOS-soak evidence.
+- `ios-vision-hands` is **required** for the iPad kiosk (touchless is primary), not optional.
 
-**Scope:**
+---
 
-- Extend `AudioCommand` with sketch-aware synthesis lifecycle: `AddSynth(SynthDef)`, `RemoveSynth(SynthId)`, `SetSynthParam(SynthId, ParamKey, f32)`. Sketch-side helpers in `wc-sketches`.
-- Wire `fundsp` into `DspHost::render` — replace the zero-fill placeholder with real synthesis from the active synth graphs. The Plan 4 mute test gets re-validated against a non-silent source at this point.
-- Port v4's `createAudioGroup` (Line voice graph) to a fundsp `SynthDef`:
-  - Two oscillators at `BASE_FREQUENCY = 320`: square (`BASE/2`, detuned ±2 cents) and sawtooth (`BASE`), each gain=0.30
-  - Low sawtooth at `BASE/4`, gain=0.90
-  - Two 5-note chord stacks at `BASE` and `BASE×8` (intervals: unison, +12, +12+7, +24, +24+4 semitones)
-  - White noise → lowpass (cutoff parameter) → lowshelf (2200Hz, +8dB) → gain
-  - LFO at 8.66Hz modulating two bandpass filter cutoffs (Q=2.18)
-  - Final stage: compressor (threshold=−50, knee=12, ratio=2) → double highshelf (`BASE×4`, `BASE×8`, both −6dB)
-- **Background sample loading** — `line_background.mp3/ogg` (258KB/668KB on `main`). Per spec §5.12 we cannot use `bevy_audio` (one-shot SFX only). `fundsp/wav` feature is disabled. Decision deferred to plan-writing: either re-encode to WAV + enable `fundsp/wav`, or add `symphonia` for in-process mp3/ogg decode into a `Vec<f32>` PCM buffer. Loop the sample via fundsp `wave()` source.
-- **ParticleStats** CPU computation (port of `src/particles/particleStats.ts`):
-  - `averageVel = sqrt(sum(dx² + dy²) / N)`
-  - `varianceLength = sqrt(varianceX² + varianceY²)`
-  - `flatRatio = varianceX / varianceY` (1 = circular, large = horizontally flat, near-0 = vertically thin)
-  - `groupedUpness = sqrt(averageVel / varianceLength)` — the single load-bearing scalar across audio AND visual
-  - `normalizedEntropy = entropy / (width × 1.3839)` where `entropy = sum(length × log(length)) / N`
-  - `normalizedVarianceLength = varianceLength / (0.28866 × width)`
-- Per-frame coupling, `Update` system:
-  - `flatRatio → LFO frequency target`
-  - `222 / normalizedEntropy → bandpass filter cutoff target`
-  - `2000 × normalizedVarianceLength → noise filter cutoff target`
-  - `max(groupedUpness - 0.05, 0) × 5 → synth volume`
-  - `triangleWaveApprox(now/5000) × (groupedUpness + 0.5) × 15000 → shader G`
-  - `(1/15) / (groupedUpness + 1) → shader iMouseFactor`
-- All synth-param writes flow through the `AudioCommandSender` ring; never block.
+## Phase 1 — Desktop v4 parity
 
-**Risks:** fundsp API drift from v4 Web Audio semantics and the mp3 decoding decision.
+Bring v5 to parity (then better) with the v4 gallery on the desktop kiosk. Optimise opportunistically; leave hooks open for the later optimisation and iOS phases rather than building them now.
 
-### Plan 10 — Line polish + PARITY sign-off
+Line is essentially there — Plans 7–11.6 shipped the simulation, rendering, audio, overlay UI, and the Leap provider (see *Shipped history*). What remains in Phase 1 is the screensaver hardening, the four remaining sketch ports, and the Line parity sign-off.
 
-**Goal:** Line ships. `PARITY.md` in the sketch module is signed and the side-by-side capture matches v4 within the agreed perceptual tolerance.
+### `line-parity-signoff`
 
-**Scope:**
+*Was Plan 11.7.* The closing Line step: a manual side-by-side capture vs v4 (1280×720, idle / mid-press / mid-decay states, mouse + touch + Leap pinch exercised, audio recorded), roll the v5-only divergences into `crates/wc-sketches/src/line/PARITY.md` as approved deviations, flip the verdict PENDING → PASS, tag `v5-line-parity`. Deviations to record:
 
-- **Heatmap-image spawn template.** Port `src/sketches/line/heatmapSampler.ts` — image → CDF on luminance × alpha → weighted random sampling via binary search. Add `spawn_template: Option<PathBuf>` (image picker setting). Sub-pixel jitter on sampled coordinates. Fallback to default horizontal-line spawn when the image is all-black or fully transparent.
-- Any remaining items from `next-plan-carry-forwards.md` not absorbed in Plan 7's Phase 0.
-- `crates/wc-sketches/src/line/PARITY.md` — parity target = `perceptual` (per spec §8). Reference media: pin v4 commit hash for a fixed-input capture. List approved deviations. Verdict line.
-- Idle / screensaver behavioral parity check — v4 uses `idleTimeoutSeconds = 30` and `screenSaverTimeoutSeconds = 30` (additive). Match the totals in v5's `InteractionTimer` config.
-- 8-hour soak test on Line — required per AGENTS.md before any release tag. Lock in the harness now so subsequent sketches inherit it.
+- **Multi-axis gyroscope** attractor visual (replaces v4's tilted single ring) — deliberate v5 design choice, Madison-directed.
+- **Pad-instrument synth** (stochastic LFOs, pink-noise breath, configurable attack/release) — documents the universal audio-coupling pattern.
+- **Heatmap-image spawn** accepts `png/jpg/jpeg/webp` (v4: png only).
+- The 11.5 overlay-UI deviations (panel/button alpha bumps, backdrop-blur on buttons, fade-overlay reload, sheen rotation, HDR+AgX+bloom pipeline) — full list under *Shipped history*.
 
+Mostly mechanical capture work; the substance shipped in Plans 11 / 11.5 / 11.6.
 
-**Outcome:** Plan 10 shipped the heatmap-image spawn, the 8-hour soak harness, and the Phase-0 carry-forward drain. The first manual run (2026-05-25) surfaced four parity gaps that the implementation pass alone couldn't catch — they require eyes-on testing or out-of-scope features — and so deferred to Plan 11 rather than being shoehorned into Plan 10's "polish" scope.
+### `screensaver-attract` (1.A)
 
-### Plan 11 — Line parity completion (code-complete)
+*Was Plan 11.8.* The screensaver / attract / compute-saver mode — the thing we've been building. Code shipped for three of four seams (thermal signal, screensaver framework, Line attract driver). Design spec: `specs/2026-05-29-line-screensaver-attract-mode-design.md` (§10 as-built addendum). As-built deviations: Hot tier = "Low-Rate Ember" (full pipeline at ~3 fps present rate), not a frozen dispatch; thermal sensing = zero-dep Linux sysfs reader, not `sysinfo`.
 
-**Goal:** Close the code gaps surfaced by the Plan 10 hands-on run. The `PARITY.md` sign-off and the `v5-line-parity` tag move to the dedicated final step after 11.5 and 11.6 land — there's no value capturing a "PASS" verdict against a build that's still missing the overlay UI and on-hardware Leap operation.
+Remaining (deferred; none blocks a `v5-screensaver` tag on its own):
 
-**Scope:**
+- **Thermal sensor sign-off + threshold tuning** *(device-conditional)*. The Linux sysfs reader is compile/ABI-verified but hasn't run against live `/sys`. On the chosen Linux box: confirm a CPU `hwmon` chip (`coretemp`/`k10temp`), then tune the placeholder bands (`enter_warm 75` / `enter_hot 90 °C` in `lifecycle::thermal::mod.rs`) against observed throttle temps. (On iPad this path is replaced by the OS thermal enum — see `thermal-seam-generalization`.)
+- **Hot-tier "warm-up-then-freeze" escalation** *(deferred — YAGNI until evidence)*. If the soak shows ~3 fps + `leap-idle-pause` still runs the box too hot, add a true dispatch freeze that runs until particle alpha saturates, then latches `particle_count = 0`.
+- **Presence-reactive attract layer** *(deferred)*. Particles lean toward an approaching visitor pre-engage; the seam is left open. (a) react to a hand entering the tracking volume (free); (b) tap raw Leap IR images (`IMAGES` policy) for near-field detection.
+- **Per-sketch attract visuals.** The framework (`in_screensaver(AppState)` + per-tier present throttle + caption overlay) already supports them; only Line authored a performer. Flame/Dots/Cymatics/Waves each register their own when built.
 
-- **Attractor ring rotation visibility.** Replace `bevy::math::primitives::Annulus` (rotationally symmetric — perfect circle, no visible spin) with a low-segment polygonal ring mesh so the per-frame `(10 - idx) / 20 * power` rotation is perceivable. ✅ Shipped — implementation evolved through a v4-faithful 32-segment ring with `abs(cos(phi))` X-scale modulation, and then on Madison's call became a v5 multi-axis gyroscope (rings split across X/Y/Z gimbals with desynchronised rates) as an approved deviation. Sign-off step records this as an intentional v5 design choice, not a parity failure.
-- **Touch and hand-tracking attractor activation.** `update_mouse_attractor` currently reads `Res<ButtonInput<MouseButton>>::just_pressed(Left)` only. The pointer-merge layer already routes touch and hand-source positions, but neither can trigger press. Add: `Res<Touches>` for `TouchPhase::Started`/`Ended` events, and a hand-tracking pinch gesture (≥ `PINCH_PRESS_THRESHOLD`) for synthetic press. ✅ Shipped — the hand-tracking path is feature-gated on `hand-tracking-gestures` and runs against synthetic input only until Plan 11.6 lands the real `LeaprsProvider`.
-- **`rfd`-based file picker** for `spawn_template`. Replace the free-text input with a "Browse…" button that opens a native file dialog (`rfd::FileDialog::new().add_filter("Image", &["png"])`). New `SettingKind::FilePath { extensions: &[&str] }` variant; renderer adds the button alongside the text field. ~30 LOC + the `rfd = "0.15"` dep.
-- **Per-field `#[serde(default)]` on `LineSettings`** so adding a new field (e.g. `gamma` in Plan 8) doesn't make existing persisted TOML fail the whole-section deserialize and silently revert all sibling values to defaults. Apply the same pattern to other settings structs preemptively.
-- **Heatmap-spawn end-to-end verification.** Spot-check with at least one real PNG (probably `assets/sketches/line/star.png` and a hand-picked photograph) plus a deliberately-wrong path to exercise the horizontal-line fallback. Currently only unit-tested.
-- **Audio character re-tune (Phase F).** Originally framed as a polish pass; in practice grew into a multi-voice pad-instrument redesign — stochastic generative DSP layers, per-voice envelopes, configurable synth attack/release/volume knobs in `LineSettings`, and the universal "audio reads CPU inputs" coupling pattern (see [below](#universal-audio-coupling-pattern-codified-during-plan-11-phase-f)). ✅ Shipped.
-- **Settings-panel pointer isolation.** New [`EguiPointerCaptured`](../../crates/wc-core/src/settings/pointer_capture.rs) resource gates the Line mouse handler's press edge on whether `bevy_egui::EguiWantsInput` owns the pointer this frame, so clicks inside the Settings panel no longer spawn a stray attractor under the slider. ✅ Shipped — also benefits Plan 11.5's chrome work.
+### `leap-idle-pause` (1.A)
 
-**Out of scope (handed to dedicated parity gates):**
+*The screensaver's unwired fourth seam — a real bug.* `pause_leap_on_screensaver` / `resume_leap_on_active` (`crates/wc-core/src/input/providers/leap_native.rs:693,702`) are defined and documented as a thermal lever but **registered as systems nowhere** (verified 2026-05-30; the whole `set_paused → set_all_leap_paused → pause_leap_on_screensaver` chain is unreachable). So the Ultraleap service runs at full power through the entire idle screensaver. Register them on `OnEnter(SketchActivity::Screensaver)` / `OnEnter(SketchActivity::Active)`, behind the existing leap / `hand-tracking-gestures` cfg next to `apply_leap_background_setting` in `crates/wc-core/src/input/mod.rs`. ~6 LOC + a wiring test (CF #84). *Desktop/Leap path only — compiles out on iPad.* Then verify controller IR-LED heat behaviour on hardware (an IR-viewer; if pause doesn't extinguish the LEDs, the only guaranteed fix is cutting USB power via a switchable hub during deep idle).
 
-- Plan 8's known-deferred items (post-process gating outside `AppState::Line`, per-frame uniform-buffer reuse) — fold into the next render-graph work that touches the area.
-- **Hand-tracking provider implementation** (no `HandTrackingState` writer exists yet — pure stub from Plan 3). Plan 11 ships the gesture-edge handling behind the `hand-tracking-gestures` feature flag, tested with synthetic input only; the real `LeaprsProvider` and on-hardware verification land in **Plan 11.6** as a Line parity gate.
-- **Overlay UI chrome** (translucent buttons, settings panel styling, nav, auto-fade) — kept out of the sketch scope and landed as **Plan 11.5**, the other Line parity gate.
-- **Manual side-by-side `PARITY.md` sign-off and `v5-line-parity` tag** — moved to the final step after 11.6 lands. The capture only makes sense against a build with the overlay UI and Leap operation in place.
+### `sketch-flame` / `sketch-dots` / `sketch-cymatics` / `sketch-waves` (1.B)
 
-**Status:** Shipped across Phases A–D (subagent-driven code passes) plus Phase F (audio re-tune that grew well past its original scope).
+The remaining four v4 sketches. Each ships its own `PARITY.md`, absorbs accumulated carry-forwards, and registers a screensaver attract performer. Per-sketch character (design spec §8 + the universal audio-coupling pattern):
 
-The final sign-off step closes the loop with the `v5-line-parity` tag once Plans 11.5, 11.6, and 11.7 land.
+| Slug | Parity target | Notes |
+| ---- | ------------- | ----- |
+| `sketch-flame` | Perceptual | IFS fractal; recognizability matters, chaotic detail can drift. CPU-bound (no GPU parallelism); audio coupling stays CPU-side (visitor stats during the per-frame traversal). No GPU↔CPU sync concern. |
+| `sketch-dots` | Perceptual | Shares most infrastructure with Line. **Keep particles on CPU** (matches v4); only fall back to the approximated-envelope pattern if counts ever force a GPU port. |
+| `sketch-cymatics` | Physics-matched | 2025-era human-authored; the visual *is* the simulation, numerical drift = wrong sketch. GPU compute (ping-pong wave PDE); audio reads CPU-side input scalars (`activeRadius`, `numCycles`, `centerSpeed`, `slowDownAmount`), never GPU state. The architectural reference for the universal pattern. |
+| `sketch-waves` | Perceptual | Audio→visual coupling (FFT of microphone). Depends on `mic-fft`. Visuals are a closed-form CPU heightmap; no GPU compute. |
 
-### Plan 11.5 — Overlay UI parity (Line parity gate)
+Order is provisional — the actual sequence depends on which sketch's data demands surface architectural gaps soonest.
 
-One of the two manual gates that stand between Plan 11's code-complete tag and Line being declared truly shipped. Plan 11.5 ports v4's overlay UI surface — the chrome that sits on top of every sketch, not the sketch itself — so the kiosk install presents the v4 visual language and the next sketch port can plug into a finished UI shell instead of inheriting Line's bare-bones controls.
+### `mic-fft`
 
-**Scope:**
+Microphone capture + `rustfft` path, deferred from the audio scaffolding (Plan 4). Prerequisite for `sketch-waves` (audio is the *input* there, not the output).
 
-- **Translucent buttons** matching v4's visual style — likely `bevy_egui` with custom `Visuals` (background tint, border radius, alpha) tuned to v4. Buttons share a single style applied across nav + settings + sketch-specific affordances.
-- **Settings panel** — extends Plan 5's existing `bevy_egui` panel with the v4 visual style. Replaces the default-egui-frame look with translucent backdrop + matching button styling. The Plan 5 reflection-driven widget set stays; only the chrome changes. Plan 11 already landed the [`EguiPointerCaptured`](../../crates/wc-core/src/settings/pointer_capture.rs) gate so the new chrome doesn't double-trigger sketch interaction.
-- **Navigation buttons** — sketch-picker, fullscreen toggle, settings open/close, info/about. Match v4's icon set + placement.
-- **Auto-fading UI** — overlay UI fades out after N seconds of pointer inactivity, fades back in on any pointer event. Matches v4's kiosk-friendly behavior. Coupled to the existing `InteractionTimer` (Plan 2) and a new `UiOpacity` resource animated by an `Update` system.
+### Opportunistic hooks (Phase 1, not phase-gated)
 
-**Reference:** match v4's overlay UI style exactly. Reference media lives in `.worktrees/v4/src/` — locate the overlay components and styling there before designing.
+Cheap-and-compounding or leave-a-hook-open items that can land anytime during Phase 1 — they don't block parity but pay dividends across later phases.
 
-**Why a parity gate:** Madison's first hands-on run after Plan 11 surfaced that the UI surface is still missing relative to v4 — without it, the kiosk install doesn't pass the "looks like v4" bar. Doing this before the next sketch port also means Plans 12+ wire into a finished UI shell instead of inheriting Line's minimal placeholder; doing it after every sketch would mean re-touching each one to retrofit the chrome.
+- **`dev-velocity-build`** — `bevy/dynamic_linking` behind a dev-only flag/alias (never release/WASM; spike against the vendored-LeapC rpath first) + a fast linker (`mold`/`lld` on Linux, *appended* to the existing per-target `rustflags`; skip `sold`/`zld` on macOS — Apple's `ld` is already fast). CF #85, #86. Build profiles themselves are already done (`[profile.release]` fat-LTO + `codegen-units=1` + `panic=abort` + `strip`; deps at opt-3 in dev).
+- **`thermal-seam-generalization`** — make the thermal sensor seam source-agnostic (`tier`-producing alongside `°C`-producing) so the Linux-sysfs/macmon °C path and the iOS `ProcessInfo.thermalState` enum path are two backends behind one `ThermalState`. The `ThermalState` *resource* already absorbs a new `ThermalSource`; the sensor abstraction doesn't (it's `read_celsius -> Option<f32>` all the way down). Worth doing regardless of device — it's the generalisation the v5 thermal thesis rests on. CF #90.
+- **`perf-soak-telemetry`** — listed in Phase 2, but it's the gating evidence for both the optimisation phase and the iOS go/no-go, so it can be built opportunistically as soon as a candidate device exists.
 
-**Cost shape:** the bulk of the work was hands-on visual parity iteration after the initial implementation landed, not the underlying state machine. Plan-writing time estimates proved much too optimistic against the actual back-and-forth of matching v4's pixel/animation feel.
+---
 
-**Shipped:** All five sub-plugins (Style, BackdropBlur, AutoFade, Buttons, Picker) landed plus the `SketchManifest` registry. The two settings panels are restyled. The Line sketch gained the picker tile (display name "Gravity" per v4) with sheen-on-hover and play-icon overlay. Audio properly silences on Home (cpal stream pauses). Sketch reload routes through a fade-overlay state machine (FadeOut → Switch → FadeIn) so settings changes never flash the picker. Internal HDR rendering pipeline (`Rgba16Float` ViewTarget end-to-end, `Tonemapping::AgX`, `Bloom { intensity: 0.15, ..Bloom::NATURAL }`) landed alongside the chrome work to fix the gravity post-process being tonally compressed against an SDR target — verified at gamma 1.3 on 2026-05-27.
+## Phase 2 — Deep optimisation pass
 
-**Approved deviations from v4** (record in `PARITY.md` when Plan 11.7 runs):
-- `panel_stroke` alpha 20 → 60 (v4 literal: rgba(255,255,255,0.08)); needed for visibility against the dark blurred backdrop.
-- `button_stroke` alpha 38 → 76 (v4 literal: rgba(255,255,255,0.15)); same reason.
-- `panel_fill` alpha 204 → 160 (v4 literal: rgba(0,0,0,0.8)); browser `backdrop-filter` compositing lifts apparent brightness in a way Bevy's straight-alpha pipeline does not — tint reduced so the blur is visibly present.
-- Overlay buttons use `backdrop_blur_frame` (v4 has no `backdrop-filter` on buttons); produces frosted-glass on buttons too.
-- Sketch reload uses a fade-overlay state machine; v4 applies settings instantly. v5's behavior is intentionally smoother.
-- Sheen-on-hover uses a horizontal-strip sweep with manually-applied 30° rotation; v4 uses CSS `transform: rotate(30deg)` on a vertical strip. Visually close.
-- Credits cell "Open Source Licenses" link is plain text; v4 has an internal `/licenses` route. v5 has no in-app licenses page.
-- Panel-title letter-spacing uses egui defaults; egui has no built-in letter-spacing knob (v4 used `letter-spacing: 0.04em`).
-- v5 uses Bevy's HDR rendering pipeline + AgX tonemap + post-process bloom on the primary camera. v4's WebGL canvas effectively renders to float-precision and the browser tonemaps to display; the v5 HDR work matches that pipeline rather than deviating from it. Bloom (intensity 0.15, `Bloom::NATURAL` composite) is a deliberate v5-only enhancement sitting on top of v4's gravity-post-process glow — at low intensity it lifts the perceptual brightness of star sprites without blowing out highlights. Future sketches inherit this pipeline; bloom-per-sketch tuning is not yet user-exposed (param lives in `crates/waveconductor/src/main.rs`).
+After v4 parity (or better), a focused optimisation pass. **Build order: soak telemetry → analyse → governor.** Triaged from an external performance-research pass (Perplexity) + an in-repo senior-engineer adversarial review. The headline was that most of the researcher's stack was already shipped, and the rest is YAGNI until a full-render soak produces evidence — the governor is a *retrofit against data*, not a greenfield architecture.
 
-**Scope items from the original 11.5 spec that did NOT ship** (rolled to `next-plan-carry-forwards.md`):
-- Fullscreen toggle overlay button (the `WaveConductorAction::ToggleFullscreen` keybinding exists; the button does not).
-- Info/About overlay button.
-- Section grouping in the dev panel (only the user panel renders sections; dev panel still flat).
+Already shipped (no action): three-tier-equivalent build profiles; zero-dep thermal sensing with hysteresis (enabled in the deployment binary); the screensaver's per-tier present-rate throttle (`UpdateMode::Reactive`, ≈30/15/3 fps).
 
-### Plan 11.6 — Hand-tracking provider + Leap manual verification (Line parity gate)
+### `perf-soak-telemetry`
 
-The second of the two manual gates between Plan 11's code-complete tag and Line shipping. Plan 11 wired the gesture-edge handling (pinch press / release, [`LastPinchState`](../../crates/wc-sketches/src/line/systems/mouse.rs) per-chirality) behind the `hand-tracking-gestures` feature, but tested it with synthetic input only. The kiosk install's primary input modality is the Leap Motion Controller, so Line cannot ship to the pi-party deployment until on-hardware operation is verified end-to-end.
+The gating prerequisite. The current 8-hour soak runs `MinimalPlugins` (no RenderApp, no GPU) — the real renderer has never run unattended on hardware. Build a `DefaultPlugins` full-render, screensaver-resident soak on the candidate device, with **CSV/structured telemetry** (timestamp, frame-time mean/p95/p99, `ThermalState.tier` + `last_temp_c`, entity count). It either proves the present-rate throttle already holds thermals (most of the rest is then YAGNI) or produces the data that justifies the governor. The one artifact that serves both candidate devices and the iOS go/no-go. CF #87, #88.
 
-**Scope:**
+### `frametime-percentiles`
 
-- **`LeaprsProvider` real implementation** — replace the [`LeaprsProvider`](../../crates/wc-core/src/input/providers/leap_native.rs) stub (currently returns `HandTrackingStatus::Disconnected` and logs a warning). Add `leaprs` crate dep (`LeapC` bindings); wire `start` / `stop` / `poll` to actually open the connection and emit `HandTrackingFrame` messages each frame.
-- **Provider selection at startup** — the binary's `ActiveProvider` selection needs a runtime toggle (env var, CLI flag, or build-time feature). When Leap is available, the binary inserts `LeaprsProvider`; otherwise falls back to the mock provider. The `hand-tracking-gestures` feature should pull in the real provider by default.
-- **Hands-on Leap testing** — on Madison's Leap hardware, verify:
-  - Pinch above [`PINCH_PRESS_THRESHOLD`](../../crates/wc-sketches/src/line/systems/mouse.rs) (0.85) spawns an attractor at the projected hand position.
-  - Releasing the pinch zeros the attractor.
-  - Holding the pinch holds the attractor and the audio voice tracks the held envelope.
-  - Two hands → two attractors. Multi-attractor physics already supports N=8; the gesture path needs to feed both `left()` and `right()` simultaneously without one stomping the other.
-- **Hand-position projection.** The `HandTrackingState` carries the hand's 3D position in Leap-space coordinates. Plan 11.6 picks a projection to world-space pixels (likely a top-down ortho mapping calibrated against the Leap's mounting position above the kiosk). Document the projection so the parity capture can reproduce it.
-- **Soak test on Leap input** — re-run the 8-hour soak harness with synthetic hand-tracking events to verify no leaks in the new provider path. The real Leap hardware soak can wait for the pi-party deployment dress rehearsal.
+Custom p95/p99 over `FrameTimeDiagnosticsPlugin` history (the built-in exposes a smoothed average only; ~30 LOC over the history ring, sized for a 12-hour run not the default ≈20 samples). Feeds the governor and the perf-audit harness.
 
-**Out of scope:**
+### `perf-governor`
 
-- **Mediapipe / webcam fallback provider** — kiosk targets Leap exclusively. Mediapipe is a future hand-tracking option if Madison wants to demo on a laptop without the Leap controller, but not a parity gate.
-- **In-air gestures beyond pinch** (grab, swipe, point) — Line uses pinch only. Future sketches that need richer gestures will extend `HandGestureEvent` and the gesture-detection systems.
+A `PerformanceGovernor` + `QualityLevel` / `QualitySettings` subscription pattern, **frame-time-primary with thermal as a secondary bias** (asymmetric hysteresis, mirroring the thermal tiers; sketches subscribe to the shared signal, cf. the universal audio-coupling pattern). Generalises the design-for-but-defer "in-sketch live thermal auto-adaptation" (spec D9) into a multi-signal governor that throttles **live** particle-count / dispatch-size / fps during play (today only the screensaver throttles, and only present-rate).
 
-**Risks:** (1) `leaprs` crate ergonomics — last-touched several years ago, may need patching — and (2) the projection calibration against actual kiosk mounting.
+Frame-time-primary is the right *primary* signal because it's the only fine-grained adaptive signal that survives the worst-case targets: **WASM / WebGPU exposes no thermal sensor at all**, and **iOS exposes only a coarse 4-level enum**. Gated on `perf-soak-telemetry` + `frametime-percentiles`.
 
-**Carry-forwards Phase 0:** absorbs whatever items are in `next-plan-carry-forwards.md` at the time of writing.
+### `dynamic-resolution`
 
-### Plan 11.7 — Final Line `PARITY.md` sign-off + `v5-line-parity` tag
+Render-scale DRS — the biggest GPU lever. Render the 2D + gravity-post pass into a reduced `Image` target and upscale on composite (Bevy's `MainPassResolutionOverride` is DLSS-oriented and excludes 2D/post passes, so it doesn't help Line — this is a real custom-pipeline change). UI stays native-crisp. **Priority is device-conditional:** evidence-gated/defer on an actively-cooled box; **likely-required on a fanless A12Z iPad at retina res** (a 264 ppi panel hides a ~0.5× particle/post pass). Reject `bevy-dynamic-viewport` and `set_scale_factor_override` (rescales UI too).
 
-The closing step of the Line workstream. Runs once 11.5 (overlay UI) and 11.6 (Leap verification) are both shipped — the capture only carries weight against a build that has all the surface a v4 user sees.
+*Dropped from the research:* the sysinfo/wmi/macmon thermal-crate survey (superseded by the zero-dep reader); Windows-WMI / Intel-Mac thermal completeness (not targets); an in-app watchdog; `bevy-dynamic-viewport`; `set_scale_factor_override` DRS; a shared `RenderScale` resource sketches "inherit" (2D vs 3D passes don't share a target shape — retrofit per-camera instead).
 
-**Scope:**
+---
 
-- **Manual side-by-side parity capture.** Madison runs v5 (`cargo run -p waveconductor`) against v4 (`npm run dev` on the v4 worktree, branch pinned at a recorded commit hash) at 1280×720. Matching idle, mid-press, and mid-decay states captured at both. Mouse, touch, and Leap pinch are each exercised. Audio is captured (system audio recording) so the v5 pad-instrument character can be diffed against v4's synth.
-- **Approved-deviation roll-up.** `crates/wc-sketches/src/line/PARITY.md` records the v5-only divergences as approved deviations, not parity failures:
-  - **Multi-axis gyroscope** attractor visual replaces v4's tilted single-ring rotation. Deliberate v5 design choice (Madison-directed) — improves silhouette legibility and reads as more "alive."
-  - **Pad-instrument synth** with stochastic LFOs, pink-noise breath, and configurable attack/release replaces v4's stricter envelope. Documents the universal "audio reads CPU inputs" coupling pattern.
-  - **Heatmap-image spawn** accepts `png`, `jpg`, `jpeg`, `webp` rather than `png` only (v4).
-  - Each deviation linked to the commit that landed it.
-- **`PARITY.md` verdict** flipped from PENDING → PASS. Pinned v4 reference commit recorded. Capture artifacts (screenshots + audio) checked into `docs/parity/line/` or linked from `PARITY.md`.
-- **Tag `v5-line-parity`** on `rewrite/bevy` at the verdict commit. Push to origin.
+## Phase 3 — iOS / iPad port
 
-Mostly mechanical capture work — the substance lives in 11, 11.5, and 11.6.
+A candidate primary deployment device: **iPad Pro 11″ 2nd gen (MY232LL/A) — A12Z (2020), 8-core GPU, fanless, LiDAR + TrueDepth, 2388×1668 retina (264 ppi) 120 Hz ProMotion, iPadOS 26.** Added alongside the four stated build targets (macOS, Linux, Windows, WASM all keep compiling); iOS is additive. Triaged from a Perplexity research pass + an adversarial review that verified every load-bearing claim against the codebase and current docs.
 
-## Beyond Line
+**Integration model: Bevy owns the iOS app** (reject the research's Swift-shell model). `main.rs` is a standard `DefaultPlugins` + `bevy_winit` app, and winit's UIKit backend runs the *whole* app on `aarch64-apple-ios`. Because `wc-core` is Bevy-native (63/72 files), Bevy-owns-the-app shares the entire existing app (HDR pipeline, egui chrome, Core/Sketches plugins); native capabilities (Vision, AVAudioSession, `isIdleTimerDisabled`, `thermalState`, document picker) are `objc2` leaf shims under the `platform/` convention. *Dropped:* the Swift-shell model; the "Bevy-free `waveconductor_core`" refactor (fantasy — 63/72 files are Bevy-coupled); AVAudioEngine (cpal has a real iOS CoreAudio backend — the fundsp+rtrb graph runs unchanged; only a ~20-line `AVAudioSession` shim is needed).
 
-Per spec §8 the v4 deck contains five sketches. Plans 12+ port them. Order is provisional — the actual sequence depends on which sketch's data demands surface architectural gaps soonest.
+**Interaction on iPad:** touchless is primary here too — **Apple Vision hand-tracking is required, not optional** (the kiosk outputs to a projector; touch is the secondary mode). Hand-Z isn't required, so Vision-2D (no LiDAR fusion) is acceptable across the deck.
 
-| Sketch | Parity target | Notes |
-| ------ | ------------- | ----- |
-| Line | Perceptual | Plans 7–11. |
-| Flame | Perceptual | IFS fractal; recognizability matters, chaotic detail can drift. CPU-bound (tree structure doesn't parallelize to GPU); audio coupling stays where v4 has it (visitor stats during the same per-frame CPU traversal). No GPU↔CPU sync concern. |
-| Dots | Perceptual | Particle character matters; shares most infrastructure with Line. **Keep particles on CPU** (matches v4); if particle counts ever demand GPU, port the audio coupling to the approximated-envelope pattern from Plan 11 Phase F. |
-| Cymatics | Physics-matched | 2025-era human-authored sketch. The visual *is* the simulation; numerical drift = wrong sketch. GPU compute (ping-pong wave PDE) — and v4's audio coupling already reads CPU-side input scalars (`activeRadius`, `numCycles`, `centerSpeed`, `slowDownAmount`), never GPU state. This is the architectural reference for the universal pattern below. |
-| Waves | Perceptual | Audio→visual coupling (FFT of microphone). Requires microphone capture + rustfft path that Plan 4 explicitly deferred. Visuals are a closed-form CPU heightmap; no GPU compute needed. |
+**#1 GPU-port risk:** the multi-pass HDR + gravity-post (framebuffer readback) + bloom + 6-pass blur stack at retina res — TBDR mobile GPUs punish full-screen framebuffer-readback passes. wgpu→Metal *compute* itself is fine on A12Z (WebGPU-only / compute-only is a *web-target* constraint, not a native-Metal one). Mitigated by `ios-dynamic-resolution` and dropping bloom/blur under `Hot`. Must be proven by the on-device soak.
 
-Each sketch ships its own `PARITY.md` and absorbs whatever carry-forwards have accumulated.
+### `ios-foundations`
 
-### Universal audio-coupling pattern (codified during Plan 11 Phase F)
+`aarch64-apple-ios` (+ sim) targets; a macOS CI runner compiling iOS behind the lint gate; an Apple Developer account + provisioning/signing; gate `hand-tracking-gestures` (Leap) / `rfd` / dev-settings-panel *off* in the iOS profile. `cargo-mobile2` / `xcodebuild` wraps the Xcode project. **Exit:** `cargo build --target aarch64-apple-ios` green in CI.
+
+### `ios-first-light`
+
+winit UIKit app launches on-device, draws the Home picker + Line at native res, touch drives the attractor (touch first only because it's the easiest bring-up signal); FFI shims: `AVAudioSession` category/activation, `isIdleTimerDisabled`. **Exit:** Line interactive on-device, audio audible.
+
+### `ios-thermal-soak`
+
+`ThermalSource::OsThermalState` backend mapping `ProcessInfo.thermalState` → `ThermalTier` (via `thermal-seam-generalization`, bypassing the °C classifier — the OS provides hysteresis). Run `perf-soak-telemetry` **on the iPad**. **Exit (go/no-go):** an 8-hour on-device soak that either holds fanless thermals on the present-rate throttle, or produces the data justifying `ios-dynamic-resolution`. Depends on `thermal-seam-generalization`, `perf-soak-telemetry`.
+
+### `ios-vision-hands`
+
+*Required for the iPad kiosk (touchless primary).* An Apple Vision (`VNDetectHumanHandPoseRequest`) provider as a new `HandTrackingProvider` impl emitting the existing `HandTrackingFrame` shape (CF #76 reserves a second `ProviderId`). Caveats: Vision runs async, so the provider runs detection on its own queue and `poll()` drains a lock-free buffer (the WebSocket provider's pattern); Vision returns **2D landmarks, no Z** — acceptable per the interaction model (no sketch needs hand-Z). LiDAR depth fusion is a future enhancement, not in scope.
+
+### `ios-dynamic-resolution`
+
+*(Conditional on `ios-thermal-soak` evidence.)* The `dynamic-resolution` Image-target downscale for the Line 2D + gravity-post pass, tier-driven, with native-res UI composite. **Exit:** soak holds with UI staying crisp. Depends on `dynamic-resolution`.
+
+### `ios-kiosk-hardening`
+
+- **Crash recovery:** MDM / Apple Configurator **Single App Mode on a supervised device** (`com.apple.app.lock`) — Guided Access does *not* relaunch a crash or survive reboot; there is no iOS `Restart=always`. Mostly ops / provisioning.
+- **Battery longevity:** a 2020 iPad pinned at ~100% under fanless GPU load 12 h/day risks swelling, and the user-settable 80% charge cap is iPad-2024+-only (the A12Z gets only automatic charge-management). Mitigate with ventilation, lower DRS to shed heat, an overnight duty-cycle, scheduled swelling inspection.
+- **Permissions:** pre-grant camera/mic at setup so no system prompt strands the piece mid-install.
+
+**Exit:** survives an unattended multi-day run + a forced crash.
+
+---
+
+## Phase 4 — New sketches & major features
+
+Post-parity creative expansion.
+
+### `face-body-tracking`
+
+A new touchless interaction surface beyond hands — face and/or body pose tracking, via Apple APIs (Vision body pose / ARKit body tracking, TrueDepth face) on iPad, or MediaPipe for cross-platform / webcam. Slots into the same `HandTrackingProvider`-style provider abstraction (or a sibling pose provider). Opens new sketch interaction modes (lean / approach, face-driven, full-body). Down the road.
+
+### `new-sketches`
+
+Original post-v4 sketches and other major features. Design each with the universal audio-coupling pattern from day one (derive audio from CPU-side inputs, never GPU readback). Open-ended.
+
+---
+
+## Phase 5 — Web showcase
+
+*Lowest priority.* The working v4 app already covers the web target, so the v5 web build is mainly a **portfolio showcase**, not the installation. WebGPU-only (no WebGL2 / CPU fallback; compute-shader particle path only).
+
+Keeping web as a live target nonetheless **informs architecture along the way**: it's why frame-time-primary governance matters (no thermal sensor in the browser), why the settings-persistence layer already carries a `web-sys` localStorage path, and why the input layer keeps a `websocket` provider. Build the actual bundle last.
+
+### `web-showcase`
+
+The WASM/WebGPU portfolio build + bundle. Inherits the frame-time-primary governor as its only adaptive lever.
+
+---
+
+## Release gates (tag `v5.0.0`, merge `v5-alpha` → `main`)
+
+Cross-cutting items that must be true before tagging `v5.0.0` and merging to `main`. Most map to slugs above; the rest:
+
+- **Distribution** (spec §5.7) — macOS DMG, Windows portable exe, AppImage, web bundle, and (if iPad is taken) an `aarch64-apple-ios` `.ipa`. CI matrix + signing + notarization. Asset-path config for release bundles lands incrementally; iOS bundles assets inside the `.app`.
+- **8-hour soak** (AGENTS.md) — required before every release tag (`perf-soak-telemetry` is the full-render version).
+- **Perf audit harness** (spec §5.9) — `FrameTimeDiagnosticsPlugin` / `EntityCountDiagnosticsPlugin` / `SystemInformationDiagnosticsPlugin` → CSV (overlaps `perf-soak-telemetry` + `frametime-percentiles`). `bevy_framepace` spike — adopt if it improves thermal behaviour, skip if free-running already meets the bar.
+- **v4 perf-mode shim** (spec §5.11) — a small IPC + start/stop bridge so v4 can stay on `main` until v5.0 is feature-complete.
+- **Licenses surface** — port v4's `/licenses` route (the credits cell currently renders "Open Source Licenses" as plain text). Generate the dependency-license bundle (`cargo-about` / `cargo-bundle-licenses` in CI), ship it as an asset, wire an in-app modal through the overlay chrome. Reference `.worktrees/v4/src/routes/licensesPage/`.
+
+---
+
+## Reference: universal audio-coupling pattern
+
+*Codified during Line's audio re-tune. Applies to every sketch.*
 
 **Audio derives from CPU-side simulation *inputs*, never from GPU-side simulation *outputs*.**
 
-The pattern surfaced when Line's Plan 7 GPU-compute pipeline created a CPU↔GPU sync problem: the audio coupling needed per-frame particle statistics, but the authoritative particle state lived on the GPU. Plans 7–10 worked around it with a `LineCpuMirror` running parallel physics on the host. Plan 11 Phase F replaced that mirror with smoothed CPU envelopes driven by `MouseAttractorState` events — the audio coupling now reads attractor power directly, not the per-particle reduction, at ~1µs/frame instead of ~50µs.
-
-The architectural insight: v4's Cymatics sketch already does this naturally. Its GPU compute simulation is driven by CPU-side parameters (`activeRadius`, `numCycles`, etc.); the audio reads those same parameters. The GPU is never read back. **Cymatics is the reference; Line's Phase F brings it into the same shape.**
+Line's GPU-compute pipeline created a CPU↔GPU sync problem: the audio coupling needed per-frame particle statistics, but the authoritative state lived on the GPU. The fix replaced a parallel CPU physics mirror with smoothed CPU envelopes driven by `MouseAttractorState` events — audio reads attractor power directly (~1µs/frame vs ~50µs). v4's Cymatics already does this: its GPU compute is driven by CPU-side parameters and the audio reads those same parameters; the GPU is never read back.
 
 Apply to future sketches:
 
-- **Identify the CPU-side inputs that drive the simulation** (mouse position, attractor power, time-since-event, mode/setting changes, etc.).
-- **Derive audio control signals from those inputs**, not from per-particle / per-cell statistics computed off GPU state.
-- **Use smoothed envelopes** (attack/release on rising/falling edges of input events) to produce the right *perceptual shape* — rising on activity, plateauing during sustained input, decaying after release. Tune the constants against v4 perceptually; document them as named consts with rustdoc.
-- **Approved deviation**: audio output won't be mathematically equivalent to v4 frame-by-frame, but IS perceptually equivalent. Document in `PARITY.md` per sketch.
+- Identify the CPU-side inputs that drive the simulation (pointer/hand position, attractor power, time-since-event, mode/setting changes).
+- Derive audio control signals from those inputs, not from per-particle / per-cell GPU-state reductions.
+- Use smoothed envelopes (attack/release on input edges) for the right perceptual shape; tune constants against v4 perceptually; document as named consts.
+- Approved deviation: audio won't be frame-by-frame mathematically equal to v4, but IS perceptually equivalent — document per `PARITY.md`.
 
-Implications per sketch:
+Per sketch: Flame — no change (visitor stats already CPU-side). Dots — keep particles CPU-side. Cymatics — copy v4 directly (CPU drives the GPU-compute inputs; audio reads them). Waves — audio is *input* (mic FFT), no coupling concern. The `AudioCommand::Add<Sketch>Synth` + per-param-over-a-lock-free-ring shape established for Line is the template.
 
-- **Flame**: no change needed — visitor stats are already CPU-side, IFS is CPU-bound, no GPU coupling.
-- **Dots**: simplest path is to keep particles on CPU (v4-faithful, no mirror, no envelope work). Only fall back to envelope approximation if particle counts force a GPU port.
-- **Cymatics**: copy v4's pattern directly. CPU drives the inputs that feed the GPU compute; audio reads from those same CPU inputs.
-- **Waves**: audio is INPUT (microphone FFT), not output. Visuals derive from CPU heightmap. No coupling concern.
-- **Future post-v4 sketches**: design with this pattern from day one. If you need a per-particle reduction for audio, that's a smell — derive from inputs instead.
+---
 
-The synthesis registration shape established for Line (`AudioCommand::AddLineSynth` / `RemoveLineSynth` + per-synth-param messages over a lock-free ring) is the right pattern; future sketches add their own `Add<Sketch>Synth` variants with sketch-specific param keys.
+## Shipped history
 
-## Screensaver & adaptive thermal (shipped — carry-forwards)
+Immutable ledger of shipped work. Full detail in the per-plan docs under `docs/superpowers/plans/`.
 
-The Line screensaver / attract mode shipped its four seams (thermal signal, screensaver framework, Line attract driver, Leap idle-pause). See the design spec at `specs/2026-05-29-line-screensaver-attract-mode-design.md`, especially the §10 as-built addendum, for the two deviations made during verification (Hot tier = "Low-Rate Ember" not a frozen dispatch; thermal sensing = zero-dependency Linux sysfs reader, not `sysinfo`).
+| Plan | Topic | Tag |
+| ---- | ----- | --- |
+| 1 | Foundation (workspace, CI, lint gates) | `v5-foundation` |
+| 2 | Lifecycle (state machine, leafwing keyboard actions) | `v5-lifecycle` |
+| 3 | Input (mouse, touch, hand-tracking provider, pointer state) | `v5-input` |
+| 4 | Audio scaffolding (cpal stream, ring buffers, default-silent DspHost) | `v5-audio` |
+| 5 | Settings (Reflect-based, persistence, dev/user panels, derive macro) | `v5-settings` |
+| 6 | Line skeleton + sketch scaffolding pattern | `v5-line` |
+| 7 | Line simulation parity + idle veto hook | `v5-line-sim` |
+| 7.5 | Test harness: synthetic input + shared `tests/common/` | `v5-test-harness` |
+| 8 | Line rendering parity (gravity smear, star sprites, attractor rings) | `v5-line-render` |
+| 9 | Line audio + reactivity coupling | `v5-line-audio` |
+| 10 | Line polish + heatmap spawn + soak harness | — (parity gaps → Plan 11) |
+| 11 | Line parity completion (rings, touch/hand activation, file picker, audio re-tune) | — (tag → `line-parity-signoff`) |
+| 11.5 | Overlay UI parity (translucent buttons, settings chrome, nav, auto-fade, HDR pipeline) | — (tag → `line-parity-signoff`) |
+| 11.6 | Hand-tracking `LeaprsProvider` + Leap manual verification + HandMesh | — (tag → `line-parity-signoff`) |
+| 11.8 | Line screensaver / attract mode + adaptive thermal | — (carry-forwards → `screensaver-attract`) |
 
-The items below were **intentionally** scoped out (spec §6 and §10). None block the screensaver shipping or a `v5-screensaver` tag on their own; each is a clean follow-up.
+Notes preserved from the shipped narratives that bear on open work:
 
-### Hardware / soak verification (do these on the NUC before relying on adaptive throttling)
+- **11.5 approved deviations** (record at `line-parity-signoff`): `panel_stroke` alpha 20→60, `button_stroke` 38→76, `panel_fill` 204→160 (browser backdrop-filter compositing); overlay buttons use `backdrop_blur_frame`; fade-overlay reload (v4 is instant); sheen 30° rotation on a horizontal strip; credits "Open Source Licenses" is plain text (no in-app page yet); egui has no letter-spacing knob; HDR + AgX + bloom (intensity 0.15, `Bloom::NATURAL`) pipeline matching v4's float-precision / browser-tonemap path.
+- **11.5 not-shipped** (→ carry-forwards): fullscreen-toggle overlay button (keybinding exists), info/about button, dev-panel section grouping.
+- **11.6 leaprs notes:** `leaprs 0.2.2`; `vendor/leapc/` soname version 6; `unsafe impl Send+Sync` on the connection; API-surface caveats — see CF #78–82.
 
-- **NUC thermal sensor sign-off + threshold tuning.** The Linux sysfs reader (`wc-core` `lifecycle::thermal::platform::native`) is compile- and ABI-verified but has not run against live `/sys`. On the actual NUC: `cat /sys/class/hwmon/hwmon*/name` and the matching `temp*_input`, confirm a CPU chip (`coretemp`/`k10temp`) is found, then tune the placeholder bands (`enter_warm` 75 / `enter_hot` 90 °C in `lifecycle::thermal::mod.rs`) against observed steady-state-vs-throttle temperatures.
-- **8-hour `DefaultPlugins` (full-render), never-exited screensaver soak.** The existing soak runs `MinimalPlugins` (no renderer) and exercises spawn/despawn churn; the screensaver runs the *full* pipeline resident for hours without hitting `OnExit`. A full-render soak held in the Screensaver state is what actually de-risks long-uptime stability — and produces the temperature log that tunes the thresholds above. (Supersedes the generic "8-hour soak with `DefaultPlugins`" item in the pre-release tier for the screensaver's purposes.)
-- **Leap controller-heat hardware verification.** The idle-pause (`ALLOW_PAUSE_RESUME` + `set_paused` on entering the screensaver) reliably sheds *host* CPU, but its effect on the *controller's* IR-LED heat is inconsistent across SDK builds. Verify on hardware with an IR-viewer (does pause extinguish the LEDs?) and measure resume latency. If controller heat must drop, the only guaranteed fix is cutting USB power (a switchable powered hub) during deep idle.
+The per-plan implementation docs (`docs/superpowers/plans/`) carry the full as-built detail for each line above.
 
-### Deferred features (build when the need / evidence arrives)
-
-- **Hot-tier "warm-up-then-freeze" escalation.** Hot currently ships as the "Low-Rate Ember" (full pipeline at ~3 fps present rate) because a from-start dispatch freeze black-screens (particle alpha only rises inside the compute shader). If the soak shows 3 fps + the Leap idle-pause still runs the NUC too hot, add a true dispatch freeze that first runs the dispatch until alpha saturates, *then* latches `particle_count = 0`. Gated on that evidence — YAGNI until then.
-- **Real macOS thermal sensing (`macmon`).** Apple-Silicon stays on the Cool/Schedule fallback because `macmon`'s MSRV (1.95) exceeds the pinned rustc 1.89. The reader is written and preserved behind the dormant, `compile_error!`-guarded `thermal-sensor-macos` feature; enabling it is a one-spot change after a toolchain bump (see below).
-- **Toolchain bump (1.89 → current stable).** The 1.89 pin is incidental — "whatever stable was current on 2026-05-22", not a feature requirement (edition is 2021). Bumping to current stable (1.95/1.96) keeps the reproducibility + lint-stability benefits of pinning and unblocks the `macmon` macOS sensor and latest `sysinfo`/deps. Do it as its own isolated commit (`rust-toolchain.toml` + `clippy.toml` `msrv` + workspace `rust-version`), then re-run the full gate.
-- **Presence-reactive attract layer (#4).** Particles lean toward an approaching visitor *before* they engage; the seam is left open in the choreography. Two tiers: (a) react to a hand entering the tracking volume pre-grab (free, no new SDK surface); (b) tap the raw Leap IR images (`IMAGES` policy) for near-field approach detection (more work, per-frame image bandwidth).
-- **Per-sketch attract visuals for the other sketches.** The framework (`in_screensaver(AppState)` run-condition + per-tier present throttle + caption overlay) already supports them; only Line authored a performer. Flame/Dots/Cymatics/Waves each register their own when built.
-- **In-sketch (live) thermal auto-adaptation.** *Live* sketches self-throttle (particle count / dispatch / fps) under sustained load during play, reading the same `ThermalState` signal the screensaver consumes (the signal was built minimal-but-general for exactly this — design-for-but-defer, spec D9). Distinct from the screensaver's own throttling, which already ships.
-
-## Pre-release tier
-
-These land before tagging `v5.0.0` and merging `rewrite/bevy` → `main`. They are *not* per-sketch but cut across the workspace:
-
-- **Distribution** (spec §5.7) — macOS DMG, Windows portable exe, AppImage, web bundle. CI matrix + signing + notarization. Asset-path config for release bundles is one of the Plan 7 carry-forwards and lands incrementally.
-- **8-hour soak test** (AGENTS.md) — required before every release tag. Harness lands in Plan 10.
-- **Perf audit harness** (spec §5.9) — FrameTimeDiagnosticsPlugin / EntityCountDiagnosticsPlugin / SystemInformationDiagnosticsPlugin readout into a CSV log. `bevy_framepace` spike (spec §5.12) — adopt if it improves thermal behavior, skip if free-running already meets the bar.
-- **v4 perf-mode shim** (spec §5.11) — small IPC + start/stop bridge so v4 can stay on `main` until v5.0 is feature-complete.
-- **Microphone capture + rustfft path** (deferred from Plan 4) — prerequisite for the Waves sketch.
-- **Licenses surface** — v4's homepage credits-block links to an internal `/licenses` route that renders the workspace's open-source license attributions. v5 has no equivalent; the credits cell currently renders "Open Source Licenses" as plain text. Port: generate the dependency-license bundle (e.g. via `cargo-about` or `cargo-bundle-licenses` in CI), ship it as an asset, and wire an in-app modal (or a dedicated `AppState` variant) that reads the bundle and renders it through the same overlay chrome. Reference the v4 component at `.worktrees/v4/src/routes/licensesPage/` for layout.
+---
 
 ## Convention
 
-Each plan:
-
-- Lives at `docs/superpowers/plans/YYYY-MM-DD-v5-plan-N-<topic>.md`.
-- Closes with a commit + tag `v5-<topic>`.
-- Has a Phase 0 that absorbs whatever items are in `next-plan-carry-forwards.md` at the time of writing. New items added during the plan's review pass roll forward to the next plan's Phase 0.
-- Sketch-touching plans also update or create `crates/wc-sketches/src/<sketch>/PARITY.md` once the sketch reaches its parity target.
-
-Plans are written via the `superpowers:writing-plans` skill and executed via `superpowers:subagent-driven-development`.
+- Forward work is a **slug** (`kebab-case`); ordering / dependencies live in *Sequence & priorities*. Discrete shippables close with a commit + `v5-<slug>` tag.
+- Detailed per-item plans live at `docs/superpowers/plans/YYYY-MM-DD-v5-<slug>.md`, written via the `superpowers:writing-plans` skill and executed via `superpowers:subagent-driven-development`.
+- Each plan has a **Phase 0** that absorbs the current `next-plan-carry-forwards.md` items; new items found during review roll forward.
+- Sketch-touching plans update / create `crates/wc-sketches/src/<sketch>/PARITY.md` at the sketch's parity target.
+- Work lands on `v5-alpha`; `v5.0.0` tags the parity release and merges to `main`.
