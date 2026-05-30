@@ -50,6 +50,15 @@ pub struct DebugToggles {
     /// `WC_DEBUG_SOLID_PARTICLES=<rgba hex>`: render particles as a flat linear
     /// colour (`[r, g, b, a]`, 0..=1). `a > 0` means "active".
     pub solid_particles: Option<[f32; 4]>,
+    /// `WC_DEBUG_FORCE_SCREENSAVER`: drive `SketchActivity::Screensaver` at
+    /// startup so a capture scenario lands in attract mode without waiting out
+    /// the idle timer. Presence = on.
+    pub force_screensaver: bool,
+    /// `WC_DEBUG_FORCE_TIER=<cool|warm|hot>`: pin the screensaver's
+    /// [`crate::lifecycle::thermal::ThermalTier`] so each tier can be captured
+    /// deterministically (the real sensor is hardware/load-dependent). `None`
+    /// = use the live `ThermalState`. Unparseable value → `None`.
+    pub force_tier: Option<crate::lifecycle::thermal::ThermalTier>,
 }
 
 impl DebugToggles {
@@ -64,6 +73,7 @@ impl DebugToggles {
         let force_g = value("WC_DEBUG_FORCE_G").and_then(|v| v.trim().parse::<f32>().ok());
         let solid_particles =
             value("WC_DEBUG_SOLID_PARTICLES").and_then(|v| parse_rgba_hex(v.trim()));
+        let force_tier = value("WC_DEBUG_FORCE_TIER").and_then(|v| parse_tier(v.trim()));
 
         Self {
             force_g,
@@ -72,6 +82,8 @@ impl DebugToggles {
             disable_bone_composite: present("WC_DEBUG_DISABLE_BONE_COMPOSITE"),
             disable_bone_camera: present("WC_DEBUG_DISABLE_BONE_CAMERA"),
             solid_particles,
+            force_screensaver: present("WC_DEBUG_FORCE_SCREENSAVER"),
+            force_tier,
         }
     }
 
@@ -88,6 +100,19 @@ impl DebugToggles {
 /// True if any `WC_DEBUG_*` var is present — the activation predicate.
 pub fn any_debug_var_present(vars: &[(String, String)]) -> bool {
     vars.iter().any(|(k, _)| k.starts_with("WC_DEBUG_"))
+}
+
+/// Parse a `WC_DEBUG_FORCE_TIER` value (case-insensitive `cool`/`warm`/`hot`)
+/// into a [`crate::lifecycle::thermal::ThermalTier`]. Returns `None` for any
+/// other input so a typo silently falls back to the live tier.
+fn parse_tier(value: &str) -> Option<crate::lifecycle::thermal::ThermalTier> {
+    use crate::lifecycle::thermal::ThermalTier;
+    match value.to_ascii_lowercase().as_str() {
+        "cool" => Some(ThermalTier::Cool),
+        "warm" => Some(ThermalTier::Warm),
+        "hot" => Some(ThermalTier::Hot),
+        _ => None,
+    }
 }
 
 /// Parse a 6- or 8-digit RGB(A) hex string (no `#`) into linear `[r,g,b,a]` in

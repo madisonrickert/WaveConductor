@@ -22,9 +22,11 @@ pub mod nav;
 pub mod reload;
 pub mod screensaver;
 pub mod state;
+pub mod thermal;
 
 pub use idle::RegisterIdleVetoExt;
 pub use reload::SketchReloadState;
+pub use thermal::{ThermalSource, ThermalState, ThermalTier};
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::*;
@@ -64,8 +66,16 @@ impl Plugin for LifecyclePlugin {
                     reload::drive_reload_state,
                 )
                     .chain(),
-            )
-            .add_systems(OnEnter(state::SketchActivity::Screensaver), screensaver::show)
-            .add_systems(OnExit(state::SketchActivity::Screensaver), screensaver::hide);
+            );
+
+        // Adaptive thermal signal (Plan 12, Seam 1). Spawns the background
+        // temperature sampler and maintains `Res<ThermalState>`. Built before
+        // the screensaver framework so the latter can read the tier.
+        app.add_plugins(thermal::ThermalMonitorPlugin);
+
+        // Screensaver / attract-mode framework (Plan 12, Seam 2). Owns the
+        // `in_screensaver` run-condition, the `ScreensaverSettings` resource,
+        // the instruction overlay, and the per-tier present-rate throttle.
+        app.add_plugins(screensaver::ScreensaverPlugin);
     }
 }

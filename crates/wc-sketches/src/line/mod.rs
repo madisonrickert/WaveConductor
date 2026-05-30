@@ -38,6 +38,7 @@ pub mod material;
 pub mod particle;
 pub mod particle_stats;
 pub mod post_process;
+pub mod screensaver;
 pub mod settings;
 pub mod sim_cpu;
 pub mod systems;
@@ -102,6 +103,11 @@ impl Plugin for LinePlugin {
 
         // Wire per-hand attractors (Plan 11.6 Phase 11.1).
         app.add_plugins(leap_attractors::LineLeapAttractorsPlugin);
+
+        // Wire the attract-mode / screensaver driver (Plan 12, Seam 3). Its
+        // systems are gated on `in_screensaver(AppState::Line)`, so they run
+        // only while Line's screensaver is showing — zero cost otherwise.
+        app.add_plugins(screensaver::LineScreensaverPlugin);
 
         // Wire wireframe bone visualization (Plan 11.6 Phase 13).
         app.add_plugins(hand_mesh::LineHandMeshPlugin);
@@ -373,6 +379,8 @@ mod tests {
             disable_bone_composite: false,
             disable_bone_camera: false,
             solid_particles: None,
+            force_screensaver: false,
+            force_tier: None,
         };
         assert!(should_register_smear(Some(&all_off)));
         assert!(should_register_bone_composite(Some(&all_off)));

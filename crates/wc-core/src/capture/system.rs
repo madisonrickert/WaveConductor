@@ -256,6 +256,13 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     if let Some([r, g, b, a]) = t.solid_particles {
         parts.push(format!("\"solid_particles\":[{r},{g},{b},{a}]"));
     }
+    if t.force_screensaver {
+        parts.push("\"force_screensaver\":true".to_string());
+    }
+    if let Some(tier) = t.force_tier {
+        // Lower-case the tier name to match the `WC_DEBUG_FORCE_TIER` input form.
+        parts.push(format!("\"force_tier\":\"{}\"", format!("{tier:?}").to_lowercase()));
+    }
     format!("{{{}}}", parts.join(","))
 }
 
@@ -361,6 +368,8 @@ mod tests {
             disable_bone_composite: false,
             disable_bone_camera: false,
             solid_particles: None,
+            force_screensaver: false,
+            force_tier: None,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");

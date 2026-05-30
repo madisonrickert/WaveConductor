@@ -97,6 +97,17 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 # Bitflag types for hand-tracking device-side / service-side health
 # (DeviceHealth, ServiceHealth). Used by `input::state::ProviderStatus`.
 bitflags = "2"
+# Thermal sensing for the screensaver's adaptive `ThermalState` signal (Plan 12)
+# needs NO workspace dependency. The Linux deployment NUC is read by a
+# zero-dependency `std::fs` sysfs reader (`wc-core`
+# `lifecycle::thermal::platform::native`, behind the default-on `thermal-sensor`
+# feature). We deliberately avoided `sysinfo` (=0.33.1 builds on 1.89 but pulls
+# ~30 crates + a frozen MSRV pin; latest 0.39 needs rustc 1.95) and `lm-sensors`
+# (needs the libsensors C lib + bindgen at build time). macOS Apple-Silicon
+# stays on the Cool/Schedule no-sensor fallback; its `macmon` backend (MSRV >
+# the pinned 1.89) is preserved behind the dormant, `compile_error!`-guarded
+# `thermal-sensor-macos` feature for a future toolchain bump. See the design
+# spec's §10 addendum and `crates/wc-core/Cargo.toml`.
 # GPU struct alignment helpers (used by Line sketch particle/uniform buffers)
 bytemuck = { version = "1", features = ["derive"] }
 # Image decode (Plan 10 Phase A): Line sketch's heatmap-image spawn template

@@ -46,3 +46,6 @@ skills-lock.json
 # Plan 11 manual parity sign-off). Created via `git worktree add`; never
 # committed to the rewrite/bevy branch.
 /.worktrees/
+
+# Visual-companion brainstorming scratch (superpowers)
+.superpowers/

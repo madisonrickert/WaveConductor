@@ -13,7 +13,10 @@
 //! - [`sim_params`] — Per-frame writer for [`crate::line::compute::LineSimParams`].
 //!   Bakes the v4-parity drag constants, derives the size-scaled gravity
 //!   multiplier from the window width, and publishes the attractor array
-//!   alongside the constrain-to-box bounds.
+//!   alongside the constrain-to-box bounds. The param-baking core is factored
+//!   into the shared `bake_sim_params` / `bake_post_base` fns (Plan 12 Condition
+//!   A1) so the live writer here and the screensaver's phantom-hand writer
+//!   (`crate::line::screensaver`) bake identically and cannot drift.
 
 pub mod mouse;
 pub mod sim_params;
@@ -24,6 +27,7 @@ pub use mouse::{
     MOUSE_POWER_FLOOR, MOUSE_POWER_PRESS,
 };
 pub use sim_params::{
-    update_sim_params, V4_FIXED_DT, V4_INERTIAL_DRAG_CONSTANT, V4_PULLING_DRAG_CONSTANT,
+    bake_post_base, bake_sim_params, update_sim_params, WindowGeom, V4_FADE_DURATION, V4_FIXED_DT,
+    V4_INERTIAL_DRAG_CONSTANT, V4_PULLING_DRAG_CONSTANT,
 };
 pub use spawn::{spawn_line, LineRoot};

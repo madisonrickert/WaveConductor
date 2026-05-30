@@ -83,6 +83,13 @@ pub struct LeaprsProvider {
     /// `LeapC` service handshake completes, so we retry on each poll
     /// until it sticks.
     background_policy_applied: bool,
+    /// `true` once the `AllowPauseResume` policy has been successfully set on the
+    /// live connection. The screensaver pauses the service during idle as a
+    /// thermal lever (Plan 12, Seam 4 — the Ultraleap tracking service is a heavy
+    /// constant CPU load); `Connection::set_pause` only works after this policy
+    /// is granted, so it is armed via the same deferred-retry handshake as
+    /// `BackgroundFrames`.
+    pause_policy_applied: bool,
 }
 
 // ── HandTrackingProvider impl ────────────────────────────────────────────────
@@ -102,11 +109,13 @@ impl HandTrackingProvider for LeaprsProvider {
             HandTrackingError::Unavailable(format!("leaprs::Connection::open failed: {e}"))
         })?;
 
-        // BackgroundFrames policy is NOT applied here. `conn.open()` returns
-        // before the `LeapC` service handshake completes, so a policy call
-        // here returns `NotConnected`. The retry loop in `poll()` applies it
-        // once the connection has settled into `ServiceConnection::Connected`.
+        // BackgroundFrames / AllowPauseResume policies are NOT applied here.
+        // `conn.open()` returns before the `LeapC` service handshake completes,
+        // so a policy call here returns `NotConnected`. The retry loop in
+        // `poll()` applies both once the connection has settled into
+        // `ServiceConnection::Connected`.
         self.background_policy_applied = false;
+        self.pause_policy_applied = false;
 
         self.connection = Some(conn);
         self.status.service = ServiceConnection::Connecting;
@@ -166,44 +175,9 @@ impl HandTrackingProvider for LeaprsProvider {
             }
         }
 
-        // Apply the deferred BackgroundFrames policy once the handshake is
-        // complete. The first attempt at `start()` time returns NotConnected
-        // because the service connection is still mid-handshake; retrying on
-        // each poll until success sidesteps that without needing to plumb a
-        // post-Connection callback through `dispatch_event`.
-        if self.request_background
-            && !self.background_policy_applied
-            && matches!(self.status.service, ServiceConnection::Connected)
-        {
-            if let Some(conn) = self.connection.as_mut() {
-                match conn.set_policy_flags(
-                    leaprs::PolicyFlags::BACKGROUND_FRAMES,
-                    leaprs::PolicyFlags::empty(),
-                ) {
-                    Ok(()) => {
-                        self.background_policy_applied = true;
-                        if !self
-                            .diagnostics
-                            .active_policies
-                            .iter()
-                            .any(|p| p == "BackgroundFrames")
-                        {
-                            self.diagnostics
-                                .active_policies
-                                .push("BackgroundFrames".to_string());
-                        }
-                    }
-                    Err(e) => {
-                        // Will retry on the next poll. Log once-quietly so
-                        // the warning doesn't spam if the service stays
-                        // half-connected for several seconds.
-                        tracing::debug!(
-                            "deferred BackgroundFrames policy set still failing: {e}"
-                        );
-                    }
-                }
-            }
-        }
+        // Apply the deferred policies (BackgroundFrames, AllowPauseResume) once
+        // the service handshake has completed — see `apply_deferred_policies`.
+        self.apply_deferred_policies();
 
         // Heartbeat: refresh last_frame_ago or degrade to NotStreaming.
         match self.status.streaming {
@@ -240,6 +214,55 @@ impl HandTrackingProvider for LeaprsProvider {
 // ── LeaprsProvider typed-method extensions ───────────────────────────────────
 
 impl LeaprsProvider {
+    /// Apply the deferred connection policies once the service handshake is
+    /// complete. Called each `poll` after draining events.
+    ///
+    /// `conn.open()` returns before the handshake settles, so a policy set at
+    /// `start()` time returns `NotConnected`; we retry here on every poll until
+    /// `ServiceConnection::Connected` and the set succeeds, then latch the
+    /// applied flag so we stop retrying.
+    ///
+    /// - **`BackgroundFrames`** — only when `request_background` is set.
+    /// - **`AllowPauseResume`** — always (the screensaver's idle-pause lever
+    ///   needs it; Plan 12, Seam 4), independent of `request_background`.
+    fn apply_deferred_policies(&mut self) {
+        if !matches!(self.status.service, ServiceConnection::Connected) {
+            return;
+        }
+        if self.request_background && !self.background_policy_applied {
+            self.background_policy_applied = self
+                .try_set_deferred_policy(leaprs::PolicyFlags::BACKGROUND_FRAMES, "BackgroundFrames");
+        }
+        if !self.pause_policy_applied {
+            self.pause_policy_applied = self
+                .try_set_deferred_policy(leaprs::PolicyFlags::ALLOW_PAUSE_RESUME, "AllowPauseResume");
+        }
+    }
+
+    /// Set one policy flag on the live connection, recording `label` in
+    /// `active_policies` on success. Returns `true` if the policy is now applied
+    /// (so the caller can latch it), `false` to retry next poll. Returns `false`
+    /// if the connection vanished between drain and here.
+    fn try_set_deferred_policy(&mut self, flag: leaprs::PolicyFlags, label: &str) -> bool {
+        let Some(conn) = self.connection.as_mut() else {
+            return false;
+        };
+        match conn.set_policy_flags(flag, leaprs::PolicyFlags::empty()) {
+            Ok(()) => {
+                if !self.diagnostics.active_policies.iter().any(|p| p == label) {
+                    self.diagnostics.active_policies.push(label.to_string());
+                }
+                true
+            }
+            Err(e) => {
+                // Retry next poll. Logged at debug so a half-connected service
+                // doesn't spam warnings for several seconds.
+                tracing::debug!("deferred {label} policy set still failing: {e}");
+                false
+            }
+        }
+    }
+
     /// Apply or clear the `BackgroundFrames` policy on the open connection.
     ///
     /// No-op when the connection isn't open. Idempotent — applying the same
@@ -271,6 +294,45 @@ impl LeaprsProvider {
             self.diagnostics
                 .active_policies
                 .push("BackgroundFrames".to_string());
+        }
+    }
+
+    /// Pause or resume the Ultraleap tracking service (Plan 12, Seam 4).
+    ///
+    /// Pausing reliably cuts *host CPU* — the tracking service is a heavy
+    /// constant load (~44% of a core while tracking), the likely M1-overheating
+    /// culprit — so the screensaver pauses it during idle to shed heat. A paused
+    /// service emits no frames, so wake trades instant hand-detection for the CPU
+    /// saving; the lifecycle resumes on returning to `Active`.
+    ///
+    /// No-op when the connection isn't open or `AllowPauseResume` has not yet
+    /// been granted (the handshake in `poll` arms it). `Connection::set_pause`
+    /// returns `Err` until the policy is granted; we log at debug and retry on
+    /// the next call rather than panic.
+    ///
+    /// ## Honest caveat (hardware-verify)
+    ///
+    /// Software pause reliably cuts host CPU, but its effect on *controller heat*
+    /// (IR-LED power-down) is inconsistent across SDK builds. The only guaranteed
+    /// device-heat fix is cutting USB power. This targets the host-CPU/M1 win.
+    pub fn set_paused(&mut self, paused: bool) {
+        if !self.pause_policy_applied {
+            // The policy isn't granted yet; pausing would error. Skip quietly —
+            // the handshake in `poll` will arm it, and the next `set_paused`
+            // call (driven by the lifecycle system) will take effect.
+            tracing::debug!(
+                paused,
+                "leaprs: AllowPauseResume not yet granted; deferring set_pause"
+            );
+            return;
+        }
+        let Some(conn) = self.connection.as_mut() else {
+            return;
+        };
+        if let Err(err) = conn.set_pause(paused) {
+            tracing::warn!(?err, paused, "leaprs: set_pause failed");
+        } else {
+            tracing::info!(paused, "leaprs: tracking service pause state updated");
         }
     }
 }
@@ -595,6 +657,46 @@ pub fn apply_leap_background_setting(
             }
         }
     }
+}
+
+// ── screensaver idle-pause (Plan 12, Seam 4) ─────────────────────────────────
+
+/// Set the pause state on every registered Leap provider. Shared by the
+/// enter/leave-screensaver systems below so the downcast/iterate boilerplate
+/// lives in one place.
+fn set_all_leap_paused(registry: &mut crate::input::provider::ProviderRegistry, paused: bool) {
+    for slot in registry.iter_mut() {
+        if slot.id != crate::input::provider::ProviderId::Leap {
+            continue;
+        }
+        if let Some(any) = slot.inner.as_any_mut() {
+            if let Some(leap) = any.downcast_mut::<LeaprsProvider>() {
+                leap.set_paused(paused);
+            }
+        }
+    }
+}
+
+/// `OnEnter(SketchActivity::Screensaver)` — pause the Leap tracking service to
+/// shed host CPU during idle (Plan 12, Seam 4, D8).
+///
+/// The Ultraleap service is a heavy constant CPU load; pausing it is a parallel
+/// thermal lever to the renderer cooldown. We pause only on `Screensaver` (not
+/// mere `Idle`) so brief idles keep instant hand-detection wake; any interaction
+/// returns to `Active` and [`resume_leap_on_active`] resumes the service.
+pub fn pause_leap_on_screensaver(
+    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
+) {
+    set_all_leap_paused(&mut registry, true);
+}
+
+/// `OnEnter(SketchActivity::Active)` — resume the Leap tracking service so hands
+/// are detected again the instant a visitor returns. Idempotent; resuming an
+/// already-running service is a cheap no-op inside `set_pause`.
+pub fn resume_leap_on_active(
+    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
+) {
+    set_all_leap_paused(&mut registry, false);
 }
 
 #[cfg(test)]

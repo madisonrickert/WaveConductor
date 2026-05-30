@@ -54,12 +54,26 @@ exceeds `12`. A frame with no baseline yet never regresses — it is reported as
 
 ## Scenarios (`scenarios.toml`)
 
-Two scenarios are defined today:
+Scenarios defined today:
 
 | Name | sketch | provider | config | frames | debug |
 |------|--------|----------|--------|--------|-------|
 | `line-synthetic` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
 | `line-synthetic-no-bloom` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | `DISABLE_BLOOM = "1"` |
+| `line-screensaver-cool` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "cool"` |
+| `line-screensaver-warm` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "warm"` |
+| `line-screensaver-hot` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "hot"` |
+
+The `line-screensaver-*` scenarios drive Line's attract mode (Plan 12). They force
+`SketchActivity::Screensaver` at startup and pin a thermal tier so each tier's
+attract visual is reproducible (the live sensor is hardware/load-dependent). The
+frame spread (0 / 270 / 540 / 810 at dt=1/60) samples the ~9 s invitation pulse
+across **dream → rising → peak grab → release**. Expected per-frame signal: Cool
+and Warm animate (`delta_prev` ~7–24, peaking at frame 540 as particles converge
+at the vessel); Hot freezes the compute dispatch, so its `delta_prev` is ~0 after
+frame 0 (a static-but-bloom-breathing "ember"). Review the PNGs to confirm: (a)
+visibly Line, (b) two phantom hands read as a gesture over a central vessel at the
+grab, (c) Hot is calm-but-alive, not black.
 
 Schema:
 
@@ -106,6 +120,8 @@ the scenario's `[debug]` table or `--debug KEY=VAL` (the launcher re-prefixes
 | `WC_DEBUG_DISABLE_BONE_COMPOSITE` | Skip the additive bone-glow composite node. |
 | `WC_DEBUG_DISABLE_BONE_CAMERA` | Do not spawn the off-screen bone camera. |
 | `WC_DEBUG_SOLID_PARTICLES=<rgba hex>` | Render particles as a flat linear colour instead of the star texel. 6 hex digits (alpha defaults to `ff`) or 8 (`rrggbbaa`), no `#`. Bad/odd-length hex -> ignored. |
+| `WC_DEBUG_FORCE_SCREENSAVER` | Drive `SketchActivity::Screensaver` at startup so a capture lands in attract mode without waiting out the idle timer (presence = on; value ignored). |
+| `WC_DEBUG_FORCE_TIER=<cool\|warm\|hot>` | Pin the screensaver's thermal tier so each tier can be captured deterministically. Unparseable value -> live `ThermalState`. |
 
 Flag toggles (`DISABLE_*`) are true whenever their var is present, regardless of
 value — `=1` and `=` both activate them. `FORCE_G` and `SOLID_PARTICLES` are

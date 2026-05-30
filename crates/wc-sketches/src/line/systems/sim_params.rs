@@ -52,12 +52,108 @@ pub const V4_INERTIAL_DRAG_CONSTANT: f32 = 0.53913643334;
 /// regardless of what the renderer is actually doing.
 pub const V4_FIXED_DT: f32 = 0.032;
 
+/// v4 `PARTICLE_SYSTEM_PARAMS.FADE_DURATION`. Per-particle fade-in seconds.
+pub const V4_FADE_DURATION: f32 = 3.0;
+
+/// Window geometry the param-baker needs. Bundled so the shared
+/// [`bake_sim_params`] takes one window argument, and so the screensaver's
+/// attract writer (which also has a `Window`) builds it the same way.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowGeom {
+    /// Window width in logical pixels.
+    pub width: f32,
+    /// Window height in logical pixels.
+    pub height: f32,
+}
+
+impl WindowGeom {
+    /// Read the geometry from a Bevy [`Window`].
+    #[must_use]
+    pub fn from_window(window: &Window) -> Self {
+        Self {
+            width: window.width(),
+            height: window.height(),
+        }
+    }
+}
+
+/// **Plan 12 Condition A1 (shared bake fn).** Build the full [`SimParams`] for a
+/// frame from a baked attractor array, the frame `dt`, and the window geometry.
+/// Both the live writer ([`update_sim_params`]) and the screensaver's
+/// phantom-hand writer (`crate::line::screensaver`) call this so the two
+/// producers cannot drift in their drag-baking, size-scaling, fade duration, or
+/// constrain-box derivation.
+///
+/// `attractors` carries the already-`gravity_constant`-baked powers (the caller
+/// multiplies each attractor's raw power by `gravity_constant` before filling
+/// the array, matching the mouse/hand attractor treatment); `attractor_count`
+/// is the number of live entries. `dt` is the (uncapped) per-frame delta — the
+/// 50 ms cap is applied here.
+#[must_use]
+pub fn bake_sim_params(
+    dt: f32,
+    geom: WindowGeom,
+    attractors: [Attractor; MAX_ATTRACTORS],
+    attractor_count: u32,
+) -> SimParams {
+    // --- Drag baking (v4-parity, against the FIXED dt, not render dt) ----
+    let pulling_drag_baked = V4_PULLING_DRAG_CONSTANT.powf(V4_FIXED_DT);
+    let inertial_drag_baked = V4_INERTIAL_DRAG_CONSTANT.powf(V4_FIXED_DT);
+
+    // --- Size scaling (matches v4 sizeScaledGravityConstant) ------------
+    let w = geom.width;
+    let h = geom.height;
+    let size_scale = (2.0_f32.powf(w / 836.0 - 1.0)).min(1.0);
+
+    // --- Constrain-to-box bounds (centered on origin, matching spawn) ---
+    let half_w = w * 0.5;
+    let half_h = h * 0.5;
+
+    SimParams {
+        dt: dt.min(0.05),
+        attractor_count,
+        pulling_drag_baked,
+        inertial_drag_baked,
+        size_scale,
+        fade_duration: V4_FADE_DURATION,
+        constrain_min: [-half_w, -half_h],
+        constrain_max: [half_w, half_h],
+        _pad: [0.0; 2],
+        attractors,
+    }
+}
+
+/// **Plan 12 Condition A1 (shared post-process base).** Set the geometry- and
+/// time-derived fields of [`LinePostParams`] both writers share: `i_resolution`,
+/// `i_mouse` (focal point in window-pixel space), `i_global_time`, and `gamma`.
+/// `g_constant` / `i_mouse_factor` are left for the caller (live:
+/// `audio_coupling`; attract: the choreography) so this fn owns only the
+/// truly-shared derivation.
+///
+/// `focal_world` is the world-space focal point (mouse for the live writer, the
+/// vessel anchor for the attract writer); it is converted to the shader's
+/// window-pixel space (top-left origin, +y down) for `i_mouse`.
+pub fn bake_post_base(
+    post: &mut LinePostParams,
+    geom: WindowGeom,
+    focal_world: [f32; 2],
+    elapsed_secs: f32,
+    gamma: f32,
+) {
+    let w = geom.width;
+    let h = geom.height;
+    post.i_resolution = [w, h];
+    post.i_mouse = [focal_world[0] + w * 0.5, h - (focal_world[1] + h * 0.5)];
+    post.i_global_time = elapsed_secs;
+    post.gamma = gamma;
+}
+
 /// `Update` — gated by `sketch_active(AppState::Line)`.
 ///
-/// Populates the attractor array (mouse at index 0 when active), bakes the
-/// pulling/inertial drag constants against the v4 fixed-dt, derives the
-/// size-scaled gravity multiplier from the window width, and writes the
-/// constrain-to-box bounds.
+/// Collects the live attractors (mouse + tracked hands), bakes them via the
+/// shared [`bake_sim_params`] / [`bake_post_base`] (Condition A1), and writes
+/// placeholder `g_constant` / `i_mouse_factor` that `audio_coupling` overrides
+/// later in the same frame.
 pub fn update_sim_params(
     time: Res<'_, Time>,
     settings: Res<'_, LineSettings>,
