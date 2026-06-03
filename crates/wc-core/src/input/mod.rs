@@ -126,23 +126,33 @@ impl Plugin for HandTrackingPlugin {
             use crate::lifecycle::screensaver::ScreensaverActive;
             use crate::lifecycle::state::SketchActivity;
 
-            app.init_resource::<self::idle_pause::LeapIdlePause>();
-
-            // Begin the duty cycle on deep-idle entry; un-pause for good when a
-            // visitor returns.
-            app.add_systems(
-                OnEnter(SketchActivity::Screensaver),
-                self::providers::leap_native::enter_leap_idle_pause,
-            );
+            // Defensive (independent of the duty cycle): ensure the tracking
+            // service is un-paused whenever a visitor returns, even if a prior
+            // run or an aborted duty cycle left it paused.
             app.add_systems(
                 OnEnter(SketchActivity::Active),
                 self::providers::leap_native::resume_leap_on_active,
             );
-            app.add_systems(
-                Update,
-                self::providers::leap_native::drive_leap_idle_pause
-                    .run_if(resource_exists::<ScreensaverActive>),
-            );
+
+            // Experimental deep-idle duty cycle — OFF BY DEFAULT. It pauses the
+            // Leap service during the screensaver to shed CPU/heat, briefly
+            // un-pausing to sample for a returning hand. Under GPU contention it
+            // can wedge the Ultraleap service, and on macOS a wedge needs a
+            // manual USB replug to clear (see
+            // docs/superpowers/specs/2026-06-03-leap-service-recovery-design.md).
+            // Opt in with `WC_LEAP_DUTY_CYCLE=1` only to reproduce or measure it.
+            if duty_cycle_enabled(std::env::var(DUTY_CYCLE_ENV).ok().as_deref()) {
+                app.init_resource::<self::idle_pause::LeapIdlePause>();
+                app.add_systems(
+                    OnEnter(SketchActivity::Screensaver),
+                    self::providers::leap_native::enter_leap_idle_pause,
+                );
+                app.add_systems(
+                    Update,
+                    self::providers::leap_native::drive_leap_idle_pause
+                        .run_if(resource_exists::<ScreensaverActive>),
+                );
+            }
 
             // Propagate runtime leap_background changes to the live connection.
             app.add_systems(
@@ -152,5 +162,41 @@ impl Plugin for HandTrackingPlugin {
                     .in_set(InputSystems),
             );
         }
+    }
+}
+
+/// Env var that opts into the experimental deep-idle Leap duty cycle. Unset — or
+/// any value other than `1`/`true` — leaves the duty cycle **off**.
+#[cfg(feature = "hand-tracking-gestures")]
+const DUTY_CYCLE_ENV: &str = "WC_LEAP_DUTY_CYCLE";
+
+/// Whether the experimental deep-idle Leap duty cycle is enabled, given the
+/// value of [`DUTY_CYCLE_ENV`] (pass `std::env::var(DUTY_CYCLE_ENV).ok().as_deref()`).
+///
+/// **Off by default.** The duty cycle pauses/resumes the Ultraleap service ~2×/s
+/// during the screensaver to shed CPU/heat, but under GPU contention that can
+/// wedge the service, and on macOS a wedge needs a manual USB replug to clear
+/// (see `docs/superpowers/specs/2026-06-03-leap-service-recovery-design.md`).
+/// Opt in with `WC_LEAP_DUTY_CYCLE=1` (or `true`) only to reproduce or measure it.
+#[cfg(feature = "hand-tracking-gestures")]
+fn duty_cycle_enabled(var: Option<&str>) -> bool {
+    matches!(var, Some("1" | "true"))
+}
+
+#[cfg(all(test, feature = "hand-tracking-gestures"))]
+mod tests {
+    use super::duty_cycle_enabled;
+
+    #[test]
+    fn duty_cycle_is_off_unless_explicitly_opted_in() {
+        // Off by default and for any unrecognized value (footgun guard).
+        assert!(!duty_cycle_enabled(None));
+        assert!(!duty_cycle_enabled(Some("")));
+        assert!(!duty_cycle_enabled(Some("0")));
+        assert!(!duty_cycle_enabled(Some("false")));
+        assert!(!duty_cycle_enabled(Some("yes")));
+        // On only for the two documented opt-in values.
+        assert!(duty_cycle_enabled(Some("1")));
+        assert!(duty_cycle_enabled(Some("true")));
     }
 }
