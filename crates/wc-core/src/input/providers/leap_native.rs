@@ -30,6 +30,7 @@ use bevy::prelude::{DetectChanges, Messages, Res, ResMut};
 use smallvec::SmallVec;
 
 use crate::input::hand::{Chirality, Hand, LandmarkIndex, LANDMARK_COUNT};
+use crate::input::idle_pause::{LeapIdlePause, PauseAction};
 use crate::input::provider::HandTrackingProvider;
 use crate::input::state::{
     DeviceHealth, DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics,
@@ -665,11 +666,11 @@ pub fn apply_leap_background_setting(
     }
 }
 
-// ── screensaver idle-pause (Plan 11.8, Seam 4) ─────────────────────────────────
+// ── screensaver idle-pause duty cycle (leap-idle-pause, CF #84) ──────────────
 
 /// Set the pause state on every registered Leap provider. Shared by the
-/// enter/leave-screensaver systems below so the downcast/iterate boilerplate
-/// lives in one place.
+/// duty-cycle systems below so the downcast/iterate boilerplate lives in one
+/// place.
 fn set_all_leap_paused(registry: &mut crate::input::provider::ProviderRegistry, paused: bool) {
     for slot in registry.iter_mut() {
         if slot.id != crate::input::provider::ProviderId::Leap {
@@ -683,17 +684,41 @@ fn set_all_leap_paused(registry: &mut crate::input::provider::ProviderRegistry, 
     }
 }
 
-/// `OnEnter(SketchActivity::Screensaver)` — pause the Leap tracking service to
-/// shed host CPU during idle (Plan 11.8, Seam 4, D8).
-///
-/// The Ultraleap service is a heavy constant CPU load; pausing it is a parallel
-/// thermal lever to the renderer cooldown. We pause only on `Screensaver` (not
-/// mere `Idle`) so brief idles keep instant hand-detection wake; any interaction
-/// returns to `Active` and [`resume_leap_on_active`] resumes the service.
-pub fn pause_leap_on_screensaver(
+/// Apply a [`PauseAction`] from the duty cycle to every registered Leap provider.
+fn apply_pause_action(
+    action: PauseAction,
+    registry: &mut crate::input::provider::ProviderRegistry,
+) {
+    match action {
+        PauseAction::Pause => set_all_leap_paused(registry, true),
+        PauseAction::Resume => set_all_leap_paused(registry, false),
+        PauseAction::Hold => {}
+    }
+}
+
+/// `OnEnter(SketchActivity::Screensaver)` — begin the idle-pause duty cycle: pause
+/// the Leap service immediately (no visitor at deep-idle entry) and arm the
+/// sampling clock (Plan `leap-idle-pause`, CF #84).
+pub fn enter_leap_idle_pause(
+    time: Res<'_, bevy::time::Time>,
+    mut duty: ResMut<'_, LeapIdlePause>,
     mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
 ) {
-    set_all_leap_paused(&mut registry, true);
+    let action = duty.reset_paused(time.elapsed());
+    apply_pause_action(action, &mut registry);
+}
+
+/// `Update` while the screensaver is showing — advance the duty cycle, toggling
+/// the Leap service pause on phase boundaries. Brief sample windows let a hand
+/// wake the install (its frames flow through `reset_on_interaction` → `Active`,
+/// where [`resume_leap_on_active`] un-pauses for good).
+pub fn drive_leap_idle_pause(
+    time: Res<'_, bevy::time::Time>,
+    mut duty: ResMut<'_, LeapIdlePause>,
+    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
+) {
+    let action = duty.advance(time.elapsed());
+    apply_pause_action(action, &mut registry);
 }
 
 /// `OnEnter(SketchActivity::Active)` — resume the Leap tracking service so hands
@@ -741,5 +766,33 @@ mod tests {
     fn device_health_empty_roundtrips() {
         let health = device_health_from_leaprs(leaprs::DeviceStatus::empty());
         assert_eq!(health, DeviceHealth::empty());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn enter_resets_duty_cycle_to_paused() {
+        use crate::input::idle_pause::{DutyPhase, LeapIdlePause};
+        use crate::input::provider::ProviderRegistry;
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins); // provides Time
+        app.init_resource::<LeapIdlePause>();
+        app.init_resource::<ProviderRegistry>();
+
+        // Pretend we were mid-sample, then enter the screensaver.
+        app.world_mut()
+            .resource_mut::<LeapIdlePause>()
+            .set_phase_sampling();
+        app.world_mut()
+            .run_system_once(super::enter_leap_idle_pause)
+            .expect("system run");
+
+        assert_eq!(
+            app.world().resource::<LeapIdlePause>().phase(),
+            DutyPhase::Paused,
+            "entering the screensaver must pause + arm the duty cycle",
+        );
     }
 }

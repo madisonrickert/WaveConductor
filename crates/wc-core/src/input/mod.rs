@@ -121,15 +121,36 @@ impl Plugin for HandTrackingPlugin {
                     .in_set(InputSystems),
             );
 
-        // When the Leap native provider is compiled in, watch for runtime
-        // changes to `leap_background` and propagate them to the live
-        // connection without requiring a restart.
         #[cfg(feature = "hand-tracking-gestures")]
-        app.add_systems(
-            PreUpdate,
-            self::providers::leap_native::apply_leap_background_setting
-                .after(systems::poll_all_providers)
-                .in_set(InputSystems),
-        );
+        {
+            use crate::lifecycle::screensaver::ScreensaverActive;
+            use crate::lifecycle::state::SketchActivity;
+
+            app.init_resource::<self::idle_pause::LeapIdlePause>();
+
+            // Begin the duty cycle on deep-idle entry; un-pause for good when a
+            // visitor returns.
+            app.add_systems(
+                OnEnter(SketchActivity::Screensaver),
+                self::providers::leap_native::enter_leap_idle_pause,
+            );
+            app.add_systems(
+                OnEnter(SketchActivity::Active),
+                self::providers::leap_native::resume_leap_on_active,
+            );
+            app.add_systems(
+                Update,
+                self::providers::leap_native::drive_leap_idle_pause
+                    .run_if(resource_exists::<ScreensaverActive>),
+            );
+
+            // Propagate runtime leap_background changes to the live connection.
+            app.add_systems(
+                PreUpdate,
+                self::providers::leap_native::apply_leap_background_setting
+                    .after(systems::poll_all_providers)
+                    .in_set(InputSystems),
+            );
+        }
     }
 }
