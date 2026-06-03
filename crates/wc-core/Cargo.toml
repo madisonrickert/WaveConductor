@@ -78,5 +78,9 @@ serde_json.workspace = true
 name = "leap_pause_probe"
 required-features = ["hand-tracking-gestures"]
 
+[[example]]
+name = "leap_duty_stress"
+required-features = ["hand-tracking-gestures"]
+
 [dev-dependencies]
 tempfile.workspace = true
