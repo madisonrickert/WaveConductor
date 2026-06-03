@@ -23,8 +23,12 @@ use bevy::prelude::Resource;
 /// Worst-case wake latency / required hand-hold time. Madison-directed (0.5 s).
 pub const IDLE_PAUSE_PERIOD: Duration = Duration::from_millis(500);
 
-/// Un-paused sample window. **Placeholder** — tuned in Phase 4 to the measured
-/// service resume latency `L` plus a small margin. Must stay `< IDLE_PAUSE_PERIOD`.
+/// Un-paused sample window. Tuned against the Phase 1 hardware spike (2026-06-03):
+/// measured Leap service resume latency `L` was median 32 ms / max 79 ms over 20
+/// cycles. With [`SAMPLE_POLL_INTERVAL`] polling, worst-case wake-registration is
+/// ~`max L` + one poll tick + the `reset_on_interaction` pass ≈ 95 ms, so 150 ms
+/// leaves a comfortable ~55 ms margin while still parking the service ~70% of each
+/// period. Must stay `< IDLE_PAUSE_PERIOD`.
 pub const IDLE_PAUSE_SAMPLE_WINDOW: Duration = Duration::from_millis(150);
 
 /// Wake interval requested while sampling, so the app ticks fast enough to catch
