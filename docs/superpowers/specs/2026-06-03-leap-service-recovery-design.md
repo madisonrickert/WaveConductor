@@ -23,6 +23,45 @@ We built and live-tested a duty cycle that pauses the Leap service during the sc
 
 LeapC only streams frames to the **focused** application unless the `BackgroundFrames` policy is requested. A CLI harness never has focus (and the Control Panel may be focused), so without `request_background = true` it reads **zero frames** — which looks identical to a device wedge. The real app sets this; diagnostic harnesses must too.
 
+### Live wedge recovery test (2026-06-03, second session)
+
+A wedge occurred **spontaneously** during ordinary hot multitasking, with **WaveConductor not running at all** (confirmed: no `waveconductor` process). This is important:
+
+- It **exonerates our duty cycle** for *this* wedge and corroborates the GPU/concurrency-contention root cause — the vendor service froze on its own under load, matching Ultraleap's documented "service intermittently stops when using some applications at the same time."
+- **Consequence for the roadmap:** wedge-recovery is needed *regardless* of what we decide about pausing. Even if we drop the duty cycle entirely, the kiosk's hand-tracking dependency can freeze under load over a long unattended run, so detection + recovery is a standalone requirement, not a cleanup for our own toggling.
+
+Characterization of the live wedge (all zero-privilege diagnostics):
+
+- `libtrack_server` **alive** (81 min uptime) but pinned at **~0% CPU** (was ~67% moments earlier) — the frozen-but-alive signature, not a crash or clean exit.
+- The Leap is **still enumerated on USB** ("Leap Motion Controller" present) — so this is *not* a USB-level disconnect; the wedge is purely in the service's data path. The human replug works by forcing the service to rebuild its device session, not because the device fell off the bus.
+- Service identity confirmed: `com.ultraleap.tracking.service`, a root LaunchDaemon in `/Library/LaunchDaemons/`, `KeepAlive = true` + `RunAtLoad = true` (so killing it auto-respawns).
+
+**Rung-1 recovery, empirically tested** (`crates/wc-core/examples/leap_recovery_probe.rs` — a hand-free liveness probe that connects a fresh client, observes the data path, then tries `set_pause(false)`):
+
+- Fresh client `start()` **succeeded** (control path alive).
+- Data path: **0 frames in 3 s** as-found, **0 frames in 4 s** after `set_pause(false)`.
+- **Verdict: rung 1 does NOT clear a service-level wedge.** A client reconnect / pause-clear is insufficient for this failure mode. (Keep rung 1 in the ladder for client-side staleness — a different failure — but it will not fix the daemon freeze.)
+
+`sudo` was not cached, so rung 3 was *not* run autonomously; the exact command is staged for the operator (below), with `leap_recovery_probe` as the post-restart verification (a revived service streams frames immediately, no hand needed).
+
+#### Operator runbook — recover this wedge (macOS, needs your password once)
+
+```bash
+# Rung 3 — restart only the Ultraleap daemon (third-party, so the macOS 14.4
+# kickstart -k restriction on Apple-critical daemons does not apply):
+sudo launchctl kickstart -k system/com.ultraleap.tracking.service
+# If that errors, KeepAlive=true means a plain kill respawns it:
+#   sudo launchctl kill SIGKILL system/com.ultraleap.tracking.service
+# Full reload fallback:
+#   sudo launchctl bootout system/com.ultraleap.tracking.service && \
+#   sudo launchctl bootstrap system /Library/LaunchDaemons/com.ultraleap.tracking.service.plist
+
+# Verify the data path is back (no hand required — healthy service streams frames):
+cargo run -p wc-core --example leap_recovery_probe --features hand-tracking-gestures
+```
+
+Physical USB replug remains the known-good fallback if rung 3 fails (it forces the same device-session rebuild). The GUI Ultraleap Control Panel may also expose a "restart service" action via its own vendor helper — the user-facing equivalent of rung 3.
+
 ---
 
 ## Goal
@@ -48,7 +87,7 @@ We already have the signal: the provider stamps `last_tracking_instant` on every
 | 3 | **Restart the tracking service** | OS-scoped service authority | Linux (polkit action on the exact unit); Windows (SCM ACL on the exact service); macOS (SMAppService one-verb helper, or narrow sudoers on dev) |
 | 4 | **Reboot** | systemd `StartLimitAction` / hardware watchdog / OS scheduler | Linux clean; Windows via SCM recovery; macOS helper |
 
-**Open, high-value:** whether rung 1 (client reconnect) or rung 2 (USB reset) clears a *service-level* wedge — USB reset is the software analog of the only fix we've confirmed (the human replug). If a cheap rung clears it, the privileged rung 3 is rarely needed.
+**Settled (2026-06-03):** rung 1 (client reconnect / `set_pause(false)`) does **not** clear a service-level wedge — tested live with `leap_recovery_probe` (0 frames before *and* after, fresh client connected). On macOS rung 2 is unavailable (no clean per-device USB reset), so macOS recovery escalates **rung 0 → rung 1 (cheap, but expected to fail the daemon-freeze case) → rung 3 (privileged restart)**. The software analog of the confirmed human replug is therefore the **service restart**, not a USB reset. **Still open:** does rung 2 (USB reset) clear it on Linux/Windows — if so it's a no-privilege path those OSes get and macOS doesn't.
 
 ## Per-OS least-privilege mechanisms
 
@@ -92,8 +131,8 @@ Privilege granted is bound to a *structured action + named target + specific ver
 
 ## Open questions / on-device verification
 
-1. **Replicate the wedge deterministically.** Highest priority — we can't be sure of the cause until we reproduce it. Hypotheses to test, in order: (a) GPU/render contention (run the full-render app idle with the Leap and *no* duty cycle — does it still wedge? does a synthetic GPU load wedge it?); (b) the duty cycle's live polling pattern vs the harness's tight polling; (c) connect/disconnect or pause churn hitting the documented memory leak.
-2. Does **client reconnect** (rung 1) clear a service-level wedge? Does **USB reset** (rung 2)?
+1. **Replicate the wedge deterministically.** Partial progress (2026-06-03): a wedge was *observed* again — but **spontaneously, with WaveConductor not running** — which points away from our duty cycle and toward GPU/concurrency contention (hypothesis (a)). We still lack a *deterministic trigger* we can fire on demand for recovery testing. Next: induce contention on purpose (run a synthetic GPU load alongside the Leap, no WaveConductor) and see if it wedges repeatably; only then re-test the duty cycle's contribution on top. Remaining hypotheses to rule in/out: (b) the duty cycle's live polling pattern vs the harness's tight polling; (c) connect/disconnect or pause churn hitting the documented memory leak.
+2. **Client reconnect (rung 1): answered — does NOT clear a service-level wedge** (live test, `leap_recovery_probe`). Does **USB reset** (rung 2) clear it on Linux/Windows? (No macOS analog.) Does rung 3 (privileged restart) reliably clear it without a physical replug? — verify on the next live wedge using the operator runbook above.
 3. Exact service/unit names per OS; macOS 14.4 `kickstart -k` behavior for the third-party daemon.
 4. Windows least-privilege SCM-ACL grant + USB-reset path (dedicated research pass).
 5. Hardware-watchdog availability on the chosen box(es); PPPS support on any hub bought for rung 2b.
