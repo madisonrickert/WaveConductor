@@ -19,12 +19,16 @@ The installation drives a **projector** — the kiosk's display is projected, no
 - **Touch and mouse are *secondary* control modes** — supported, but not the main experience (you can't touch a projection).
 - **Hand-Z is not required.** No current sketch's key interaction fails without depth (confirmed 2026-05-30), so 2D hand landmarks (e.g. Apple Vision without LiDAR fusion) are acceptable across the whole deck. 3D depth is a future enhancement, never a blocker.
 
+## Deployment targets
+
+**All three major desktop OSes are first-class deployment targets: macOS, Linux, and Windows** (plus WASM/WebGPU for the web showcase). Do **not** assume a single deployment OS — thermal sensing, crash recovery, and Leap-service management each need a per-OS backend, and none is "the" target. The iPad/iOS port (Phase 3) is **additive and exploratory**, not the primary device.
+
 ## Sequence & priorities
 
 The orderable list. Five phases in priority order; within each, slugs roughly in dependency order. **Re-prioritise by editing here** — the slugs are stable, so nothing downstream renumbers.
 
 **Phase 1 — Desktop v4 parity** *(optimise opportunistically; leave architectural hooks open)*
-- 1.A Screensaver / attract / compute-saver: `screensaver-attract` · `leap-idle-pause`
+- 1.A Screensaver / attract / compute-saver: `screensaver-attract` · **`leap-deep-idle-state` (current main priority)**
 - 1.B Port the remaining four sketches: `sketch-flame` → `sketch-dots` → `sketch-cymatics` → (`mic-fft` →) `sketch-waves`
 - Close Line: `line-parity-signoff`
 - Opportunistic / anytime (not phase-gated): `dev-velocity-build` · `thermal-seam-generalization` · `perf-soak-telemetry`
@@ -75,14 +79,22 @@ Mostly mechanical capture work; the substance shipped in Plans 11 / 11.5 / 11.6.
 
 Remaining (deferred; none blocks a `v5-screensaver` tag on its own):
 
-- **Thermal sensor sign-off + threshold tuning** *(device-conditional)*. The Linux sysfs reader is compile/ABI-verified but hasn't run against live `/sys`. On the chosen Linux box: confirm a CPU `hwmon` chip (`coretemp`/`k10temp`), then tune the placeholder bands (`enter_warm 75` / `enter_hot 90 °C` in `lifecycle::thermal::mod.rs`) against observed throttle temps. (On iPad this path is replaced by the OS thermal enum — see `thermal-seam-generalization`.)
+- **Thermal sensor sign-off + threshold tuning** *(per-OS — all three desktop targets first-class)*. Thermal sensing needs a backend per desktop OS: **macOS** = macmon (Apple Silicon, shipped 2026-05-30); **Linux** = zero-dep sysfs `hwmon` reader (compile/ABI-verified, not yet run against live `/sys` — confirm a `coretemp`/`k10temp` chip); **Windows** = no backend yet (now in scope — likely a WMI / `OpenHardwareMonitor`-class source). Tune the placeholder bands (`enter_warm 75` / `enter_hot 90 °C` in `lifecycle::thermal::mod.rs`) against observed throttle temps on each box. (On iPad this path is replaced by the OS thermal enum — see `thermal-seam-generalization`.)
 - **Hot-tier "warm-up-then-freeze" escalation** *(deferred — YAGNI until evidence)*. If the soak shows ~3 fps + `leap-idle-pause` still runs the box too hot, add a true dispatch freeze that runs until particle alpha saturates, then latches `particle_count = 0`.
 - **Presence-reactive attract layer** *(deferred)*. Particles lean toward an approaching visitor pre-engage; the seam is left open. (a) react to a hand entering the tracking volume (free); (b) tap raw Leap IR images (`IMAGES` policy) for near-field detection.
 - **Per-sketch attract visuals.** The framework (`in_screensaver(AppState)` + per-tier present throttle + caption overlay) already supports them; only Line authored a performer. Flame/Dots/Cymatics/Waves each register their own when built.
 
-### `leap-idle-pause` (1.A)
+### `leap-deep-idle-state` (1.A) — **main priority**
 
-*The screensaver's unwired fourth seam — a real bug.* `pause_leap_on_screensaver` / `resume_leap_on_active` (`crates/wc-core/src/input/providers/leap_native.rs:693,702`) are defined and documented as a thermal lever but **registered as systems nowhere** (verified 2026-05-30; the whole `set_paused → set_all_leap_paused → pause_leap_on_screensaver` chain is unreachable). So the Ultraleap service runs at full power through the entire idle screensaver. Register them on `OnEnter(SketchActivity::Screensaver)` / `OnEnter(SketchActivity::Active)`, behind the existing leap / `hand-tracking-gestures` cfg next to `apply_leap_background_setting` in `crates/wc-core/src/input/mod.rs`. ~6 LOC + a wiring test (CF #84). *Desktop/Leap path only — compiles out on iPad.* Then verify controller IR-LED heat behaviour on hardware (an IR-viewer; if pause doesn't extinguish the LEDs, the only guaranteed fix is cutting USB power via a switchable hub during deep idle).
+*Was `leap-idle-pause` (CF #84). The naive "pause the Leap service during the screensaver" duty cycle was built and **live-tested 2026-06-03 — it wedged the device** (sustained `set_pause` toggling froze the tracking data path; recovery needed a USB replug).* Full as-built findings, the detection/recovery escalation ladder, and the least-privilege per-OS recovery architecture (no blanket sudo — Linux polkit/udev, macOS `SMAppService` one-verb helper, Windows SCM-ACL) live in **`specs/2026-06-03-leap-service-recovery-design.md`**.
+
+Managing Leap state during deep idle is the critical lever for deep-idle perf, so this is the current top priority. It splits into:
+
+- **Shipped (commit `e9831ab5`):** `reset_on_interaction` now ignores empty Leap frames, so a connected Leap no longer pins the idle timer (previously the screensaver never triggered on a real install). Independent correctness fix; kept regardless of the rest.
+- **Held, on-branch (⚠ still wired):** the duty-cycle code (`6cc22231`, `b0d539d0`, `a0d72d5a`) is viable in isolation (a standalone harness at the aggressive setting does *not* wedge) but wedges the full GPU app. It is still registered behind the `hand-tracking-gestures` feature, so a `cargo rund` that idles 60 s **will wedge the Leap until replug** — kept active for now only to help reproduce the wedge. Gate it behind an off-by-default flag (or revert the wiring) before any unattended run.
+- **Next:** replicate the wedge deterministically (lead: Ultraleap-documented GPU/concurrency contention — the CPU-only harness never wedged) → build detection (frame heartbeat + leaprs `ConnectionLost`) + the recovery ladder (client reconnect → USB reset → scoped service restart → reboot), first-class on macOS/Linux/Windows.
+
+Diagnostic harnesses: `crates/wc-core/examples/leap_pause_probe.rs` (resume latency median 32 ms / max 79 ms) and `leap_duty_stress.rs` (window sweep). *Leap path only — compiles out on iPad, which uses in-process Apple Vision and has no external service to wedge.*
 
 ### `sketch-flame` / `sketch-dots` / `sketch-cymatics` / `sketch-waves` (1.B)
 
@@ -135,13 +147,13 @@ Frame-time-primary is the right *primary* signal because it's the only fine-grai
 
 Render-scale DRS — the biggest GPU lever. Render the 2D + gravity-post pass into a reduced `Image` target and upscale on composite (Bevy's `MainPassResolutionOverride` is DLSS-oriented and excludes 2D/post passes, so it doesn't help Line — this is a real custom-pipeline change). UI stays native-crisp. **Priority is device-conditional:** evidence-gated/defer on an actively-cooled box; **likely-required on a fanless A12Z iPad at retina res** (a 264 ppi panel hides a ~0.5× particle/post pass). Reject `bevy-dynamic-viewport` and `set_scale_factor_override` (rescales UI too).
 
-*Dropped from the research:* the sysinfo/wmi/macmon thermal-crate survey (superseded by the zero-dep reader); Windows-WMI / Intel-Mac thermal completeness (not targets); an in-app watchdog; `bevy-dynamic-viewport`; `set_scale_factor_override` DRS; a shared `RenderScale` resource sketches "inherit" (2D vs 3D passes don't share a target shape — retrofit per-camera instead).
+*Dropped from the research:* the sysinfo/wmi/macmon thermal-crate survey (superseded by the zero-dep reader); Intel-Mac thermal completeness (not a target) — **but Windows thermal IS now in scope (Windows is a first-class desktop target); see the per-OS thermal sign-off item**; an in-app watchdog; `bevy-dynamic-viewport`; `set_scale_factor_override` DRS; a shared `RenderScale` resource sketches "inherit" (2D vs 3D passes don't share a target shape — retrofit per-camera instead).
 
 ---
 
 ## Phase 3 — iOS / iPad port
 
-A candidate primary deployment device: **iPad Pro 11″ 2nd gen (MY232LL/A) — A12Z (2020), 8-core GPU, fanless, LiDAR + TrueDepth, 2388×1668 retina (264 ppi) 120 Hz ProMotion, iPadOS 26.** Added alongside the four stated build targets (macOS, Linux, Windows, WASM all keep compiling); iOS is additive. Triaged from a Perplexity research pass + an adversarial review that verified every load-bearing claim against the codebase and current docs.
+An **additive, exploratory** target — *not* a primary device; the three desktop OSes (macOS / Linux / Windows) are the first-class deployment targets (see **Deployment targets** above): **iPad Pro 11″ 2nd gen (MY232LL/A) — A12Z (2020), 8-core GPU, fanless, LiDAR + TrueDepth, 2388×1668 retina (264 ppi) 120 Hz ProMotion, iPadOS 26.** Added alongside the four stated build targets (macOS, Linux, Windows, WASM all keep compiling); iOS is additive. Triaged from a Perplexity research pass + an adversarial review that verified every load-bearing claim against the codebase and current docs.
 
 **Integration model: Bevy owns the iOS app** (reject the research's Swift-shell model). `main.rs` is a standard `DefaultPlugins` + `bevy_winit` app, and winit's UIKit backend runs the *whole* app on `aarch64-apple-ios`. Because `wc-core` is Bevy-native (63/72 files), Bevy-owns-the-app shares the entire existing app (HDR pipeline, egui chrome, Core/Sketches plugins); native capabilities (Vision, AVAudioSession, `isIdleTimerDisabled`, `thermalState`, document picker) are `objc2` leaf shims under the `platform/` convention. *Dropped:* the Swift-shell model; the "Bevy-free `waveconductor_core`" refactor (fantasy — 63/72 files are Bevy-coupled); AVAudioEngine (cpal has a real iOS CoreAudio backend — the fundsp+rtrb graph runs unchanged; only a ~20-line `AVAudioSession` shim is needed).
 
