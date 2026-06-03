@@ -165,6 +165,18 @@ fn tier_present_wait(tier: ThermalTier) -> Duration {
     }
 }
 
+/// The reactive present `wait`: the tier's wait, floored to the Leap duty cycle's
+/// requested wake so the gap ends on time and sample windows are polled fast
+/// enough to catch a resume frame. `None` when the duty cycle is absent (the
+/// `hand-tracking-gestures` feature is off, or no Leap is installed).
+#[must_use]
+fn effective_wait(tier_wait: Duration, duty_wake: Option<Duration>) -> Duration {
+    match duty_wake {
+        Some(w) => tier_wait.min(w),
+        None => tier_wait,
+    }
+}
+
 /// While the screensaver is showing, set `WinitSettings` to a reactive
 /// update-mode whose `wait` matches the effective tier, throttling the present
 /// rate. Interaction still wakes the loop instantly (`react_to_*` all true), so
@@ -183,6 +195,8 @@ fn tier_present_wait(tier: ThermalTier) -> Duration {
 /// guard; compiled out of release.
 fn apply_present_rate(
     thermal: Res<'_, ThermalState>,
+    time: Res<'_, Time>,
+    duty: Option<Res<'_, crate::input::idle_pause::LeapIdlePause>>,
     #[cfg(debug_assertions)] toggles: Option<Res<'_, DebugToggles>>,
     #[cfg(debug_assertions)] capture: Option<Res<'_, crate::capture::config::CaptureConfig>>,
     mut winit: ResMut<'_, WinitSettings>,
@@ -198,7 +212,8 @@ fn apply_present_rate(
     #[cfg(not(debug_assertions))]
     let tier = effective_tier(&thermal);
 
-    let wait = tier_present_wait(tier);
+    let duty_wake = duty.as_deref().map(|d| d.requested_wake(time.elapsed()));
+    let wait = effective_wait(tier_present_wait(tier), duty_wake);
     let desired = UpdateMode::Reactive {
         wait,
         react_to_device_events: true,
@@ -255,6 +270,20 @@ fn apply_force_screensaver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_wait_is_floored_to_duty_cycle() {
+        // Hot tier present wait (333 ms) yields to a tighter duty-cycle wake.
+        let tier = Duration::from_millis(333);
+        assert_eq!(
+            effective_wait(tier, Some(Duration::from_millis(16))),
+            Duration::from_millis(16)
+        );
+        // No duty cycle → tier wait unchanged.
+        assert_eq!(effective_wait(tier, None), tier);
+        // Duty cycle slower than tier (long gap) → tier wait wins.
+        assert_eq!(effective_wait(tier, Some(Duration::from_millis(350))), tier);
+    }
 
     #[test]
     fn present_wait_increases_with_heat() {
