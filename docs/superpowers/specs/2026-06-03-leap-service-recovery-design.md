@@ -42,25 +42,37 @@ Characterization of the live wedge (all zero-privilege diagnostics):
 - Data path: **0 frames in 3 s** as-found, **0 frames in 4 s** after `set_pause(false)`.
 - **Verdict: rung 1 does NOT clear a service-level wedge.** A client reconnect / pause-clear is insufficient for this failure mode. (Keep rung 1 in the ladder for client-side staleness — a different failure — but it will not fix the daemon freeze.)
 
-`sudo` was not cached, so rung 3 was *not* run autonomously; the exact command is staged for the operator (below), with `leap_recovery_probe` as the post-restart verification (a revived service streams frames immediately, no hand needed).
+**Rung-3 recovery (privileged service restart), empirically tested.** The operator ran `sudo launchctl kickstart -k system/com.ultraleap.tracking.service`. Result:
 
-#### Operator runbook — recover this wedge (macOS, needs your password once)
+- The restart **took effect** — `libtrack_server` came back as a fresh process (new PID, ~0.25 s uptime vs the prior 81 min), so the daemon's own frozen state was cleared.
+- The Leap was **still enumerated on USB** afterward.
+- **But the fresh daemon reported "no leap detected"** and sat at ~0% CPU — it could not bind/stream from the device.
+- **Verdict: rung 3 does NOT recover a *device-session* wedge on macOS.** Restarting the daemon clears the *daemon's* frozen state but not the *device's* wedged USB session; the new daemon sees the descriptor but cannot acquire it. Recovery requires **USB re-enumeration**, which macOS cannot do per-device programmatically.
+
+So for this class of wedge the macOS ladder collapses to: rung 1 ✗ → rung 2 unavailable → rung 3 ✗ → **physical USB replug** (the only reliable recovery; confirmed twice). A PPPS-capable powered hub driven by `uhubctl` (rung 2b) is the *only* candidate software path on macOS — and `uhubctl` was **not installed**, with macOS PPPS support being partial and hub-dependent, so it remains unverified.
+
+> **⚠ macOS automated-recovery gap (first-class deployment risk).** On macOS, a *device-session* wedge has **no fully-automated recovery**: neither client reconnect (rung 1) nor daemon restart (rung 3) rebinds the device, and macOS offers no per-device USB reset (rung 2). An unattended macOS kiosk that hits this state needs **physical intervention**. Linux (sysfs `authorized` / `usbreset` / udev) and Windows (`pnputil /restart-device`) *can* re-enumerate in software, so they do **not** share this gap. Implications: (a) prefer Linux/Windows for an unattended kiosk if this wedge proves frequent; (b) on macOS, invest in a PPPS hub + `uhubctl` (and verify it actually power-cycles on macOS) as the only automated lever; (c) regardless of OS, prioritize *preventing* the wedge (avoid GPU contention) since macOS recovery is manual.
+
+This also refines the two wedge **classes** we must detect differently:
+- **Daemon-state freeze** (control path alive, data path dead, device still bound) — *might* clear with a restart (rung 3). We have not yet seen a restart fix one (the spontaneous wedge had already progressed), so this is unconfirmed.
+- **Device-session wedge** (daemon restarts clean but reports "no device") — needs USB re-enumeration; on macOS that means replug.
+
+#### Operator runbook — recover a wedge (macOS)
 
 ```bash
-# Rung 3 — restart only the Ultraleap daemon (third-party, so the macOS 14.4
-# kickstart -k restriction on Apple-critical daemons does not apply):
+# 1. Clears a DAEMON-state freeze — but NOT a device-session wedge. Needs sudo.
 sudo launchctl kickstart -k system/com.ultraleap.tracking.service
-# If that errors, KeepAlive=true means a plain kill respawns it:
-#   sudo launchctl kill SIGKILL system/com.ultraleap.tracking.service
-# Full reload fallback:
-#   sudo launchctl bootout system/com.ultraleap.tracking.service && \
-#   sudo launchctl bootstrap system /Library/LaunchDaemons/com.ultraleap.tracking.service.plist
+#    (fallbacks: `sudo launchctl kill SIGKILL system/com.ultraleap.tracking.service`
+#     — KeepAlive=true respawns it — or bootout+bootstrap of the plist.)
 
-# Verify the data path is back (no hand required — healthy service streams frames):
+# 2. Verify (no hand needed). Frames ⇒ recovered. "no leap detected" / 0 frames ⇒ step 3.
 cargo run -p wc-core --example leap_recovery_probe --features hand-tracking-gestures
+
+# 3. Physically unplug + replug the Leap (USB re-enumeration). The only reliable
+#    fix for a device-session wedge on macOS. Re-run step 2 to confirm.
 ```
 
-Physical USB replug remains the known-good fallback if rung 3 fails (it forces the same device-session rebuild). The GUI Ultraleap Control Panel may also expose a "restart service" action via its own vendor helper — the user-facing equivalent of rung 3.
+The GUI Ultraleap Control Panel's "restart service" action is only the user-facing equivalent of step 1, so it carries the same device-session limitation.
 
 ---
 
@@ -87,7 +99,12 @@ We already have the signal: the provider stamps `last_tracking_instant` on every
 | 3 | **Restart the tracking service** | OS-scoped service authority | Linux (polkit action on the exact unit); Windows (SCM ACL on the exact service); macOS (SMAppService one-verb helper, or narrow sudoers on dev) |
 | 4 | **Reboot** | systemd `StartLimitAction` / hardware watchdog / OS scheduler | Linux clean; Windows via SCM recovery; macOS helper |
 
-**Settled (2026-06-03):** rung 1 (client reconnect / `set_pause(false)`) does **not** clear a service-level wedge — tested live with `leap_recovery_probe` (0 frames before *and* after, fresh client connected). On macOS rung 2 is unavailable (no clean per-device USB reset), so macOS recovery escalates **rung 0 → rung 1 (cheap, but expected to fail the daemon-freeze case) → rung 3 (privileged restart)**. The software analog of the confirmed human replug is therefore the **service restart**, not a USB reset. **Still open:** does rung 2 (USB reset) clear it on Linux/Windows — if so it's a no-privilege path those OSes get and macOS doesn't.
+**Settled (2026-06-03), both tested live with `leap_recovery_probe` against a real wedge:**
+- **Rung 1 ✗** — client reconnect / `set_pause(false)` does not clear it (0 frames before *and* after; fresh client connected).
+- **Rung 3 ✗ (for a device-session wedge)** — `launchctl kickstart -k` restarted the daemon (fresh PID) but it came up "no leap detected"; the device's USB session, not the daemon, was wedged. Recovery required **physical USB replug** (re-enumeration).
+- **Rung 2 unavailable on macOS** (no per-device USB reset).
+
+So on macOS the ladder collapsed to rung 1 ✗ → rung 2 n/a → rung 3 ✗ → **physical replug** — i.e. **no fully-automated recovery for a device-session wedge** (see the ⚠ gap callout above). The software analog of the replug is a USB re-enumeration, which only Linux/Windows can do programmatically. **Still open:** does rung 2 (USB reset) clear it on Linux/Windows; does rung 3 ever clear a *daemon-state* freeze (one we catch before it progresses to a device-session wedge).
 
 ## Per-OS least-privilege mechanisms
 
@@ -100,7 +117,7 @@ We already have the signal: the provider stamps `last_tracking_instant` on every
 
 ### macOS
 - **Automation / AppleEvents ("Allow this app to control other applications") does NOT apply** — it governs Apple Events to *scriptable apps*, not launchd daemons. It cannot restart `com.ultraleap.tracking.service` (a system LaunchDaemon, `libtrack_server` as root, parent launchd). Rule it out.
-- **`SMAppService` (macOS 13+) privileged helper** exposing a *single* XPC verb ("restart-leap") — the correct deployment mechanism. The pre-13 path is `SMJobBless` + `/Library/PrivilegedHelperTools` + `AuthorizationRef`.
+- **`SMAppService` (macOS 13+) privileged helper** exposing a *single* XPC verb ("restart-leap") — the correct deployment mechanism. The pre-13 path is `SMJobBless` + `/Library/PrivilegedHelperTools` + `AuthorizationRef`. **Caveat (proven 2026-06-03):** a daemon restart alone does **not** recover a *device-session* wedge — the new daemon reports "no leap detected." A restart helper is necessary but **not sufficient** on macOS; without a USB re-enumeration path it cannot self-heal that case. The helper's verb should therefore also attempt re-enumeration if/when a macOS mechanism exists, and the system must fall back to alerting for physical replug.
 - **Dev-box interim:** a narrow `sudoers.d` line scoped to the exact `launchctl kickstart -k system/com.ultraleap.tracking.service` (run by Madison, or one-time rule). **Caveat:** macOS 14.4 restricts `kickstart -k` for Apple *critical* daemons; the Ultraleap daemon is third-party so should be unaffected — verify on-device; fall back to `bootout`+`bootstrap` or `launchctl kill`.
 - No clean per-device USB reset analog on macOS (rung 2 is effectively Linux/Windows-only).
 
@@ -132,7 +149,7 @@ Privilege granted is bound to a *structured action + named target + specific ver
 ## Open questions / on-device verification
 
 1. **Replicate the wedge deterministically.** Partial progress (2026-06-03): a wedge was *observed* again — but **spontaneously, with WaveConductor not running** — which points away from our duty cycle and toward GPU/concurrency contention (hypothesis (a)). We still lack a *deterministic trigger* we can fire on demand for recovery testing. Next: induce contention on purpose (run a synthetic GPU load alongside the Leap, no WaveConductor) and see if it wedges repeatably; only then re-test the duty cycle's contribution on top. Remaining hypotheses to rule in/out: (b) the duty cycle's live polling pattern vs the harness's tight polling; (c) connect/disconnect or pause churn hitting the documented memory leak.
-2. **Client reconnect (rung 1): answered — does NOT clear a service-level wedge** (live test, `leap_recovery_probe`). Does **USB reset** (rung 2) clear it on Linux/Windows? (No macOS analog.) Does rung 3 (privileged restart) reliably clear it without a physical replug? — verify on the next live wedge using the operator runbook above.
+2. **Rung 1 (client reconnect): answered ✗** and **rung 3 (privileged restart): answered ✗ for a device-session wedge** — both tested live (`leap_recovery_probe`); only a physical USB replug recovered it on macOS. Still open: does **rung 2 (USB reset)** clear it on Linux/Windows (a no-privilege path macOS lacks)? Does rung 3 ever clear a *daemon-state* freeze caught before it becomes a device-session wedge? Does a PPPS hub + `uhubctl` actually power-cycle on macOS (the only candidate automated path there)?
 3. Exact service/unit names per OS; macOS 14.4 `kickstart -k` behavior for the third-party daemon.
 4. Windows least-privilege SCM-ACL grant + USB-reset path (dedicated research pass).
 5. Hardware-watchdog availability on the chosen box(es); PPPS support on any hub bought for rung 2b.
