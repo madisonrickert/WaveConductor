@@ -53,6 +53,15 @@ impl InteractionTimer {
     pub fn idle_for(&self, now: Duration) -> Duration {
         now.saturating_sub(self.last_interaction)
     }
+
+    /// Raw timestamp of the last detected interaction.
+    ///
+    /// Primarily useful in tests that need to assert the timer was *not* reset
+    /// (e.g. verifying that an empty Leap tracking frame is ignored).
+    #[must_use]
+    pub fn last_interaction(&self) -> Duration {
+        self.last_interaction
+    }
 }
 
 /// Function pointer type for idle vetoes. Receives a read-only `World` reference;
@@ -114,9 +123,11 @@ impl RegisterIdleVetoExt for App {
 
 /// Resets [`InteractionTimer`] whenever any input event is observed.
 ///
-/// Reads mouse, keyboard, touch, and hand-tracking message streams. A hand
-/// entering the tracking volume (any [`crate::input::state::HandTrackingFrame`]
-/// arriving) counts as user interaction.
+/// Reads mouse, keyboard, touch, and hand-tracking message streams. A
+/// hand-*bearing* frame (at least one hand in the tracking volume) counts as
+/// user interaction; empty tracking frames emitted by a running-but-unoccupied
+/// Leap device do not — otherwise the idle timer never reaches `Screensaver`
+/// while a Leap is connected.
 ///
 /// Note: Bevy 0.18 renamed `EventReader`/`EventWriter` to `MessageReader`/`MessageWriter`.
 /// The readers must consume (`.read()`) messages rather than merely peeking with
@@ -135,7 +146,16 @@ pub fn reset_on_interaction(
         || mouse_buttons.read().count() > 0
         || keyboard.read().count() > 0
         || touch.read().count() > 0
-        || hand_tracking.read().count() > 0;
+        // A *hand* in the tracking volume is interaction; the empty tracking
+        // frames a running-but-unoccupied Leap streams continuously are not —
+        // otherwise the idle timer never reaches Screensaver while a Leap is
+        // connected. `.filter().count()` (not `.any()`) so the reader cursor
+        // fully drains (see the note above about peeking).
+        || hand_tracking
+            .read()
+            .filter(|frame| !frame.hands.is_empty())
+            .count()
+            > 0;
     if any_event {
         timer.mark(time.elapsed());
     }

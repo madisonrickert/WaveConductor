@@ -153,3 +153,72 @@ fn idle_transitions_after_threshold() {
         SketchActivity::Idle,
     );
 }
+
+#[test]
+fn empty_leap_frames_do_not_reset_idle_timer() {
+    use bevy::prelude::*;
+    use smallvec::SmallVec;
+    use std::time::Duration;
+    use wc_core::input::provider::ProviderId;
+    use wc_core::input::state::HandTrackingFrame;
+    use wc_core::input::synthetic::synthetic_hand_frame;
+    use wc_core::lifecycle::idle::{reset_on_interaction, InteractionTimer};
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.init_resource::<InteractionTimer>();
+    // Register HandTrackingFrame as a message type so MessageReader<HandTrackingFrame>
+    // can be used by reset_on_interaction.
+    app.add_message::<HandTrackingFrame>();
+    // Also register the other input messages reset_on_interaction reads, otherwise
+    // those MessageReader parameters fail to initialize.
+    app.add_message::<bevy::input::mouse::MouseMotion>();
+    app.add_message::<bevy::input::mouse::MouseButtonInput>();
+    app.add_message::<bevy::input::keyboard::KeyboardInput>();
+    app.add_message::<bevy::input::touch::TouchInput>();
+    app.add_systems(Update, reset_on_interaction);
+
+    // Advance the clock so "last interaction" can be distinguished from ZERO.
+    app.update();
+    let baseline = app
+        .world()
+        .resource::<InteractionTimer>()
+        .last_interaction();
+
+    // An EMPTY tracking frame (service running, no hand) must NOT reset.
+    {
+        let mut msgs = app
+            .world_mut()
+            .resource_mut::<Messages<HandTrackingFrame>>();
+        msgs.write(HandTrackingFrame {
+            provider: ProviderId::Leap,
+            hands: SmallVec::new(),
+            timestamp: Duration::ZERO,
+        });
+    }
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<InteractionTimer>()
+            .last_interaction(),
+        baseline,
+        "empty Leap frame should not count as interaction",
+    );
+
+    // A HAND-bearing frame MUST reset.
+    let now = app.world().resource::<Time>().elapsed();
+    {
+        let mut msgs = app
+            .world_mut()
+            .resource_mut::<Messages<HandTrackingFrame>>();
+        msgs.write(synthetic_hand_frame(now));
+    }
+    app.update();
+    assert!(
+        app.world()
+            .resource::<InteractionTimer>()
+            .last_interaction()
+            > baseline,
+        "hand-bearing frame should count as interaction",
+    );
+}
