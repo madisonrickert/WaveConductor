@@ -48,6 +48,7 @@ pub mod button;
 pub mod entity;
 pub mod gesture;
 pub mod hand;
+pub mod idle_pause;
 pub mod pointer;
 pub mod projection;
 pub mod provider;
