@@ -32,6 +32,7 @@ use smallvec::SmallVec;
 use crate::input::hand::{Chirality, Hand, LandmarkIndex, LANDMARK_COUNT};
 use crate::input::idle_pause::{LeapIdlePause, PauseAction};
 use crate::input::provider::HandTrackingProvider;
+use crate::input::wedge::LeapWedgeDetector;
 use crate::input::state::{
     DeviceHealth, DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics,
     ProviderStatus, ServiceConnection, TrackingFlow, MAX_HANDS,
@@ -65,6 +66,12 @@ unsafe impl Sync for LeaprsProvider {}
 /// Set `request_background` before registering if the app needs frames when
 /// it does not have window focus.
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is a distinct, documented policy/state flag for the LeapC \
+              connection lifecycle; they are not a state machine — a named struct of \
+              flags is clearer than an enum or bitflags here"
+)]
 pub struct LeaprsProvider {
     /// Live connection handle; `None` before `start()` or after `stop()`.
     connection: Option<leaprs::Connection>,
@@ -91,6 +98,12 @@ pub struct LeaprsProvider {
     /// is granted, so it is armed via the same deferred-retry handshake as
     /// `BackgroundFrames`.
     pause_policy_applied: bool,
+    /// Our last requested pause state. `set_paused` records intent here so the
+    /// wedge detector can gate on "we expect streaming" (we don't expect frames
+    /// while we've asked the service to pause).
+    paused: bool,
+    /// Debounced wedge detector (frozen-but-alive service). Advanced each `poll`.
+    wedge: LeapWedgeDetector,
 }
 
 // ── HandTrackingProvider impl ────────────────────────────────────────────────
@@ -117,6 +130,9 @@ impl HandTrackingProvider for LeaprsProvider {
         // `ServiceConnection::Connected`.
         self.background_policy_applied = false;
         self.pause_policy_applied = false;
+        self.paused = false;
+        self.wedge.reset();
+        // last_tracking_instant is cleared by stop() (and None on a fresh provider).
 
         self.connection = Some(conn);
         self.status.service = ServiceConnection::Connecting;
@@ -130,6 +146,8 @@ impl HandTrackingProvider for LeaprsProvider {
         self.connection = None;
         self.status = ProviderStatus::default();
         self.last_tracking_instant = None;
+        self.paused = false;
+        self.wedge.reset();
     }
 
     /// Drain all pending leaprs events (non-blocking, timeout = 0).
@@ -137,7 +155,7 @@ impl HandTrackingProvider for LeaprsProvider {
     /// Iterates until `poll(0)` returns `Error::Timeout` (queue empty) or
     /// any other error. Dispatches each event to `handle_event`, then
     /// refreshes the `last_frame_ago` heartbeat.
-    fn poll(&mut self, _now: Duration, out: &mut Messages<HandTrackingFrame>) {
+    fn poll(&mut self, now: Duration, out: &mut Messages<HandTrackingFrame>) {
         let Some(conn) = self.connection.as_mut() else {
             return;
         };
@@ -197,6 +215,22 @@ impl HandTrackingProvider for LeaprsProvider {
             }
             TrackingFlow::NotStreaming => {}
         }
+
+        // Wedge detection: a service that should be streaming but has gone
+        // silent (control path alive, frames dead). Gated so an intentional
+        // pause, or a cold start that never streamed, is not mistaken for a
+        // wedge. `last_tracking_instant.is_some()` means "we have streamed at
+        // least once", so a slow first-frame handshake reads as benign
+        // DeviceAttached, not a wedge.
+        let is_streaming = matches!(self.status.streaming, TrackingFlow::Streaming { .. });
+        let expecting_streaming = matches!(self.status.service, ServiceConnection::Connected)
+            && matches!(self.status.device, DevicePresence::Attached)
+            && self.last_tracking_instant.is_some()
+            && !self.paused;
+        // Discard the edge: the provider's signal is the latched is_wedged() below;
+        // the enter/clear event is re-derived by surface_leap_wedge (Task 4).
+        self.wedge.poll(now, expecting_streaming, is_streaming);
+        self.status.wedged = self.wedge.is_wedged();
     }
 
     fn status(&self) -> ProviderStatus {
@@ -321,6 +355,7 @@ impl LeaprsProvider {
     /// (IR-LED power-down) is inconsistent across SDK builds. The only guaranteed
     /// device-heat fix is cutting USB power. This targets the host-CPU/M1 win.
     pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
         if !self.pause_policy_applied {
             // The policy isn't granted yet; pausing would error. Skip quietly —
             // the handshake in `poll` will arm it, and the next `set_paused`
@@ -731,11 +766,29 @@ pub fn resume_leap_on_active(mut registry: ResMut<'_, crate::input::provider::Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::provider::HandTrackingProvider;
 
     /// Verify that every `leaprs::DeviceStatus` bit maps to the corresponding
     /// `DeviceHealth` bit.  This is a compile-time-visible table — if a new
     /// `LeapC` status flag is added and leaprs exposes it, the corresponding
     /// `DeviceHealth` variant must be added and this test updated.
+    #[test]
+    fn fresh_provider_is_not_wedged() {
+        let provider = LeaprsProvider::default();
+        assert!(!provider.status().wedged);
+    }
+
+    #[test]
+    fn set_paused_records_intent_even_before_policy_granted() {
+        // No connection / policy yet, but intent must still be recorded so the
+        // wedge gate ("we expect streaming") is correct.
+        let mut provider = LeaprsProvider::default();
+        provider.set_paused(true);
+        assert!(provider.paused);
+        provider.set_paused(false);
+        assert!(!provider.paused);
+    }
+
     #[test]
     fn device_health_maps_streaming() {
         let status = leaprs::DeviceStatus::STREAMING;
@@ -766,6 +819,15 @@ mod tests {
     fn device_health_empty_roundtrips() {
         let health = device_health_from_leaprs(leaprs::DeviceStatus::empty());
         assert_eq!(health, DeviceHealth::empty());
+    }
+
+    #[test]
+    fn stop_clears_paused_and_wedge_state() {
+        let mut provider = LeaprsProvider::default();
+        provider.set_paused(true);
+        provider.stop();
+        assert!(!provider.paused, "stop() must clear pause intent");
+        assert!(!provider.status().wedged, "stop() must clear wedged status");
     }
 
     #[test]
