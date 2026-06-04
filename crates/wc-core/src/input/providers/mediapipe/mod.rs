@@ -26,8 +26,10 @@ use crate::input::state::{
     HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
 };
 
+mod anchors;
 mod coords;
 mod inference;
+mod palm;
 
 /// Construction-time configuration for the webcam provider.
 #[derive(Debug, Clone)]
