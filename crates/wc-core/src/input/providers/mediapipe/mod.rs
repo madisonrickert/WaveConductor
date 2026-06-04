@@ -27,6 +27,7 @@ use crate::input::state::{
 };
 
 mod coords;
+mod inference;
 
 /// Construction-time configuration for the webcam provider.
 #[derive(Debug, Clone)]
