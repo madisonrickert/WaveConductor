@@ -61,7 +61,11 @@ impl Frame {
 
 /// A source of camera frames. Implementors write the latest frame into the
 /// caller's buffer and report whether a new frame was produced.
-pub trait FrameSource: Send {
+///
+/// Not `Send`: the source is created and used entirely on the worker thread
+/// (via a `Send` factory), so backends with thread affinity — e.g. `nokhwa`'s
+/// `AVFoundation` camera, which is `!Send` — work without crossing threads.
+pub trait FrameSource {
     /// Write the next frame into `out`, returning `Ok(true)` if a new frame was
     /// produced, `Ok(false)` if none is available yet (caller should retry).
     ///
@@ -128,6 +132,55 @@ impl FrameSource for MockFrameSource {
         };
         out.fit_to(frame.width, frame.height);
         out.rgb.copy_from_slice(&frame.rgb);
+        Ok(true)
+    }
+}
+
+/// Production webcam capture via `nokhwa` (`AVFoundation` / `V4L2` / `MediaFoundation`).
+/// Behind the `hand-tracking-mediapipe-camera` feature so the base build stays
+/// camera-library-free and headless-testable.
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+pub struct NokhwaFrameSource {
+    camera: nokhwa::Camera,
+}
+
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+impl NokhwaFrameSource {
+    /// Open `camera_index` and start streaming at the highest available rate.
+    ///
+    /// # Errors
+    /// Returns [`CaptureError::NoCamera`] if the device cannot be opened.
+    pub fn open(camera_index: u32) -> Result<Self, CaptureError> {
+        use nokhwa::pixel_format::RgbFormat;
+        use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+        use nokhwa::Camera;
+
+        let index = CameraIndex::Index(camera_index);
+        let requested =
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+        let mut camera =
+            Camera::new(index, requested).map_err(|e| CaptureError::NoCamera(e.to_string()))?;
+        camera
+            .open_stream()
+            .map_err(|e| CaptureError::Read(e.to_string()))?;
+        Ok(Self { camera })
+    }
+}
+
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+impl FrameSource for NokhwaFrameSource {
+    fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError> {
+        use nokhwa::pixel_format::RgbFormat;
+
+        let buffer = self
+            .camera
+            .frame()
+            .map_err(|e| CaptureError::Read(e.to_string()))?;
+        let decoded = buffer
+            .decode_image::<RgbFormat>()
+            .map_err(|e| CaptureError::Read(e.to_string()))?;
+        out.fit_to(decoded.width(), decoded.height());
+        out.rgb.copy_from_slice(decoded.as_raw());
         Ok(true)
     }
 }

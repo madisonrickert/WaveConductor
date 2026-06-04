@@ -7,24 +7,32 @@
 //! directory; the provider emits into the same Leap-device-millimetre
 //! convention the Leap provider uses, so every downstream consumer is unchanged.
 //!
-//! Data flow: a dedicated worker thread (Phase 8) owns the camera and the two
-//! inference sessions and runs the pipeline at a capped rate, pushing completed
-//! [`crate::input::hand::Hand`] frames onto a lock-free `rtrb` ring; the
-//! provider's `poll` non-blockingly drains that ring on the Bevy main thread.
-//! This skeleton reports lifecycle through
-//! [`crate::input::state::ProviderStatus`] until the worker lands.
+//! Data flow: [`HandTrackingProvider::start`] loads the two ONNX models, opens a
+//! [`capture::FrameSource`] (a real webcam under the
+//! `hand-tracking-mediapipe-camera` feature, or an injected mock in tests), and
+//! spawns a [`worker`] thread that runs the [`pipeline::Pipeline`] at a capped
+//! rate and pushes completed [`crate::input::hand::Hand`] frames onto a
+//! lock-free `rtrb` ring. `poll` non-blockingly drains that ring on the Bevy
+//! main thread.
 //!
 //! See the design spec
 //! `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy::prelude::*;
+use rtrb::Consumer;
 
-use crate::input::provider::HandTrackingProvider;
+use self::capture::{CaptureError, FrameSource};
+use self::inference::{HandInference, TractInference};
+use self::pipeline::{Pipeline, PipelineConfig};
+use self::worker::{spawn_worker, SourceFactory, WorkerHandle, WorkerMsg};
+use crate::input::provider::{HandTrackingProvider, ProviderId};
 use crate::input::state::{
-    HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
+    DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
+    ServiceConnection,
 };
 
 mod anchors;
@@ -35,6 +43,7 @@ mod landmark;
 mod palm;
 mod pipeline;
 mod signals;
+mod worker;
 
 /// Construction-time configuration for the webcam provider.
 #[derive(Debug, Clone)]
@@ -47,6 +56,10 @@ pub struct MediaPipeConfig {
     /// Inference rate cap, in Hz. Hand tracking does not need full frame rate;
     /// capping leaves CPU headroom for the render thread and lowers heat.
     pub max_inference_hz: u32,
+    /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
+    /// Defaults to the workspace-relative `assets/models/hand` (resolved at
+    /// runtime against the working directory, like Bevy's `assets/`).
+    pub model_dir: PathBuf,
 }
 
 impl Default for MediaPipeConfig {
@@ -55,6 +68,7 @@ impl Default for MediaPipeConfig {
             camera_index: 0,
             mirror: true,
             max_inference_hz: 30,
+            model_dir: PathBuf::from("assets/models/hand"),
         }
     }
 }
@@ -67,14 +81,29 @@ impl Default for MediaPipeConfig {
 /// [`HandTrackingProvider::start`] eagerly.
 pub struct MediaPipeProvider {
     config: MediaPipeConfig,
-    /// Shared status snapshot, written by the worker (Phase 8) and read in
-    /// [`Self::status`]. Held behind a `Mutex` read once per frame on the Bevy
-    /// main thread (not a real-time/audio thread, so a short uncontended lock
-    /// is acceptable; the audio-thread no-`Mutex` rule does not apply here).
+    /// Shared status snapshot, written by `poll` from worker messages and read
+    /// in [`Self::status`]. A `Mutex` read once per frame on the Bevy main
+    /// thread is fine (not a real-time/audio thread, so the no-`Mutex` rule does
+    /// not apply here).
     status: Arc<Mutex<ProviderStatus>>,
-    /// Shared diagnostics snapshot, written by the worker, read in
-    /// [`Self::diagnostics`].
+    /// Shared diagnostics snapshot, read in [`Self::diagnostics`].
     diagnostics: Arc<Mutex<ProviderDiagnostics>>,
+    /// Worker handle, ring consumer, and any test-injected source. Wrapped in a
+    /// `Mutex` so the provider is `Sync` (the trait requires it) without
+    /// `unsafe`: `rtrb::Consumer` and `Box<dyn FrameSource>` are `Send` but not
+    /// `Sync`, and `Mutex<T: Send>` is `Sync`. Only ever accessed via `&mut self`
+    /// (`get_mut`), so there is no real contention.
+    runtime: Mutex<Runtime>,
+}
+
+/// The provider's running state (everything that exists only between `start`
+/// and `stop`).
+#[derive(Default)]
+struct Runtime {
+    worker: Option<WorkerHandle>,
+    consumer: Option<Consumer<WorkerMsg>>,
+    /// Test-injected source. `+ Send` so it can move into the worker factory.
+    injected_source: Option<Box<dyn FrameSource + Send>>,
 }
 
 impl MediaPipeProvider {
@@ -86,6 +115,7 @@ impl MediaPipeProvider {
             config,
             status: Arc::new(Mutex::new(ProviderStatus::default())),
             diagnostics: Arc::new(Mutex::new(ProviderDiagnostics::default())),
+            runtime: Mutex::new(Runtime::default()),
         }
     }
 
@@ -94,22 +124,153 @@ impl MediaPipeProvider {
     pub fn config(&self) -> &MediaPipeConfig {
         &self.config
     }
+
+    /// Set the horizontal mirror. Applies on the next [`HandTrackingProvider::start`].
+    pub fn set_mirror(&mut self, mirror: bool) {
+        self.config.mirror = mirror;
+    }
+
+    /// Set the camera index. Applies on the next [`HandTrackingProvider::start`].
+    pub fn set_camera_index(&mut self, index: u32) {
+        self.config.camera_index = index;
+    }
+
+    /// Inject a frame source for testing (used instead of opening a webcam).
+    #[cfg(test)]
+    pub fn set_test_source(&mut self, source: Box<dyn FrameSource + Send>) {
+        if let Ok(rt) = self.runtime.get_mut() {
+            rt.injected_source = Some(source);
+        }
+    }
+
+    /// Build the pipeline from the vendored models.
+    fn build_pipeline(&self) -> Result<Pipeline, HandTrackingError> {
+        let dir = &self.config.model_dir;
+        let palm = load_model(dir, "palm_detection.onnx", &[1, 192, 192, 3])?;
+        let landmark = load_model(dir, "hand_landmark.onnx", &[1, 224, 224, 3])?;
+        let cfg = PipelineConfig {
+            mirror: self.config.mirror,
+            ..PipelineConfig::default()
+        };
+        Ok(Pipeline::new(palm, landmark, cfg))
+    }
+}
+
+/// Open a real webcam source on the calling (worker) thread, or error. Runs
+/// inside the worker so `!Send` camera backends never cross threads.
+fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, CaptureError> {
+    #[cfg(feature = "hand-tracking-mediapipe-camera")]
+    {
+        let source = capture::NokhwaFrameSource::open(camera_index)?;
+        let boxed: Box<dyn FrameSource> = Box::new(source);
+        Ok(boxed)
+    }
+    #[cfg(not(feature = "hand-tracking-mediapipe-camera"))]
+    {
+        let _ = camera_index;
+        Err(CaptureError::NoCamera(
+            "build with the hand-tracking-mediapipe-camera feature".into(),
+        ))
+    }
+}
+
+/// Load one ONNX model and wrap it as a boxed [`HandInference`].
+fn load_model(
+    dir: &Path,
+    name: &str,
+    input_shape: &[usize],
+) -> Result<Box<dyn HandInference>, HandTrackingError> {
+    let path = dir.join(name);
+    let bytes = std::fs::read(&path).map_err(|e| {
+        HandTrackingError::Misconfigured(format!("read model {}: {e}", path.display()))
+    })?;
+    let model = TractInference::load(&bytes, input_shape)
+        .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
+    let boxed: Box<dyn HandInference> = Box::new(model);
+    Ok(boxed)
 }
 
 impl HandTrackingProvider for MediaPipeProvider {
     fn start(&mut self) -> Result<(), HandTrackingError> {
-        // The worker (camera open + model load + pipeline thread) lands in a
-        // later phase. Until then, report Unavailable so the registry's
-        // status-check treats this like a missing device and (under `auto`)
-        // falls back to the mock provider.
-        Err(HandTrackingError::Unavailable(
-            "MediaPipeProvider worker not yet implemented".into(),
-        ))
+        let pipeline = self.build_pipeline()?;
+        // A test-injected source is used directly; otherwise the worker opens the
+        // webcam on its own thread (camera backends can be !Send). Both arms
+        // produce a `Send` factory.
+        let injected = self
+            .runtime
+            .get_mut()
+            .ok()
+            .and_then(|rt| rt.injected_source.take());
+        let camera_index = self.config.camera_index;
+        let make_source: SourceFactory = match injected {
+            Some(src) => Box::new(move || {
+                let boxed: Box<dyn FrameSource> = src;
+                Ok(boxed)
+            }),
+            None => Box::new(move || open_camera_source(camera_index)),
+        };
+        let (producer, consumer) = rtrb::RingBuffer::new(256);
+        let handle = spawn_worker(
+            make_source,
+            pipeline,
+            self.config.max_inference_hz,
+            producer,
+        );
+        if let Ok(rt) = self.runtime.get_mut() {
+            rt.worker = Some(handle);
+            rt.consumer = Some(consumer);
+        }
+        if let Ok(mut s) = self.status.lock() {
+            // The worker flips this to Streaming via its first status message;
+            // Connecting here lets the registry's start-check see success.
+            s.service = ServiceConnection::Connecting;
+            s.device = DevicePresence::Attached;
+        }
+        if let Ok(mut d) = self.diagnostics.lock() {
+            d.sdk_version = Some("MediaPipe (tract) palm+landmark".into());
+            d.device_serial = Some(format!("camera{}", self.config.camera_index));
+        }
+        Ok(())
     }
 
-    fn stop(&mut self) {}
+    fn stop(&mut self) {
+        if let Ok(rt) = self.runtime.get_mut() {
+            if let Some(mut worker) = rt.worker.take() {
+                worker.stop();
+            }
+            rt.consumer = None;
+        }
+        if let Ok(mut s) = self.status.lock() {
+            *s = ProviderStatus::default();
+        }
+    }
 
-    fn poll(&mut self, _now: Duration, _out: &mut Messages<HandTrackingFrame>) {}
+    fn poll(&mut self, _now: Duration, out: &mut Messages<HandTrackingFrame>) {
+        let mut latest = None;
+        let mut new_status = None;
+        if let Ok(rt) = self.runtime.get_mut() {
+            if let Some(consumer) = rt.consumer.as_mut() {
+                while let Ok(msg) = consumer.pop() {
+                    match msg {
+                        WorkerMsg::Hands { hands, timestamp } => latest = Some((hands, timestamp)),
+                        WorkerMsg::Status(s) => new_status = Some(s),
+                    }
+                }
+            }
+        }
+        if let Some(status) = new_status {
+            if let Ok(mut s) = self.status.lock() {
+                *s = status;
+            }
+        }
+        if let Some((hands, timestamp)) = latest {
+            out.write(HandTrackingFrame {
+                provider: ProviderId::MediaPipe,
+                hands,
+                timestamp,
+            });
+        }
+    }
 
     fn status(&self) -> ProviderStatus {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
@@ -121,12 +282,22 @@ impl HandTrackingProvider for MediaPipeProvider {
             .map(|d| d.clone())
             .unwrap_or_default()
     }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
+    use super::capture::{Frame, MockFrameSource};
     use super::*;
-    use crate::input::state::{PrimaryState, ServiceConnection};
+    use crate::input::state::PrimaryState;
+
+    fn vendored_models() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/hand")
+    }
 
     #[test]
     fn provider_before_start_is_not_started() {
@@ -141,5 +312,49 @@ mod tests {
         assert!(p.config().mirror);
         assert_eq!(p.config().max_inference_hz, 30);
         assert_eq!(p.config().camera_index, 0);
+    }
+
+    #[test]
+    fn lifecycle_with_mock_source_reaches_streaming() {
+        let config = MediaPipeConfig {
+            model_dir: vendored_models(),
+            ..MediaPipeConfig::default()
+        };
+        let mut provider = MediaPipeProvider::new(config);
+        provider.set_test_source(Box::new(MockFrameSource::looping(vec![{
+            let mut f = Frame::default();
+            f.fit_to(64, 48);
+            f
+        }])));
+
+        provider
+            .start()
+            .expect("provider should start with a mock source");
+
+        // poll drains worker status messages into the shared snapshot.
+        let mut messages = Messages::<HandTrackingFrame>::default();
+        let mut streaming = false;
+        for _ in 0..200 {
+            provider.poll(Duration::ZERO, &mut messages);
+            if provider.status().primary() == PrimaryState::Streaming {
+                streaming = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        provider.stop();
+        assert!(streaming, "provider never reached Streaming");
+        assert_eq!(provider.status().primary(), PrimaryState::NotStarted); // after stop
+    }
+
+    #[test]
+    fn missing_models_fail_to_start_cleanly() {
+        let config = MediaPipeConfig {
+            model_dir: PathBuf::from("definitely_missing_models_dir"),
+            ..MediaPipeConfig::default()
+        };
+        let mut provider = MediaPipeProvider::new(config);
+        provider.set_test_source(Box::new(MockFrameSource::solid(8, 8, [0, 0, 0])));
+        assert!(provider.start().is_err());
     }
 }
