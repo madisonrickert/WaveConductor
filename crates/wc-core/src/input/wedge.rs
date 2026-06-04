@@ -99,8 +99,10 @@ mod tests {
 
     #[test]
     fn threshold_exceeds_heartbeat() {
-        // Must debounce on a *confirmed* NotStreaming (the provider's ~1 s
-        // STALE_FRAME_THRESHOLD), not race the heartbeat.
+        // Self-contained floor: this always-compiled module can't see the
+        // provider's private STALE_FRAME_THRESHOLD. The authoritative
+        // WEDGE_THRESHOLD > STALE_FRAME_THRESHOLD binding is a compile-time
+        // assertion in leap_native.rs.
         assert!(WEDGE_THRESHOLD >= Duration::from_secs(1));
     }
 

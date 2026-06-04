@@ -36,10 +36,15 @@ use crate::input::state::{
     DeviceHealth, DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics,
     ProviderStatus, ServiceConnection, TrackingFlow, MAX_HANDS,
 };
-use crate::input::wedge::LeapWedgeDetector;
+use crate::input::wedge::{LeapWedgeDetector, WEDGE_THRESHOLD};
 
 // ── threshold for heartbeat degradation ──────────────────────────────────────
 const STALE_FRAME_THRESHOLD: Duration = Duration::from_secs(1);
+
+// The wedge debounce must outlast the heartbeat's stale-frame degrade, so we
+// only ever debounce a *confirmed* NotStreaming. Bound at compile time here,
+// where both constants are visible (wedge.rs can't see STALE_FRAME_THRESHOLD).
+const _: () = assert!(WEDGE_THRESHOLD.as_nanos() > STALE_FRAME_THRESHOLD.as_nanos());
 
 // ── provider struct ──────────────────────────────────────────────────────────
 
@@ -768,10 +773,6 @@ mod tests {
     use super::*;
     use crate::input::provider::HandTrackingProvider;
 
-    /// Verify that every `leaprs::DeviceStatus` bit maps to the corresponding
-    /// `DeviceHealth` bit.  This is a compile-time-visible table — if a new
-    /// `LeapC` status flag is added and leaprs exposes it, the corresponding
-    /// `DeviceHealth` variant must be added and this test updated.
     #[test]
     fn fresh_provider_is_not_wedged() {
         let provider = LeaprsProvider::default();
@@ -789,6 +790,10 @@ mod tests {
         assert!(!provider.paused);
     }
 
+    /// Verify that every `leaprs::DeviceStatus` bit maps to the corresponding
+    /// `DeviceHealth` bit.  This is a compile-time-visible table — if a new
+    /// `LeapC` status flag is added and leaprs exposes it, the corresponding
+    /// `DeviceHealth` variant must be added and this test updated.
     #[test]
     fn device_health_maps_streaming() {
         let status = leaprs::DeviceStatus::STREAMING;

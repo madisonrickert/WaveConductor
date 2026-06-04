@@ -89,6 +89,8 @@ Do **not** make WaveConductor a privileged service-restarter. Let the **OS init/
 
 We already have the signal: the provider stamps `last_tracking_instant` on every tracking event and flips `TrackingFlow::NotStreaming` after `STALE_FRAME_THRESHOLD` (1 s) without frames. Because a healthy un-paused service streams continuously *even with no hand present*, "no frames while we believe we're un-paused" is an unambiguous wedge signal. Corroborate with leaprs `EventRef::ConnectionLost`. A watchdog should debounce (require sustained absence) to avoid acting on a transient blip, and gate on "we expect streaming" so intentional pauses don't false-trip.
 
+**Reconnect gotcha (from the detector increment):** when recovery reconnects via `LeaprsProvider::start()`, reset `last_tracking_instant` (today `start()` relies on `stop()` clearing it). A reconnect that skips `stop()` would leave it stale, so the wedge detector's "has-streamed-before" gate (`expecting_streaming`) would read true immediately and skip the cold-start grace window.
+
 ## Recovery escalation ladder (cheapest / least-privilege first)
 
 | Rung | Action | Privilege | Reachable on |
