@@ -82,5 +82,13 @@ required-features = ["hand-tracking-gestures"]
 name = "leap_duty_stress"
 required-features = ["hand-tracking-gestures"]
 
+[[example]]
+name = "leap_recovery_probe"
+required-features = ["hand-tracking-gestures"]
+
+[[example]]
+name = "leap_heartbeat_monitor"
+required-features = ["hand-tracking-gestures"]
+
 [dev-dependencies]
 tempfile.workspace = true
