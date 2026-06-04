@@ -12,40 +12,45 @@
 
 ## Implementation status (2026-06-04)
 
-Landed on `mediapipe-hand-tracking` (9 commits; `wc-core` builds + all 203 lib
-tests pass with `--features hand-tracking-mediapipe`; `clippy -D warnings`,
-`check-secrets`, and `--all-features` checks green):
+**The provider is functionally complete and validated end-to-end in pure Rust.**
+Landed on `mediapipe-hand-tracking` (16 commits; full-workspace
+`--all-features` clippy `-D warnings`, `check-secrets`, and the per-crate test
+suites all green):
 
-- ✅ **Phase 0** — Spike. Runtime decided: **`tract`**. Models vendored;
-  `palm_detection.onnx` graph-surgeried (Resize→scales, bit-exact); landmark
-  model runs bit-exactly; handedness + world landmarks confirmed present. Palm
-  bilinear-Resize edge-fidelity gate recorded.
-- ✅ **Phase 1** — Feature flags (`hand-tracking-mediapipe` + `-camera`
-  sub-feature), provider skeleton, env-var selection, registry test.
-- ✅ **Phase 2** — `coords` (image-norm → Leap-mm) incl. cross-provider test.
-- ✅ **Phase 3** — `anchors` (2016, golden-by-invariant) + `palm` (decode + NMS).
-- ✅ **Phase 5** — `signals` (pinch/grab/palm-normal/velocity + id tracker).
-- ✅ **Phase 6.1** — `inference` (`HandInference` trait + `tract`; hermetic
-  in-crate model tests).
-- ✅ **Phase 7.1** — `capture` (`FrameSource` + `MockFrameSource`).
+- ✅ **Phase 0** — Spike. Runtime: **`tract`**. Models vendored;
+  `palm_detection.onnx` graph-surgeried (Resize→scales, bit-exact). Palm-Resize
+  fidelity gate **RESOLVED on a real hand** (tract vs onnxruntime detection
+  agree to 0.0004 normalized). Preprocessing/decode constants pinned.
+- ✅ **Phase 1** — Feature flags, provider skeleton, env-var selection, registry.
+- ✅ **Phase 2** — `coords` (image-norm → Leap-mm) + cross-provider test.
+- ✅ **Phase 3** — `anchors` + `palm` (decode + weighted NMS).
+- ✅ **Phase 4** — `landmark` ROI (crop/rotate) + projection. ROI constants
+  validated against the oracle (reproduced MediaPipe's ROI; real hand → presence
+  0.72).
+- ✅ **Phase 5** — `signals` (pinch/grab/normal/velocity + id tracker).
+- ✅ **Phase 6.1** — `inference` (`HandInference` trait + `tract`).
+- ✅ **Phase 7** — `capture` (`FrameSource` + `MockFrameSource` + real
+  `NokhwaFrameSource` behind the camera sub-feature).
+- ✅ **Phase 8** — `pipeline` (Frame→Hands) **validated end-to-end on the real
+  hand: 2 hands, correct chirality, palm in the Leap working volume** + `worker`
+  thread (Send factory builds the !Send camera on-thread) + lock-free ring.
+- ✅ **Phase 9** — provider `start`/`poll`/`stop` wired to the worker; status
+  mapping; typed `set_mirror`/`set_camera_index`; `Mutex<Runtime>` keeps the
+  provider `Sync` without `unsafe`.
+- ✅ **Phase 10 (partial)** — stale `Hand` doc fixed; full CI gates green.
 
-**Remaining — blocked on a real-hand fixture and/or Madison's webcam:**
+**Remaining — needs Madison's hardware/content:**
 
-- ⏳ **Phase 4** (`landmark` ROI crop/rotate + projection): pure math, but its
-  MediaPipe magic constants (2.6× scale, rotation keypoints, −0.5 shift) MUST be
-  validated against the Python oracle on a **real hand image** — building it
-  blind risks the subtly-wrong-ROI failure mode the debate warned about.
-- ⏳ **Phase 6.2** (end-to-end golden): needs a real hand image + oracle goldens.
-- ⏳ **Phase 7.2** (`NokhwaFrameSource`): needs a webcam (compile + manual test).
-- ⏳ **Phase 8/9** (pipeline + worker + provider wiring): integration; needs the
-  real-hand loop to validate the positive path.
-- ⏳ **Phase 10** (on-hardware acceptance, full CI gate, stale-`Hand`-doc fix):
-  Madison's webcam + sign-off.
-
-**To unblock:** a single clear webcam frame of a hand (Madison's own selfie — no
-licensing question in her repo) seeds `tools/handtrack-oracle/` to (a) validate
-the Phase-4 ROI per-stage and (b) generate the committed end-to-end golden, after
-which Phases 4/6.2/8/9 proceed; Phase 10 is the on-hardware acceptance gate.
+- ⏳ **Phase 6.2** (committed CI golden): needs one hand image Madison is happy to
+  commit (her own selfie). The env-var-gated e2e test
+  (`WC_HANDTRACK_TEST_IMAGE`) already validates the full pipeline locally; the
+  committed golden just makes that positive-path test run hermetically in CI.
+- ⏳ **Phase 10 (acceptance)**: `WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo rund`
+  on Madison's webcam — verify hand tracking drives the Line sketch, then tune
+  the few runtime conventions that need a live hand: **mirror direction**,
+  **handedness mapping** (the `handed >= 0.5 → Right` choice), and the
+  **pinch/grab thresholds** (currently geometric defaults). Dev-panel diagnostics
+  check. 8-hour soak is the separate deployment gate.
 
 **Verify gates after each phase (from AGENTS.md):**
 - `cargo fmt --all -- --check`
