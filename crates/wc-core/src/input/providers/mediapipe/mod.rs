@@ -31,6 +31,7 @@ mod anchors;
 mod capture;
 mod coords;
 mod inference;
+mod landmark;
 mod palm;
 mod signals;
 
