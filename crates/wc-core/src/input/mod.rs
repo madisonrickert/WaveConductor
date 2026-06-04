@@ -56,6 +56,7 @@ pub mod providers;
 pub mod state;
 pub mod synthetic;
 pub mod systems;
+pub mod wedge;
 
 use bevy::input::InputSystems;
 use bevy::prelude::*;
