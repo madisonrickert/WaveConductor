@@ -3,6 +3,7 @@
 **Status:** Research / design (roadmap item `leap-deep-idle-state`). Supersedes the naive `leap-idle-pause` duty-cycle approach, which live-testing falsified (see below).
 **Date:** 2026-06-03.
 **Scope:** all three major desktop OSes are **first-class** (macOS, Linux, Windows). iPad is out of scope for *this* item — its hand tracking is Apple Vision (in-process), so there is no external Leap service to wedge or restart.
+**Operational runbook:** for fast in-the-moment troubleshooting (symptoms → diagnose → recover), see [`../../runbooks/leap-wedge-troubleshooting.md`](../../runbooks/leap-wedge-troubleshooting.md). This doc is the *why*; the runbook is the *what-to-do*.
 
 ---
 
