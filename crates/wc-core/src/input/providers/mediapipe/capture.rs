@@ -170,19 +170,86 @@ impl NokhwaFrameSource {
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 impl FrameSource for NokhwaFrameSource {
     fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError> {
-        use nokhwa::pixel_format::RgbFormat;
+        use nokhwa::utils::FrameFormat;
 
         let buffer = self
             .camera
             .frame()
             .map_err(|e| CaptureError::Read(e.to_string()))?;
-        let decoded = buffer
-            .decode_image::<RgbFormat>()
-            .map_err(|e| CaptureError::Read(e.to_string()))?;
-        out.fit_to(decoded.width(), decoded.height());
-        out.rgb.copy_from_slice(decoded.as_raw());
+        let res = self.camera.resolution();
+        let (w, h) = (res.width(), res.height());
+        let raw = buffer.buffer();
+
+        // Decode without nokhwa's `decoding` feature (which pulls the
+        // IJG-licensed mozjpeg C lib): MJPEG via the pure-Rust `image` crate,
+        // YUYV and raw RGB converted directly.
+        match buffer.source_frame_format() {
+            FrameFormat::MJPEG => {
+                let img = image::load_from_memory_with_format(raw, image::ImageFormat::Jpeg)
+                    .map_err(|e| CaptureError::Read(format!("MJPEG decode: {e}")))?
+                    .to_rgb8();
+                out.fit_to(img.width(), img.height());
+                out.rgb.copy_from_slice(img.as_raw());
+            }
+            FrameFormat::YUYV => {
+                out.fit_to(w, h);
+                yuyv_to_rgb(raw, &mut out.rgb)?;
+            }
+            FrameFormat::RAWRGB => {
+                out.fit_to(w, h);
+                if raw.len() != out.rgb.len() {
+                    return Err(CaptureError::Read("RAWRGB frame size mismatch".into()));
+                }
+                out.rgb.copy_from_slice(raw);
+            }
+            other => {
+                return Err(CaptureError::Read(format!(
+                    "unsupported camera frame format {other:?}; extend NokhwaFrameSource::next_frame"
+                )));
+            }
+        }
         Ok(true)
     }
+}
+
+/// Convert packed YUYV (YUY2: `Y0 U Y1 V` per 2 pixels) to RGB8 in `out`.
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+fn yuyv_to_rgb(yuyv: &[u8], out: &mut [u8]) -> Result<(), CaptureError> {
+    if yuyv.len() / 4 * 6 != out.len() {
+        return Err(CaptureError::Read("YUYV frame size mismatch".into()));
+    }
+    // BT.601 full-range YUV→RGB.
+    let clamp = |v: f32| {
+        #[allow(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "value clamped to [0,255]; float→int has no From/TryFrom"
+        )]
+        {
+            v.clamp(0.0, 255.0).round() as u8
+        }
+    };
+    let convert = |y: f32, u: f32, v: f32, px: &mut [u8]| {
+        let c = y - 16.0;
+        let d = u - 128.0;
+        let e = v - 128.0;
+        px[0] = clamp(1.164 * c + 1.596 * e);
+        px[1] = clamp(1.164 * c - 0.392 * d - 0.813 * e);
+        px[2] = clamp(1.164 * c + 2.017 * d);
+    };
+    for (quad, rgb6) in yuyv.chunks_exact(4).zip(out.chunks_exact_mut(6)) {
+        let (y0, u, y1, v) = (
+            f32::from(quad[0]),
+            f32::from(quad[1]),
+            f32::from(quad[2]),
+            f32::from(quad[3]),
+        );
+        let (first, second) = rgb6.split_at_mut(3);
+        convert(y0, u, v, first);
+        convert(y1, u, v, second);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

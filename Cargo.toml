@@ -135,7 +135,7 @@ tract-onnx = "0.21"
 # `FrameSource` (behind `hand-tracking-mediapipe-camera`; AVFoundation / V4L2 /
 # MediaFoundation). Kept in a sub-feature so the inference/glue stay buildable
 # and CI-testable headless without camera platform libraries.
-nokhwa = { version = "0.10", features = ["input-native"] }
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
 # Native file picker (Plan 11 Phase C): cross-platform Browse… dialog for
 # the Line sketch's `spawn_template` setting. Targets macOS NSOpenPanel,
 # Windows IFileDialog, GTK on Linux. Web build is out of scope (rfd has a
