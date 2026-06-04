@@ -252,6 +252,46 @@ fn apply_debug_bloom_toggle(
 /// to detect startup failure (`LeaprsProvider` sets
 /// [`wc_core::input::state::ServiceConnection::Errored`] on create/open
 /// failure).
+/// Register the `MediaPipe` webcam provider as the primary source.
+///
+/// Returns `Some(started)` when the `hand-tracking-mediapipe` feature is
+/// compiled in (`started` reflects whether the provider came up), or `None` when
+/// the feature is absent so the caller can fall back to `auto`.
+#[cfg(all(
+    feature = "hand-tracking-gestures",
+    feature = "hand-tracking-mediapipe"
+))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Option is the shared signature; the None case is the feature-absent variant below"
+)]
+fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry) -> Option<bool> {
+    use wc_core::input::provider::{ProviderId, ProviderRole};
+    use wc_core::input::providers::mediapipe::{MediaPipeConfig, MediaPipeProvider};
+    use wc_core::input::state::ServiceConnection;
+
+    registry.register(
+        ProviderId::MediaPipe,
+        ProviderRole::Primary,
+        Box::new(MediaPipeProvider::new(MediaPipeConfig::default())),
+    );
+    Some(registry.provider(ProviderId::MediaPipe).is_some_and(|r| {
+        !matches!(
+            r.inner.status().service,
+            ServiceConnection::Errored | ServiceConnection::NotStarted
+        )
+    }))
+}
+
+/// Feature-absent variant: signals the caller to fall back to `auto`.
+#[cfg(all(
+    feature = "hand-tracking-gestures",
+    not(feature = "hand-tracking-mediapipe")
+))]
+fn register_mediapipe(_registry: &mut wc_core::input::provider::ProviderRegistry) -> Option<bool> {
+    None
+}
+
 #[cfg(feature = "hand-tracking-gestures")]
 fn install_hand_tracking_providers(
     mut commands: Commands<'_, '_>,
@@ -318,32 +358,13 @@ fn install_hand_tracking_providers(
                 );
             }
         }
-        "mediapipe" => {
-            #[cfg(feature = "hand-tracking-mediapipe")]
-            {
-                use wc_core::input::providers::mediapipe::{MediaPipeConfig, MediaPipeProvider};
-                registry.register(
-                    ProviderId::MediaPipe,
-                    ProviderRole::Primary,
-                    Box::new(MediaPipeProvider::new(MediaPipeConfig::default())),
-                );
-                let started = registry.provider(ProviderId::MediaPipe).is_some_and(|r| {
-                    !matches!(
-                        r.inner.status().service,
-                        ServiceConnection::Errored | ServiceConnection::NotStarted
-                    )
-                });
-                if started {
-                    tracing::info!("hand-tracking: MediaPipeProvider started (webcam)");
-                } else {
-                    tracing::warn!(
-                        "hand-tracking: MediaPipeProvider failed to start; \
-                         mouse and touch input still work"
-                    );
-                }
-            }
-            #[cfg(not(feature = "hand-tracking-mediapipe"))]
-            {
+        "mediapipe" => match register_mediapipe(&mut registry) {
+            Some(true) => tracing::info!("hand-tracking: MediaPipeProvider started (webcam)"),
+            Some(false) => tracing::warn!(
+                "hand-tracking: MediaPipeProvider failed to start; \
+                 mouse and touch input still work"
+            ),
+            None => {
                 tracing::warn!(
                     "hand-tracking: 'mediapipe' requested but the hand-tracking-mediapipe \
                      feature is not compiled in; defaulting to auto"
@@ -352,7 +373,7 @@ fn install_hand_tracking_providers(
                     install_mock(&mut registry);
                 }
             }
-        }
+        },
         "auto" => {
             if !try_leap(&mut registry, settings.leap_background) {
                 tracing::info!("hand-tracking: falling back to MockProvider");
