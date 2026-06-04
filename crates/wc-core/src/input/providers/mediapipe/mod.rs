@@ -30,6 +30,7 @@ mod anchors;
 mod coords;
 mod inference;
 mod palm;
+mod signals;
 
 /// Construction-time configuration for the webcam provider.
 #[derive(Debug, Clone)]
