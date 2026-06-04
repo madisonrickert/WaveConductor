@@ -227,12 +227,55 @@ Per Madison's rules: local-only, `uv`-managed, **no Anthropic/LLM API spend** (t
 | Webcam handedness/world-landmark outputs differ from assumptions | Low–Med | Verified in the spike against the oracle; chirality derivable from landmark geometry as a fallback. |
 | ~7 MB models in git | Low | Accepted (matches vendored-`libLeapC`); `xtask`-download is the documented alternative if size becomes a problem. |
 
+## Spike results (2026-06-04)
+
+Run on macOS arm64 with `tract-onnx` 0.21 vs `onnxruntime` 1.26, identical seeded
+random inputs, `1e-3` tolerance. Reproducible via `tools/handtrack-oracle/` +
+the standalone tract harness.
+
+**Model I/O (resolves open-question 2):**
+- `palm_detection`: input `input_1 [1,192,192,3]`; outputs **raw** `[1,2016,18]`
+  box/keypoint regressions + `[1,2016,1]` scores. Anchor decode + NMS are
+  outside the graph (2016 anchors confirmed) — no `NMS`/`TopK` op present.
+- `hand_landmark`: input `input_1 [1,224,224,3]`; outputs `[1,63]` image
+  landmarks, `[1,1]` presence, **`[1,1]` handedness**, **`[1,63]` world
+  landmarks**. So chirality and metric bone geometry come straight from the
+  model — `signals.rs` reads them rather than deriving (simplifies Phase 5).
+
+**tract results:**
+- `hand_landmark`: **PASS** — all four outputs match onnxruntime to 1e-4…1e-7.
+  tract runs it as-is, no changes.
+- `palm_detection`: tract **ignores the `Resize` `sizes` input** and fails at
+  `Resize__235` (`[1,256,6,6]` not upsampled to `[1,256,12,12]`). Graph surgery
+  (rewrite the 2 FPN `Resize` nodes to `scales=[1,1,2,2]`) makes the shapes
+  correct and is **bit-exact under onnxruntime** (0.0 err vs original). After
+  surgery, tract runs the model but its `linear`/`half_pixel` Resize **diverges
+  from onnxruntime at feature-map edges** (isolated 4×4→8×8 probe: 0.56 max err;
+  onnxruntime clamps out-of-range sample coords, tract extrapolates).
+
+**Decision: runtime = `tract`** (both stages run in pure Rust; the landmark
+stage that sets final accuracy is bit-perfect). The committed
+`assets/models/hand/palm_detection.onnx` is the surgeried, tract-ready model.
+
+**Residual risk + mitigation ladder (the palm-ROI fidelity gate):** the palm
+detector's bilinear-Resize edge discrepancy must be validated to not degrade
+ROI localization on a **real hand image** during Phase 6/8 (centered hands use
+the feature-map interior, where tract matches well; the discrepancy is at the
+borders). If real-hand ROIs prove unreliable, escalate: (1) decompose the 2×
+bilinear Resize into a tract-faithful `ConvTranspose`; else (2) run *only* the
+palm model under `ort` behind the `HandInference` trait; else (3) `ort` for both
+stages (accepting the vendored native lib + NOTICE). The landmark stage stays on
+tract regardless.
+
+Open-question 3 (nokhwa CI build) is still open → resolved in plan Task 1.1.
+
 ## Roadmap entry
 
 Recommend adding a slug **`mediapipe-webcam-hands`** to `docs/superpowers/roadmap.md` (a desktop sibling of Phase-3 `ios-vision-hands`; an alternative primary input to `leap-*`). I have **not** edited `roadmap.md` because it carries a pre-existing uncommitted change from before this branch — Madison should place/sequence the slug to avoid clobbering that edit.
 
-## Open questions (resolved during the spike, recorded in the plan)
+## Open questions
 
-1. Does `tract` run both models as-is, or is one Resize-node graph surgery needed? (→ runtime decision)
-2. Does `opencv/handpose_estimation_mediapipe` emit a handedness score and world landmarks, or must chirality/3D be derived from image landmarks? (→ `signals.rs` design)
-3. Does `nokhwa`'s `input-native` build cleanly on the Linux CI runner, or does the camera need sub-feature gating? (→ feature-flag shape)
+1. ~~Does `tract` run both models as-is, or is one Resize-node graph surgery needed?~~ **RESOLVED (spike):** landmark runs as-is; palm needs the `Resize`→`scales` surgery (bit-exact) and has a residual edge-fidelity gate. Runtime = `tract`.
+2. ~~Does `opencv/handpose_estimation_mediapipe` emit a handedness score and world landmarks?~~ **RESOLVED (spike):** yes — both. `signals.rs` reads them.
+3. Does `nokhwa`'s `input-native` build cleanly on the Linux CI runner, or does the camera need sub-feature gating? (→ resolved in plan Task 1.1)
+4. **NEW (spike):** Does the palm detector's bilinear-Resize edge discrepancy degrade real-hand ROI localization? (→ validated in plan Phase 6/8; mitigation ladder in *Spike results*)
