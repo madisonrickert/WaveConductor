@@ -32,11 +32,11 @@ use smallvec::SmallVec;
 use crate::input::hand::{Chirality, Hand, LandmarkIndex, LANDMARK_COUNT};
 use crate::input::idle_pause::{LeapIdlePause, PauseAction};
 use crate::input::provider::HandTrackingProvider;
-use crate::input::wedge::LeapWedgeDetector;
 use crate::input::state::{
     DeviceHealth, DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics,
     ProviderStatus, ServiceConnection, TrackingFlow, MAX_HANDS,
 };
+use crate::input::wedge::LeapWedgeDetector;
 
 // ── threshold for heartbeat degradation ──────────────────────────────────────
 const STALE_FRAME_THRESHOLD: Duration = Duration::from_secs(1);

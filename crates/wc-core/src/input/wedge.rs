@@ -109,10 +109,7 @@ mod tests {
         let mut d = LeapWedgeDetector::default();
         assert_eq!(d.poll(Duration::ZERO, true, false), WedgeTransition::None);
         // WEDGE_THRESHOLD is 3 s; 2_999 ms is 1 ms below the threshold.
-        assert_eq!(
-            d.poll(at(2_999), true, false),
-            WedgeTransition::None
-        );
+        assert_eq!(d.poll(at(2_999), true, false), WedgeTransition::None);
         assert!(!d.is_wedged());
     }
 
@@ -129,7 +126,10 @@ mod tests {
     fn real_wedge_after_threshold_is_edge_once() {
         let mut d = LeapWedgeDetector::default();
         d.poll(Duration::ZERO, true, false); // arm
-        assert_eq!(d.poll(WEDGE_THRESHOLD, true, false), WedgeTransition::Entered);
+        assert_eq!(
+            d.poll(WEDGE_THRESHOLD, true, false),
+            WedgeTransition::Entered
+        );
         assert!(d.is_wedged());
         assert_eq!(
             d.poll(WEDGE_THRESHOLD + at(500), true, false),

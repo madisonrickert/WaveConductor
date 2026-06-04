@@ -78,7 +78,9 @@ fn main() {
                 }
             } else {
                 if wedged {
-                    println!("[t={t:>4}s] ✅ RECOVERED — {frames_this_second} frames/s after a wedge.");
+                    println!(
+                        "[t={t:>4}s] ✅ RECOVERED — {frames_this_second} frames/s after a wedge."
+                    );
                 }
                 wedged = false;
                 zero_streak = 0;
