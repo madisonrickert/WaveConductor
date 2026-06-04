@@ -9,9 +9,10 @@
 //!
 //! Data flow: a dedicated worker thread (Phase 8) owns the camera and the two
 //! inference sessions and runs the pipeline at a capped rate, pushing completed
-//! [`crate::input::hand::Hand`] frames onto a lock-free `rtrb` ring; [`Self::poll`]
-//! non-blockingly drains that ring on the Bevy main thread. This skeleton
-//! reports lifecycle through [`ProviderStatus`] until the worker lands.
+//! [`crate::input::hand::Hand`] frames onto a lock-free `rtrb` ring; the
+//! provider's `poll` non-blockingly drains that ring on the Bevy main thread.
+//! This skeleton reports lifecycle through
+//! [`crate::input::state::ProviderStatus`] until the worker lands.
 //!
 //! See the design spec
 //! `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`.
