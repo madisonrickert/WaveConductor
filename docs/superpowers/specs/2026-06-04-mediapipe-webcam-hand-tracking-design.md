@@ -39,6 +39,14 @@ Both runtime advocates independently converged on the same resolution:
 
 Why `tract` is favored for *this* project specifically: the roadmap makes **macOS, Linux, and Windows all first-class desktop targets**. `ort` would require vendoring and rpath-wiring a native `libonnxruntime` per platform (three blobs, a `cargo deny` SOURCES/license gap closed by a manual NOTICE, and an rc-version pin). `tract` is one pure-Rust dependency on all three. Combined with the "Hand-Z is not required" roadmap ruling (2026-05-30) — which removes any pressure for hardware-accelerated high-precision depth — the pure-Rust CPU path is comfortably sufficient for two ~2–5 MB models at a capped inference rate.
 
+### Considered alternative — Burn (evaluated 2026-06-04, post-implementation)
+
+[Burn](https://github.com/tracel-ai/burn) (0.21) was evaluated retrospectively as a third runtime. Verdict: **not better for this use case; tract kept.**
+
+- **Where Burn would win:** its ONNX importer (`burn-onnx`) natively handles the `Resize` `linear`/`half_pixel`/`sizes`-input form — the exact node that needed our one `sizes→scales` graph-surgery in tract — so it would likely import both models with **zero surgery** (Burn's official ONNX conformance suite marks `test_resize_upsample_sizes_linear` as passing; not independently verified on our two models). That advantage is moot here: our surgery was one bit-exact, validated rewrite.
+- **Where Burn loses/draws for us:** it is a heavier, faster-churning **training** framework (0.21 alone renamed `burn-import`→`burn-onnx` and swapped `burn-ndarray`→`burn-flex`), vs tract's lean, stable, inference-only runtime — worse on footprint/maturity/auditability for two tiny models. Pure-Rust single binary is a **draw** (`burn-flex` CPU). Burn's headline feature — sharing Bevy's wgpu `Device` to run inference on the GPU — is a **non-benefit we'd decline**, since thermal stability is the #1 goal and we deliberately avoid GPU contention with the particle sketches; on CPU it's a draw. Burn's build-time codegen (`build.rs`) is also more rigid than tract's runtime model loader (no model swap without a recompile).
+- **When to revisit Burn:** if WaveConductor later wants **on-GPU ML sharing Bevy's device** (a larger generative/segmentation model feeding the visuals), **on-device training/fine-tuning** (e.g. per-installation hand calibration), or models exceeding tract's op coverage. The `HandInference` trait keeps any future runtime swap localized.
+
 ## Scope
 
 ### In scope
@@ -107,8 +115,8 @@ crates/wc-core/src/input/providers/mediapipe/
 ```
                     worker thread (capped ~20–30 Hz)                 │  Bevy main thread (PreUpdate)
  ┌────────────┐   ┌───────────┐   ┌──────────────┐   ┌───────────┐   │   ┌──────────────────────┐
- │ Nokhwa     │──▶│ palm      │──▶│ ROI crop +   │──▶│ landmark  │   │   │ MediaPipeProvider     │
- │ FrameSource│   │ detect    │   │ rotate (affine)│  │ regress   │   │   │   ::poll() drains ring│
+ │ Nokhwa     │──▶│ palm      │──▶│ ROI crop +   │──▶│ landmark  │   │   │ MediaPipeProvider    │
+ │ FrameSource│   │ detect    │   │ rotate (affine)│ │ regress   │   │   │   ::poll() drains ring│
  └────────────┘   │ (tract)   │   └──────────────┘   │ (tract)   │   │   └──────────┬───────────┘
         ▲         └───────────┘          ▲           └─────┬─────┘   │              ▼
         │  reuse prior-frame ROI ────────┘                 ▼         │   Messages<HandTrackingFrame>
