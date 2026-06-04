@@ -1,6 +1,6 @@
 # In-app Leap wedge detector — design
 
-**Status:** Design (approved 2026-06-03). Implements the *detection* half of roadmap item `leap-deep-idle-state`.
+**Status:** Implemented 2026-06-03 (plan `docs/superpowers/plans/2026-06-03-leap-wedge-detector.md`). Detection half of `leap-deep-idle-state`.
 **Scope:** **Detect + surface only.** No recovery actions in this increment (recovery is a separate, larger, per-OS effort — see the recovery design doc).
 **Related:**
 - Why/architecture of the wedge & recovery: [`2026-06-03-leap-service-recovery-design.md`](2026-06-03-leap-service-recovery-design.md)
