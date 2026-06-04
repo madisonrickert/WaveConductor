@@ -4,13 +4,15 @@
 //!
 //! 1. [`poll_all_providers`] — calls `poll()` on every registered provider,
 //!    stamping each emitted frame with the provider's [`super::provider::ProviderId`].
-//! 2. [`fuse_hand_frames`] — combines all provider frames into a single
+//! 2. [`surface_leap_wedge`] — surfaces wedge-state changes as
+//!    [`LeapWedgeChanged`] + a log line.
+//! 3. [`fuse_hand_frames`] — combines all provider frames into a single
 //!    [`super::state::FusedHandFrame`] stream.
-//! 3. [`sync_hand_entities`] — diffs fused frames against [`TrackedHand`]
+//! 4. [`sync_hand_entities`] — diffs fused frames against [`TrackedHand`]
 //!    entities, spawning / updating / despawning as needed.
-//! 4. [`mirror_state_resource`] — derives the [`HandTrackingState`] resource
+//! 5. [`mirror_state_resource`] — derives the [`HandTrackingState`] resource
 //!    and [`ButtonInput<HandButton>`] resource from the entity query each tick.
-//! 5. [`detect_gestures`] — examines previous-vs-current button state and
+//! 6. [`detect_gestures`] — examines previous-vs-current button state and
 //!    emits [`HandGestureEvent`] for each transition.
 //!
 //! All systems run in `PreUpdate` under the same `InputSystems` set Bevy uses
@@ -18,6 +20,7 @@
 //! state.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use bevy::input::ButtonInput;
 use bevy::prelude::*;
@@ -26,7 +29,9 @@ use smallvec::SmallVec;
 use super::button::{HandButton, PRESS_THRESHOLD, RELEASE_THRESHOLD};
 use super::gesture::HandGestureEvent;
 use super::provider::{ProviderId, ProviderRegistry};
-use super::state::{FusedHand, FusedHandFrame, HandTrackingFrame, HandTrackingState, MAX_HANDS};
+use super::state::{
+    FusedHand, FusedHandFrame, HandTrackingFrame, HandTrackingState, PrimaryState, MAX_HANDS,
+};
 use crate::input::entity::{
     BoneCenters, GrabStrength, HandId, Landmarks, PalmPosition, PalmVelocity, PinchStrength,
     Provenance, TrackedHand,
@@ -55,6 +60,52 @@ pub fn poll_all_providers(
             frame.provider = slot.id;
             frames.write(frame);
         }
+    }
+}
+
+/// Edge-triggered change in the primary provider's wedge state. `wedged = true`
+/// on entering a wedge, `false` on recovery. A future recovery increment
+/// subscribes to this; for now it is consumed only for logging.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct LeapWedgeChanged {
+    /// `true` = just entered a wedge; `false` = just recovered.
+    pub wedged: bool,
+    /// Monotonic time (`Time::elapsed`) of the transition.
+    pub at: Duration,
+}
+
+/// Surfaces wedge-state changes: edge-detects `PrimaryState::DeviceWedged` from
+/// the primary provider's status and emits [`LeapWedgeChanged`] + a `tracing`
+/// line on each transition. Reads the same `primary_status()` the LED reads, so
+/// the LED, log, and message can't disagree.
+///
+/// Runs every `PreUpdate` tick; allocation-free (snapshot read + `Local` compare)
+/// and logs edge-only, per the "zero work when idle" budget.
+pub fn surface_leap_wedge(
+    registry: Res<'_, ProviderRegistry>,
+    time: Res<'_, Time>,
+    mut wedge_changed: ResMut<'_, Messages<LeapWedgeChanged>>,
+    mut was_wedged: Local<'_, bool>,
+) {
+    let wedged = matches!(
+        registry.primary_status().primary(),
+        PrimaryState::DeviceWedged
+    );
+    if wedged == *was_wedged {
+        return;
+    }
+    *was_wedged = wedged;
+    wedge_changed.write(LeapWedgeChanged {
+        wedged,
+        at: time.elapsed(),
+    });
+    if wedged {
+        tracing::warn!(
+            "Leap service wedged: device attached but frame stream dead — \
+             recovery on macOS is a physical USB replug"
+        );
+    } else {
+        tracing::info!("Leap service recovered: hand-tracking frames resumed");
     }
 }
 
@@ -406,6 +457,110 @@ pub fn mirror_state_resource(
             &mut buttons,
             pick_button(hand.chirality, true),
             hand.grab_strength,
+        );
+    }
+}
+
+#[cfg(test)]
+mod wedge_surface_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bevy::prelude::*;
+
+    use super::{surface_leap_wedge, LeapWedgeChanged};
+    use crate::input::provider::{
+        HandTrackingProvider, ProviderId, ProviderRegistry, ProviderRole,
+    };
+    use crate::input::state::{
+        DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
+        ServiceConnection, TrackingFlow,
+    };
+
+    /// Test provider whose wedge state is flipped from the test via a shared flag.
+    struct StubProvider {
+        wedged: Arc<AtomicBool>,
+    }
+
+    impl HandTrackingProvider for StubProvider {
+        fn start(&mut self) -> Result<(), HandTrackingError> {
+            Ok(())
+        }
+        fn stop(&mut self) {}
+        fn poll(&mut self, _now: Duration, _out: &mut Messages<HandTrackingFrame>) {}
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus {
+                service: ServiceConnection::Connected,
+                device: DevicePresence::Attached,
+                streaming: TrackingFlow::NotStreaming,
+                wedged: self.wedged.load(Ordering::Relaxed),
+                ..ProviderStatus::default()
+            }
+        }
+        fn diagnostics(&self) -> ProviderDiagnostics {
+            ProviderDiagnostics::default()
+        }
+    }
+
+    fn app_with_stub(flag: Arc<AtomicBool>) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_message::<LeapWedgeChanged>();
+        let mut registry = ProviderRegistry::default();
+        registry.register(
+            ProviderId::Leap,
+            ProviderRole::Primary,
+            Box::new(StubProvider { wedged: flag }),
+        );
+        app.insert_resource(registry);
+        app.add_systems(Update, surface_leap_wedge);
+        app
+    }
+
+    fn drain(app: &mut App) -> Vec<LeapWedgeChanged> {
+        app.world_mut()
+            .resource_mut::<Messages<LeapWedgeChanged>>()
+            .drain()
+            .collect()
+    }
+
+    #[test]
+    fn emits_enter_then_clear_edges() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut app = app_with_stub(flag.clone());
+
+        app.update();
+        let msgs = drain(&mut app);
+        assert_eq!(msgs.len(), 1, "one enter edge");
+        assert!(msgs[0].wedged);
+
+        flag.store(false, Ordering::Relaxed);
+        app.update();
+        let msgs = drain(&mut app);
+        assert_eq!(msgs.len(), 1, "one clear edge");
+        assert!(!msgs[0].wedged);
+    }
+
+    #[test]
+    fn no_edge_when_state_unchanged() {
+        let flag = Arc::new(AtomicBool::new(false)); // never wedged
+        let mut app = app_with_stub(flag);
+        app.update();
+        app.update();
+        assert!(drain(&mut app).is_empty());
+    }
+
+    #[test]
+    fn no_repeat_emit_while_held_wedged() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut app = app_with_stub(flag);
+        app.update(); // tick 1: emits the enter edge
+        let _ = drain(&mut app); // consume it
+        app.update(); // tick 2: still wedged, no new edge
+        assert!(
+            drain(&mut app).is_empty(),
+            "a held wedge must not re-emit each tick"
         );
     }
 }

@@ -90,6 +90,7 @@ impl Plugin for HandTrackingPlugin {
             .add_message::<HandTrackingFrame>()
             .add_message::<state::FusedHandFrame>()
             .add_message::<HandGestureEvent>()
+            .add_message::<systems::LeapWedgeChanged>()
             // `pointer_merge_system` reads `CursorMoved` (Plan 8 Phase 0
             // closed the test-fidelity gap by wiring it into the mouse-source
             // path). In production `WindowPlugin` registers this message;
@@ -112,6 +113,8 @@ impl Plugin for HandTrackingPlugin {
                 PreUpdate,
                 (
                     systems::poll_all_providers,
+                    // runs after poll so it reads this tick's fresh provider status
+                    systems::surface_leap_wedge,
                     systems::fuse_hand_frames,
                     systems::sync_hand_entities,
                     systems::mirror_state_resource,
