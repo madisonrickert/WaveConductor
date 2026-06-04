@@ -123,6 +123,7 @@ impl HandTrackingProvider for MockProvider {
                 dropped_since_start: 0,
             },
             service_health: ServiceHealth::empty(),
+            wedged: false,
         }
     }
 
@@ -164,6 +165,14 @@ mod tests {
         let mut provider = MockProvider::with_frames([]);
         provider.start().expect("mock provider start cannot fail");
         assert_eq!(provider.status().primary(), PrimaryState::Streaming);
+    }
+
+    #[test]
+    fn mock_never_reports_wedged() {
+        let mut provider = MockProvider::with_frames([]);
+        provider.start().expect("mock provider start cannot fail");
+        assert!(!provider.status().wedged);
+        assert_ne!(provider.status().primary(), PrimaryState::DeviceWedged);
     }
 
     #[test]

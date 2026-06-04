@@ -242,6 +242,9 @@ pub enum PrimaryState {
     ServiceOnly,
     /// Device attached but not currently streaming frames.
     DeviceAttached,
+    /// Device attached and expected to stream, but the frame stream is
+    /// sustained-dead — the service is wedged (alive-but-frozen).
+    DeviceWedged,
     /// Streaming and the device reports no degraded-health flags.
     Streaming,
     /// Streaming, but `health` contains a degradation flag (smudged, robust,
@@ -269,6 +272,10 @@ pub struct ProviderStatus {
     pub streaming: TrackingFlow,
     /// Service-side health conditions.
     pub service_health: ServiceHealth,
+    /// `true` when the service is wedged: attached + expected-to-stream but the
+    /// frame stream is sustained-dead. Set only by the native provider's
+    /// `LeapWedgeDetector`; `primary()` maps it to `PrimaryState::DeviceWedged`.
+    pub wedged: bool,
 }
 
 impl ProviderStatus {
@@ -279,7 +286,8 @@ impl ProviderStatus {
     /// 2. Device failure conditions → `DeviceFailed`
     /// 3. Service-level reachability problems → `ServiceMissing` / `Disconnected`
     /// 4. Streaming with any health/service-health degradation → `DeviceDegraded`
-    /// 5. Streaming clean → `Streaming`
+    /// 5. Streaming clean → [`PrimaryState::Streaming`]
+    ///    5.5. Attached + wedged (sustained-dead stream) → [`PrimaryState::DeviceWedged`]
     /// 6. Device attached but no streaming → `DeviceAttached`
     /// 7. Service connected, no device → `ServiceOnly`
     /// 8. Anything else → `Disconnected` (catch-all)
@@ -323,6 +331,13 @@ impl ProviderStatus {
                 return PrimaryState::DeviceDegraded;
             }
             return PrimaryState::Streaming;
+        }
+
+        // Rule 5.5 — attached + expected-to-stream but stream sustained-dead.
+        // Below DeviceFailed/Disconnected (a real failure is more actionable),
+        // above benign DeviceAttached (the whole point: distinguish a wedge).
+        if self.wedged && matches!(self.device, DevicePresence::Attached) {
+            return PrimaryState::DeviceWedged;
         }
 
         // Rule 6
@@ -431,6 +446,7 @@ mod tests {
                 dropped_since_start: 0,
             },
             service_health: ServiceHealth::empty(),
+            wedged: false,
         };
         assert_eq!(s.primary(), PrimaryState::Streaming);
     }
@@ -446,6 +462,7 @@ mod tests {
                 dropped_since_start: 0,
             },
             service_health: ServiceHealth::empty(),
+            wedged: false,
         };
         assert_eq!(s.primary(), PrimaryState::DeviceDegraded);
     }
@@ -480,6 +497,7 @@ mod tests {
                 dropped_since_start: 0,
             },
             service_health: ServiceHealth::LOW_FPS_DETECTED,
+            wedged: false,
         };
         assert_eq!(s.primary(), PrimaryState::DeviceDegraded);
     }
@@ -490,6 +508,45 @@ mod tests {
             ProviderStatus::default().primary(),
             PrimaryState::NotStarted
         );
+    }
+
+    #[test]
+    fn provider_status_primary_wedged_attached_is_device_wedged() {
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Attached,
+            streaming: TrackingFlow::NotStreaming,
+            wedged: true,
+            ..ProviderStatus::default()
+        };
+        assert_eq!(s.primary(), PrimaryState::DeviceWedged);
+    }
+
+    #[test]
+    fn provider_status_primary_device_failed_outranks_wedged() {
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Failed,
+            wedged: true,
+            ..ProviderStatus::default()
+        };
+        assert_eq!(s.primary(), PrimaryState::DeviceFailed);
+    }
+
+    #[test]
+    fn provider_status_primary_wedged_requires_attached() {
+        // DevicePresence::Lost is NOT caught by Rule 2 (only Failed is) and
+        // passes through Rule 3 (service == Connected). With no streaming it
+        // skips Rules 4-5, then the Rule 5.5 guard rejects it (not Attached),
+        // falling through to the Rule 8 catch-all → Disconnected.
+        let s = ProviderStatus {
+            service: ServiceConnection::Connected,
+            device: DevicePresence::Lost, // not Attached → Rule 5.5 guard must reject
+            streaming: TrackingFlow::NotStreaming,
+            wedged: true,
+            ..ProviderStatus::default()
+        };
+        assert_ne!(s.primary(), PrimaryState::DeviceWedged);
     }
 
     #[test]

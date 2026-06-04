@@ -513,7 +513,8 @@ pub fn draw_volume_button(
 /// - Green → fully operational (Streaming, clean health)
 /// - Yellow-green → soft degradation (smudged/robust/low-resource / low FPS)
 /// - Blue → device present but idle (attached, not yet streaming)
-/// - Orange → service reachable but no device
+/// - Amber `#f39c12` → service reachable but no device attached
+/// - Orange `#e67e22` → device wedged (frozen stream; service alive but not delivering frames)
 /// - Red → not reachable (service missing, disconnected, device error)
 /// - Dark gray → not started (LED is present but muted)
 fn leap_led_color_and_tooltip(
@@ -535,6 +536,10 @@ fn leap_led_color_and_tooltip(
         ),
         PrimaryState::Streaming => (Color32::from_rgb(0x2e, 0xcc, 0x71), "Streaming"),
         PrimaryState::DeviceDegraded => (Color32::from_rgb(0xf1, 0xc4, 0x0f), "Tracking degraded"),
+        PrimaryState::DeviceWedged => (
+            Color32::from_rgb(0xe6, 0x7e, 0x22),
+            "Tracking frozen (service wedged)",
+        ),
         PrimaryState::DeviceFailed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "Device error"),
     }
 }
