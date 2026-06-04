@@ -230,6 +230,9 @@ fn apply_debug_bloom_toggle(
 /// resource based on env-var preference plus auto-fallback semantics:
 ///
 /// - `WAVECONDUCTOR_HAND_PROVIDER=leap`: try Leap, error if it fails.
+/// - `WAVECONDUCTOR_HAND_PROVIDER=mediapipe`: use the in-process webcam
+///   provider (requires the `hand-tracking-mediapipe` feature); error if it
+///   fails, no fallback (parallels `leap`).
 /// - `WAVECONDUCTOR_HAND_PROVIDER=mock`: register only the (silent) mock.
 /// - `WAVECONDUCTOR_HAND_PROVIDER=synthetic`: register a mock that emits a
 ///   stationary synthetic open hand, for testing hand visuals without
@@ -313,6 +316,41 @@ fn install_hand_tracking_providers(
                     "hand-tracking: env forced 'leap' but provider failed to start; \
                      no provider will be registered, mouse and touch input still work"
                 );
+            }
+        }
+        "mediapipe" => {
+            #[cfg(feature = "hand-tracking-mediapipe")]
+            {
+                use wc_core::input::providers::mediapipe::{MediaPipeConfig, MediaPipeProvider};
+                registry.register(
+                    ProviderId::MediaPipe,
+                    ProviderRole::Primary,
+                    Box::new(MediaPipeProvider::new(MediaPipeConfig::default())),
+                );
+                let started = registry.provider(ProviderId::MediaPipe).is_some_and(|r| {
+                    !matches!(
+                        r.inner.status().service,
+                        ServiceConnection::Errored | ServiceConnection::NotStarted
+                    )
+                });
+                if started {
+                    tracing::info!("hand-tracking: MediaPipeProvider started (webcam)");
+                } else {
+                    tracing::warn!(
+                        "hand-tracking: MediaPipeProvider failed to start; \
+                         mouse and touch input still work"
+                    );
+                }
+            }
+            #[cfg(not(feature = "hand-tracking-mediapipe"))]
+            {
+                tracing::warn!(
+                    "hand-tracking: 'mediapipe' requested but the hand-tracking-mediapipe \
+                     feature is not compiled in; defaulting to auto"
+                );
+                if !try_leap(&mut registry, settings.leap_background) {
+                    install_mock(&mut registry);
+                }
             }
         }
         "auto" => {
