@@ -33,6 +33,7 @@ mod coords;
 mod inference;
 mod landmark;
 mod palm;
+mod pipeline;
 mod signals;
 
 /// Construction-time configuration for the webcam provider.
