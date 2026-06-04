@@ -90,7 +90,7 @@ pub enum Chirality {
 /// [`crate::input::projection::palm_to_world`], which maps it to world space):
 /// x in `[-200, +200]`, y as height-above-device in `[40, 350]`, z signed depth.
 /// Providers project their native spaces into this layout — the Leap provider
-/// passes LeapC millimetres through; the `MediaPipe` provider maps normalized
+/// passes `LeapC` millimetres through; the `MediaPipe` provider maps normalized
 /// image coordinates into the same convention via its `coords` module.
 #[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Hand {
