@@ -10,6 +10,43 @@
 
 **Reference:** Spec `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`. Glue porting references: `WasmEdge/mediapipe-rs` (`src/tasks/vision/hand_landmark/`), `PINTO0309/hand-gesture-recognition-using-onnx`. Models: `opencv/palm_detection_mediapipe`, `opencv/handpose_estimation_mediapipe` (HuggingFace, Apache-2.0).
 
+## Implementation status (2026-06-04)
+
+Landed on `mediapipe-hand-tracking` (9 commits; `wc-core` builds + all 203 lib
+tests pass with `--features hand-tracking-mediapipe`; `clippy -D warnings`,
+`check-secrets`, and `--all-features` checks green):
+
+- ✅ **Phase 0** — Spike. Runtime decided: **`tract`**. Models vendored;
+  `palm_detection.onnx` graph-surgeried (Resize→scales, bit-exact); landmark
+  model runs bit-exactly; handedness + world landmarks confirmed present. Palm
+  bilinear-Resize edge-fidelity gate recorded.
+- ✅ **Phase 1** — Feature flags (`hand-tracking-mediapipe` + `-camera`
+  sub-feature), provider skeleton, env-var selection, registry test.
+- ✅ **Phase 2** — `coords` (image-norm → Leap-mm) incl. cross-provider test.
+- ✅ **Phase 3** — `anchors` (2016, golden-by-invariant) + `palm` (decode + NMS).
+- ✅ **Phase 5** — `signals` (pinch/grab/palm-normal/velocity + id tracker).
+- ✅ **Phase 6.1** — `inference` (`HandInference` trait + `tract`; hermetic
+  in-crate model tests).
+- ✅ **Phase 7.1** — `capture` (`FrameSource` + `MockFrameSource`).
+
+**Remaining — blocked on a real-hand fixture and/or Madison's webcam:**
+
+- ⏳ **Phase 4** (`landmark` ROI crop/rotate + projection): pure math, but its
+  MediaPipe magic constants (2.6× scale, rotation keypoints, −0.5 shift) MUST be
+  validated against the Python oracle on a **real hand image** — building it
+  blind risks the subtly-wrong-ROI failure mode the debate warned about.
+- ⏳ **Phase 6.2** (end-to-end golden): needs a real hand image + oracle goldens.
+- ⏳ **Phase 7.2** (`NokhwaFrameSource`): needs a webcam (compile + manual test).
+- ⏳ **Phase 8/9** (pipeline + worker + provider wiring): integration; needs the
+  real-hand loop to validate the positive path.
+- ⏳ **Phase 10** (on-hardware acceptance, full CI gate, stale-`Hand`-doc fix):
+  Madison's webcam + sign-off.
+
+**To unblock:** a single clear webcam frame of a hand (Madison's own selfie — no
+licensing question in her repo) seeds `tools/handtrack-oracle/` to (a) validate
+the Phase-4 ROI per-stage and (b) generate the committed end-to-end golden, after
+which Phases 4/6.2/8/9 proceed; Phase 10 is the on-hardware acceptance gate.
+
 **Verify gates after each phase (from AGENTS.md):**
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features --workspace -- -D warnings`

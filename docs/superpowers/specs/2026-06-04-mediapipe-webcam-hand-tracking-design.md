@@ -2,7 +2,10 @@
 
 **Date:** 2026-06-04
 **Workstream:** New roadmap item — proposed slug `mediapipe-webcam-hands` (see *Roadmap entry* below)
-**Status:** Design — pending Madison review before plan-writing
+**Status:** Implementation in progress on branch `mediapipe-hand-tracking` —
+foundation + spike landed (runtime decided: `tract`); integration + hardware
+validation pending Madison's review and a real-hand fixture (see *Spike results*
+and the plan's *Implementation status*). Pending Madison review/sign-off.
 **Scope window:** ~6–9 focused days (provider plumbing + two-stage ONNX glue + verification spike + diagnostics)
 **Branch:** `mediapipe-hand-tracking` (off `v5-alpha`; merges back to `v5-alpha` on Madison's sign-off)
 
