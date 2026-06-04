@@ -85,10 +85,13 @@ pub enum Chirality {
 
 /// A single tracked hand at one point in time.
 ///
-/// `landmarks` are in normalized device coordinates: x and y in `[-1.0, 1.0]`
-/// (screen-relative, +x right, +y up); z is signed depth relative to the
-/// camera/sensor (more negative = further away). Providers project their
-/// native coordinate spaces into this layout.
+/// Positions (`palm_position`, `landmarks`) are in **Leap-device millimetres**,
+/// the convention every consumer expects (see
+/// [`crate::input::projection::palm_to_world`], which maps it to world space):
+/// x in `[-200, +200]`, y as height-above-device in `[40, 350]`, z signed depth.
+/// Providers project their native spaces into this layout — the Leap provider
+/// passes LeapC millimetres through; the `MediaPipe` provider maps normalized
+/// image coordinates into the same convention via its `coords` module.
 #[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Hand {
     /// Provider-stable identifier across frames. Two consecutive frames with
