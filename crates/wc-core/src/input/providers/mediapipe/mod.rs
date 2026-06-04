@@ -28,6 +28,7 @@ use crate::input::state::{
 };
 
 mod anchors;
+mod capture;
 mod coords;
 mod inference;
 mod palm;
