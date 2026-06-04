@@ -27,6 +27,13 @@ hand-tracking-gestures = [
     "wc-core/hand-tracking-gestures",
     "wc-sketches/hand-tracking-gestures",
 ]
+# In-process MediaPipe webcam hand-tracking. Pulls the camera sub-feature (the
+# real binary needs a real webcam) and the sketch hand-consumers. Additive to
+# `hand-tracking-gestures`; not in `default` (opt in explicitly).
+hand-tracking-mediapipe = [
+    "wc-core/hand-tracking-mediapipe-camera",
+    "wc-sketches/hand-tracking-gestures",
+]
 
 [dependencies]
 bevy = { workspace = true }

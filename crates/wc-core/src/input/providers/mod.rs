@@ -10,3 +10,8 @@
 pub mod leap_native;
 pub mod mock;
 pub mod websocket;
+
+/// In-process MediaPipe webcam provider (palm→landmark ONNX via tract).
+/// Compiled only when the `hand-tracking-mediapipe` feature is enabled.
+#[cfg(feature = "hand-tracking-mediapipe")]
+pub mod mediapipe;

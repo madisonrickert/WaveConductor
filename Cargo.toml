@@ -124,6 +124,18 @@ rand = "0.9"
 # only (gemini is leaprs's only default and is what we want); the optional
 # `glam` feature is intentionally off because we convert Vec3 provider-side.
 leaprs = { version = "0.2.2", default-features = false, features = ["gemini"] }
+# Pure-Rust ONNX inference for the in-process MediaPipe webcam hand-tracking
+# provider (behind `hand-tracking-mediapipe`). Pure Rust → no native blob, no
+# cargo-deny SOURCES surface, single self-contained binary on macOS/Linux/Windows.
+# The two-stage palm→landmark glue (anchors, NMS, ROI) is implemented in
+# `wc-core/src/input/providers/mediapipe/`. See the spike results in the design
+# spec for the runtime decision and the palm-model graph surgery.
+tract-onnx = "0.21"
+# Cross-platform webcam capture for the MediaPipe provider's production
+# `FrameSource` (behind `hand-tracking-mediapipe-camera`; AVFoundation / V4L2 /
+# MediaFoundation). Kept in a sub-feature so the inference/glue stay buildable
+# and CI-testable headless without camera platform libraries.
+nokhwa = { version = "0.10", features = ["input-native"] }
 # Native file picker (Plan 11 Phase C): cross-platform Browse… dialog for
 # the Line sketch's `spawn_template` setting. Targets macOS NSOpenPanel,
 # Windows IFileDialog, GTK on Linux. Web build is out of scope (rfd has a
