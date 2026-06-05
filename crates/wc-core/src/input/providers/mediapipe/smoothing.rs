@@ -34,20 +34,19 @@ use crate::input::hand::{Hand, LANDMARK_COUNT};
 use crate::input::state::MAX_HANDS;
 
 /// Default minimum cutoff frequency (Hz) — the cutoff when the hand is still, so
-/// it sets the at-rest smoothing. Lower = steadier when the hand holds still
-/// (less jitter) but laggier on slow motion. `1.0` Hz smooths a held hand far
-/// harder than the previous `2.5` (≈9.5%/frame vs ≈21% toward target at 60 fps),
-/// which is the fix for "jittery even when holding still". Live-tunable from the
-/// dev panel (`HandTrackingSettings::smoothing_min_cutoff`).
-pub const DEFAULT_MIN_CUTOFF: f32 = 1.0;
+/// it sets the at-rest smoothing. Higher = lighter smoothing (more responsive,
+/// less lag) at the cost of more jitter passing. `5.0` is deliberately light:
+/// once GPU inference and the stabilized tracking ROI cleaned up the pose, heavy
+/// output smoothing mostly added lag, so this hardware-validated higher value
+/// feels more responsive. Live-tunable from the dev panel
+/// (`HandTrackingSettings::smoothing_min_cutoff`).
+pub const DEFAULT_MIN_CUTOFF: f32 = 5.0;
 
 /// Default speed coefficient: how fast the cutoff opens up with hand speed (less
 /// lag during motion). Because the speed is object-scale-normalized (see the
-/// module docs), this is expressed in *hand-lengths per second* — so a
-/// `MediaPipe`-like aggressive value is single digits here, not the `0.02` that
-/// suited the previous un-normalized mm/s speed. Live-tunable from the dev panel
-/// (`HandTrackingSettings::smoothing_beta`).
-pub const DEFAULT_BETA: f32 = 2.0;
+/// module docs), this is expressed in *hand-lengths per second*. Live-tunable
+/// from the dev panel (`HandTrackingSettings::smoothing_beta`).
+pub const DEFAULT_BETA: f32 = 6.0;
 
 /// Cutoff for the derivative low-pass (Hz) — the One-Euro paper's fixed default.
 const DERIVATE_CUTOFF: f32 = 1.0;

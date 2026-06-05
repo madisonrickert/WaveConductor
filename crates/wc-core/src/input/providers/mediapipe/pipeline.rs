@@ -93,7 +93,7 @@ impl Default for PipelineConfig {
             mirror: true,
             palm_score_threshold: 0.5,
             presence_threshold: 0.5,
-            grab_rest_deadzone: 0.12,
+            grab_rest_deadzone: 0.2,
         }
     }
 }

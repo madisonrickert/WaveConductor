@@ -32,7 +32,7 @@ pub struct HandTrackingSettings {
     /// attractor lingers when the hand is open; lower if grab feels weak/late.
     /// Default must match `mediapipe::pipeline::PipelineConfig` (`0.12`).
     #[setting(
-        default = 0.12_f32,
+        default = 0.2_f32,
         min = 0.0,
         max = 0.6,
         step = 0.01,
@@ -47,9 +47,9 @@ pub struct HandTrackingSettings {
     /// steadier when the hand holds still (more lag on slow motion). Default must
     /// match `mediapipe::smoothing::DEFAULT_MIN_CUTOFF` (`1.0`).
     #[setting(
-        default = 1.0_f32,
+        default = 5.0_f32,
         min = 0.1,
-        max = 5.0,
+        max = 10.0,
         step = 0.05,
         category = Dev,
         section = "Hand Tracking",
@@ -62,7 +62,7 @@ pub struct HandTrackingSettings {
     /// faster during motion (less lag). Scale-normalized hand-lengths/sec.
     /// Default must match `mediapipe::smoothing::DEFAULT_BETA` (`2.0`).
     #[setting(
-        default = 2.0_f32,
+        default = 6.0_f32,
         min = 0.0,
         max = 10.0,
         step = 0.1,
@@ -77,11 +77,11 @@ pub struct HandTrackingSettings {
 /// Serde fallbacks so a config saved before these fields existed still loads
 /// (the values stay in sync with the provider's compile-time defaults).
 fn default_grab_rest_deadzone() -> f32 {
-    0.12
+    0.2
 }
 fn default_smoothing_min_cutoff() -> f32 {
-    1.0
+    5.0
 }
 fn default_smoothing_beta() -> f32 {
-    2.0
+    6.0
 }
