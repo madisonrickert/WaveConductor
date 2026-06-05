@@ -21,7 +21,7 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::math::Vec3;
 
 use super::palm::PalmDetection;
-use crate::input::hand::LANDMARK_COUNT;
+use crate::input::hand::{LandmarkIndex, LANDMARK_COUNT};
 
 /// ROI expansion factor applied to the longer detection-box side.
 pub const ROI_SCALE: f32 = 2.6;
@@ -74,6 +74,58 @@ pub fn roi_from_palm(det: &PalmDetection) -> RoiRect {
         cx: cx + x_shift,
         cy: cy + y_shift,
         size: w.max(h) * ROI_SCALE,
+        rotation,
+    }
+}
+
+/// ROI expansion factor applied to the landmark bounding box when tracking.
+///
+/// Larger gives more motion margin between frames (the hand is less likely to
+/// leave the crop before the next frame) at the cost of a smaller hand in the
+/// 224 crop. `2.0` matches `MediaPipe`'s landmark→rect scale; tune during
+/// hardware acceptance if tracking precision or robustness needs it.
+pub const TRACK_ROI_SCALE: f32 = 2.0;
+
+/// Compute the next-frame tracking ROI directly from this frame's landmarks, so
+/// tracking frames can skip the expensive palm-detection stage (`MediaPipe`'s
+/// detect-then-track design).
+///
+/// Rotation aligns the wrist→middle-MCP axis to vertical — the same convention
+/// [`roi_from_palm`] uses, but sourced from landmarks 0 and 9. The square side
+/// is the longer side of the landmarks' bounding box measured *in that rotated
+/// frame* (so the rotated square tightly bounds the hand), expanded by
+/// [`TRACK_ROI_SCALE`]; the centre is that box's centre. `landmarks` are
+/// normalized `[0, 1]` image coordinates, as produced by [`project_landmarks`].
+#[must_use]
+pub fn roi_from_landmarks(landmarks: &[Vec3; LANDMARK_COUNT]) -> RoiRect {
+    let wrist = landmarks[LandmarkIndex::Wrist.as_index()];
+    let middle = landmarks[LandmarkIndex::MiddleMcp.as_index()];
+    // Same rotation as roi_from_palm: bring the wrist→middle-MCP axis to vertical.
+    let rotation = FRAC_PI_2 - (-(middle.y - wrist.y)).atan2(middle.x - wrist.x);
+
+    // Bounding box of all landmarks expressed in the ROI's upright frame
+    // (each point rotated by -rotation), matching project_landmarks' convention
+    // so a crop from this ROI inverts correctly.
+    let (sin, cos) = rotation.sin_cos();
+    let mut min_u = f32::MAX;
+    let mut min_v = f32::MAX;
+    let mut max_u = f32::MIN;
+    let mut max_v = f32::MIN;
+    for lm in landmarks {
+        let u = lm.x * cos + lm.y * sin;
+        let v = -lm.x * sin + lm.y * cos;
+        min_u = min_u.min(u);
+        max_u = max_u.max(u);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+    }
+    // Centre of the rotated box, rotated back into image space.
+    let cu = (min_u + max_u) * 0.5;
+    let cv = (min_v + max_v) * 0.5;
+    RoiRect {
+        cx: cu * cos - cv * sin,
+        cy: cu * sin + cv * cos,
+        size: (max_u - min_u).max(max_v - min_v) * TRACK_ROI_SCALE,
         rotation,
     }
 }
@@ -228,6 +280,48 @@ mod tests {
             (roi_from_palm(&right).rotation - FRAC_PI_2).abs() < 1e-4,
             "right rot={}",
             roi_from_palm(&right).rotation
+        );
+    }
+
+    /// Build a 21-landmark hand in normalized image coords with a known
+    /// axis-aligned bounding box. All landmarks sit at the centre except the
+    /// five that pin the bbox extremes and the wrist/middle-MCP rotation axis.
+    fn upright_hand() -> [Vec3; LANDMARK_COUNT] {
+        let mut lm = [Vec3::new(0.5, 0.5, 0.0); LANDMARK_COUNT];
+        lm[LandmarkIndex::Wrist.as_index()] = Vec3::new(0.5, 0.7, 0.0); // bottom (max y)
+        lm[LandmarkIndex::MiddleMcp.as_index()] = Vec3::new(0.5, 0.45, 0.0); // above wrist
+        lm[LandmarkIndex::IndexMcp.as_index()] = Vec3::new(0.4, 0.5, 0.0); // left (min x)
+        lm[LandmarkIndex::PinkyMcp.as_index()] = Vec3::new(0.6, 0.5, 0.0); // right (max x)
+        lm[LandmarkIndex::MiddleTip.as_index()] = Vec3::new(0.5, 0.3, 0.0); // top (min y)
+        lm
+    }
+
+    #[test]
+    fn track_roi_centers_and_scales_on_landmark_bbox() {
+        // Upright hand → no rotation; bbox x∈[0.4,0.6] y∈[0.3,0.7] → centre
+        // (0.5,0.5), long side 0.4, square side 0.4*TRACK_ROI_SCALE.
+        let roi = roi_from_landmarks(&upright_hand());
+        assert!(roi.rotation.abs() < 1e-4, "rot={}", roi.rotation);
+        assert!((roi.cx - 0.5).abs() < 1e-4, "cx={}", roi.cx);
+        assert!((roi.cy - 0.5).abs() < 1e-4, "cy={}", roi.cy);
+        assert!(
+            (roi.size - 0.4 * TRACK_ROI_SCALE).abs() < 1e-4,
+            "size={}",
+            roi.size
+        );
+    }
+
+    #[test]
+    fn track_roi_rotation_follows_wrist_to_middle_axis() {
+        // Middle-MCP to the right of the wrist → rotate the crop 90° upright,
+        // matching roi_from_palm's convention.
+        let mut lm = [Vec3::new(0.5, 0.5, 0.0); LANDMARK_COUNT];
+        lm[LandmarkIndex::Wrist.as_index()] = Vec3::new(0.5, 0.5, 0.0);
+        lm[LandmarkIndex::MiddleMcp.as_index()] = Vec3::new(0.7, 0.5, 0.0);
+        assert!(
+            (roi_from_landmarks(&lm).rotation - FRAC_PI_2).abs() < 1e-4,
+            "rot={}",
+            roi_from_landmarks(&lm).rotation
         );
     }
 
