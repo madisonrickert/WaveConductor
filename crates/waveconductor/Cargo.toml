@@ -34,6 +34,13 @@ hand-tracking-mediapipe = [
     "wc-core/hand-tracking-mediapipe-camera",
     "wc-sketches/hand-tracking-gestures",
 ]
+# MediaPipe webcam provider with the GPU (ort/CoreML) inference backend on top of
+# the camera build. Run `cargo rund --features hand-tracking-mediapipe-ort` to test
+# GPU inference; tract remains available via WAVECONDUCTOR_HAND_INFERENCE=tract.
+hand-tracking-mediapipe-ort = [
+    "hand-tracking-mediapipe",
+    "wc-core/hand-tracking-mediapipe-ort",
+]
 
 [dependencies]
 bevy = { workspace = true }

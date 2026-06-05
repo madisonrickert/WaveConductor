@@ -43,6 +43,10 @@ mod anchors;
 mod capture;
 mod coords;
 mod inference;
+/// GPU inference backend (`ort`/ONNX Runtime); alternative to `inference`'s tract
+/// path. Compiled only under `hand-tracking-mediapipe-ort`.
+#[cfg(feature = "hand-tracking-mediapipe-ort")]
+mod inference_ort;
 mod landmark;
 mod palm;
 mod pipeline;
@@ -272,6 +276,11 @@ fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Capture
 }
 
 /// Load one ONNX model and wrap it as a boxed [`HandInference`].
+///
+/// Backend selection: the pure-Rust `tract` path is the default. When the
+/// `hand-tracking-mediapipe-ort` feature is compiled, the GPU `ort`/`CoreML` path
+/// is used unless `WAVECONDUCTOR_HAND_INFERENCE=tract` forces tract (see
+/// [`use_ort_backend`]). Both consume the same vendored ONNX models.
 fn load_model(
     dir: &Path,
     name: &str,
@@ -281,10 +290,37 @@ fn load_model(
     let bytes = std::fs::read(&path).map_err(|e| {
         HandTrackingError::Misconfigured(format!("read model {}: {e}", path.display()))
     })?;
+    #[cfg(feature = "hand-tracking-mediapipe-ort")]
+    if use_ort_backend() {
+        let model = inference_ort::OrtInference::load(&bytes)
+            .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
+        let boxed: Box<dyn HandInference> = Box::new(model);
+        return Ok(boxed);
+    }
     let model = TractInference::load(&bytes, input_shape)
         .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
     let boxed: Box<dyn HandInference> = Box::new(model);
     Ok(boxed)
+}
+
+/// Whether to use the `ort` GPU backend. Only meaningful when the
+/// `hand-tracking-mediapipe-ort` feature is compiled: the feature defaults to
+/// `ort` (it was opted into to test the GPU path); `WAVECONDUCTOR_HAND_INFERENCE=tract`
+/// forces the pure-Rust path for an A/B without recompiling.
+#[cfg(feature = "hand-tracking-mediapipe-ort")]
+fn use_ort_backend() -> bool {
+    !std::env::var("WAVECONDUCTOR_HAND_INFERENCE")
+        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("tract"))
+}
+
+/// Short label for the active inference backend, surfaced in diagnostics so the
+/// dev panel shows whether tract (CPU) or ort (GPU) is running.
+fn backend_label() -> &'static str {
+    #[cfg(feature = "hand-tracking-mediapipe-ort")]
+    if use_ort_backend() {
+        return "ort/CoreML";
+    }
+    "tract"
 }
 
 impl HandTrackingProvider for MediaPipeProvider {
@@ -324,7 +360,7 @@ impl HandTrackingProvider for MediaPipeProvider {
             s.device = DevicePresence::Attached;
         }
         if let Ok(mut d) = self.diagnostics.lock() {
-            d.sdk_version = Some("MediaPipe (tract) palm+landmark".into());
+            d.sdk_version = Some(format!("MediaPipe ({}) palm+landmark", backend_label()));
             d.device_serial = Some(format!("camera{}", self.config.camera_index));
         }
         // Cold-start the smoothing so a restart carries no stale pose/momentum.
