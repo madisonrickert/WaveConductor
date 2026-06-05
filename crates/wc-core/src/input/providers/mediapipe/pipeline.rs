@@ -44,6 +44,31 @@ const LM_SIZE: u32 = 224;
 /// the periodic re-detect cost.
 const REDETECT_PERIOD: Duration = Duration::from_millis(500);
 
+/// Normalized-image distance within which a fresh palm detection is taken to
+/// corroborate an existing track. The same hand's palm ROI and landmark ROI have
+/// near-coincident centres (well under this), while two distinct hands sit far
+/// further apart, so this both confirms a track and avoids double-counting one
+/// hand as two on a re-detect frame.
+const REDETECT_MATCH_GATE: f32 = 0.25;
+
+/// Consecutive re-detect frames a track may go uncorroborated by palm before it
+/// is dropped. `2` tolerates a single missed palm detection of a real hand — the
+/// landmark stage, which is more reliable than palm, keeps tracking it across the
+/// gap so the hand never blinks — while still clearing a phantom (a landmark
+/// false-positive palm never confirms) within ~`REDETECT_MISS_LIMIT ×
+/// REDETECT_PERIOD` (≈1 s).
+const REDETECT_MISS_LIMIT: u8 = 2;
+
+/// A tracked hand's next-frame ROI plus how many consecutive re-detect frames it
+/// has gone without a corroborating palm detection. The miss count drives
+/// phantom clearing (see [`REDETECT_MISS_LIMIT`]); it is `0` while the hand is
+/// confirmed and untouched on the tracking frames between re-detects.
+#[derive(Debug, Clone, Copy)]
+struct TrackedRoi {
+    roi: RoiRect,
+    misses: u8,
+}
+
 /// Tunables for the pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -74,13 +99,15 @@ pub struct Pipeline {
     decode: PalmDecodeOptions,
     tracker: HandTracker,
     config: PipelineConfig,
-    /// Per-hand ROIs carried to the next frame (detect-then-track). When
-    /// non-empty, the next [`Self::process`] reuses them and skips the palm
-    /// stage — which is ~2× the landmark stage and the bulk of the per-frame
-    /// cost. Emptied when a hand is lost (landmark presence drops below
-    /// threshold) or the frame is unusable, which forces re-acquisition via
-    /// palm detection on the following frame.
-    tracked: SmallVec<[RoiRect; MAX_HANDS]>,
+    /// Per-hand ROIs (with miss counts) carried to the next frame
+    /// (detect-then-track). When non-empty, the next [`Self::process`] reuses
+    /// them and skips the palm stage — which is ~2× the landmark stage and the
+    /// bulk of the per-frame cost. A track keeps its landmark-derived ROI across
+    /// re-detect frames for continuity (see [`reconcile_redetect`]); it is
+    /// dropped when its hand is lost (landmark presence falls below threshold),
+    /// when the frame is unusable, or when palm fails to corroborate it for
+    /// [`REDETECT_MISS_LIMIT`] consecutive re-detects.
+    tracked: SmallVec<[TrackedRoi; MAX_HANDS]>,
     /// Time accumulated since palm detection last ran. Drives periodic
     /// re-detection ([`REDETECT_PERIOD`]) so tracking can't stay locked on a
     /// stale/false ROI.
@@ -131,29 +158,40 @@ impl Pipeline {
 
         // Detect-then-track: reuse the previous frame's ROIs and skip palm (the
         // dominant per-frame cost) — but re-run palm whenever nothing is tracked
-        // OR the re-detect timer has elapsed. The periodic re-detection is what
-        // keeps a spurious detection from sticking forever (landmark-only never
-        // re-validates, so a false ROI with high presence would otherwise be a
-        // permanent phantom) and lets newly-appeared hands be picked up.
-        // `acquire_rois` is authoritative on a re-detect frame: tracks not
-        // re-detected are dropped, which clears phantoms.
+        // OR the re-detect timer has elapsed. Periodic re-detection picks up
+        // newly-appeared hands and clears phantoms (a landmark-only track never
+        // re-validates, so a false ROI with high presence would otherwise stick
+        // forever). On a re-detect frame the fresh palm detections do NOT replace
+        // the tracked ROIs — that would pop a steadily-tracked hand to a
+        // structurally different palm ROI twice a second, and blink the hand
+        // whenever palm momentarily missed it. Instead [`reconcile_redetect`]
+        // keeps each track's landmark-derived ROI for continuity, uses palm only
+        // to corroborate (reset miss count), tolerate (a real hand the more
+        // reliable landmark stage still tracks), or eventually drop (a phantom),
+        // and to add genuinely new hands.
         self.since_detect += dt;
         let redetect = self.tracked.is_empty() || self.since_detect >= REDETECT_PERIOD;
-        let rois = if redetect {
+        let to_run: SmallVec<[TrackedRoi; MAX_HANDS]> = if redetect {
             self.since_detect = Duration::ZERO;
-            self.acquire_rois(&square)?
+            let palm_rois = self.acquire_rois(&square)?;
+            let tracked = std::mem::take(&mut self.tracked);
+            reconcile_redetect(tracked, &palm_rois)
         } else {
             std::mem::take(&mut self.tracked)
         };
 
-        // Run the landmark stage on each ROI; keep the hand and its next-frame
-        // ROI when presence holds. An ROI that loses presence is dropped, so if
+        // Run the landmark stage on each ROI; keep the hand and carry its
+        // next-frame ROI (derived from this frame's landmarks) plus its miss
+        // count when presence holds. An ROI that loses presence is dropped, so if
         // every hand is lost `tracked` ends empty and the next frame re-acquires.
-        let mut next: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
-        for roi in rois {
-            if let Some((hand, next_roi)) = self.landmark_for(&square, roi, dt)? {
+        let mut next: SmallVec<[TrackedRoi; MAX_HANDS]> = SmallVec::new();
+        for tr in to_run {
+            if let Some((hand, next_roi)) = self.landmark_for(&square, tr.roi, dt)? {
                 hands.push(hand);
-                next.push(next_roi);
+                next.push(TrackedRoi {
+                    roi: next_roi,
+                    misses: tr.misses,
+                });
             }
         }
         self.tracked = next;
@@ -245,6 +283,65 @@ impl Pipeline {
             next_roi,
         )))
     }
+}
+
+// --- detect-then-track reconciliation ------------------------------------
+
+/// Reconcile existing tracks with the palm detections from a re-detect frame.
+///
+/// Existing tracks keep their (landmark-derived) ROI for continuity — they are
+/// never replaced by a palm ROI, which would pop a steadily-tracked hand. A palm
+/// detection within [`REDETECT_MATCH_GATE`] of a track corroborates it (miss
+/// count reset to `0`); an uncorroborated track is tolerated until it has missed
+/// [`REDETECT_MISS_LIMIT`] consecutive re-detects, then dropped (phantom
+/// clearing). Each palm detection corroborates at most one track; detections
+/// that match no track are appended as new tracks. The result is capped at
+/// [`MAX_HANDS`], existing tracks taking priority.
+fn reconcile_redetect(
+    tracked: SmallVec<[TrackedRoi; MAX_HANDS]>,
+    palm_rois: &[RoiRect],
+) -> SmallVec<[TrackedRoi; MAX_HANDS]> {
+    let mut out: SmallVec<[TrackedRoi; MAX_HANDS]> = SmallVec::new();
+    // Which palm detections have corroborated a track (so each confirms at most
+    // one, and the leftovers become new hands).
+    let mut claimed = [false; MAX_HANDS];
+
+    for t in tracked {
+        let matched = palm_rois.iter().enumerate().find(|(i, p)| {
+            !claimed.get(*i).copied().unwrap_or(true)
+                && roi_center_dist(&t.roi, p) <= REDETECT_MATCH_GATE
+        });
+        if let Some((i, _)) = matched {
+            if let Some(slot) = claimed.get_mut(i) {
+                *slot = true;
+            }
+            out.push(TrackedRoi {
+                roi: t.roi,
+                misses: 0,
+            });
+        } else if t.misses + 1 < REDETECT_MISS_LIMIT {
+            out.push(TrackedRoi {
+                roi: t.roi,
+                misses: t.misses + 1,
+            });
+        }
+        // else: missed too many consecutive re-detects → dropped (phantom).
+    }
+
+    for (i, p) in palm_rois.iter().enumerate() {
+        if out.len() >= MAX_HANDS {
+            break;
+        }
+        if !claimed.get(i).copied().unwrap_or(true) {
+            out.push(TrackedRoi { roi: *p, misses: 0 });
+        }
+    }
+    out
+}
+
+/// Centre-to-centre distance between two ROIs in normalized image units.
+fn roi_center_dist(a: &RoiRect, b: &RoiRect) -> f32 {
+    (a.cx - b.cx).hypot(a.cy - b.cy)
 }
 
 // --- numeric conversion helpers (kept tiny + justified) ------------------
@@ -772,6 +869,86 @@ mod tests {
             2,
             "interval elapsed → palm re-runs"
         );
+    }
+
+    /// A square ROI centred at `(cx, cy)` (size/rotation irrelevant to
+    /// reconciliation, which matches on centres only).
+    fn roi_at(cx: f32, cy: f32) -> RoiRect {
+        RoiRect {
+            cx,
+            cy,
+            size: 0.3,
+            rotation: 0.0,
+        }
+    }
+
+    /// Build a track set from `(cx, cy, misses)` triples.
+    fn tracks(items: &[(f32, f32, u8)]) -> SmallVec<[TrackedRoi; MAX_HANDS]> {
+        items
+            .iter()
+            .map(|&(cx, cy, misses)| TrackedRoi {
+                roi: roi_at(cx, cy),
+                misses,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn redetect_corroborated_track_keeps_its_own_roi() {
+        // A track that had missed once; palm now sees the same hand slightly
+        // offset (within the gate). Its ROI must NOT be replaced by the palm ROI
+        // (continuity — no twice-a-second pop), and the miss count resets.
+        let out = reconcile_redetect(tracks(&[(0.5, 0.5, 1)]), &[roi_at(0.55, 0.52)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].misses, 0, "corroboration resets the miss count");
+        assert!(
+            (out[0].roi.cx - 0.5).abs() < 1e-6 && (out[0].roi.cy - 0.5).abs() < 1e-6,
+            "keeps the track's own landmark ROI, not the palm ROI",
+        );
+    }
+
+    #[test]
+    fn redetect_tolerates_one_miss_then_drops_phantom() {
+        // First uncorroborated re-detect: tolerated so a real hand the landmark
+        // stage still tracks does not blink.
+        let out = reconcile_redetect(tracks(&[(0.5, 0.5, 0)]), &[]);
+        assert_eq!(out.len(), 1, "a single palm miss must not drop the hand");
+        assert_eq!(out[0].misses, 1);
+        // Second consecutive miss: dropped (phantom cleared within ~1 s).
+        let out2 = reconcile_redetect(out, &[]);
+        assert!(out2.is_empty(), "dropped after REDETECT_MISS_LIMIT misses");
+    }
+
+    #[test]
+    fn redetect_adds_unmatched_palm_as_new_hand() {
+        // Existing hand near (0.3,0.3); palm sees it plus a second hand far off.
+        let out = reconcile_redetect(
+            tracks(&[(0.3, 0.3, 0)]),
+            &[roi_at(0.3, 0.31), roi_at(0.8, 0.8)],
+        );
+        assert_eq!(out.len(), 2, "existing hand corroborated + new hand added");
+        assert!(out.iter().any(|t| (t.roi.cx - 0.8).abs() < 1e-6));
+    }
+
+    #[test]
+    fn redetect_from_empty_acquires_all_detections() {
+        let out = reconcile_redetect(SmallVec::new(), &[roi_at(0.2, 0.2), roi_at(0.7, 0.7)]);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|t| t.misses == 0));
+    }
+
+    #[test]
+    fn redetect_far_palm_does_not_corroborate() {
+        // Track at (0.2,0.2); a palm at (0.7,0.2) is well beyond the gate, so it
+        // must not corroborate — the track accrues a miss and the far palm is
+        // added as its own new hand.
+        let out = reconcile_redetect(tracks(&[(0.2, 0.2, 0)]), &[roi_at(0.7, 0.2)]);
+        assert_eq!(out.len(), 2);
+        let track = out
+            .iter()
+            .find(|t| (t.roi.cx - 0.2).abs() < 1e-6)
+            .expect("original track kept");
+        assert_eq!(track.misses, 1, "a far palm must not corroborate the track");
     }
 
     #[test]
