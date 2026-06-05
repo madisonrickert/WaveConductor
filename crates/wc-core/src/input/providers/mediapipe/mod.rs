@@ -68,6 +68,13 @@ pub struct MediaPipeConfig {
     /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Wired to
     /// `WAVECONDUCTOR_HAND_GRAB_DEADZONE`.
     pub grab_rest_deadzone: f32,
+    /// One-Euro minimum cutoff (Hz) for render-rate smoothing — the at-rest
+    /// smoothing strength (see [`smoothing::DEFAULT_MIN_CUTOFF`]). Wired to
+    /// `WAVECONDUCTOR_HAND_MIN_CUTOFF`.
+    pub smoothing_min_cutoff: f32,
+    /// One-Euro speed coefficient for render-rate smoothing (see
+    /// [`smoothing::DEFAULT_BETA`]). Wired to `WAVECONDUCTOR_HAND_BETA`.
+    pub smoothing_beta: f32,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
     /// Defaults to the workspace-relative `assets/models/hand` (resolved at
     /// runtime against the working directory, like Bevy's `assets/`).
@@ -82,6 +89,8 @@ impl Default for MediaPipeConfig {
             max_inference_hz: 30,
             smoothing: true,
             grab_rest_deadzone: PipelineConfig::default().grab_rest_deadzone,
+            smoothing_min_cutoff: DEFAULT_MIN_CUTOFF,
+            smoothing_beta: DEFAULT_BETA,
             model_dir: PathBuf::from("assets/models/hand"),
         }
     }
@@ -138,12 +147,13 @@ impl MediaPipeProvider {
     /// happens in [`HandTrackingProvider::start`].
     #[must_use]
     pub fn new(config: MediaPipeConfig) -> Self {
+        let smoother = HandSmoother::new(config.smoothing_min_cutoff, config.smoothing_beta);
         Self {
             config,
             status: Arc::new(Mutex::new(ProviderStatus::default())),
             diagnostics: Arc::new(Mutex::new(ProviderDiagnostics::default())),
             runtime: Mutex::new(Runtime::default()),
-            smoother: HandSmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA),
+            smoother,
             target_hands: SmallVec::new(),
             target_ts: Duration::ZERO,
             had_hands: false,

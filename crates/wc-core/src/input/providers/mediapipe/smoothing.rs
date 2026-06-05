@@ -12,7 +12,18 @@
 //! The Leap provider (~110 fps, already hardware-smoothed) never passes through
 //! here, so its latency/feel is unchanged. Filter parameters
 //! ([`DEFAULT_MIN_CUTOFF`], [`DEFAULT_BETA`]) are starting points to tune during
-//! hardware acceptance.
+//! hardware acceptance (the app wires them to `WAVECONDUCTOR_HAND_MIN_CUTOFF` /
+//! `WAVECONDUCTOR_HAND_BETA`).
+//!
+//! **Object-scale normalization.** Positional channels (palm position, the 21
+//! landmarks) are filtered in the Leap-mm space, where a hand close to the
+//! camera produces larger per-frame deltas than the same physical motion of a
+//! far hand — so a fixed `beta` would over- or under-smooth with distance.
+//! Following `MediaPipe`'s `LandmarksSmoothingCalculator`, the speed that drives
+//! the adaptive cutoff is divided by the hand's apparent size ([`object_scale`])
+//! so smoothing strength is invariant to how close the hand is. Already-
+//! normalized channels (the unit palm normal, `[0, 1]` pinch/grab) are filtered
+//! without scaling.
 
 use std::f32::consts::TAU;
 use std::time::Duration;
@@ -23,16 +34,28 @@ use smallvec::SmallVec;
 use crate::input::hand::{Hand, LANDMARK_COUNT};
 use crate::input::state::MAX_HANDS;
 
-/// Default minimum cutoff frequency (Hz). Lower = smoother but laggier when the
-/// hand moves slowly. Tunable during hardware acceptance.
-pub const DEFAULT_MIN_CUTOFF: f32 = 2.5;
+/// Default minimum cutoff frequency (Hz) — the cutoff when the hand is still, so
+/// it sets the at-rest smoothing. Lower = steadier when the hand holds still
+/// (less jitter) but laggier on slow motion. `1.0` Hz smooths a held hand far
+/// harder than the previous `2.5` (≈9.5%/frame vs ≈21% toward target at 60 fps),
+/// which is the fix for "jittery even when holding still". Tunable on hardware
+/// via `WAVECONDUCTOR_HAND_MIN_CUTOFF`.
+pub const DEFAULT_MIN_CUTOFF: f32 = 1.0;
 
-/// Default speed coefficient. Higher = less lag during fast motion (the filter
-/// cutoff rises with hand speed). Tunable during hardware acceptance.
-pub const DEFAULT_BETA: f32 = 0.02;
+/// Default speed coefficient: how fast the cutoff opens up with hand speed (less
+/// lag during motion). Because the speed is object-scale-normalized (see the
+/// module docs), this is expressed in *hand-lengths per second* — so a
+/// `MediaPipe`-like aggressive value is single digits here, not the `0.02` that
+/// suited the previous un-normalized mm/s speed. Tunable via
+/// `WAVECONDUCTOR_HAND_BETA`.
+pub const DEFAULT_BETA: f32 = 2.0;
 
 /// Cutoff for the derivative low-pass (Hz) — the One-Euro paper's fixed default.
 const DERIVATE_CUTOFF: f32 = 1.0;
+
+/// Floor for [`object_scale`] (Leap mm), so a degenerate/collapsed landmark set
+/// never divides the speed by ~0.
+const MIN_OBJECT_SCALE: f32 = 1.0;
 
 /// One-Euro smoothing factor for a cutoff frequency and timestep.
 ///
@@ -67,9 +90,12 @@ impl OneEuroFilter {
         }
     }
 
-    /// Filter sample `x` given elapsed `dt` seconds. The first sample — or any
-    /// non-positive `dt` — passes through (no time has elapsed to smooth over).
-    fn filter(&mut self, x: f32, dt: f32) -> f32 {
+    /// Filter sample `x` given elapsed `dt` seconds. `value_scale` divides the
+    /// speed that drives the adaptive cutoff (`1 / object_scale` for positional
+    /// channels, `1.0` for already-normalized ones); the value is always blended
+    /// in its original units. The first sample — or any non-positive `dt` —
+    /// passes through (no time has elapsed to smooth over).
+    fn filter(&mut self, x: f32, dt: f32, value_scale: f32) -> f32 {
         let Some(x_prev) = self.x_prev else {
             self.x_prev = Some(x);
             return x;
@@ -77,11 +103,14 @@ impl OneEuroFilter {
         if dt <= 0.0 {
             return x_prev;
         }
-        // Smoothed derivative → speed-adaptive cutoff → smoothed value.
+        // Smoothed derivative → speed-adaptive cutoff → smoothed value. The
+        // speed is scale-normalized (`edx * value_scale`) so the cutoff — and
+        // thus the smoothing strength — is invariant to apparent hand size; the
+        // blend stays in original units, so the output needs no rescaling.
         let dx = (x - x_prev) / dt;
         let edx = low_pass(dx, smoothing_alpha(DERIVATE_CUTOFF, dt), self.dx_prev);
         self.dx_prev = edx;
-        let cutoff = self.min_cutoff + self.beta * edx.abs();
+        let cutoff = self.min_cutoff + self.beta * (edx * value_scale).abs();
         let x_hat = low_pass(x, smoothing_alpha(cutoff, dt), x_prev);
         self.x_prev = Some(x_hat);
         x_hat
@@ -104,13 +133,27 @@ impl Vec3Filter {
         }
     }
 
-    fn filter(&mut self, v: Vec3, dt: f32) -> Vec3 {
+    fn filter(&mut self, v: Vec3, dt: f32, value_scale: f32) -> Vec3 {
         Vec3::new(
-            self.c[0].filter(v.x, dt),
-            self.c[1].filter(v.y, dt),
-            self.c[2].filter(v.z, dt),
+            self.c[0].filter(v.x, dt, value_scale),
+            self.c[1].filter(v.y, dt, value_scale),
+            self.c[2].filter(v.z, dt, value_scale),
         )
     }
+}
+
+/// Apparent hand size (Leap mm) used to make positional smoothing invariant to
+/// camera distance — the analogue of `MediaPipe`'s object-scale ROI input: the
+/// mean of the landmark bounding box's width and height. Floored at
+/// [`MIN_OBJECT_SCALE`] so a collapsed landmark set never divides speed by ~0.
+fn object_scale(landmarks: &[Vec3; LANDMARK_COUNT]) -> f32 {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for lm in landmarks {
+        min = min.min(*lm);
+        max = max.max(*lm);
+    }
+    (((max.x - min.x) + (max.y - min.y)) * 0.5).max(MIN_OBJECT_SCALE)
 }
 
 /// The filter bank for a single hand: every positional/scalar field that is
@@ -137,19 +180,28 @@ impl HandFilters {
     /// Produce the smoothed hand for this frame, easing every filtered field
     /// toward `target` by `dt`.
     fn filter_hand(&mut self, target: &Hand, dt: f32) -> Hand {
+        // Positional channels normalize by apparent hand size; already-normalized
+        // channels (unit normal, [0,1] pinch/grab) use a unit scale.
+        let pos_scale = 1.0 / object_scale(&target.landmarks);
         let mut landmarks = target.landmarks;
         for (filter, lm) in self.landmarks.iter_mut().zip(landmarks.iter_mut()) {
-            *lm = filter.filter(*lm, dt);
+            *lm = filter.filter(*lm, dt, pos_scale);
         }
         Hand {
-            palm_position: self.palm_position.filter(target.palm_position, dt),
+            palm_position: self.palm_position.filter(target.palm_position, dt, pos_scale),
             // Smooth the normal's components, then re-normalize to a unit vector.
             palm_normal: self
                 .palm_normal
-                .filter(target.palm_normal, dt)
+                .filter(target.palm_normal, dt, 1.0)
                 .normalize_or_zero(),
-            pinch_strength: self.pinch.filter(target.pinch_strength, dt).clamp(0.0, 1.0),
-            grab_strength: self.grab.filter(target.grab_strength, dt).clamp(0.0, 1.0),
+            pinch_strength: self
+                .pinch
+                .filter(target.pinch_strength, dt, 1.0)
+                .clamp(0.0, 1.0),
+            grab_strength: self
+                .grab
+                .filter(target.grab_strength, dt, 1.0)
+                .clamp(0.0, 1.0),
             landmarks,
             // id, chirality, and palm_velocity carry through unchanged.
             ..target.clone()
@@ -246,28 +298,56 @@ mod tests {
     #[test]
     fn first_sample_passes_through() {
         let mut f = OneEuroFilter::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
-        assert!((f.filter(5.0, 0.016) - 5.0).abs() < 1e-6);
+        assert!((f.filter(5.0, 0.016, 1.0) - 5.0).abs() < 1e-6);
     }
 
     #[test]
     fn zero_dt_holds_previous() {
         let mut f = OneEuroFilter::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
-        f.filter(3.0, 0.016); // establish
-        assert!((f.filter(99.0, 0.0) - 3.0).abs() < 1e-6);
+        f.filter(3.0, 0.016, 1.0); // establish
+        assert!((f.filter(99.0, 0.0, 1.0) - 3.0).abs() < 1e-6);
     }
 
     #[test]
     fn steps_toward_then_converges_to_a_new_target() {
         let mut f = OneEuroFilter::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
-        f.filter(0.0, 0.016); // baseline 0
-        let first = f.filter(10.0, 0.016); // first response toward 10
+        f.filter(0.0, 0.016, 1.0); // baseline 0
+        let first = f.filter(10.0, 0.016, 1.0); // first response toward 10
         assert!(first > 0.0 && first < 10.0, "first response {first}");
         let mut last = first;
         for _ in 0..120 {
-            last = f.filter(10.0, 0.016);
+            last = f.filter(10.0, 0.016, 1.0);
         }
         assert!((last - 10.0).abs() < 0.1, "converged to {last}");
         assert!(last > first, "monotonic toward target");
+    }
+
+    #[test]
+    fn scale_normalization_changes_smoothing_strength() {
+        // Identical absolute motion; a larger value_scale (a smaller apparent
+        // hand) raises the adaptive cutoff, so the filtered value tracks closer
+        // to the target. This is the distance-invariance mechanism.
+        let mut near = OneEuroFilter::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        let mut far = OneEuroFilter::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        near.filter(0.0, 0.016, 0.1); // baselines
+        far.filter(0.0, 0.016, 10.0);
+        let near_step = near.filter(1.0, 0.016, 0.1); // big apparent hand → heavier smoothing
+        let far_step = far.filter(1.0, 0.016, 10.0); // small apparent hand → lighter smoothing
+        assert!(
+            far_step > near_step,
+            "larger value_scale tracks closer: far={far_step} near={near_step}",
+        );
+    }
+
+    #[test]
+    fn object_scale_floors_a_collapsed_hand() {
+        let collapsed = [Vec3::ZERO; LANDMARK_COUNT];
+        assert!((object_scale(&collapsed) - MIN_OBJECT_SCALE).abs() < 1e-6);
+        // A spread hand reports its mean bbox extent.
+        let mut lm = [Vec3::ZERO; LANDMARK_COUNT];
+        lm[0] = Vec3::new(-10.0, -20.0, 0.0);
+        lm[1] = Vec3::new(10.0, 20.0, 0.0); // bbox 20 wide, 40 tall → mean 30
+        assert!((object_scale(&lm) - 30.0).abs() < 1e-6);
     }
 
     #[test]

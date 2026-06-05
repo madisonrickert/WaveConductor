@@ -293,10 +293,16 @@ fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry)
             .unwrap_or(default)
     };
     let grab_rest_deadzone = env_f32("WAVECONDUCTOR_HAND_GRAB_DEADZONE", defaults.grab_rest_deadzone);
+    // One-Euro smoothing knobs: MIN_CUTOFF lower = steadier when still (more lag
+    // on slow motion); BETA higher = opens up faster during motion (less lag).
+    let smoothing_min_cutoff = env_f32("WAVECONDUCTOR_HAND_MIN_CUTOFF", defaults.smoothing_min_cutoff);
+    let smoothing_beta = env_f32("WAVECONDUCTOR_HAND_BETA", defaults.smoothing_beta);
 
     let config = MediaPipeConfig {
         smoothing,
         grab_rest_deadzone,
+        smoothing_min_cutoff,
+        smoothing_beta,
         ..MediaPipeConfig::default()
     };
 

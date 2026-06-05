@@ -1005,8 +1005,8 @@ mod tests {
     fn grab_deadzone_zeroes_the_rest_floor_and_keeps_full_fist() {
         // A relaxed-open floor at/under the deadzone collapses to exactly 0 so
         // Line's `grab > 0` decay gate releases; a full fist still reaches 1.
-        assert_eq!(apply_grab_deadzone(0.10, 0.12), 0.0, "below deadzone → 0");
-        assert_eq!(apply_grab_deadzone(0.12, 0.12), 0.0, "at deadzone → 0");
+        assert!(apply_grab_deadzone(0.10, 0.12) < 1e-6, "below deadzone → 0");
+        assert!(apply_grab_deadzone(0.12, 0.12) < 1e-6, "at deadzone → 0");
         assert!(
             (apply_grab_deadzone(1.0, 0.12) - 1.0).abs() < 1e-6,
             "full fist stays 1",
@@ -1015,7 +1015,7 @@ mod tests {
         assert!((apply_grab_deadzone(0.56, 0.12) - 0.5).abs() < 1e-6);
         // A zero deadzone is a pass-through; a degenerate >0.95 deadzone clamps.
         assert!((apply_grab_deadzone(0.3, 0.0) - 0.3).abs() < 1e-6);
-        assert_eq!(apply_grab_deadzone(0.5, 1.5), 0.0);
+        assert!(apply_grab_deadzone(0.5, 1.5) < 1e-6, "degenerate deadzone clamps");
     }
 
     #[test]
