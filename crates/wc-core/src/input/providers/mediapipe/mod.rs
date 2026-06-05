@@ -19,6 +19,7 @@
 //! `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -130,6 +131,10 @@ pub struct MediaPipeProvider {
     /// Whether the previous `poll` emitted a hand — lets us emit a single
     /// clearing frame when the last hand leaves, then go quiet.
     had_hands: bool,
+    /// Live grab rest-deadzone (`f32` bits), shared with the worker's
+    /// [`Pipeline`] so the dev tuning panel can re-tune it without a restart.
+    /// Written by [`Self::set_grab_deadzone`]; read by the pipeline each frame.
+    live_grab_deadzone: Arc<AtomicU32>,
 }
 
 /// The provider's running state (everything that exists only between `start`
@@ -148,6 +153,7 @@ impl MediaPipeProvider {
     #[must_use]
     pub fn new(config: MediaPipeConfig) -> Self {
         let smoother = HandSmoother::new(config.smoothing_min_cutoff, config.smoothing_beta);
+        let live_grab_deadzone = Arc::new(AtomicU32::new(config.grab_rest_deadzone.to_bits()));
         Self {
             config,
             status: Arc::new(Mutex::new(ProviderStatus::default())),
@@ -157,7 +163,23 @@ impl MediaPipeProvider {
             target_hands: SmallVec::new(),
             target_ts: Duration::ZERO,
             had_hands: false,
+            live_grab_deadzone,
         }
+    }
+
+    /// Live-set the grab rest-deadzone (shared with the running worker pipeline).
+    /// Cheap and lock-free; safe to call every frame from a tuning system.
+    pub fn set_grab_deadzone(&self, deadzone: f32) {
+        self.live_grab_deadzone
+            .store(deadzone.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Live-retune the render-rate smoothing (applies to tracked hands and to
+    /// banks created later, without resetting any hand's filter state).
+    pub fn set_smoothing_params(&mut self, min_cutoff: f32, beta: f32) {
+        self.config.smoothing_min_cutoff = min_cutoff;
+        self.config.smoothing_beta = beta;
+        self.smoother.set_params(min_cutoff, beta);
     }
 
     /// The configuration this provider was constructed with.
@@ -194,7 +216,10 @@ impl MediaPipeProvider {
             grab_rest_deadzone: self.config.grab_rest_deadzone,
             ..PipelineConfig::default()
         };
-        Ok(Pipeline::new(palm, landmark, cfg))
+        let mut pipeline = Pipeline::new(palm, landmark, cfg);
+        // Share the live deadzone cell so the tuning UI reaches the worker.
+        pipeline.set_live_deadzone_source(Arc::clone(&self.live_grab_deadzone));
+        Ok(pipeline)
     }
 }
 

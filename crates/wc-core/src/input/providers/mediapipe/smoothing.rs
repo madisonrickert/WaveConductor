@@ -115,6 +115,13 @@ impl OneEuroFilter {
         self.x_prev = Some(x_hat);
         x_hat
     }
+
+    /// Live-update the One-Euro parameters without disturbing the filter state,
+    /// so a tuning UI can re-tune a tracked hand mid-motion.
+    fn set_params(&mut self, min_cutoff: f32, beta: f32) {
+        self.min_cutoff = min_cutoff;
+        self.beta = beta;
+    }
 }
 
 /// Three One-Euro filters, one per component of a [`Vec3`].
@@ -139,6 +146,12 @@ impl Vec3Filter {
             self.c[1].filter(v.y, dt, value_scale),
             self.c[2].filter(v.z, dt, value_scale),
         )
+    }
+
+    fn set_params(&mut self, min_cutoff: f32, beta: f32) {
+        for c in &mut self.c {
+            c.set_params(min_cutoff, beta);
+        }
     }
 }
 
@@ -207,6 +220,17 @@ impl HandFilters {
             ..target.clone()
         }
     }
+
+    /// Live-update the One-Euro parameters of every channel in this bank.
+    fn set_params(&mut self, min_cutoff: f32, beta: f32) {
+        self.palm_position.set_params(min_cutoff, beta);
+        self.palm_normal.set_params(min_cutoff, beta);
+        for lm in &mut self.landmarks {
+            lm.set_params(min_cutoff, beta);
+        }
+        self.pinch.set_params(min_cutoff, beta);
+        self.grab.set_params(min_cutoff, beta);
+    }
 }
 
 /// Eases the exposed `MediaPipe` hand pose toward the latest inference result at
@@ -239,6 +263,17 @@ impl HandSmoother {
     pub fn clear(&mut self) {
         self.last_now = None;
         self.banks.clear();
+    }
+
+    /// Live-retune the One-Euro parameters: applies to every currently-tracked
+    /// hand's bank *and* becomes the default for banks created later (no state
+    /// is reset, so a tracked hand keeps smoothing through the change).
+    pub fn set_params(&mut self, min_cutoff: f32, beta: f32) {
+        self.min_cutoff = min_cutoff;
+        self.beta = beta;
+        for (_, bank) in &mut self.banks {
+            bank.set_params(min_cutoff, beta);
+        }
     }
 
     /// Advance smoothing to `now`, easing toward the `target` hands, and return
@@ -396,6 +431,23 @@ mod tests {
             (back[0].palm_position.x - 80.0).abs() < 1e-6,
             "returning hand should be fresh, got {}",
             back[0].palm_position.x
+        );
+    }
+
+    #[test]
+    fn set_params_retunes_a_live_bank_without_resetting_it() {
+        let mut s = HandSmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        s.smooth(&[hand_with(1, 0.0)], Duration::from_millis(0));
+        s.smooth(&[hand_with(1, 0.0)], Duration::from_millis(16)); // establish a bank
+        // Crank to near-zero cutoff with no velocity adaptivity → very heavy
+        // smoothing. A big target jump should barely move this frame, and the
+        // bank must NOT be reset (a reset would pass the new target through).
+        s.set_params(0.01, 0.0);
+        let out = s.smooth(&[hand_with(1, 1000.0)], Duration::from_millis(32));
+        assert!(
+            out[0].palm_position.x < 100.0,
+            "retuned heavy smoothing, not reset: {}",
+            out[0].palm_position.x,
         );
     }
 

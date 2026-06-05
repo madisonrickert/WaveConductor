@@ -15,6 +15,8 @@
 //! hermetic mock test plus an env-var-gated end-to-end check.
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::math::Vec3;
@@ -137,6 +139,11 @@ pub struct Pipeline {
     /// re-detection ([`REDETECT_PERIOD`]) so tracking can't stay locked on a
     /// stale/false ROI.
     since_detect: Duration,
+    /// Optional live source for [`PipelineConfig::grab_rest_deadzone`], shared
+    /// (lock-free `f32` bits) with the provider so a tuning UI can re-tune the
+    /// deadzone while the worker thread runs. Refreshed at the top of each
+    /// [`Self::process`]; `None` (tests, no UI) leaves the config value in force.
+    live_grab_deadzone: Option<Arc<AtomicU32>>,
 }
 
 impl Pipeline {
@@ -156,7 +163,15 @@ impl Pipeline {
             config,
             tracked: SmallVec::new(),
             since_detect: Duration::ZERO,
+            live_grab_deadzone: None,
         }
+    }
+
+    /// Attach a shared, lock-free source for the grab rest-deadzone so a tuning
+    /// UI on the main thread can re-tune it while this pipeline runs on the
+    /// worker thread. The bits are an `f32` (`to_bits`/`from_bits`).
+    pub fn set_live_deadzone_source(&mut self, source: Arc<AtomicU32>) {
+        self.live_grab_deadzone = Some(source);
     }
 
     /// Run one frame through both stages and return the tracked hands.
@@ -170,6 +185,11 @@ impl Pipeline {
         frame: &Frame,
         dt: Duration,
     ) -> Result<SmallVec<[Hand; MAX_HANDS]>, InferenceError> {
+        // Pick up any live deadzone re-tune from the provider/UI before this
+        // frame derives grab.
+        if let Some(src) = &self.live_grab_deadzone {
+            self.config.grab_rest_deadzone = f32::from_bits(src.load(Ordering::Relaxed));
+        }
         let mut hands: SmallVec<[Hand; MAX_HANDS]> = SmallVec::new();
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
             self.tracker.end_frame();
@@ -1016,6 +1036,27 @@ mod tests {
         // A zero deadzone is a pass-through; a degenerate >0.95 deadzone clamps.
         assert!((apply_grab_deadzone(0.3, 0.0) - 0.3).abs() < 1e-6);
         assert!(apply_grab_deadzone(0.5, 1.5) < 1e-6, "degenerate deadzone clamps");
+    }
+
+    #[test]
+    fn live_deadzone_source_overrides_config_grab() {
+        // The tuning UI shares an atomic f32-bits cell with the worker pipeline;
+        // process() must pick up a re-tune before deriving this frame's grab.
+        let (mut pipe, _p, _l) = counting_pipeline();
+        let cell = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+        pipe.set_live_deadzone_source(Arc::clone(&cell));
+        let frame = consistent_frame();
+        let dt = Duration::from_millis(33);
+
+        // Deadzone 0 → the mock's curled-ish hand reports a real grab.
+        let h0 = pipe.process(&frame, dt).expect("frame 0");
+        assert!(h0[0].grab_strength > 0.1, "raw grab {}", h0[0].grab_strength);
+
+        // Crank the live deadzone high → grab collapses to 0 on the next frame,
+        // with no restart.
+        cell.store(0.99_f32.to_bits(), Ordering::Relaxed);
+        let h1 = pipe.process(&frame, dt).expect("frame 1");
+        assert!(h1[0].grab_strength < 1e-6, "deadzoned grab {}", h1[0].grab_strength);
     }
 
     #[test]
