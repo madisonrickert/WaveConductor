@@ -25,8 +25,8 @@ use super::anchors::{generate_palm_anchors, Anchor, PalmAnchorOptions};
 use super::capture::Frame;
 use super::coords::image_norm_to_leap_mm;
 use super::inference::{HandInference, InferenceError, Tensor};
-use super::landmark::{project_landmarks, roi_from_palm, RoiRect};
-use super::palm::{decode_palm_detections, weighted_nms, PalmDecodeOptions, PalmDetection};
+use super::landmark::{project_landmarks, roi_from_landmarks, roi_from_palm, RoiRect};
+use super::palm::{decode_palm_detections, weighted_nms, PalmDecodeOptions};
 use super::signals::{
     grab_strength, palm_center, palm_normal, palm_velocity, pinch_strength, HandTracker,
 };
@@ -66,6 +66,13 @@ pub struct Pipeline {
     decode: PalmDecodeOptions,
     tracker: HandTracker,
     config: PipelineConfig,
+    /// Per-hand ROIs carried to the next frame (detect-then-track). When
+    /// non-empty, the next [`Self::process`] reuses them and skips the palm
+    /// stage — which is ~2× the landmark stage and the bulk of the per-frame
+    /// cost. Emptied when a hand is lost (landmark presence drops below
+    /// threshold) or the frame is unusable, which forces re-acquisition via
+    /// palm detection on the following frame.
+    tracked: SmallVec<[RoiRect; MAX_HANDS]>,
 }
 
 impl Pipeline {
@@ -83,6 +90,7 @@ impl Pipeline {
             decode: PalmDecodeOptions::mediapipe_palm_192(),
             tracker: HandTracker::default(),
             config,
+            tracked: SmallVec::new(),
         }
     }
 
@@ -100,14 +108,46 @@ impl Pipeline {
         let mut hands: SmallVec<[Hand; MAX_HANDS]> = SmallVec::new();
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
             self.tracker.end_frame();
+            self.tracked.clear(); // a bad frame breaks tracking → re-acquire next
             return Ok(hands);
         }
 
         // Square-pad to the larger side so detection coords are aspect-correct.
         let square = square_pad(frame);
 
-        // Stage 1: palm detection on the 192 input.
-        let palm_in = to_nchw_unit(&resize(&square, PALM_SIZE, PALM_SIZE), PALM_SIZE);
+        // Detect-then-track: if we have ROIs from the previous frame, reuse them
+        // and skip palm detection (the dominant per-frame cost). Otherwise run
+        // palm detection to (re)acquire. `take` leaves `tracked` empty; it is
+        // repopulated below from this frame's successful hands.
+        let rois = if self.tracked.is_empty() {
+            self.acquire_rois(&square)?
+        } else {
+            std::mem::take(&mut self.tracked)
+        };
+
+        // Run the landmark stage on each ROI; keep the hand and its next-frame
+        // ROI when presence holds. An ROI that loses presence is dropped, so if
+        // every hand is lost `tracked` ends empty and the next frame re-acquires.
+        let mut next: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
+        for roi in rois {
+            if let Some((hand, next_roi)) = self.landmark_for(&square, roi, dt)? {
+                hands.push(hand);
+                next.push(next_roi);
+            }
+        }
+        self.tracked = next;
+        self.tracker.end_frame();
+        Ok(hands)
+    }
+
+    /// Acquisition path: run palm detection on the square frame and return up to
+    /// [`MAX_HANDS`] candidate ROIs (highest-scoring first). Only runs when not
+    /// already tracking.
+    fn acquire_rois(
+        &mut self,
+        square: &RgbImage,
+    ) -> Result<SmallVec<[RoiRect; MAX_HANDS]>, InferenceError> {
+        let palm_in = to_nchw_unit(&resize(square, PALM_SIZE, PALM_SIZE), PALM_SIZE);
         let out = self.palm.run(&palm_in)?;
         let (boxes, scores) = pick_palm_outputs(&out)?;
         let mut dets = weighted_nms(
@@ -122,24 +162,18 @@ impl Pipeline {
         );
         dets.sort_by(|a, b| b.score.total_cmp(&a.score));
         dets.truncate(MAX_HANDS);
-
-        // Stage 2: landmarks per detection.
-        for det in &dets {
-            if let Some(hand) = self.landmark_for(&square, det, dt)? {
-                hands.push(hand);
-            }
-        }
-        self.tracker.end_frame();
-        Ok(hands)
+        Ok(dets.iter().map(roi_from_palm).collect())
     }
 
+    /// Run the landmark stage for one ROI. Returns the tracked hand and the ROI
+    /// to use for it next frame (derived from its landmarks), or `None` if the
+    /// model's presence score is below threshold (no hand in this ROI).
     fn landmark_for(
         &mut self,
         square: &RgbImage,
-        det: &PalmDetection,
+        roi: RoiRect,
         dt: Duration,
-    ) -> Result<Option<Hand>, InferenceError> {
-        let roi = roi_from_palm(det);
+    ) -> Result<Option<(Hand, RoiRect)>, InferenceError> {
         let crop = warp_roi(square, &roi, LM_SIZE);
         let lm_in = to_nchw_unit(&crop, LM_SIZE);
         let out = self.landmark.run(&lm_in)?;
@@ -166,16 +200,22 @@ impl Pipeline {
         // a later pass). Start at zero on first sighting.
         let velocity = palm_velocity(palm_pos, palm_pos, dt);
 
-        Ok(Some(Hand {
-            id,
-            chirality,
-            palm_position: palm_pos,
-            palm_normal: palm_normal(&landmarks, chirality),
-            palm_velocity: velocity,
-            pinch_strength: pinch_strength(&img_landmarks),
-            grab_strength: grab_strength(&img_landmarks),
-            landmarks,
-        }))
+        // Next frame tracks from these landmarks, skipping palm detection.
+        let next_roi = roi_from_landmarks(&img_landmarks);
+
+        Ok(Some((
+            Hand {
+                id,
+                chirality,
+                palm_position: palm_pos,
+                palm_normal: palm_normal(&landmarks, chirality),
+                palm_velocity: velocity,
+                pinch_strength: pinch_strength(&img_landmarks),
+                grab_strength: grab_strength(&img_landmarks),
+                landmarks,
+            },
+            next_roi,
+        )))
     }
 }
 
@@ -544,6 +584,117 @@ mod tests {
             1000.0 / tracking
         );
         eprintln!("=======================================================\n");
+    }
+
+    /// Inference stub that counts `run` calls and returns canned outputs, so a
+    /// test can observe which model stages the pipeline invokes per frame.
+    struct CountingInference {
+        calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        outputs: Vec<Tensor>,
+    }
+
+    impl HandInference for CountingInference {
+        fn run(&mut self, _input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.outputs.clone())
+        }
+    }
+
+    #[test]
+    fn tracking_frame_skips_palm_detection() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // Palm output: anchor 0 hot (raw score 100 → ~1.0), a single 0.2×0.2
+        // box → exactly one detection; every other anchor scores ~0 and drops.
+        let mut scores = vec![-100.0f32; 2016];
+        scores[0] = 100.0;
+        let mut boxes = vec![0.0f32; 2016 * 18];
+        boxes[2] = 192.0 * 0.2; // width
+        boxes[3] = 192.0 * 0.2; // height
+        let palm_out = vec![
+            Tensor {
+                data: boxes,
+                shape: vec![1, 2016, 18],
+            },
+            Tensor {
+                data: scores,
+                shape: vec![1, 2016, 1],
+            },
+        ];
+
+        // Landmark output: a spread hand in crop-pixel space with high presence
+        // and handedness, so every frame yields a hand and a valid next ROI.
+        let mut lms = vec![112.0f32; 63];
+        let mut set = |i: usize, x: f32, y: f32| {
+            lms[i * 3] = x;
+            lms[i * 3 + 1] = y;
+        };
+        set(0, 112.0, 160.0); // wrist
+        set(9, 112.0, 90.0); // middle MCP
+        set(5, 85.0, 110.0); // index MCP
+        set(17, 140.0, 110.0); // pinky MCP
+        set(12, 112.0, 50.0); // middle tip
+        let lm_out = vec![
+            Tensor {
+                data: lms,
+                shape: vec![1, 63],
+            },
+            Tensor {
+                data: vec![5.0],
+                shape: vec![1, 1],
+            }, // presence → ~0.99
+            Tensor {
+                data: vec![5.0],
+                shape: vec![1, 1],
+            }, // handedness → Right
+            Tensor {
+                data: vec![0.0; 63],
+                shape: vec![1, 63],
+            }, // world landmarks
+        ];
+
+        let palm_calls = Arc::new(AtomicU32::new(0));
+        let lm_calls = Arc::new(AtomicU32::new(0));
+        let mut pipe = Pipeline::new(
+            Box::new(CountingInference {
+                calls: Arc::clone(&palm_calls),
+                outputs: palm_out,
+            }),
+            Box::new(CountingInference {
+                calls: Arc::clone(&lm_calls),
+                outputs: lm_out,
+            }),
+            PipelineConfig::default(),
+        );
+
+        let frame = Frame {
+            width: 64,
+            height: 48,
+            rgb: vec![128u8; 64 * 48 * 3],
+        };
+        let dt = Duration::from_millis(33);
+
+        // Frame 1 acquires: palm detection runs, then the landmark stage.
+        let h1 = pipe.process(&frame, dt).expect("frame 1");
+        assert_eq!(h1.len(), 1, "frame 1 should acquire one hand");
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 1, "palm runs to acquire");
+        assert_eq!(lm_calls.load(Ordering::Relaxed), 1);
+
+        // Frame 2 tracks: it reuses frame 1's ROI and must NOT re-run palm.
+        let h2 = pipe.process(&frame, dt).expect("frame 2");
+        assert_eq!(h2.len(), 1, "frame 2 should track the hand");
+        assert_eq!(
+            palm_calls.load(Ordering::Relaxed),
+            1,
+            "tracking frame must skip palm detection"
+        );
+        assert_eq!(
+            lm_calls.load(Ordering::Relaxed),
+            2,
+            "landmark runs every frame"
+        );
     }
 
     #[test]
