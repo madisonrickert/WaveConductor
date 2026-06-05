@@ -429,6 +429,123 @@ mod tests {
         );
     }
 
+    /// Per-stage latency breakdown for the two-stage pipeline, in the profile
+    /// `cargo rund` uses (our code at opt-level 1, tract/image at opt-level 3).
+    /// Not a correctness test — a measurement harness for the framerate work.
+    /// Run with:
+    ///   `cargo test -p wc-core --features hand-tracking-mediapipe \
+    ///    -- --ignored --nocapture profile_pipeline_stages`
+    #[test]
+    #[ignore = "measurement harness, not a correctness assertion; run with --nocapture"]
+    fn profile_pipeline_stages() {
+        use std::time::Instant;
+
+        let mut palm = model("palm_detection.onnx", &[1, 192, 192, 3]);
+        let mut landmark = model("hand_landmark.onnx", &[1, 224, 224, 3]);
+
+        // Time `body` N times after one warm-up; return mean milliseconds.
+        let bench = |iters: u32, body: &mut dyn FnMut()| -> f64 {
+            body();
+            let t = Instant::now();
+            for _ in 0..iters {
+                body();
+            }
+            (t.elapsed().as_secs_f64() * 1000.0) / f64::from(iters)
+        };
+
+        // A non-trivial synthetic frame (gradient) at each candidate capture res.
+        let make_frame = |w: u32, h: u32| -> Frame {
+            let mut rgb = vec![0u8; idx(w) * idx(h) * 3];
+            for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+                px[0] = u8::try_from(i % 256).unwrap_or(0);
+                px[1] = u8::try_from((i / 7) % 256).unwrap_or(0);
+                px[2] = u8::try_from((i / 13) % 256).unwrap_or(0);
+            }
+            Frame {
+                width: w,
+                height: h,
+                rgb,
+            }
+        };
+
+        eprintln!("\n=== mediapipe pipeline per-stage latency (mean ms) ===");
+
+        // Preprocessing scales with capture resolution — measure the realistic set.
+        for &(w, h) in &[(640u32, 480u32), (1280, 720), (1920, 1080)] {
+            let frame = make_frame(w, h);
+            let mut sq = square_pad(&frame);
+            let t_pad = bench(20, &mut || {
+                sq = square_pad(&frame);
+            });
+            let mut small = resize(&sq, PALM_SIZE, PALM_SIZE);
+            let t_resize = bench(20, &mut || {
+                small = resize(&sq, PALM_SIZE, PALM_SIZE);
+            });
+            eprintln!(
+                "  preprocess @ {w}x{h}: square_pad {t_pad:.2}  resize->192 {t_resize:.2}  (sum {:.2})",
+                t_pad + t_resize
+            );
+        }
+
+        // Inference latency is data-independent (fixed conv/matmul FLOPs), so a
+        // zeros tensor measures it faithfully.
+        let palm_in = Tensor {
+            data: vec![0.0; idx(PALM_SIZE) * idx(PALM_SIZE) * 3],
+            shape: vec![1, idx(PALM_SIZE), idx(PALM_SIZE), 3],
+        };
+        let t_palm = bench(20, &mut || {
+            let _ = palm.run(&palm_in).expect("palm run");
+        });
+
+        // ROI warp (one per detected hand) + landmark inference.
+        let sq = square_pad(&make_frame(1280, 720));
+        let roi = RoiRect {
+            cx: 0.5,
+            cy: 0.5,
+            size: 0.5,
+            rotation: 0.0,
+        };
+        let mut crop = warp_roi(&sq, &roi, LM_SIZE);
+        let t_warp = bench(20, &mut || {
+            crop = warp_roi(&sq, &roi, LM_SIZE);
+        });
+        let lm_in = Tensor {
+            data: vec![0.0; idx(LM_SIZE) * idx(LM_SIZE) * 3],
+            shape: vec![1, idx(LM_SIZE), idx(LM_SIZE), 3],
+        };
+        let t_lm = bench(20, &mut || {
+            let _ = landmark.run(&lm_in).expect("landmark run");
+        });
+
+        eprintln!("  palm.run (192):       {t_palm:.2}");
+        eprintln!("  warp_roi->224:        {t_warp:.2}");
+        eprintln!("  landmark.run (224):   {t_lm:.2}");
+
+        // Per-frame budgets at 1280x720 with one hand in view.
+        let f720 = make_frame(1280, 720);
+        let s720 = square_pad(&f720);
+        let t_pad_720 = bench(20, &mut || {
+            let _ = square_pad(&f720);
+        });
+        let t_resize_720 = bench(20, &mut || {
+            let _ = resize(&s720, PALM_SIZE, PALM_SIZE);
+        });
+        // Acquisition frame: square_pad + resize->192 + palm + warp + landmark.
+        let acquire = t_pad_720 + t_resize_720 + t_palm + t_warp + t_lm;
+        // Tracking frame (detect-then-track): no palm, no resize->192 — just
+        // square_pad (warp samples it) + warp + landmark.
+        let tracking = t_pad_720 + t_warp + t_lm;
+        eprintln!(
+            "\n  acquisition frame (palm path): {acquire:.2} ms  (~{:.1} fps)",
+            1000.0 / acquire
+        );
+        eprintln!(
+            "  tracking frame (palm skipped): {tracking:.2} ms  (~{:.1} fps)",
+            1000.0 / tracking
+        );
+        eprintln!("=======================================================\n");
+    }
+
     #[test]
     fn warp_center_samples_roi_center() {
         // A 4x4 image with a single bright pixel at the centre; an identity-ish
