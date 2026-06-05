@@ -78,6 +78,10 @@ pub struct PipelineConfig {
     pub palm_score_threshold: f32,
     /// Minimum landmark-presence score to keep a hand.
     pub presence_threshold: f32,
+    /// Rest deadzone subtracted from the geometric grab so a *relaxed-open* hand
+    /// reads exactly `0`. See [`apply_grab_deadzone`]. Tunable on hardware via
+    /// `WAVECONDUCTOR_HAND_GRAB_DEADZONE`.
+    pub grab_rest_deadzone: f32,
 }
 
 impl Default for PipelineConfig {
@@ -86,8 +90,29 @@ impl Default for PipelineConfig {
             mirror: true,
             palm_score_threshold: 0.5,
             presence_threshold: 0.5,
+            grab_rest_deadzone: 0.12,
         }
     }
+}
+
+/// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
+///
+/// [`grab_strength`] is calibrated to ideal open-hand geometry (fingers fully
+/// extended one hand-scale out → `0`); a real relaxed hand sits slightly curled
+/// and landmark noise jitters the fingertips, so the raw signal carries a small
+/// positive floor at rest. That floor matters now that the depth proxy makes
+/// grab the *sole* attractor driver: Line's decay gate is `grab > 0`, so any
+/// positive floor keeps the attractor faintly — and, via the slow attack EMA,
+/// increasingly — on even with the hand wide open. Subtracting a rest deadzone
+/// and rescaling pins `grab <= deadzone → 0` while a full fist still reaches `1`.
+///
+/// `deadzone` is clamped to `[0, 0.95]`; `0` is a pass-through.
+fn apply_grab_deadzone(grab: f32, deadzone: f32) -> f32 {
+    let dz = deadzone.clamp(0.0, 0.95);
+    if dz <= 0.0 {
+        return grab;
+    }
+    ((grab - dz) / (1.0 - dz)).clamp(0.0, 1.0)
 }
 
 /// The two-stage hand pipeline. Holds the model sessions, anchors, tracker, and
@@ -277,7 +302,12 @@ impl Pipeline {
                 palm_normal: palm_normal(&landmarks, chirality),
                 palm_velocity: velocity,
                 pinch_strength: pinch_strength(&img_landmarks),
-                grab_strength: grab_strength(&img_landmarks),
+                // Rest-deadzone the grab so a relaxed-open hand reads exactly 0
+                // (otherwise its small positive floor keeps Line's attractor on).
+                grab_strength: apply_grab_deadzone(
+                    grab_strength(&img_landmarks),
+                    self.config.grab_rest_deadzone,
+                ),
                 landmarks,
             },
             next_roi,
@@ -967,6 +997,23 @@ mod tests {
             "palm z = {} (want {MEDIAPIPE_DEPTH_PROXY_MM})",
             hands[0].palm_position.z
         );
+    }
+
+    #[test]
+    fn grab_deadzone_zeroes_the_rest_floor_and_keeps_full_fist() {
+        // A relaxed-open floor at/under the deadzone collapses to exactly 0 so
+        // Line's `grab > 0` decay gate releases; a full fist still reaches 1.
+        assert_eq!(apply_grab_deadzone(0.10, 0.12), 0.0, "below deadzone → 0");
+        assert_eq!(apply_grab_deadzone(0.12, 0.12), 0.0, "at deadzone → 0");
+        assert!(
+            (apply_grab_deadzone(1.0, 0.12) - 1.0).abs() < 1e-6,
+            "full fist stays 1",
+        );
+        // Mid-grab is rescaled, not clipped: 0.56 → (0.56-0.12)/0.88 = 0.5.
+        assert!((apply_grab_deadzone(0.56, 0.12) - 0.5).abs() < 1e-6);
+        // A zero deadzone is a pass-through; a degenerate >0.95 deadzone clamps.
+        assert!((apply_grab_deadzone(0.3, 0.0) - 0.3).abs() < 1e-6);
+        assert_eq!(apply_grab_deadzone(0.5, 1.5), 0.0);
     }
 
     #[test]

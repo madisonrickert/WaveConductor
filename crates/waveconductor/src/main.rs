@@ -280,8 +280,23 @@ fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry)
                 "off" | "0" | "false" | "no"
             )
         });
+
+    // Feel tunables, overridable at runtime for live hardware A/B (each maps to
+    // a named constant in the provider). A missing or unparseable value keeps the
+    // default. `WAVECONDUCTOR_HAND_GRAB_DEADZONE` pins a relaxed-open hand's grab
+    // to 0 (raise if the attractor lingers when open, lower if grab feels weak).
+    let defaults = MediaPipeConfig::default();
+    let env_f32 = |name: &str, default: f32| -> f32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+    let grab_rest_deadzone = env_f32("WAVECONDUCTOR_HAND_GRAB_DEADZONE", defaults.grab_rest_deadzone);
+
     let config = MediaPipeConfig {
         smoothing,
+        grab_rest_deadzone,
         ..MediaPipeConfig::default()
     };
 

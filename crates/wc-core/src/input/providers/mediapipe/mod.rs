@@ -64,6 +64,10 @@ pub struct MediaPipeConfig {
     /// turn off to expose the raw ~15–20 fps inference poses (for A/B comparison
     /// during tuning). The app wires this to `WAVECONDUCTOR_HAND_SMOOTHING`.
     pub smoothing: bool,
+    /// Rest deadzone for the grab signal so a relaxed-open hand reads exactly
+    /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Wired to
+    /// `WAVECONDUCTOR_HAND_GRAB_DEADZONE`.
+    pub grab_rest_deadzone: f32,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
     /// Defaults to the workspace-relative `assets/models/hand` (resolved at
     /// runtime against the working directory, like Bevy's `assets/`).
@@ -77,6 +81,7 @@ impl Default for MediaPipeConfig {
             mirror: true,
             max_inference_hz: 30,
             smoothing: true,
+            grab_rest_deadzone: PipelineConfig::default().grab_rest_deadzone,
             model_dir: PathBuf::from("assets/models/hand"),
         }
     }
@@ -176,6 +181,7 @@ impl MediaPipeProvider {
         let landmark = load_model(dir, "hand_landmark.onnx", &[1, 224, 224, 3])?;
         let cfg = PipelineConfig {
             mirror: self.config.mirror,
+            grab_rest_deadzone: self.config.grab_rest_deadzone,
             ..PipelineConfig::default()
         };
         Ok(Pipeline::new(palm, landmark, cfg))
