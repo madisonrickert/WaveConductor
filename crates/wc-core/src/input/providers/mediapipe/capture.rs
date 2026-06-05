@@ -146,28 +146,25 @@ pub struct NokhwaFrameSource {
 
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 impl NokhwaFrameSource {
-    /// Open `camera_index` and start streaming near `width`×`height` at ~30 fps.
+    /// Open `camera_index` and start streaming at the highest available rate.
     ///
-    /// Hand tracking downsamples every frame to 192/224, so a modest capture
-    /// resolution loses no detection accuracy while cutting per-frame
-    /// MJPEG-decode + square-pad work (and sustained heat — the deployment's
-    /// priority). The camera negotiates the *nearest* supported format via
-    /// `Closest`; [`Self::next_frame`] decodes whatever it actually returns
-    /// (MJPEG / YUYV / RGB), so an exact match is not required.
+    /// Requests `AbsoluteHighestFrameRate` and lets the backend choose the
+    /// format. A resolution cap was tried (640×480 via `Closest`) to cut
+    /// per-frame decode cost, but it failed to open on the macOS/AVFoundation
+    /// backend — the device did not enumerate that exact format — so it was
+    /// reverted. A future cap must be derived from the camera's *enumerated*
+    /// formats on real hardware, not requested blind.
     ///
     /// # Errors
     /// Returns [`CaptureError::NoCamera`] if the device cannot be opened.
-    pub fn open(camera_index: u32, width: u32, height: u32) -> Result<Self, CaptureError> {
+    pub fn open(camera_index: u32) -> Result<Self, CaptureError> {
         use nokhwa::pixel_format::RgbFormat;
-        use nokhwa::utils::{
-            CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
-            Resolution,
-        };
+        use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
         use nokhwa::Camera;
 
         let index = CameraIndex::Index(camera_index);
-        let target = CameraFormat::new(Resolution::new(width, height), FrameFormat::MJPEG, 30);
-        let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(target));
+        let requested =
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         let mut camera =
             Camera::new(index, requested).map_err(|e| CaptureError::NoCamera(e.to_string()))?;
         camera
