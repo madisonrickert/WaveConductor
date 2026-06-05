@@ -310,8 +310,11 @@ ran *every* frame → ~4.4 fps.
    result every render frame, so a ~20 fps source renders as fluid ~60 fps
    *perceived* motion. The shared `HandTrackingState`/`TrackedHand` layer and the
    Leap path are untouched.
-4. **Capture pinned to 640×480** — was `AbsoluteHighestFrameRate` (720p/1080p),
-   downsampled to 192/224 anyway; smaller frames cut per-frame decode + heat.
+4. **Capture pinned to 640×480** — *reverted.* The `Closest(640×480 MJPEG)`
+   request failed to open the macOS/AVFoundation camera (the device does not
+   enumerate that exact format), so the worker exited and no hand tracked. Back
+   to `AbsoluteHighestFrameRate`. A resolution cap must be derived from the
+   camera's *enumerated* formats on real hardware, not requested blind.
 
 **Runtime-fork debate (the Fork-2 `ort` fallback question, revisited under the
 new perf data).** Three senior-engineer reviewers evaluated breaking past the
@@ -335,6 +338,52 @@ the pi-party), *or* the NUC can't sustain ~15 fps inference. The lean is then
 **pure-Rust GPU for thermal offload, not `ort`** (ort sacrifices the pure-Rust
 property *and* adds CPU heat). The `HandInference` trait keeps either swap
 localized.
+
+## Feel fixes from the second hardware test (2026-06-05)
+
+The smoothed build felt much better, but three issues remained: a stuck-on
+attractor, a jittery palm that "warps," and residual jumpiness. Two were
+concrete provider bugs, root-caused in code (not feel guesses) and fixed.
+
+1. **Attractor stuck on — the depth term blew up.** Line's power model is
+   `wanted = grab^1.5 · 5^((−z + 350) / 160)`, written for Leap, which reports
+   depth `z` in mm `[40, 350]`. The MediaPipe pipeline passed the landmark
+   model's *relative* z straight through `image_norm_to_leap_mm` — a near-zero
+   value (`project_landmarks` scales it by ROI size, so ≈ ±0.1), **not** an mm
+   depth. At z≈0 the depth term is `5^(350/160) ≈ 34×`, so power pinned high
+   regardless of grab (and any z jitter was amplified 34×). **Fix:** pin
+   `palm_position.z` to a fixed mid-range proxy
+   (`coords::MEDIAPIPE_DEPTH_PROXY_MM = 120`), making the depth term a constant
+   ~10× so **grab alone** drives strength. Calibrated against the known-good
+   mouse reference (`MOUSE_POWER_PRESS = 10`): a full fist reaches power ≈10 ≈ a
+   mouse press. A single webcam has no reliable hand-Z; a *size-based* depth
+   proxy (apparent hand size → z, closer ⇒ stronger like Leap) is the future
+   enhancement. Until then this constant is the one strength knob.
+2. **Periodic "warp" — re-detect replaced the tracked ROI.** The phantom fix
+   (periodic re-detect) made palm *authoritative*: every 500 ms it discarded the
+   landmark ROIs and substituted freshly-detected palm ROIs. A palm ROI differs
+   structurally from a landmark ROI (2.6× vs 2.0× expansion, centre shifted
+   toward the fingers), so the crop changed twice a second and the hand popped;
+   and a frame where palm momentarily missed blinked the hand out entirely.
+   **Fix:** `pipeline::reconcile_redetect` — on a re-detect frame each track
+   **keeps its landmark ROI** (continuity); palm only corroborates (reset),
+   tolerates (`REDETECT_MISS_LIMIT = 2` consecutive misses, so the more-reliable
+   landmark stage carries a real hand across an intermittent palm miss without
+   blinking), or finally drops a phantom (cleared in ~1 s). Unmatched palm
+   detections become new hands.
+
+**Tunables left for hardware A/B (Madison's call — feel, not correctness):**
+
+- `MEDIAPIPE_DEPTH_PROXY_MM` (120) — global attractor strength. Raise → stronger
+  pull at a given grab.
+- `DEFAULT_MIN_CUTOFF` (2.5) / `DEFAULT_BETA` (0.02) in `smoothing.rs` — lower
+  `min_cutoff` smooths the residual position jitter harder (more lag when slow).
+  `WAVECONDUCTOR_HAND_SMOOTHING=off` exposes the raw pose for comparison.
+- `LINE_HAND_GRAB_THRESHOLD` (0.0) / the `grab_strength` open-hand zero point —
+  if a *relaxed open* hand still reads a small grab (so a faint pull lingers),
+  the grab curve's open reference (`signals.rs`) needs a real-hand calibration,
+  or a small deadzone. Deferred: it needs the actual relaxed-open landmark
+  geometry from hardware, not a synthetic guess.
 
 ## Roadmap entry
 
