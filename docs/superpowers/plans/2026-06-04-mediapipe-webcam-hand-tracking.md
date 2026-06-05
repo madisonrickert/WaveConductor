@@ -45,8 +45,11 @@ suites all green):
   commit (her own selfie). The env-var-gated e2e test
   (`WC_HANDTRACK_TEST_IMAGE`) already validates the full pipeline locally; the
   committed golden just makes that positive-path test run hermetically in CI.
-- ⏳ **Phase 10 (acceptance)**: `WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo rund`
-  on Madison's webcam — verify hand tracking drives the Line sketch, then tune
+- ⏳ **Phase 10 (acceptance)**:
+  `WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo rund --features hand-tracking-mediapipe`
+  on Madison's webcam (the feature is opt-in — NOT in the default `cargo rund`
+  build, so the flag is required) — verify hand tracking drives the Line sketch,
+  then tune
   the few runtime conventions that need a live hand: **mirror direction**,
   **handedness mapping** (the `handed >= 0.5 → Right` choice), and the
   **pinch/grab thresholds** (currently geometric defaults). Dev-panel diagnostics
