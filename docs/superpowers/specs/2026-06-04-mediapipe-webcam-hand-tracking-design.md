@@ -289,6 +289,53 @@ the Rust `anchors`/`palm` modules are confirmed correct on real data.
 
 Open-question 3 (nokhwa CI build) is still open → resolved in plan Task 1.1.
 
+## Performance follow-up & runtime-fork debate (2026-06-05)
+
+First on-hardware run tracked, but at an unusable framerate. Root-caused with a
+per-stage profiler (`pipeline::tests::profile_pipeline_stages`): on Apple
+Silicon, tract ran palm in ~147 ms and landmark in ~62 ms, and palm detection
+ran *every* frame → ~4.4 fps.
+
+**In-constraint fixes shipped (no runtime swap, all pure-Rust):**
+
+1. **Detect-then-track** — palm detection now runs only to (re)acquire; tracking
+   frames derive the ROI from the previous frame's landmarks
+   (`roi_from_landmarks`) and run the landmark model alone. ~4.4 → ~15 fps.
+2. **tract 0.21 → 0.23** — two years of linalg-kernel work; landmark 62 → 46 ms.
+   ~15 → ~20 fps. API migration in `TractInference` only; `cargo deny` stays
+   clean. (Re-validate real-hand detection quality on hardware — the numerical
+   fidelity gate was originally run on 0.21.)
+3. **Render-rate One-Euro smoothing** (`smoothing.rs`, MediaPipe-provider-only) —
+   the provider's `poll` eases the exposed pose toward the latest inference
+   result every render frame, so a ~20 fps source renders as fluid ~60 fps
+   *perceived* motion. The shared `HandTrackingState`/`TrackedHand` layer and the
+   Leap path are untouched.
+4. **Capture pinned to 640×480** — was `AbsoluteHighestFrameRate` (720p/1080p),
+   downsampled to 192/224 anyway; smaller frames cut per-frame decode + heat.
+
+**Runtime-fork debate (the Fork-2 `ort` fallback question, revisited under the
+new perf data).** Three senior-engineer reviewers evaluated breaking past the
+~15–20 fps tract CPU ceiling. Consensus: **do not swap runtimes.**
+
+- **Native `ort` + CoreML/CPU** — constraint-fit 2/5. Would reach 30–60 fps, but
+  reintroduces a CDN-fetched C++ blob, expands CVE surface `cargo audit` can't
+  see, trips a strict `[sources]` allowlist, and can't serve the WebGPU web
+  target. Discards the exact property tract was chosen for.
+- **Pure-Rust GPU (burn-wgpu)** — constraint-fit 3/5. Preserves pure-Rust, but
+  **can't share Bevy's wgpu device** (wgpu 27 vs 29) → a second GPU device →
+  render contention + *more* heat (against the thermal goal), and the Linux NUC
+  (primary deploy target) may see little/no win.
+- **Optimize in-constraint (chosen)** — the target is 60 fps *perceived* motion,
+  not 60 fps *inference*; human hand motion is ~5–10 Hz, so ~20 fps inference +
+  render-rate smoothing suffices.
+
+**When to revisit a swap:** if, after these fixes, palm re-acquisition hitch is
+user-visible on the NUC even with smoothing (e.g. constant hand entry/exit at
+the pi-party), *or* the NUC can't sustain ~15 fps inference. The lean is then
+**pure-Rust GPU for thermal offload, not `ort`** (ort sacrifices the pure-Rust
+property *and* adds CPU heat). The `HandInference` trait keeps either swap
+localized.
+
 ## Roadmap entry
 
 Recommend adding a slug **`mediapipe-webcam-hands`** to `docs/superpowers/roadmap.md` (a desktop sibling of Phase-3 `ios-vision-hands`; an alternative primary input to `leap-*`). I have **not** edited `roadmap.md` because it carries a pre-existing uncommitted change from before this branch — Madison should place/sequence the slug to avoid clobbering that edit.
