@@ -24,15 +24,18 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use rtrb::Consumer;
+use smallvec::SmallVec;
 
 use self::capture::{CaptureError, FrameSource};
 use self::inference::{HandInference, TractInference};
 use self::pipeline::{Pipeline, PipelineConfig};
+use self::smoothing::{HandSmoother, DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
 use self::worker::{spawn_worker, SourceFactory, WorkerHandle, WorkerMsg};
+use crate::input::hand::Hand;
 use crate::input::provider::{HandTrackingProvider, ProviderId};
 use crate::input::state::{
     DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
-    ServiceConnection,
+    ServiceConnection, MAX_HANDS,
 };
 
 mod anchors;
@@ -43,6 +46,7 @@ mod landmark;
 mod palm;
 mod pipeline;
 mod signals;
+mod smoothing;
 mod worker;
 
 /// Construction-time configuration for the webcam provider.
@@ -104,6 +108,19 @@ pub struct MediaPipeProvider {
     /// `Sync`, and `Mutex<T: Send>` is `Sync`. Only ever accessed via `&mut self`
     /// (`get_mut`), so there is no real contention.
     runtime: Mutex<Runtime>,
+    /// Render-rate One-Euro smoothing. The worker produces poses at the
+    /// inference rate (~15–20 fps); `poll` runs at render rate (~60 fps) and
+    /// eases the exposed pose toward [`Self::target_hands`] each call so motion
+    /// reads as fluid. `MediaPipe`-only — all of this lives in this provider.
+    smoother: HandSmoother,
+    /// Latest inference result from the worker, held between worker frames as
+    /// the smoothing target.
+    target_hands: SmallVec<[Hand; MAX_HANDS]>,
+    /// Capture timestamp of [`Self::target_hands`].
+    target_ts: Duration,
+    /// Whether the previous `poll` emitted a hand — lets us emit a single
+    /// clearing frame when the last hand leaves, then go quiet.
+    had_hands: bool,
 }
 
 /// The provider's running state (everything that exists only between `start`
@@ -126,6 +143,10 @@ impl MediaPipeProvider {
             status: Arc::new(Mutex::new(ProviderStatus::default())),
             diagnostics: Arc::new(Mutex::new(ProviderDiagnostics::default())),
             runtime: Mutex::new(Runtime::default()),
+            smoother: HandSmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA),
+            target_hands: SmallVec::new(),
+            target_ts: Duration::ZERO,
+            had_hands: false,
         }
     }
 
@@ -246,6 +267,11 @@ impl HandTrackingProvider for MediaPipeProvider {
             d.sdk_version = Some("MediaPipe (tract) palm+landmark".into());
             d.device_serial = Some(format!("camera{}", self.config.camera_index));
         }
+        // Cold-start the smoothing so a restart carries no stale pose/momentum.
+        self.smoother.clear();
+        self.target_hands.clear();
+        self.target_ts = Duration::ZERO;
+        self.had_hands = false;
         Ok(())
     }
 
@@ -259,16 +285,23 @@ impl HandTrackingProvider for MediaPipeProvider {
         if let Ok(mut s) = self.status.lock() {
             *s = ProviderStatus::default();
         }
+        self.smoother.clear();
+        self.target_hands.clear();
+        self.had_hands = false;
     }
 
-    fn poll(&mut self, _now: Duration, out: &mut Messages<HandTrackingFrame>) {
-        let mut latest = None;
+    fn poll(&mut self, now: Duration, out: &mut Messages<HandTrackingFrame>) {
+        // Drain the worker ring: keep the most recent hands as the smoothing
+        // target and apply the latest status.
+        let mut new_target: Option<(SmallVec<[Hand; MAX_HANDS]>, Duration)> = None;
         let mut new_status = None;
         if let Ok(rt) = self.runtime.get_mut() {
             if let Some(consumer) = rt.consumer.as_mut() {
                 while let Ok(msg) = consumer.pop() {
                     match msg {
-                        WorkerMsg::Hands { hands, timestamp } => latest = Some((hands, timestamp)),
+                        WorkerMsg::Hands { hands, timestamp } => {
+                            new_target = Some((hands, timestamp));
+                        }
                         WorkerMsg::Status(s) => new_status = Some(s),
                     }
                 }
@@ -279,11 +312,23 @@ impl HandTrackingProvider for MediaPipeProvider {
                 *s = status;
             }
         }
-        if let Some((hands, timestamp)) = latest {
+        if let Some((hands, timestamp)) = new_target {
+            self.target_hands = hands;
+            self.target_ts = timestamp;
+        }
+
+        // Ease the exposed pose toward the held target every poll, so a
+        // ~15–20 fps inference source renders as fluid ~60 fps motion. `now` is
+        // `Time::elapsed` (monotonic), giving the One-Euro filter its dt.
+        let smoothed = self.smoother.smooth(&self.target_hands, now);
+        // Emit while a hand is present, plus one clearing frame when the last
+        // hand leaves — then stay quiet rather than spamming empty frames.
+        if !smoothed.is_empty() || self.had_hands {
+            self.had_hands = !smoothed.is_empty();
             out.write(HandTrackingFrame {
                 provider: ProviderId::MediaPipe,
-                hands,
-                timestamp,
+                hands: smoothed,
+                timestamp: self.target_ts,
             });
         }
     }
