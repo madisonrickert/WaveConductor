@@ -130,7 +130,7 @@ leaprs = { version = "0.2.2", default-features = false, features = ["gemini"] }
 # The two-stage palm→landmark glue (anchors, NMS, ROI) is implemented in
 # `wc-core/src/input/providers/mediapipe/`. See the spike results in the design
 # spec for the runtime decision and the palm-model graph surgery.
-tract-onnx = "0.21"
+tract-onnx = "0.23"
 # Cross-platform webcam capture for the MediaPipe provider's production
 # `FrameSource` (behind `hand-tracking-mediapipe-camera`; AVFoundation / V4L2 /
 # MediaFoundation). Kept in a sub-feature so the inference/glue stay buildable

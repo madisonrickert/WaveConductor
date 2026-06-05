@@ -88,7 +88,7 @@ pub trait HandInference: Send {
 
 /// `tract`-backed inference for a single model with a fixed input shape.
 pub struct TractInference {
-    plan: TypedSimplePlan<TypedModel>,
+    plan: Arc<TypedSimplePlan>,
     input_shape: Vec<usize>,
 }
 
@@ -137,12 +137,16 @@ impl HandInference for TractInference {
         outputs
             .into_iter()
             .map(|o| {
-                let view = o
-                    .to_array_view::<f32>()
+                // tract 0.23 returns `TValue`s, and the old `Tensor::to_array_view`
+                // is now `to_plain_array_view` (the safe, checked accessor).
+                // Materialize the owned tensor, then take a plain array view.
+                let tensor = o.into_tensor();
+                let array = tensor
+                    .to_plain_array_view::<f32>()
                     .map_err(|e| InferenceError::Run(e.to_string()))?;
                 Ok(Tensor {
-                    shape: view.shape().to_vec(),
-                    data: view.iter().copied().collect(),
+                    shape: array.shape().to_vec(),
+                    data: array.iter().copied().collect(),
                 })
             })
             .collect()
