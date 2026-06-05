@@ -102,13 +102,35 @@ pub fn palm_velocity(prev: Vec3, cur: Vec3, dt: Duration) -> Vec3 {
     }
 }
 
+/// Consecutive frames an observed chirality must *disagree* with a track's held
+/// chirality before the track flips to it. `MediaPipe`'s per-frame handedness
+/// classification can flicker; holding the value across a few frames keeps the
+/// track stable through a transient flip while still adapting if the hand really
+/// is the other chirality. See [`HandTracker::assign`].
+const CHIRALITY_FLIP_FRAMES: u8 = 4;
+
+/// The result of [`HandTracker::assign`]: a stable track id and the track's
+/// held (hysteresis-smoothed) [`Chirality`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Assigned {
+    /// Stable per-hand id, reused only after the hand leaves.
+    pub id: u32,
+    /// Chirality held across brief per-frame handedness flips.
+    pub chirality: Chirality,
+}
+
 /// Assigns stable per-hand IDs across frames.
 ///
 /// `MediaPipe`'s landmark stage has no notion of track identity, so the provider
-/// keeps its own: a detection inherits the ID of the previous frame's hand of
-/// the same [`Chirality`] when their palm positions are within
-/// [`Self::gate`]; otherwise it gets a fresh ID. Tracks not seen in a frame age
-/// out, so IDs are reused only after a hand leaves.
+/// keeps its own: a detection inherits the id of the nearest previous-frame hand
+/// whose palm is within [`Self::gate`] — matched by **position alone**.
+/// Chirality is deliberately *not* part of the match key: `MediaPipe`'s
+/// per-frame handedness can flip spuriously, and keying identity on it would
+/// spawn a fresh id (resetting that hand's render-rate smoothing bank, which is
+/// keyed on the id) on every flicker. Instead each track *holds* a chirality
+/// that only flips after [`CHIRALITY_FLIP_FRAMES`] consecutive disagreements.
+/// Tracks not seen in a frame age out, so IDs are reused only after a hand
+/// leaves.
 #[derive(Debug)]
 pub struct HandTracker {
     tracks: Vec<Track>,
@@ -121,7 +143,10 @@ pub struct HandTracker {
 #[derive(Debug, Clone, Copy)]
 struct Track {
     id: u32,
+    /// The track's held chirality (see [`CHIRALITY_FLIP_FRAMES`]).
     chirality: Chirality,
+    /// Consecutive frames the observed chirality disagreed with `chirality`.
+    chirality_disagrees: u8,
     pos: Vec3,
     seen_this_frame: bool,
 }
@@ -148,12 +173,14 @@ impl HandTracker {
         }
     }
 
-    /// Assign (or reuse) an ID for a hand of `chirality` at palm position `pos`.
-    pub fn assign(&mut self, chirality: Chirality, pos: Vec3) -> u32 {
-        // Nearest unclaimed track of the same chirality within the gate.
+    /// Assign (or reuse) a track for a hand observed with `chirality` at palm
+    /// position `pos`, returning its stable id and held chirality.
+    pub fn assign(&mut self, chirality: Chirality, pos: Vec3) -> Assigned {
+        // Nearest unclaimed track within the gate — by POSITION ALONE (chirality
+        // is held per-track, not matched on; see the type docs).
         let mut best: Option<(usize, f32)> = None;
         for (i, t) in self.tracks.iter().enumerate() {
-            if t.seen_this_frame || t.chirality != chirality {
+            if t.seen_this_frame {
                 continue;
             }
             let d = t.pos.distance(pos);
@@ -162,19 +189,35 @@ impl HandTracker {
             }
         }
         if let Some((i, _)) = best {
-            self.tracks[i].pos = pos;
-            self.tracks[i].seen_this_frame = true;
-            return self.tracks[i].id;
+            let t = &mut self.tracks[i];
+            t.pos = pos;
+            t.seen_this_frame = true;
+            // Sticky chirality: only flip after CHIRALITY_FLIP_FRAMES consecutive
+            // disagreements, so a one-frame handedness flicker is ignored.
+            if chirality == t.chirality {
+                t.chirality_disagrees = 0;
+            } else {
+                t.chirality_disagrees += 1;
+                if t.chirality_disagrees >= CHIRALITY_FLIP_FRAMES {
+                    t.chirality = chirality;
+                    t.chirality_disagrees = 0;
+                }
+            }
+            return Assigned {
+                id: t.id,
+                chirality: t.chirality,
+            };
         }
         let id = self.next_id;
         self.next_id += 1;
         self.tracks.push(Track {
             id,
             chirality,
+            chirality_disagrees: 0,
             pos,
             seen_this_frame: true,
         });
-        id
+        Assigned { id, chirality }
     }
 
     /// Call once per frame after all `assign` calls: drop tracks not seen this
@@ -277,29 +320,63 @@ mod tests {
     }
 
     #[test]
-    fn tracker_keeps_id_for_nearby_same_chirality_hand() {
+    fn tracker_keeps_id_for_nearby_hand() {
         let mut t = HandTracker::default();
-        let id1 = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        let a = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
         t.end_frame();
-        let id2 = t.assign(Chirality::Right, Vec3::new(5.0, 205.0, 0.0));
-        assert_eq!(id1, id2);
+        let b = t.assign(Chirality::Right, Vec3::new(5.0, 205.0, 0.0));
+        assert_eq!(a.id, b.id);
     }
 
     #[test]
     fn tracker_gives_new_id_for_far_hand() {
         let mut t = HandTracker::default();
-        let id1 = t.assign(Chirality::Right, Vec3::new(-200.0, 100.0, 0.0));
+        let a = t.assign(Chirality::Right, Vec3::new(-200.0, 100.0, 0.0));
         t.end_frame();
-        let id2 = t.assign(Chirality::Right, Vec3::new(200.0, 300.0, 0.0));
-        assert_ne!(id1, id2);
+        let b = t.assign(Chirality::Right, Vec3::new(200.0, 300.0, 0.0));
+        assert_ne!(a.id, b.id);
     }
 
     #[test]
-    fn tracker_separates_left_and_right_hands() {
+    fn tracker_keeps_id_and_held_chirality_through_a_one_frame_flip() {
+        // A hand stays put while its handedness flickers for a single frame.
+        // Identity is matched by position, so the id must NOT churn (which would
+        // reset the smoothing bank), and the held chirality must not flip on a
+        // lone disagreement.
         let mut t = HandTracker::default();
-        let r = t.assign(Chirality::Right, Vec3::new(0.0, 0.0, 0.0));
-        // Same position but opposite chirality → distinct ID.
-        let l = t.assign(Chirality::Left, Vec3::new(0.0, 0.0, 0.0));
-        assert_ne!(r, l);
+        let a = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        t.end_frame();
+        let b = t.assign(Chirality::Left, Vec3::new(2.0, 201.0, 0.0));
+        assert_eq!(a.id, b.id, "id stable across a chirality flicker");
+        assert_eq!(
+            b.chirality,
+            Chirality::Right,
+            "held chirality ignores a one-frame flip",
+        );
+    }
+
+    #[test]
+    fn tracker_flips_held_chirality_after_sustained_disagreement() {
+        // Sustained disagreement (the hand really is the other chirality) flips
+        // the held value after CHIRALITY_FLIP_FRAMES, keeping the same id.
+        let mut t = HandTracker::default();
+        let first = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        let mut last = first;
+        for _ in 0..CHIRALITY_FLIP_FRAMES {
+            t.end_frame();
+            last = t.assign(Chirality::Left, Vec3::new(0.0, 200.0, 0.0));
+        }
+        assert_eq!(first.id, last.id, "id stays stable while chirality settles");
+        assert_eq!(last.chirality, Chirality::Left, "flips after enough frames");
+    }
+
+    #[test]
+    fn tracker_separates_two_hands_by_position_regardless_of_chirality() {
+        // Two hands far apart keep distinct ids even with the same observed
+        // chirality (position-based association).
+        let mut t = HandTracker::default();
+        let left_hand = t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        let right_hand = t.assign(Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
+        assert_ne!(left_hand.id, right_hand.id);
     }
 }

@@ -272,7 +272,7 @@ impl Pipeline {
         for (dst, src) in landmarks.iter_mut().zip(img_landmarks.iter()) {
             *dst = image_norm_to_leap_mm(*src, self.config.mirror);
         }
-        let chirality = if handed >= 0.5 {
+        let observed_chirality = if handed >= 0.5 {
             Chirality::Right
         } else {
             Chirality::Left
@@ -285,7 +285,9 @@ impl Pipeline {
         // otherwise z≈0 makes that term ~34× and the attractor sticks on. See
         // [`MEDIAPIPE_DEPTH_PROXY_MM`].
         palm_pos.z = MEDIAPIPE_DEPTH_PROXY_MM;
-        let id = self.tracker.assign(chirality, palm_pos);
+        // Position-based id with a hysteresis-held chirality, so a spurious
+        // per-frame handedness flip neither churns the id nor flickers downstream.
+        let assigned = self.tracker.assign(observed_chirality, palm_pos);
         // Velocity needs the previous palm position; the tracker holds it, but a
         // simple per-frame estimate is sufficient here (refined with history in
         // a later pass). Start at zero on first sighting.
@@ -296,10 +298,10 @@ impl Pipeline {
 
         Ok(Some((
             Hand {
-                id,
-                chirality,
+                id: assigned.id,
+                chirality: assigned.chirality,
                 palm_position: palm_pos,
-                palm_normal: palm_normal(&landmarks, chirality),
+                palm_normal: palm_normal(&landmarks, assigned.chirality),
                 palm_velocity: velocity,
                 pinch_strength: pinch_strength(&img_landmarks),
                 // Rest-deadzone the grab so a relaxed-open hand reads exactly 0
