@@ -330,7 +330,11 @@ mod tests {
         let roi = roi_from_landmarks(&upright_hand());
         assert!(roi.rotation.abs() < 1e-4, "rot={}", roi.rotation);
         assert!((roi.cx - 0.5).abs() < 1e-4, "cx={}", roi.cx);
-        assert!((roi.cy - 0.46).abs() < 1e-4, "cy={} (want 0.46 after shift)", roi.cy);
+        assert!(
+            (roi.cy - 0.46).abs() < 1e-4,
+            "cy={} (want 0.46 after shift)",
+            roi.cy
+        );
         assert!(
             (roi.size - 0.4 * TRACK_ROI_SCALE).abs() < 1e-4,
             "size={}",

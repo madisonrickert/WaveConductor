@@ -496,3 +496,44 @@ thermal-throttles → move the NUC to a GPU backend (OpenVINO/Vulkan) behind the
 a hard thermal-coexistence gate (≥30-min co-run with the renderer, no frame-time
 regression); commit only if it passes, else `ort` native + web deferred. `tract-metal`
 is optional and macOS-gated; it changes nothing about this sequence.
+
+## GPU inference landed + the two problems it exposed (2026-06-05)
+
+The `ort`/CoreML backend (feature `hand-tracking-mediapipe-ort`, runtime-selected,
+tract default) made inference fast — `profile_inference_backends` on M1:
+
+| stage | tract CPU | ort CoreML | speedup |
+| --- | --- | --- | --- |
+| `palm.run` | 299 ms | 32.5 ms | 9.2× |
+| `landmark.run` | 89.5 ms | 1.25 ms | 71.5× |
+
+With inference off the critical path, two problems the framework solves became
+visible. Both were fixed by matching MediaPipe's design (researched against its
+source), **not** by adding smoothing — the prior heavy output-smoothing only
+masked them.
+
+1. **Tracking drift (position/rotation/scale, ~2×/sec reset).** Detect-then-track
+   drift: `roi_from_landmarks` derived rotation from wrist→middle-MCP[9], a short
+   single-point baseline whose angle noise compounds (rotate crop → biased
+   landmarks → rotate more); the 500 ms palm re-detect snapped it back (hence the
+   reset cadence == re-detect period). **Fix:** match `HandLandmarksToRectCalculator`
+   — rotate so wrist → weighted-mean(landmarks 4, 6, 8) (`((L4+L8)/2 + L6)/2`, a
+   long noise-robust baseline) points up, and shift the ROI centre toward the
+   fingers by `TRACK_ROI_SHIFT_Y = -0.1` along the rotated axis so the palm stays
+   centred. The transform stays memoryless (MediaPipe adds no ROI
+   blending/hysteresis — stability is geometric).
+2. **Multi-second lag at good fps (frame backlog).** The worker capped itself by
+   *sleeping* the rest of a fixed frame budget after each frame; while it slept the
+   camera buffer filled, so it processed ever-staler frames and latency grew
+   unbounded. **Fix (FlowLimiter analogue):** drop the sleep cap — on a captured
+   frame, process immediately and let the next blocking camera read pace the loop,
+   always grabbing the freshest frame (≤1 in flight, newest wins). `max_hz` is
+   retained but no longer caps via sleep; a drop-not-sleep limiter can reinstate a
+   hard thermal cap later.
+
+Possible follow-ups if anything still drifts/lags: drive re-detection by the
+landmark presence score instead of a fixed 500 ms timer (MediaPipe re-detects on
+score, not a clock); a true two-thread FlowLimiter (capture overwrites a 1-slot
+latest-frame, processor consumes) if the single-thread pacing leaves residual lag;
+and re-check whether the render-rate output smoothing still earns its latency now
+that the pose is clean.
