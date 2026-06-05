@@ -95,7 +95,10 @@ fn relink_objc_exception_for_dynamic_linking() {
             // that point. `-force_load` loads the archive's members
             // unconditionally, order-independently. In the plain (static) build
             // the archive is also linked normally; ld dedups the duplicate.
-            println!("cargo:rustc-link-arg-bins=-Wl,-force_load,{}", lib.display());
+            println!(
+                "cargo:rustc-link-arg-bins=-Wl,-force_load,{}",
+                lib.display()
+            );
             return;
         }
     }

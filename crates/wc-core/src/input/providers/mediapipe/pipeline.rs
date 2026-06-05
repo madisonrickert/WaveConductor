@@ -679,7 +679,11 @@ mod tests {
         // Frame 1 acquires: palm detection runs, then the landmark stage.
         let h1 = pipe.process(&frame, dt).expect("frame 1");
         assert_eq!(h1.len(), 1, "frame 1 should acquire one hand");
-        assert_eq!(palm_calls.load(Ordering::Relaxed), 1, "palm runs to acquire");
+        assert_eq!(
+            palm_calls.load(Ordering::Relaxed),
+            1,
+            "palm runs to acquire"
+        );
         assert_eq!(lm_calls.load(Ordering::Relaxed), 1);
 
         // Frame 2 tracks: it reuses frame 1's ROI and must NOT re-run palm.
