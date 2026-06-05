@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 
 use super::anchors::{generate_palm_anchors, Anchor, PalmAnchorOptions};
 use super::capture::Frame;
-use super::coords::image_norm_to_leap_mm;
+use super::coords::{image_norm_to_leap_mm, MEDIAPIPE_DEPTH_PROXY_MM};
 use super::inference::{HandInference, InferenceError, Tensor};
 use super::landmark::{project_landmarks, roi_from_landmarks, roi_from_palm, RoiRect};
 use super::palm::{decode_palm_detections, weighted_nms, PalmDecodeOptions};
@@ -214,7 +214,14 @@ impl Pipeline {
         } else {
             Chirality::Left
         };
-        let palm_pos = image_norm_to_leap_mm(palm_center(&img_landmarks), self.config.mirror);
+        let mut palm_pos = image_norm_to_leap_mm(palm_center(&img_landmarks), self.config.mirror);
+        // A single webcam has no reliable hand depth, and the landmark model's z
+        // is a near-zero relative value rather than a Leap-range depth. Pin z to
+        // a fixed mid-range proxy so the Line power model's `5^((−z+350)/160)`
+        // term is a constant (~10×) and grab alone drives attractor strength —
+        // otherwise z≈0 makes that term ~34× and the attractor sticks on. See
+        // [`MEDIAPIPE_DEPTH_PROXY_MM`].
+        palm_pos.z = MEDIAPIPE_DEPTH_PROXY_MM;
         let id = self.tracker.assign(chirality, palm_pos);
         // Velocity needs the previous palm position; the tracker holds it, but a
         // simple per-frame estimate is sufficient here (refined with history in
@@ -764,6 +771,24 @@ mod tests {
             palm_calls.load(Ordering::Relaxed),
             2,
             "interval elapsed → palm re-runs"
+        );
+    }
+
+    #[test]
+    fn palm_position_reports_the_depth_proxy() {
+        // A webcam gives no real hand-Z, so the provider pins palm z to a fixed
+        // mid-range proxy (keeps Line's `5^((−z+350)/160)` power term constant so
+        // grab — not a bogus z≈0 → ~34× term — drives the attractor).
+        let (mut pipe, _palm, _lm) = counting_pipeline();
+        let frame = consistent_frame();
+        let hands = pipe
+            .process(&frame, Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1);
+        assert!(
+            (hands[0].palm_position.z - MEDIAPIPE_DEPTH_PROXY_MM).abs() < 1e-3,
+            "palm z = {} (want {MEDIAPIPE_DEPTH_PROXY_MM})",
+            hands[0].palm_position.z
         );
     }
 

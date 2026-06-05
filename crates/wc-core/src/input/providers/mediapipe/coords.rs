@@ -16,6 +16,28 @@ use bevy::math::Vec3;
 
 use crate::input::projection::{LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, LEAP_Y_MIN_MM};
 
+/// Fixed depth (mm, Leap convention) the provider reports for every hand.
+///
+/// A single webcam yields no reliable hand-Z: the landmark model's `z` is a
+/// relative, near-zero depth ([`super::landmark::project_landmarks`] scales it
+/// by the ROI size, so it lands around `±0.1`), **not** a Leap-range depth in
+/// `[40, 350]`. Downstream consumers written for Leap assume the mm convention —
+/// most consequentially Line's power model
+/// `wanted = grab^1.5 · 5^((−z + 350) / 160)`. Feeding it a near-zero `z` makes
+/// the depth term `5^(350/160) ≈ 34×`, which pins the attractor on regardless of
+/// grab. Rather than invent a noisy depth, we pin `z` to a fixed mid-range value
+/// so the depth term is a *constant* and **grab alone** drives attractor
+/// strength (the intended webcam interaction).
+///
+/// Calibration: `5^((−120 + 350) / 160) ≈ 10.1×`, so a full fist (`grab = 1`)
+/// reaches power `≈ 10` — matching a mouse press
+/// (`crate`-external `MOUSE_POWER_PRESS = 10`), the known-good interactive
+/// reference — while a relaxed hand decays toward zero. A future enhancement can
+/// derive a real depth proxy from apparent hand size (closer ⇒ stronger, like
+/// Leap); until then this constant is the single strength knob to tune on
+/// hardware.
+pub const MEDIAPIPE_DEPTH_PROXY_MM: f32 = 120.0;
+
 /// Map a `MediaPipe` normalized image point into the Leap-device-mm convention.
 ///
 /// - `p.x`, `p.y` are normalized image coordinates in `[0, 1]` (origin top-left,
