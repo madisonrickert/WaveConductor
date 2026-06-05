@@ -105,6 +105,23 @@ fn draw_dev_panel(world: &mut World) {
         .get_resource::<crate::input::provider::ProviderRegistry>()
         .map(|r| (r.primary_id(), r.primary_status(), r.primary_diagnostics()));
 
+    // Live grab/pinch readout (drives the tuning calibration hint) and a working
+    // copy of the tunable settings — snapshotted before the egui closure borrows
+    // `world`. Slider edits land in `tuning` and are committed back after `show`.
+    let hand_readout: Option<(usize, f32, f32)> = world
+        .get_resource::<crate::input::state::HandTrackingState>()
+        .map(|s| {
+            let first = s.iter().next();
+            (
+                s.active_hand_count(),
+                first.map_or(0.0, |h| h.grab_strength),
+                first.map_or(0.0, |h| h.pinch_strength),
+            )
+        });
+    let mut tuning: Option<crate::settings::HandTrackingSettings> = world
+        .get_resource::<crate::settings::HandTrackingSettings>()
+        .cloned();
+
     bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
         .order(bevy_egui::egui::Order::Foreground)
         .fixed_pos(bevy_egui::egui::pos2(16.0, 60.0))
@@ -138,6 +155,13 @@ fn draw_dev_panel(world: &mut World) {
                         ui.separator();
                     }
 
+                    // Live MediaPipe feel tuning — readout + sliders bound to the
+                    // persisted settings (edits committed after the closure).
+                    if let Some(t) = tuning.as_mut() {
+                        draw_hand_tuning_controls(ui, &style, t, hand_readout);
+                        ui.separator();
+                    }
+
                     bevy_egui::egui::ScrollArea::vertical()
                         .max_height((window_height - 200.0).max(100.0))
                         .show(ui, |ui| {
@@ -146,6 +170,57 @@ fn draw_dev_panel(world: &mut World) {
                 },
             );
         });
+
+    // Commit slider edits back to the resource, but only when a value actually
+    // moved — so `Changed<HandTrackingSettings>` (autosave + the apply-to-provider
+    // system) fires on real edits, not every frame the panel is open.
+    if let Some(edited) = tuning {
+        if let Some(mut res) = world.get_resource_mut::<crate::settings::HandTrackingSettings>() {
+            if *res != edited {
+                *res = edited;
+            }
+        }
+    }
+}
+
+/// Renders the live `MediaPipe` hand-tuning controls inside the dev panel: a
+/// grab/pinch readout (so the operator can see the open-hand grab *floor*) plus
+/// sliders bound to the persisted [`crate::settings::HandTrackingSettings`]
+/// tunables. The caller commits edits back to the resource; the
+/// `apply_mediapipe_tuning_settings` system forwards them to the live provider,
+/// so feel changes apply with no restart.
+fn draw_hand_tuning_controls(
+    ui: &mut bevy_egui::egui::Ui,
+    style: &OverlayStyle,
+    settings: &mut crate::settings::HandTrackingSettings,
+    readout: Option<(usize, f32, f32)>,
+) {
+    use bevy_egui::egui;
+
+    ui.label(egui::RichText::new("HAND TUNING (MediaPipe)").size(13.0));
+    ui.add_space(4.0);
+    if let Some((count, grab, pinch)) = readout {
+        ui.label(format!(
+            "Live:  {count} hand(s)  ·  grab {grab:.2}  ·  pinch {pinch:.2}"
+        ));
+        ui.label(
+            egui::RichText::new(
+                "Open-hand calibration: set deadzone to 0, hold your hand open, read the \
+                 grab floor above, then raise the deadzone just past it.",
+            )
+            .size(10.0)
+            .color(style.text_color_dim),
+        );
+        ui.add_space(2.0);
+    }
+    ui.add(
+        egui::Slider::new(&mut settings.grab_rest_deadzone, 0.0..=0.6).text("Grab rest deadzone"),
+    );
+    ui.add(
+        egui::Slider::new(&mut settings.smoothing_min_cutoff, 0.1..=5.0)
+            .text("Smoothing min cutoff (Hz)"),
+    );
+    ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));
 }
 
 /// Renders the curated "HAND TRACKING" diagnostic grid inside the dev panel.
