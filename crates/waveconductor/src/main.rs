@@ -270,10 +270,25 @@ fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry)
     use wc_core::input::providers::mediapipe::{MediaPipeConfig, MediaPipeProvider};
     use wc_core::input::state::ServiceConnection;
 
+    // `WAVECONDUCTOR_HAND_SMOOTHING=off|0|false|no` (case-insensitive) exposes
+    // the raw inference poses for A/B tuning; smoothing is on by default.
+    let smoothing = std::env::var("WAVECONDUCTOR_HAND_SMOOTHING")
+        .ok()
+        .is_none_or(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "off" | "0" | "false" | "no"
+            )
+        });
+    let config = MediaPipeConfig {
+        smoothing,
+        ..MediaPipeConfig::default()
+    };
+
     registry.register(
         ProviderId::MediaPipe,
         ProviderRole::Primary,
-        Box::new(MediaPipeProvider::new(MediaPipeConfig::default())),
+        Box::new(MediaPipeProvider::new(config)),
     );
     Some(registry.provider(ProviderId::MediaPipe).is_some_and(|r| {
         !matches!(

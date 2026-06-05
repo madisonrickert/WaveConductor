@@ -60,6 +60,10 @@ pub struct MediaPipeConfig {
     /// Inference rate cap, in Hz. Hand tracking does not need full frame rate;
     /// capping leaves CPU headroom for the render thread and lowers heat.
     pub max_inference_hz: u32,
+    /// Apply render-rate One-Euro smoothing (see [`smoothing`]). On by default;
+    /// turn off to expose the raw ~15–20 fps inference poses (for A/B comparison
+    /// during tuning). The app wires this to `WAVECONDUCTOR_HAND_SMOOTHING`.
+    pub smoothing: bool,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
     /// Defaults to the workspace-relative `assets/models/hand` (resolved at
     /// runtime against the working directory, like Bevy's `assets/`).
@@ -72,6 +76,7 @@ impl Default for MediaPipeConfig {
             camera_index: 0,
             mirror: true,
             max_inference_hz: 30,
+            smoothing: true,
             model_dir: PathBuf::from("assets/models/hand"),
         }
     }
@@ -303,15 +308,20 @@ impl HandTrackingProvider for MediaPipeProvider {
 
         // Ease the exposed pose toward the held target every poll, so a
         // ~15–20 fps inference source renders as fluid ~60 fps motion. `now` is
-        // `Time::elapsed` (monotonic), giving the One-Euro filter its dt.
-        let smoothed = self.smoother.smooth(&self.target_hands, now);
+        // `Time::elapsed` (monotonic), giving the One-Euro filter its dt. When
+        // smoothing is disabled, emit the raw held pose for A/B comparison.
+        let hands = if self.config.smoothing {
+            self.smoother.smooth(&self.target_hands, now)
+        } else {
+            self.target_hands.clone()
+        };
         // Emit while a hand is present, plus one clearing frame when the last
         // hand leaves — then stay quiet rather than spamming empty frames.
-        if !smoothed.is_empty() || self.had_hands {
-            self.had_hands = !smoothed.is_empty();
+        if !hands.is_empty() || self.had_hands {
+            self.had_hands = !hands.is_empty();
             out.write(HandTrackingFrame {
                 provider: ProviderId::MediaPipe,
-                hands: smoothed,
+                hands,
                 timestamp: self.target_ts,
             });
         }
@@ -357,6 +367,7 @@ mod tests {
         assert!(p.config().mirror);
         assert_eq!(p.config().max_inference_hz, 30);
         assert_eq!(p.config().camera_index, 0);
+        assert!(p.config().smoothing, "smoothing on by default");
     }
 
     #[test]
