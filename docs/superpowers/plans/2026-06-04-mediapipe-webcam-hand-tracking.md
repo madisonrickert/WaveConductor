@@ -46,16 +46,14 @@ suites all green):
   (`WC_HANDTRACK_TEST_IMAGE`) already validates the full pipeline locally; the
   committed golden just makes that positive-path test run hermetically in CI.
 - ⏳ **Phase 10 (acceptance)**:
-  `WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo run --package waveconductor --features hand-tracking-mediapipe`
-  on Madison's webcam — verify hand tracking drives the Line sketch, then tune
-  ⚠️ **Use the plain `cargo run`, NOT `cargo rund`, for the camera feature.** Two
-  reasons: (1) the feature is opt-in, not in the default build, so `--features
-  hand-tracking-mediapipe` is required; (2) `bevy/dynamic_linking` (what `rund`
-  uses) fails to link with nokhwa's macOS backend — its old `objc` crate's
-  `objc_exception` shim (`_RustObjCExceptionTryCatch`) gets dropped by
-  `-nodefaultlibs -dead_strip`. The plain static build (AGENTS.md's documented
-  fallback) links cleanly. Fixing `rund` for the camera is optional future polish
-  (a whole-archive/force_load linker workaround).
+  `WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo rund --features hand-tracking-mediapipe`
+  on Madison's webcam — verify hand tracking drives the Line sketch, then tune.
+  The feature is opt-in (not in the default build), so `--features
+  hand-tracking-mediapipe` is required. `cargo rund` (fast dynamic-linking
+  iteration) works: `build.rs` `-force_load`s nokhwa's `objc_exception` archive,
+  which `bevy/dynamic_linking` would otherwise drop (`_RustObjCExceptionTryCatch`
+  undefined). The plain `cargo run … --features hand-tracking-mediapipe` also
+  works as a static fallback.
   the few runtime conventions that need a live hand: **mirror direction**,
   **handedness mapping** (the `handed >= 0.5 → Right` choice), and the
   **pinch/grab thresholds** (currently geometric defaults). Dev-panel diagnostics
