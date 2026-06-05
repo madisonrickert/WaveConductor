@@ -438,16 +438,31 @@ on `LandmarksSmoothingCalculator` and the hand graph configs), not feel guesses.
      disagreements (`assign` returns the held chirality, so downstream handedness no
      longer flickers either).
 
-**Tunables, now env-overridable for live hardware A/B** (supersedes the second-test
-list above):
+**Tunables — live in-app controls (no relaxed-open guessing, no restart).** The
+three numeric feel knobs moved from env vars to **persisted `HandTrackingSettings`
+fields**, edited live in the dev panel (Shift+D → *HAND TUNING (MediaPipe)*), which
+also shows a live grab/pinch readout. `apply_mediapipe_tuning_settings` forwards
+changes to the running provider each time they change. Env vars were the agent's
+iteration lever; the operator wanted movable controls.
 
-| Env var | Constant (default) | Effect |
+| Setting (default) | Dev-panel slider | Effect |
 | --- | --- | --- |
-| `WAVECONDUCTOR_HAND_GRAB_DEADZONE` | `grab_rest_deadzone` (0.12) | Raise if the attractor lingers with the hand open; lower if grab feels weak/late. |
-| `WAVECONDUCTOR_HAND_MIN_CUTOFF` | `DEFAULT_MIN_CUTOFF` (1.0) | Lower = steadier when still (more lag on slow motion). |
-| `WAVECONDUCTOR_HAND_BETA` | `DEFAULT_BETA` (2.0) | Higher = opens the cutoff faster during motion (less lag). |
-| `WAVECONDUCTOR_HAND_SMOOTHING=off` | — | Expose the raw inference pose for A/B comparison. |
-| (compile-time) | `MEDIAPIPE_DEPTH_PROXY_MM` (120) | Global attractor strength; not yet env-wired. |
+| `grab_rest_deadzone` (0.12) | Grab rest deadzone (0–0.6) | A relaxed-open hand whose raw grab is ≤ this reads 0. **Open-hand calibration:** set to 0, open hand, read the grab floor in the readout, then raise just past it. |
+| `smoothing_min_cutoff` (1.0) | Smoothing min cutoff, Hz (0.1–5) | Lower = steadier when still (more lag on slow motion). |
+| `smoothing_beta` (2.0) | Smoothing beta (0–10) | Higher = opens the cutoff faster during motion (less lag). |
+
+Still env/compile-time: `WAVECONDUCTOR_HAND_SMOOTHING=off` (expose the raw inference
+pose for A/B); `MEDIAPIPE_DEPTH_PROXY_MM` (120, global attractor strength —
+compile-time, not yet a setting).
+
+**Why #1 still reproduced at the 0.12 default, and the calibration fix.** On the
+third re-test the attractor still lingered with the hand open: a real relaxed-open
+grab *floor* exceeds 0.12, so the deadzoned grab never reaches 0, Line's `grab > 0`
+decay gate never fires, and the slow attack EMA leaves the attractor stuck at
+whatever it built up. The constant was a guess. The live readout + slider replace
+the guess with a measurement — read your floor, set the deadzone past it — and the
+value persists. (A future "calibrate open hand" button could capture the floor on a
+click.)
 
 ### Issue #3 — GPU acceleration: senior-engineer debate consensus
 
