@@ -86,22 +86,44 @@ pub fn roi_from_palm(det: &PalmDetection) -> RoiRect {
 /// hardware acceptance if tracking precision or robustness needs it.
 pub const TRACK_ROI_SCALE: f32 = 2.0;
 
+/// Vertical shift of the tracking-ROI centre, in pre-scale box-height units,
+/// along the rotated (hand) axis toward the fingers — `MediaPipe`'s landmark-path
+/// `shift_y`. Keeps the palm centred in the crop so the hand does not walk out of
+/// it between frames (a tracking-drift cause). Same sign convention as
+/// [`ROI_SHIFT_Y`].
+pub const TRACK_ROI_SHIFT_Y: f32 = -0.1;
+
+/// Landmark indices that, with the wrist, define the tracking-ROI rotation
+/// baseline. `MediaPipe`'s `HandLandmarksToRectCalculator` rotates the crop so the
+/// vector from the wrist to the **weighted mean of landmarks 4, 6, 8**
+/// (`((L4 + L8)/2 + L6) / 2`) points up. That long, three-point-averaged baseline
+/// is far more rotation-stable than a single short wrist→MCP vector — whose angle
+/// noise is what made the tracking ROI rotate, stretch, and drift off-screen
+/// between re-detects. (Upstream the constants are misnamed `*PIPJoint` but the
+/// literal indices 4/6/8 are what the model was tuned against; match them.)
+const ROT_REF_A: usize = 4;
+const ROT_REF_B: usize = 6;
+const ROT_REF_C: usize = 8;
+
 /// Compute the next-frame tracking ROI directly from this frame's landmarks, so
 /// tracking frames can skip the expensive palm-detection stage (`MediaPipe`'s
 /// detect-then-track design).
 ///
-/// Rotation aligns the wrist→middle-MCP axis to vertical — the same convention
-/// [`roi_from_palm`] uses, but sourced from landmarks 0 and 9. The square side
-/// is the longer side of the landmarks' bounding box measured *in that rotated
-/// frame* (so the rotated square tightly bounds the hand), expanded by
-/// [`TRACK_ROI_SCALE`]; the centre is that box's centre. `landmarks` are
-/// normalized `[0, 1]` image coordinates, as produced by [`project_landmarks`].
+/// Rotation aligns the wrist→weighted-mean(4,6,8) axis to vertical — `MediaPipe`'s
+/// landmark-path baseline (see [`ROT_REF_A`]), which is far more rotation-stable
+/// than the short wrist→MCP vector. The square side is the longer side of the
+/// landmarks' bounding box measured *in that rotated frame* (so the rotated square
+/// tightly bounds the hand), expanded by [`TRACK_ROI_SCALE`]; the centre is that
+/// box's centre, shifted toward the fingers by [`TRACK_ROI_SHIFT_Y`] along the
+/// rotated axis. `landmarks` are normalized `[0, 1]` image coordinates, as
+/// produced by [`project_landmarks`].
 #[must_use]
 pub fn roi_from_landmarks(landmarks: &[Vec3; LANDMARK_COUNT]) -> RoiRect {
     let wrist = landmarks[LandmarkIndex::Wrist.as_index()];
-    let middle = landmarks[LandmarkIndex::MiddleMcp.as_index()];
-    // Same rotation as roi_from_palm: bring the wrist→middle-MCP axis to vertical.
-    let rotation = FRAC_PI_2 - (-(middle.y - wrist.y)).atan2(middle.x - wrist.x);
+    // MediaPipe's weighted mean of landmarks 4, 6, 8: `((L4 + L8)/2 + L6) / 2`.
+    let ref_pt = ((landmarks[ROT_REF_A] + landmarks[ROT_REF_C]) / 2.0 + landmarks[ROT_REF_B]) / 2.0;
+    // Bring the wrist→ref axis to vertical (target 90°).
+    let rotation = FRAC_PI_2 - (-(ref_pt.y - wrist.y)).atan2(ref_pt.x - wrist.x);
 
     // Bounding box of all landmarks expressed in the ROI's upright frame
     // (each point rotated by -rotation), matching project_landmarks' convention
@@ -119,12 +141,15 @@ pub fn roi_from_landmarks(landmarks: &[Vec3; LANDMARK_COUNT]) -> RoiRect {
         min_v = min_v.min(v);
         max_v = max_v.max(v);
     }
-    // Centre of the rotated box, rotated back into image space.
+    // Centre of the rotated box, rotated back into image space, then shifted
+    // toward the fingers along the rotated axis (shift_y) — same form as
+    // roi_from_palm, using the rotated-frame box height.
     let cu = (min_u + max_u) * 0.5;
     let cv = (min_v + max_v) * 0.5;
+    let height = max_v - min_v;
     RoiRect {
-        cx: cu * cos - cv * sin,
-        cy: cu * sin + cv * cos,
+        cx: cu * cos - cv * sin - height * TRACK_ROI_SHIFT_Y * sin,
+        cy: cu * sin + cv * cos + height * TRACK_ROI_SHIFT_Y * cos,
         size: (max_u - min_u).max(max_v - min_v) * TRACK_ROI_SCALE,
         rotation,
     }
@@ -298,12 +323,14 @@ mod tests {
 
     #[test]
     fn track_roi_centers_and_scales_on_landmark_bbox() {
-        // Upright hand → no rotation; bbox x∈[0.4,0.6] y∈[0.3,0.7] → centre
-        // (0.5,0.5), long side 0.4, square side 0.4*TRACK_ROI_SCALE.
+        // Upright hand (landmarks 4,6,8 default to centre, so wrist→ref points
+        // straight up) → no rotation; bbox x∈[0.4,0.6] y∈[0.3,0.7] → long side
+        // 0.4, square side 0.4*TRACK_ROI_SCALE. The centre x stays 0.5; the centre
+        // y is shifted toward the fingers by height*shift_y = 0.4*(-0.1) = -0.04.
         let roi = roi_from_landmarks(&upright_hand());
         assert!(roi.rotation.abs() < 1e-4, "rot={}", roi.rotation);
         assert!((roi.cx - 0.5).abs() < 1e-4, "cx={}", roi.cx);
-        assert!((roi.cy - 0.5).abs() < 1e-4, "cy={}", roi.cy);
+        assert!((roi.cy - 0.46).abs() < 1e-4, "cy={} (want 0.46 after shift)", roi.cy);
         assert!(
             (roi.size - 0.4 * TRACK_ROI_SCALE).abs() < 1e-4,
             "size={}",
@@ -312,12 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn track_roi_rotation_follows_wrist_to_middle_axis() {
-        // Middle-MCP to the right of the wrist → rotate the crop 90° upright,
-        // matching roi_from_palm's convention.
+    fn track_roi_rotation_follows_wrist_to_finger_baseline() {
+        // The rotation baseline is wrist → weighted-mean(4,6,8), not wrist→MCP.
+        // Put landmarks 4,6,8 to the right of the wrist → rotate the crop 90°
+        // upright, matching roi_from_palm's convention.
         let mut lm = [Vec3::new(0.5, 0.5, 0.0); LANDMARK_COUNT];
         lm[LandmarkIndex::Wrist.as_index()] = Vec3::new(0.5, 0.5, 0.0);
-        lm[LandmarkIndex::MiddleMcp.as_index()] = Vec3::new(0.7, 0.5, 0.0);
+        lm[ROT_REF_A] = Vec3::new(0.7, 0.5, 0.0);
+        lm[ROT_REF_B] = Vec3::new(0.7, 0.5, 0.0);
+        lm[ROT_REF_C] = Vec3::new(0.7, 0.5, 0.0);
         assert!(
             (roi_from_landmarks(&lm).rotation - FRAC_PI_2).abs() < 1e-4,
             "rot={}",
