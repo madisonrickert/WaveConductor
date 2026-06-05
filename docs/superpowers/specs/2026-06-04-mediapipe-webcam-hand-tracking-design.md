@@ -395,3 +395,89 @@ Recommend adding a slug **`mediapipe-webcam-hands`** to `docs/superpowers/roadma
 2. ~~Does `opencv/handpose_estimation_mediapipe` emit a handedness score and world landmarks?~~ **RESOLVED (spike):** yes — both. `signals.rs` reads them.
 3. Does `nokhwa`'s `input-native` build cleanly on the Linux CI runner, or does the camera need sub-feature gating? (→ resolved in plan Task 1.1)
 4. ~~**NEW (spike):** Does the palm detector's bilinear-Resize edge discrepancy degrade real-hand ROI localization?~~ **RESOLVED (2026-06-04):** No — on the canonical hand image tract's top detection matches onnxruntime to 0.0004 normalized (score Δ 0.003). tract confirmed, no caveat. See *Spike results*.
+
+## Feel fixes from the third hardware test (2026-06-05)
+
+After the second-test fixes, three issues remained: the attractor still triggered
+with the hand wide open; landmarks still drifted/jumped; and framerate still felt
+low ("explore GPU options — `tract-metal` before jumping to `ort`"). The first two
+were root-caused in code and against the real MediaPipe framework (a research pass
+on `LandmarksSmoothingCalculator` and the hand graph configs), not feel guesses.
+
+1. **Attractor on with an open hand — grab never reached 0.** `signals::grab_strength`
+   is calibrated to ideal open-hand geometry (tips one hand-scale out → 0), but a
+   real relaxed hand sits slightly curled and landmark noise jitters the fingertips,
+   leaving a small *positive* grab floor at rest. Now that the depth proxy makes grab
+   the sole attractor driver, that floor matters: Line's decay gate is `grab > 0`
+   (`LINE_HAND_GRAB_THRESHOLD = 0.0`), so any positive floor never decays and the slow
+   attack EMA builds it up. **Fix:** a rest deadzone in the provider
+   (`pipeline::apply_grab_deadzone`, default `grab_rest_deadzone = 0.12`): subtract
+   the deadzone and rescale so `grab ≤ deadzone → 0` while a full fist still reaches 1.
+   The Line sketch — and the Leap path, whose grab truly reaches 0 — are untouched.
+2. **Landmarks drift/jump — the smoother didn't work the way MediaPipe's does.** Three
+   structural gaps, all now closed:
+   - *No object-scale normalization.* MediaPipe's `LandmarksSmoothingCalculator`
+     divides landmark velocity by the hand's apparent size (`object_scale =
+     (roi_w + roi_h)/2`) before the One-Euro cutoff, so smoothing strength is
+     invariant to camera distance. We filtered in raw Leap-mm space, so a close hand
+     (large per-frame deltas) and a far hand smoothed differently. The adaptive
+     cutoff's speed term is now divided by `smoothing::object_scale` for positional
+     channels (palm position, the 21 landmarks); already-normalized channels (unit
+     normal, `[0, 1]` pinch/grab) use a unit scale.
+   - *Wrong One-Euro regime.* `min_cutoff` was 2.5 Hz (≈21%/frame toward target at
+     60 fps — barely smooths a held hand) with `beta` 0.02 (almost no velocity
+     adaptivity). MediaPipe runs a *low* min_cutoff with a *high* beta. New defaults:
+     `min_cutoff = 1.0` (≈9.5%/frame — much steadier at rest) and `beta = 2.0`, the
+     latter now in scale-normalized hand-lengths/sec so the cutoff still opens up
+     promptly during motion. The render-rate 60 fps easing Madison liked is unchanged.
+   - *Track-id churn reset the filter.* `HandTracker` keyed identity on per-frame
+     chirality, but MediaPipe's handedness flickers frame-to-frame; a one-frame flip
+     spawned a new id, resetting that hand's smoothing bank (keyed on id) and popping
+     the pose. Identity is now matched by **palm position alone**; chirality is held
+     per-track and flips only after `CHIRALITY_FLIP_FRAMES = 4` consecutive
+     disagreements (`assign` returns the held chirality, so downstream handedness no
+     longer flickers either).
+
+**Tunables, now env-overridable for live hardware A/B** (supersedes the second-test
+list above):
+
+| Env var | Constant (default) | Effect |
+| --- | --- | --- |
+| `WAVECONDUCTOR_HAND_GRAB_DEADZONE` | `grab_rest_deadzone` (0.12) | Raise if the attractor lingers with the hand open; lower if grab feels weak/late. |
+| `WAVECONDUCTOR_HAND_MIN_CUTOFF` | `DEFAULT_MIN_CUTOFF` (1.0) | Lower = steadier when still (more lag on slow motion). |
+| `WAVECONDUCTOR_HAND_BETA` | `DEFAULT_BETA` (2.0) | Higher = opens the cutoff faster during motion (less lag). |
+| `WAVECONDUCTOR_HAND_SMOOTHING=off` | — | Expose the raw inference pose for A/B comparison. |
+| (compile-time) | `MEDIAPIPE_DEPTH_PROXY_MM` (120) | Global attractor strength; not yet env-wired. |
+
+### Issue #3 — GPU acceleration: senior-engineer debate consensus
+
+Two senior engineers (pragmatist/defer vs. forward-invest/unify) debated the runtime
+options against the research (tract-metal, ort, wonnx, burn, candle). They **converged**:
+
+- **Much of "jumpy" is not raw fps** — it is the jitter/warp/reset fixed in software
+  this round. Re-measure feel *after* these land before spending on a runtime.
+- **`tract-metal` accelerates only the M1 dev box.** tract's GPU is Metal-or-CUDA
+  only — no Intel-iGPU / Vulkan / WebGPU — so it does nothing for the deploy fleet
+  (Intel NUC, Windows-without-NVIDIA) or the WebGPU-only web target. It is a near-free
+  dev nicety behind the `HandInference` trait, not a fix for the bottleneck.
+- **`wonnx` is out** — the natural pure-Rust ONNX-on-wgpu unified path, but
+  unmaintained since 2023-09-30; unacceptable under a multi-hour kiosk.
+- **The real fork, gated on a measurement, is `ort` vs `burn`-on-wgpu:** `ort`
+  (CoreML + DirectML) is the lower-effort *native* deploy win but reintroduces a C++
+  blob per platform, needs a from-source OpenVINO build to actually reach the NUC's
+  iGPU, and gives zero web acceleration. `burn` on CubeCL/wgpu is the only *maintained*
+  single codepath across Mac/NUC/Windows/Web, but is a heavier dep with build-time
+  model codegen and — the make-or-break risk — shares the GPU with Bevy's renderer,
+  threatening the #1 thermal-stability goal.
+
+**Consensus decision-gated sequence:** (1) land the feel-fixes (done); (2) add
+trait-seam instrumentation — per-frame tracking-inference ms + track-churn counts;
+(3) profile the **Intel NUC** under a representative multi-hour session. Then gate:
+**A — Feel:** if smooth on the NUC at current fps after the fixes → **stop, no runtime
+migration.** **B — NUC inference:** if median tracking-frame inference > ~33 ms or it
+thermal-throttles → move the NUC to a GPU backend (OpenVINO/Vulkan) behind the trait.
+**C — Windows-on-non-NVIDIA:** if needed → `ort` + DirectML, *only* on that platform.
+**D — Web:** if web hand-tracking joins the roadmap → time-box a `burn`-wgpu spike with
+a hard thermal-coexistence gate (≥30-min co-run with the renderer, no frame-time
+regression); commit only if it passes, else `ort` native + web deferred. `tract-metal`
+is optional and macOS-gated; it changes nothing about this sequence.
