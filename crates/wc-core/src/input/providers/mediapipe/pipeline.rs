@@ -81,8 +81,9 @@ pub struct PipelineConfig {
     /// Minimum landmark-presence score to keep a hand.
     pub presence_threshold: f32,
     /// Rest deadzone subtracted from the geometric grab so a *relaxed-open* hand
-    /// reads exactly `0`. See [`apply_grab_deadzone`]. Tunable on hardware via
-    /// `WAVECONDUCTOR_HAND_GRAB_DEADZONE`.
+    /// reads exactly `0`. See [`apply_grab_deadzone`]. Live-tunable from the dev
+    /// panel (`HandTrackingSettings::grab_rest_deadzone`); on the worker pipeline
+    /// it is refreshed each frame from the provider's shared cell.
     pub grab_rest_deadzone: f32,
 }
 
@@ -1035,7 +1036,10 @@ mod tests {
         assert!((apply_grab_deadzone(0.56, 0.12) - 0.5).abs() < 1e-6);
         // A zero deadzone is a pass-through; a degenerate >0.95 deadzone clamps.
         assert!((apply_grab_deadzone(0.3, 0.0) - 0.3).abs() < 1e-6);
-        assert!(apply_grab_deadzone(0.5, 1.5) < 1e-6, "degenerate deadzone clamps");
+        assert!(
+            apply_grab_deadzone(0.5, 1.5) < 1e-6,
+            "degenerate deadzone clamps"
+        );
     }
 
     #[test]
@@ -1050,13 +1054,21 @@ mod tests {
 
         // Deadzone 0 → the mock's curled-ish hand reports a real grab.
         let h0 = pipe.process(&frame, dt).expect("frame 0");
-        assert!(h0[0].grab_strength > 0.1, "raw grab {}", h0[0].grab_strength);
+        assert!(
+            h0[0].grab_strength > 0.1,
+            "raw grab {}",
+            h0[0].grab_strength
+        );
 
         // Crank the live deadzone high → grab collapses to 0 on the next frame,
         // with no restart.
         cell.store(0.99_f32.to_bits(), Ordering::Relaxed);
         let h1 = pipe.process(&frame, dt).expect("frame 1");
-        assert!(h1[0].grab_strength < 1e-6, "deadzoned grab {}", h1[0].grab_strength);
+        assert!(
+            h1[0].grab_strength < 1e-6,
+            "deadzoned grab {}",
+            h1[0].grab_strength
+        );
     }
 
     #[test]

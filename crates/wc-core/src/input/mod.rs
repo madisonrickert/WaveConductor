@@ -166,6 +166,16 @@ impl Plugin for HandTrackingPlugin {
                     .in_set(InputSystems),
             );
         }
+
+        // Propagate runtime hand-tuning changes (grab deadzone, smoothing) to the
+        // live MediaPipe provider. Separate feature from the Leap gestures block.
+        #[cfg(feature = "hand-tracking-mediapipe")]
+        app.add_systems(
+            PreUpdate,
+            self::providers::mediapipe::apply_mediapipe_tuning_settings
+                .after(systems::poll_all_providers)
+                .in_set(InputSystems),
+        );
     }
 }
 

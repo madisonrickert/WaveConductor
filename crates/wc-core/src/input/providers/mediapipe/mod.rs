@@ -66,15 +66,16 @@ pub struct MediaPipeConfig {
     /// during tuning). The app wires this to `WAVECONDUCTOR_HAND_SMOOTHING`.
     pub smoothing: bool,
     /// Rest deadzone for the grab signal so a relaxed-open hand reads exactly
-    /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Wired to
-    /// `WAVECONDUCTOR_HAND_GRAB_DEADZONE`.
+    /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Seeded from and
+    /// kept in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
     pub grab_rest_deadzone: f32,
     /// One-Euro minimum cutoff (Hz) for render-rate smoothing — the at-rest
-    /// smoothing strength (see [`smoothing::DEFAULT_MIN_CUTOFF`]). Wired to
-    /// `WAVECONDUCTOR_HAND_MIN_CUTOFF`.
+    /// smoothing strength (see [`smoothing::DEFAULT_MIN_CUTOFF`]). Seeded from and
+    /// kept in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
     pub smoothing_min_cutoff: f32,
     /// One-Euro speed coefficient for render-rate smoothing (see
-    /// [`smoothing::DEFAULT_BETA`]). Wired to `WAVECONDUCTOR_HAND_BETA`.
+    /// [`smoothing::DEFAULT_BETA`]). Seeded from and kept in sync with
+    /// [`crate::settings::HandTrackingSettings`] (dev panel).
     pub smoothing_beta: f32,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
     /// Defaults to the workspace-relative `assets/models/hand` (resolved at
@@ -220,6 +221,35 @@ impl MediaPipeProvider {
         // Share the live deadzone cell so the tuning UI reaches the worker.
         pipeline.set_live_deadzone_source(Arc::clone(&self.live_grab_deadzone));
         Ok(pipeline)
+    }
+}
+
+/// Push live hand-tuning settings into the running `MediaPipe` provider.
+///
+/// Mirrors `apply_leap_background_setting`: a `PreUpdate` system (after polling)
+/// that, when [`crate::settings::HandTrackingSettings`] changes, re-tunes the
+/// `MediaPipe` provider in place — the grab rest-deadzone (forwarded lock-free to
+/// the worker pipeline) and the One-Euro smoothing parameters. No restart, so the
+/// dev tuning panel adjusts feel live.
+pub fn apply_mediapipe_tuning_settings(
+    settings: Res<'_, crate::settings::HandTrackingSettings>,
+    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for slot in registry.iter_mut() {
+        if slot.id != crate::input::provider::ProviderId::MediaPipe {
+            continue;
+        }
+        if let Some(mp) = slot
+            .inner
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<MediaPipeProvider>())
+        {
+            mp.set_grab_deadzone(settings.grab_rest_deadzone);
+            mp.set_smoothing_params(settings.smoothing_min_cutoff, settings.smoothing_beta);
+        }
     }
 }
 

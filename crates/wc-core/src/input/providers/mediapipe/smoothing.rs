@@ -11,9 +11,8 @@
 //! Scope: this is **`MediaPipe`-only**, applied inside the provider's `poll`.
 //! The Leap provider (~110 fps, already hardware-smoothed) never passes through
 //! here, so its latency/feel is unchanged. Filter parameters
-//! ([`DEFAULT_MIN_CUTOFF`], [`DEFAULT_BETA`]) are starting points to tune during
-//! hardware acceptance (the app wires them to `WAVECONDUCTOR_HAND_MIN_CUTOFF` /
-//! `WAVECONDUCTOR_HAND_BETA`).
+//! ([`DEFAULT_MIN_CUTOFF`], [`DEFAULT_BETA`]) are live-tunable from the dev panel
+//! via [`crate::settings::HandTrackingSettings`] — no restart.
 //!
 //! **Object-scale normalization.** Positional channels (palm position, the 21
 //! landmarks) are filtered in the Leap-mm space, where a hand close to the
@@ -38,16 +37,16 @@ use crate::input::state::MAX_HANDS;
 /// it sets the at-rest smoothing. Lower = steadier when the hand holds still
 /// (less jitter) but laggier on slow motion. `1.0` Hz smooths a held hand far
 /// harder than the previous `2.5` (≈9.5%/frame vs ≈21% toward target at 60 fps),
-/// which is the fix for "jittery even when holding still". Tunable on hardware
-/// via `WAVECONDUCTOR_HAND_MIN_CUTOFF`.
+/// which is the fix for "jittery even when holding still". Live-tunable from the
+/// dev panel (`HandTrackingSettings::smoothing_min_cutoff`).
 pub const DEFAULT_MIN_CUTOFF: f32 = 1.0;
 
 /// Default speed coefficient: how fast the cutoff opens up with hand speed (less
 /// lag during motion). Because the speed is object-scale-normalized (see the
 /// module docs), this is expressed in *hand-lengths per second* — so a
 /// `MediaPipe`-like aggressive value is single digits here, not the `0.02` that
-/// suited the previous un-normalized mm/s speed. Tunable via
-/// `WAVECONDUCTOR_HAND_BETA`.
+/// suited the previous un-normalized mm/s speed. Live-tunable from the dev panel
+/// (`HandTrackingSettings::smoothing_beta`).
 pub const DEFAULT_BETA: f32 = 2.0;
 
 /// Cutoff for the derivative low-pass (Hz) — the One-Euro paper's fixed default.
@@ -201,7 +200,9 @@ impl HandFilters {
             *lm = filter.filter(*lm, dt, pos_scale);
         }
         Hand {
-            palm_position: self.palm_position.filter(target.palm_position, dt, pos_scale),
+            palm_position: self
+                .palm_position
+                .filter(target.palm_position, dt, pos_scale),
             // Smooth the normal's components, then re-normalize to a unit vector.
             palm_normal: self
                 .palm_normal
@@ -439,9 +440,9 @@ mod tests {
         let mut s = HandSmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
         s.smooth(&[hand_with(1, 0.0)], Duration::from_millis(0));
         s.smooth(&[hand_with(1, 0.0)], Duration::from_millis(16)); // establish a bank
-        // Crank to near-zero cutoff with no velocity adaptivity → very heavy
-        // smoothing. A big target jump should barely move this frame, and the
-        // bank must NOT be reset (a reset would pass the new target through).
+                                                                   // Crank to near-zero cutoff with no velocity adaptivity → very heavy
+                                                                   // smoothing. A big target jump should barely move this frame, and the
+                                                                   // bank must NOT be reset (a reset would pass the new target through).
         s.set_params(0.01, 0.0);
         let out = s.smooth(&[hand_with(1, 1000.0)], Duration::from_millis(32));
         assert!(

@@ -265,7 +265,10 @@ fn apply_debug_bloom_toggle(
     clippy::unnecessary_wraps,
     reason = "Option is the shared signature; the None case is the feature-absent variant below"
 )]
-fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry) -> Option<bool> {
+fn register_mediapipe(
+    registry: &mut wc_core::input::provider::ProviderRegistry,
+    settings: &wc_core::settings::HandTrackingSettings,
+) -> Option<bool> {
     use wc_core::input::provider::{ProviderId, ProviderRole};
     use wc_core::input::providers::mediapipe::{MediaPipeConfig, MediaPipeProvider};
     use wc_core::input::state::ServiceConnection;
@@ -281,28 +284,16 @@ fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry)
             )
         });
 
-    // Feel tunables, overridable at runtime for live hardware A/B (each maps to
-    // a named constant in the provider). A missing or unparseable value keeps the
-    // default. `WAVECONDUCTOR_HAND_GRAB_DEADZONE` pins a relaxed-open hand's grab
-    // to 0 (raise if the attractor lingers when open, lower if grab feels weak).
-    let defaults = MediaPipeConfig::default();
-    let env_f32 = |name: &str, default: f32| -> f32 {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(default)
-    };
-    let grab_rest_deadzone = env_f32("WAVECONDUCTOR_HAND_GRAB_DEADZONE", defaults.grab_rest_deadzone);
-    // One-Euro smoothing knobs: MIN_CUTOFF lower = steadier when still (more lag
-    // on slow motion); BETA higher = opens up faster during motion (less lag).
-    let smoothing_min_cutoff = env_f32("WAVECONDUCTOR_HAND_MIN_CUTOFF", defaults.smoothing_min_cutoff);
-    let smoothing_beta = env_f32("WAVECONDUCTOR_HAND_BETA", defaults.smoothing_beta);
-
+    // The numeric feel tunables (grab deadzone, smoothing min-cutoff/beta) are
+    // owned by HandTrackingSettings — the Dev panel edits them live and they
+    // persist. Seed the provider from the (possibly persisted) settings so a
+    // saved value applies at startup; `apply_mediapipe_tuning_settings` keeps it
+    // in sync on every change.
     let config = MediaPipeConfig {
         smoothing,
-        grab_rest_deadzone,
-        smoothing_min_cutoff,
-        smoothing_beta,
+        grab_rest_deadzone: settings.grab_rest_deadzone,
+        smoothing_min_cutoff: settings.smoothing_min_cutoff,
+        smoothing_beta: settings.smoothing_beta,
         ..MediaPipeConfig::default()
     };
 
@@ -324,7 +315,10 @@ fn register_mediapipe(registry: &mut wc_core::input::provider::ProviderRegistry)
     feature = "hand-tracking-gestures",
     not(feature = "hand-tracking-mediapipe")
 ))]
-fn register_mediapipe(_registry: &mut wc_core::input::provider::ProviderRegistry) -> Option<bool> {
+fn register_mediapipe(
+    _registry: &mut wc_core::input::provider::ProviderRegistry,
+    _settings: &wc_core::settings::HandTrackingSettings,
+) -> Option<bool> {
     None
 }
 
@@ -394,7 +388,7 @@ fn install_hand_tracking_providers(
                 );
             }
         }
-        "mediapipe" => match register_mediapipe(&mut registry) {
+        "mediapipe" => match register_mediapipe(&mut registry, &settings) {
             Some(true) => tracing::info!("hand-tracking: MediaPipeProvider started (webcam)"),
             Some(false) => tracing::warn!(
                 "hand-tracking: MediaPipeProvider failed to start; \
