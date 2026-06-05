@@ -36,6 +36,14 @@ use crate::input::state::MAX_HANDS;
 const PALM_SIZE: u32 = 192;
 const LM_SIZE: u32 = 224;
 
+/// How often to re-run palm detection while hands are being tracked. Tracking
+/// alone (landmark-only) never re-validates against detection, so a spurious
+/// detection could otherwise stick forever and block new hands. Re-detecting on
+/// this cadence clears phantoms and picks up newly-appeared hands while still
+/// skipping palm on the frames in between. Tunable; render-rate smoothing masks
+/// the periodic re-detect cost.
+const REDETECT_PERIOD: Duration = Duration::from_millis(500);
+
 /// Tunables for the pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -73,6 +81,10 @@ pub struct Pipeline {
     /// threshold) or the frame is unusable, which forces re-acquisition via
     /// palm detection on the following frame.
     tracked: SmallVec<[RoiRect; MAX_HANDS]>,
+    /// Time accumulated since palm detection last ran. Drives periodic
+    /// re-detection ([`REDETECT_PERIOD`]) so tracking can't stay locked on a
+    /// stale/false ROI.
+    since_detect: Duration,
 }
 
 impl Pipeline {
@@ -91,6 +103,7 @@ impl Pipeline {
             tracker: HandTracker::default(),
             config,
             tracked: SmallVec::new(),
+            since_detect: Duration::ZERO,
         }
     }
 
@@ -109,17 +122,25 @@ impl Pipeline {
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
             self.tracker.end_frame();
             self.tracked.clear(); // a bad frame breaks tracking → re-acquire next
+            self.since_detect = Duration::ZERO;
             return Ok(hands);
         }
 
         // Square-pad to the larger side so detection coords are aspect-correct.
         let square = square_pad(frame);
 
-        // Detect-then-track: if we have ROIs from the previous frame, reuse them
-        // and skip palm detection (the dominant per-frame cost). Otherwise run
-        // palm detection to (re)acquire. `take` leaves `tracked` empty; it is
-        // repopulated below from this frame's successful hands.
-        let rois = if self.tracked.is_empty() {
+        // Detect-then-track: reuse the previous frame's ROIs and skip palm (the
+        // dominant per-frame cost) — but re-run palm whenever nothing is tracked
+        // OR the re-detect timer has elapsed. The periodic re-detection is what
+        // keeps a spurious detection from sticking forever (landmark-only never
+        // re-validates, so a false ROI with high presence would otherwise be a
+        // permanent phantom) and lets newly-appeared hands be picked up.
+        // `acquire_rois` is authoritative on a re-detect frame: tracks not
+        // re-detected are dropped, which clears phantoms.
+        self.since_detect += dt;
+        let redetect = self.tracked.is_empty() || self.since_detect >= REDETECT_PERIOD;
+        let rois = if redetect {
+            self.since_detect = Duration::ZERO;
             self.acquire_rois(&square)?
         } else {
             std::mem::take(&mut self.tracked)
@@ -601,18 +622,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tracking_frame_skips_palm_detection() {
-        use std::sync::atomic::{AtomicU32, Ordering};
+    /// Build a pipeline wired with call-counting mocks: palm yields exactly one
+    /// detection, landmark yields one high-presence hand. Returns the pipeline
+    /// plus the palm and landmark call counters.
+    fn counting_pipeline() -> (
+        Pipeline,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        use std::sync::atomic::AtomicU32;
         use std::sync::Arc;
 
-        // Palm output: anchor 0 hot (raw score 100 → ~1.0), a single 0.2×0.2
-        // box → exactly one detection; every other anchor scores ~0 and drops.
+        // Palm: anchor 0 hot → one 0.2×0.2 detection; all other anchors drop.
         let mut scores = vec![-100.0f32; 2016];
         scores[0] = 100.0;
         let mut boxes = vec![0.0f32; 2016 * 18];
-        boxes[2] = 192.0 * 0.2; // width
-        boxes[3] = 192.0 * 0.2; // height
+        boxes[2] = 192.0 * 0.2;
+        boxes[3] = 192.0 * 0.2;
         let palm_out = vec![
             Tensor {
                 data: boxes,
@@ -624,8 +650,7 @@ mod tests {
             },
         ];
 
-        // Landmark output: a spread hand in crop-pixel space with high presence
-        // and handedness, so every frame yields a hand and a valid next ROI.
+        // Landmark: a spread hand with high presence + handedness.
         let mut lms = vec![112.0f32; 63];
         let mut set = |i: usize, x: f32, y: f32| {
             lms[i * 3] = x;
@@ -644,20 +669,20 @@ mod tests {
             Tensor {
                 data: vec![5.0],
                 shape: vec![1, 1],
-            }, // presence → ~0.99
+            },
             Tensor {
                 data: vec![5.0],
                 shape: vec![1, 1],
-            }, // handedness → Right
+            },
             Tensor {
                 data: vec![0.0; 63],
                 shape: vec![1, 63],
-            }, // world landmarks
+            },
         ];
 
         let palm_calls = Arc::new(AtomicU32::new(0));
         let lm_calls = Arc::new(AtomicU32::new(0));
-        let mut pipe = Pipeline::new(
+        let pipe = Pipeline::new(
             Box::new(CountingInference {
                 calls: Arc::clone(&palm_calls),
                 outputs: palm_out,
@@ -668,12 +693,24 @@ mod tests {
             }),
             PipelineConfig::default(),
         );
+        (pipe, palm_calls, lm_calls)
+    }
 
-        let frame = Frame {
+    /// A consistent, non-empty frame for driving the pipeline.
+    fn consistent_frame() -> Frame {
+        Frame {
             width: 64,
             height: 48,
             rgb: vec![128u8; 64 * 48 * 3],
-        };
+        }
+    }
+
+    #[test]
+    fn tracking_frame_skips_palm_detection() {
+        use std::sync::atomic::Ordering;
+        let (mut pipe, palm_calls, lm_calls) = counting_pipeline();
+        let frame = consistent_frame();
+        // dt well under REDETECT_PERIOD so frame 2 tracks rather than re-detects.
         let dt = Duration::from_millis(33);
 
         // Frame 1 acquires: palm detection runs, then the landmark stage.
@@ -698,6 +735,35 @@ mod tests {
             lm_calls.load(Ordering::Relaxed),
             2,
             "landmark runs every frame"
+        );
+    }
+
+    #[test]
+    fn redetects_after_the_interval() {
+        use std::sync::atomic::Ordering;
+        let (mut pipe, palm_calls, _lm) = counting_pipeline();
+        let frame = consistent_frame();
+        // Each step's dt is below REDETECT_PERIOD (500ms), but two accumulate
+        // past it. Frame 1 acquires (palm #1); frame 2 tracks (no palm); frame 3
+        // crosses the interval → palm re-runs. This is what prevents a spurious
+        // ROI from sticking forever and lets new hands be picked up.
+        let dt = Duration::from_millis(400);
+
+        pipe.process(&frame, dt).expect("frame 1 (acquire)");
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 1, "acquire runs palm");
+
+        pipe.process(&frame, dt).expect("frame 2 (track)");
+        assert_eq!(
+            palm_calls.load(Ordering::Relaxed),
+            1,
+            "still within the re-detect interval → track only"
+        );
+
+        pipe.process(&frame, dt).expect("frame 3 (re-detect)");
+        assert_eq!(
+            palm_calls.load(Ordering::Relaxed),
+            2,
+            "interval elapsed → palm re-runs"
         );
     }
 
