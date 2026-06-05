@@ -56,6 +56,12 @@ pub struct MediaPipeConfig {
     /// Inference rate cap, in Hz. Hand tracking does not need full frame rate;
     /// capping leaves CPU headroom for the render thread and lowers heat.
     pub max_inference_hz: u32,
+    /// Requested capture width. The pipeline downsamples to 192/224 regardless,
+    /// so a modest resolution keeps per-frame decode cost (and heat) low. The
+    /// camera negotiates the nearest supported format.
+    pub capture_width: u32,
+    /// Requested capture height. See [`Self::capture_width`].
+    pub capture_height: u32,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
     /// Defaults to the workspace-relative `assets/models/hand` (resolved at
     /// runtime against the working directory, like Bevy's `assets/`).
@@ -68,6 +74,10 @@ impl Default for MediaPipeConfig {
             camera_index: 0,
             mirror: true,
             max_inference_hz: 30,
+            // 640×480 is ample for hand tracking (the models see 192/224) and
+            // far cheaper to decode each frame than the camera's native max.
+            capture_width: 640,
+            capture_height: 480,
             model_dir: PathBuf::from("assets/models/hand"),
         }
     }
@@ -158,16 +168,20 @@ impl MediaPipeProvider {
 
 /// Open a real webcam source on the calling (worker) thread, or error. Runs
 /// inside the worker so `!Send` camera backends never cross threads.
-fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, CaptureError> {
+fn open_camera_source(
+    camera_index: u32,
+    width: u32,
+    height: u32,
+) -> Result<Box<dyn FrameSource>, CaptureError> {
     #[cfg(feature = "hand-tracking-mediapipe-camera")]
     {
-        let source = capture::NokhwaFrameSource::open(camera_index)?;
+        let source = capture::NokhwaFrameSource::open(camera_index, width, height)?;
         let boxed: Box<dyn FrameSource> = Box::new(source);
         Ok(boxed)
     }
     #[cfg(not(feature = "hand-tracking-mediapipe-camera"))]
     {
-        let _ = camera_index;
+        let _ = (camera_index, width, height);
         Err(CaptureError::NoCamera(
             "build with the hand-tracking-mediapipe-camera feature".into(),
         ))
@@ -202,12 +216,14 @@ impl HandTrackingProvider for MediaPipeProvider {
             .ok()
             .and_then(|rt| rt.injected_source.take());
         let camera_index = self.config.camera_index;
+        let cap_w = self.config.capture_width;
+        let cap_h = self.config.capture_height;
         let make_source: SourceFactory = match injected {
             Some(src) => Box::new(move || {
                 let boxed: Box<dyn FrameSource> = src;
                 Ok(boxed)
             }),
-            None => Box::new(move || open_camera_source(camera_index)),
+            None => Box::new(move || open_camera_source(camera_index, cap_w, cap_h)),
         };
         let (producer, consumer) = rtrb::RingBuffer::new(256);
         let handle = spawn_worker(
