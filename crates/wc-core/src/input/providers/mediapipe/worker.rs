@@ -26,6 +26,11 @@ use crate::input::state::{
     DeviceHealth, DevicePresence, ProviderStatus, ServiceConnection, TrackingFlow, MAX_HANDS,
 };
 
+/// Idle backoff when the source has no frame ready (or errored), so a
+/// non-blocking source can't busy-spin a core. A real (blocking) camera read
+/// rarely hits this path; it mainly guards the test/mock sources.
+const IDLE_POLL: Duration = Duration::from_millis(2);
+
 /// Creates the frame source on the worker thread. Deferring construction lets
 /// `!Send` camera backends (e.g. `nokhwa`'s `AVFoundation` camera) be built
 /// where they are used; the factory itself is `Send` (it captures only the
@@ -83,8 +88,14 @@ pub fn spawn_worker(
 ) -> WorkerHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
-    let min_dt =
-        Duration::from_secs_f32(1.0 / f32::from(u16::try_from(max_hz.max(1)).unwrap_or(30)));
+    // The processing rate is paced by the blocking camera read (the worker
+    // always grabs the freshest frame the source has), NOT by sleeping a fixed
+    // interval. The old sleep-based cap let the camera buffer fill while we slept,
+    // so we processed ever-staler frames — a growing multi-second backlog. This
+    // is the single-thread analogue of MediaPipe's FlowLimiter (≤1 frame in
+    // flight, newest wins). `max_hz` is retained on the API but no longer caps via
+    // sleep; revisit with a drop-not-sleep limiter if thermals need a hard cap.
+    let _ = max_hz;
 
     let join = std::thread::Builder::new()
         .name("wc-mediapipe-worker".into())
@@ -104,6 +115,9 @@ pub fn spawn_worker(
                 let loop_start = Instant::now();
                 match source.next_frame(&mut frame) {
                     Ok(true) => {
+                        // A frame is in hand: process it immediately, no sleep —
+                        // the next blocking read paces us to the camera and keeps
+                        // the pose current instead of trailing a buffered backlog.
                         let now = loop_start.duration_since(start);
                         let dt = loop_start.duration_since(last_process);
                         last_process = loop_start;
@@ -116,13 +130,16 @@ pub fn spawn_worker(
                                 .push(WorkerMsg::Status(streaming_status(Duration::ZERO, 0)));
                         }
                     }
-                    Ok(false) => {}
+                    Ok(false) => {
+                        // No frame ready (e.g. an exhausted mock): brief sleep so a
+                        // non-blocking source can't busy-spin a core.
+                        std::thread::sleep(IDLE_POLL);
+                    }
                     Err(_) => {
                         let _ = producer.push(WorkerMsg::Status(no_camera_status()));
+                        std::thread::sleep(IDLE_POLL);
                     }
                 }
-                // Rate-cap: sleep the remainder of the frame budget (0 if over).
-                std::thread::sleep(min_dt.saturating_sub(loop_start.elapsed()));
             }
         })
         .ok();
