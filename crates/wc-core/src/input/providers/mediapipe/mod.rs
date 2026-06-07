@@ -393,6 +393,7 @@ impl HandTrackingProvider for MediaPipeProvider {
         let mut new_status = None;
         let mut new_diagnostics = None;
         let mut new_error = None;
+        let mut new_camera_format = None;
         if let Ok(rt) = self.runtime.get_mut() {
             if let Some(consumer) = rt.consumer.as_mut() {
                 while let Ok(msg) = consumer.pop() {
@@ -403,6 +404,7 @@ impl HandTrackingProvider for MediaPipeProvider {
                         WorkerMsg::Status(s) => new_status = Some(s),
                         WorkerMsg::Diagnostics(d) => new_diagnostics = Some(d),
                         WorkerMsg::Error(e) => new_error = Some(e),
+                        WorkerMsg::CameraFormat(f) => new_camera_format = Some(f),
                     }
                 }
             }
@@ -416,10 +418,15 @@ impl HandTrackingProvider for MediaPipeProvider {
             self.target_hands = hands;
             self.target_ts = timestamp;
         }
-        if new_diagnostics.is_some() || new_error.is_some() {
+        if new_diagnostics.is_some() || new_error.is_some() || new_camera_format.is_some() {
             if let Ok(mut d) = self.diagnostics.lock() {
                 if let Some(err) = new_error {
                     d.last_error = Some(err);
+                }
+                if let Some(fmt) = new_camera_format {
+                    // Fold the negotiated format into the device label shown next
+                    // to "Attached" in the dev panel.
+                    d.device_serial = Some(format!("camera{} · {}", self.config.camera_index, fmt));
                 }
                 if let Some(worker_diag) = new_diagnostics {
                     d.dropped_frames = worker_diag.dropped_frames;

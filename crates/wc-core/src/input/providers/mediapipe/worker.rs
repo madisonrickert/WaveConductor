@@ -58,6 +58,8 @@ pub enum WorkerMsg {
     /// A pipeline error string. Sent only on the (rare) error path, so the
     /// `String` allocation never touches the steady-state frame loop.
     Error(String),
+    /// The negotiated camera format label, sent once when the source opens.
+    CameraFormat(String),
 }
 
 /// Worker/pipeline diagnostics sent to the provider.
@@ -156,6 +158,14 @@ fn run_worker_loop(
     let mut last_inference = None;
     let mut dropped_frames = 0_u64;
     let mut pipeline_errors = 0_u64;
+    // Report the negotiated capture format once, up front.
+    if let Some(label) = source.format_label().map(str::to_owned) {
+        push_msg(
+            &mut producer,
+            WorkerMsg::CameraFormat(label),
+            &mut dropped_frames,
+        );
+    }
     push_msg(
         &mut producer,
         WorkerMsg::Status(streaming_status(Duration::ZERO, 0)),
@@ -430,7 +440,9 @@ mod tests {
                             max_dropped = max_dropped.max(dropped_since_start);
                         }
                     }
-                    WorkerMsg::Diagnostics(_) | WorkerMsg::Error(_) => {}
+                    WorkerMsg::Diagnostics(_)
+                    | WorkerMsg::Error(_)
+                    | WorkerMsg::CameraFormat(_) => {}
                 }
             }
             std::thread::sleep(Duration::from_millis(5));

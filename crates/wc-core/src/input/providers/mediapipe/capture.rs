@@ -72,6 +72,14 @@ pub trait FrameSource {
     /// # Errors
     /// Returns [`CaptureError`] if the camera is unavailable or a read fails.
     fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError>;
+
+    /// A short human-readable label for the active capture format (e.g.
+    /// `"640x480 YUYV @30"`), or `None` for sources with no meaningful format
+    /// (mocks). Surfaced in provider diagnostics so the dev panel shows what the
+    /// camera actually negotiated.
+    fn format_label(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A test/replay frame source: serves a fixed list of frames, optionally
@@ -142,18 +150,83 @@ impl FrameSource for MockFrameSource {
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 pub struct NokhwaFrameSource {
     camera: nokhwa::Camera,
+    /// Human-readable label for the negotiated capture format (for diagnostics).
+    format: String,
+}
+
+/// Largest capture dimensions [`choose_camera_format`] will select (720p-class):
+/// bigger formats cost more USB bandwidth and decode/convert time than hand
+/// tracking needs.
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+const MAX_CAPTURE_W: u32 = 1280;
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+const MAX_CAPTURE_H: u32 = 720;
+/// Smallest capture dimensions worth selecting: below this the frame is too
+/// coarse for reliable landmark detection.
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+const MIN_CAPTURE_W: u32 = 320;
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+const MIN_CAPTURE_H: u32 = 240;
+/// Resolution area we bias selection toward (640×480).
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+const TARGET_AREA: i64 = 640 * 480;
+
+/// Choose the cheapest usable capture format from a device's *enumerated*
+/// formats.
+///
+/// Policy: consider only formats [`NokhwaFrameSource::next_frame`] can decode
+/// (`MJPEG`, `YUYV`, `RAWRGB`) within `320×240..=1280×720`; prefer uncompressed
+/// (no per-frame JPEG decode), then the resolution closest to 640×480, then a
+/// higher frame rate. Returns `None` when nothing usable is in range, so the
+/// caller keeps the format the camera already opened with — degrading
+/// gracefully rather than requesting a blind format that may not exist (a blind
+/// `Closest(640×480 MJPEG)` failed to open on `AVFoundation`).
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+fn choose_camera_format(
+    formats: &[nokhwa::utils::CameraFormat],
+) -> Option<nokhwa::utils::CameraFormat> {
+    use nokhwa::utils::FrameFormat;
+
+    // 0 = uncompressed (cheap), 1 = MJPEG (needs a JPEG decode). Formats
+    // `next_frame` cannot decode return `None` and are excluded.
+    fn decode_rank(format: FrameFormat) -> Option<u8> {
+        match format {
+            FrameFormat::YUYV | FrameFormat::RAWRGB => Some(0),
+            FrameFormat::MJPEG => Some(1),
+            _ => None,
+        }
+    }
+
+    formats
+        .iter()
+        .filter(|f| {
+            decode_rank(f.format()).is_some()
+                && f.width() >= MIN_CAPTURE_W
+                && f.height() >= MIN_CAPTURE_H
+                && f.width() <= MAX_CAPTURE_W
+                && f.height() <= MAX_CAPTURE_H
+        })
+        .min_by_key(|f| {
+            let rank = decode_rank(f.format()).unwrap_or(u8::MAX);
+            let area = i64::from(f.width()) * i64::from(f.height());
+            let area_dist = (area - TARGET_AREA).abs();
+            // Cheapest decode first, then nearest to target resolution, then the
+            // highest frame rate (Reverse so larger fps sorts first).
+            (rank, area_dist, std::cmp::Reverse(f.frame_rate()))
+        })
+        .copied()
 }
 
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 impl NokhwaFrameSource {
-    /// Open `camera_index` and start streaming at the highest available rate.
+    /// Open `camera_index`, narrow to the cheapest usable enumerated format, and
+    /// start streaming.
     ///
-    /// Requests `AbsoluteHighestFrameRate` and lets the backend choose the
-    /// format. A resolution cap was tried (640×480 via `Closest`) to cut
-    /// per-frame decode cost, but it failed to open on the macOS/AVFoundation
-    /// backend — the device did not enumerate that exact format — so it was
-    /// reverted. A future cap must be derived from the camera's *enumerated*
-    /// formats on real hardware, not requested blind.
+    /// Opens at `AbsoluteHighestFrameRate` first (the request that reliably opens
+    /// across `V4L2`/`AVFoundation`/`MSMF`), then queries the device's enumerated
+    /// formats and switches to the one [`choose_camera_format`] picks. Both
+    /// enumeration and the format switch degrade gracefully: any failure leaves
+    /// the camera on the format it already opened with.
     ///
     /// # Errors
     /// Returns [`CaptureError::NoCamera`] if the device cannot be opened.
@@ -167,15 +240,41 @@ impl NokhwaFrameSource {
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         let mut camera =
             Camera::new(index, requested).map_err(|e| CaptureError::NoCamera(e.to_string()))?;
+
+        // Narrow to a cheaper enumerated format where the device offers one.
+        if let Ok(formats) = camera.compatible_camera_formats() {
+            if let Some(chosen) = choose_camera_format(&formats) {
+                // `chosen` came from this device's enumeration, so `Closest`
+                // resolves to it. A set failure is non-fatal: keep the opened
+                // format.
+                let request =
+                    RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(chosen));
+                let _ = camera.set_camera_requset(request);
+            }
+        }
+
         camera
             .open_stream()
             .map_err(|e| CaptureError::Read(e.to_string()))?;
-        Ok(Self { camera })
+
+        let active = camera.camera_format();
+        let format = format!(
+            "{}x{} {:?} @{}",
+            active.width(),
+            active.height(),
+            active.format(),
+            active.frame_rate()
+        );
+        Ok(Self { camera, format })
     }
 }
 
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 impl FrameSource for NokhwaFrameSource {
+    fn format_label(&self) -> Option<&str> {
+        Some(&self.format)
+    }
+
     fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError> {
         use nokhwa::utils::FrameFormat;
 
@@ -310,5 +409,81 @@ mod tests {
         // Same dimensions next frame → no reallocation.
         src.next_frame(&mut out).expect("second frame");
         assert_eq!(out.rgb.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn mock_source_has_no_format_label() {
+        let src = MockFrameSource::solid(2, 2, [0, 0, 0]);
+        assert_eq!(src.format_label(), None);
+    }
+}
+
+#[cfg(all(test, feature = "hand-tracking-mediapipe-camera"))]
+#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
+mod camera_format_tests {
+    use super::*;
+    use nokhwa::utils::{CameraFormat, FrameFormat, Resolution};
+
+    fn fmt(w: u32, h: u32, f: FrameFormat, fps: u32) -> CameraFormat {
+        CameraFormat::new(Resolution::new(w, h), f, fps)
+    }
+
+    #[test]
+    fn prefers_uncompressed_over_mjpeg_at_same_resolution() {
+        let formats = vec![
+            fmt(640, 480, FrameFormat::MJPEG, 30),
+            fmt(640, 480, FrameFormat::YUYV, 30),
+        ];
+        let chosen = choose_camera_format(&formats).expect("a format in range");
+        assert_eq!(
+            chosen.format(),
+            FrameFormat::YUYV,
+            "uncompressed avoids JPEG decode"
+        );
+    }
+
+    #[test]
+    fn picks_resolution_closest_to_target() {
+        let formats = vec![
+            fmt(320, 240, FrameFormat::YUYV, 30),
+            fmt(640, 480, FrameFormat::YUYV, 30),
+            fmt(1280, 720, FrameFormat::YUYV, 30),
+        ];
+        let chosen = choose_camera_format(&formats).expect("a format in range");
+        assert_eq!((chosen.width(), chosen.height()), (640, 480));
+    }
+
+    #[test]
+    fn breaks_ties_on_higher_frame_rate() {
+        let formats = vec![
+            fmt(640, 480, FrameFormat::YUYV, 30),
+            fmt(640, 480, FrameFormat::YUYV, 60),
+        ];
+        let chosen = choose_camera_format(&formats).expect("a format in range");
+        assert_eq!(chosen.frame_rate(), 60);
+    }
+
+    #[test]
+    fn excludes_undecodable_and_out_of_bounds() {
+        // NV12 is undecodable by next_frame; 1920x1080 exceeds the 720p bound.
+        let formats = vec![
+            fmt(640, 480, FrameFormat::NV12, 30),
+            fmt(1920, 1080, FrameFormat::MJPEG, 30),
+        ];
+        assert!(
+            choose_camera_format(&formats).is_none(),
+            "no decodable in-range format → keep the opened default",
+        );
+    }
+
+    #[test]
+    fn falls_back_to_mjpeg_when_no_uncompressed_in_range() {
+        let formats = vec![
+            fmt(640, 480, FrameFormat::MJPEG, 30),
+            fmt(1920, 1080, FrameFormat::YUYV, 30), // out of bounds
+        ];
+        let chosen = choose_camera_format(&formats).expect("the bounded MJPEG");
+        assert_eq!(chosen.format(), FrameFormat::MJPEG);
+        assert_eq!((chosen.width(), chosen.height()), (640, 480));
     }
 }
