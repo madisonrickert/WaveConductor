@@ -2,18 +2,27 @@
 
 **Date:** 2026-06-04
 **Workstream:** New roadmap item — proposed slug `mediapipe-webcam-hands` (see *Roadmap entry* below)
-**Status:** Functionally complete on branch `mediapipe-hand-tracking` — the
-provider runs the full two-stage pipeline in pure Rust and is validated
-end-to-end on a real hand (2 hands detected; palm-Resize fidelity gate resolved).
-All CI gates green. Remaining: a committed CI golden image (Madison's selfie) and
-on-hardware acceptance + tuning (see the plan's *Implementation status*). Pending
-Madison review/sign-off before merge to `v5-alpha`.
+**Status:** Functionally complete enough to run on branch
+`mediapipe-hand-tracking`, but **not merge-ready after the 2026-06-07
+reassessment**. The branch now has a working Rust-owned two-stage pipeline plus
+an optional `ort`/CoreML backend, but reliability/performance still lag the
+first-party MediaPipe demos. Remaining work is no longer just "hardware tuning":
+fix tracking-ROI graph parity, add stage/frame-age diagnostics, restore
+drop-not-sleep rate limiting, cap camera format from enumerated modes, remove
+hot-path copies/allocations, and fix zero `palm_velocity` before acceptance.
 **Scope window:** ~6–9 focused days (provider plumbing + two-stage ONNX glue + verification spike + diagnostics)
 **Branch:** `mediapipe-hand-tracking` (off `v5-alpha`; merges back to `v5-alpha` on Madison's sign-off)
 
 ## Goal
 
-Add a second real hand-tracking provider that derives 21-landmark hands from a **conventional USB webcam** using Google's MediaPipe hand models, running **fully in-process in native Rust** — no Leap Motion device, no external process, no Python at runtime. The webcam provider slots into the existing `HandTrackingProvider` seam as `ProviderId::MediaPipe`, emits frames in the **same coordinate convention the Leap provider uses**, and therefore drives every existing sketch (Line attractors, HandMesh, gesture detection, pointer merge) with **zero changes to consumer code**.
+Add a second real hand-tracking provider that derives 21-landmark hands from a
+**conventional USB webcam** using Google's MediaPipe hand models, running
+**fully in-process with Rust-owned orchestration** — no Leap Motion device, no
+external process, no Python at runtime. The webcam provider slots into the
+existing `HandTrackingProvider` seam as `ProviderId::MediaPipe`, emits frames in
+the **same coordinate convention the Leap provider uses**, and therefore drives
+every existing sketch (Line attractors, HandMesh, gesture detection, pointer
+merge) with **zero changes to consumer code**.
 
 This unlocks hand-tracking on any machine with a webcam — broadening the kiosk's input options beyond the Leap Motion Controller, and serving as the desktop sibling of the roadmap's Phase-3 `ios-vision-hands` (camera-based hands on iPad). It is also a deliberate skills/portfolio investment: WaveConductor owns the full inference path — the two-stage palm→ROI→landmark pre/post-processing glue and the ONNX runtime integration — rather than calling a turnkey black box.
 
@@ -28,6 +37,20 @@ Two architectural forks were resolved by senior-engineer subagent debate to cons
 | **A. In-process Rust** | `nokhwa` webcam capture + an ONNX runtime running the converted MediaPipe models, glue in Rust. Single self-contained binary. | **CHOSEN.** Matches the in-process Leap house style, one PID to supervise for the multi-hour unattended soak, the existing `ProviderRegistry` + Mock-fallback acts as supervisor, and Madison explicitly wants to work closer to the ML models. |
 | **B. Python MediaPipe sidecar** | A `uv`-managed Python process runs Google's first-party `HandLandmarker` and streams landmarks over the existing `websocket.rs` provider. | Rejected. Its only decisive edges were speed-to-demo (no hard deadline exists) and zero porting risk (neutralized by the numeric oracle below). Adds a permanent second process + Python runtime + systemd unit to an otherwise single-binary deploy. The Path-B advocate itself concluded "I recommend Path A." Retained **only as a dev-time validation oracle** (see below). |
 | **C. WasmEdge `mediapipe-rs`** | The maintained `WasmEdge/mediapipe-rs` crate (full two-stage hand pipeline). | Rejected for native embedding. The crate runs **only** as `wasm32-wasi` inside the WasmEdge VM (maintainer-confirmed; the `wasi-nn` crate panics on native targets). Using it means embedding a whole WASM runtime + WASI-NN plugin + two TFLite shared libs beside the binary and copying every camera frame across the WASM boundary — the opposite of a single clean binary. Its excellent, complete glue is instead used as a **porting reference** for our Rust implementation. |
+
+### Course correction (2026-06-07): keep Rust orchestration, stop calling every backend Rust-native
+
+The current recommendation is **do not switch production to a Python sidecar yet**.
+Keep the provider in-process and keep the MediaPipe graph harness in Rust, because
+the biggest open risks are still graph-parity, flow-control, capture, and
+instrumentation problems that a runtime swap alone will not fix. Use first-party
+Python MediaPipe as an oracle/A-B harness and as a temporary demo fallback only,
+not as the default kiosk architecture.
+
+Also tighten the stack language: the `tract` backend is Rust-native, but the
+`hand-tracking-mediapipe-ort` path is a Rust-owned wrapper around native ONNX
+Runtime/CoreML. That is acceptable as a performance backend behind
+`HandInference`; it should not be presented as a pure Rust-native stack.
 
 ### Fork 2 — ONNX runtime (decided: **`tract`-first, `ort` fallback, behind a thin trait, gated by a verification spike**)
 
@@ -508,9 +531,9 @@ tract default) made inference fast — `profile_inference_backends` on M1:
 | `landmark.run` | 89.5 ms | 1.25 ms | 71.5× |
 
 With inference off the critical path, two problems the framework solves became
-visible. Both were fixed by matching MediaPipe's design (researched against its
-source), **not** by adding smoothing — the prior heavy output-smoothing only
-masked them.
+visible. One fix below was later found to be too confidently described as
+"matching MediaPipe"; the 2026-06-07 reassessment makes it first-class follow-up
+work instead of treating it as done.
 
 1. **Tracking drift (position/rotation/scale, ~2×/sec reset).** Detect-then-track
    drift: `roi_from_landmarks` derived rotation from wrist→middle-MCP[9], a short
@@ -522,14 +545,22 @@ masked them.
    fingers by `TRACK_ROI_SHIFT_Y = -0.1` along the rotated axis so the palm stays
    centred. The transform stays memoryless (MediaPipe adds no ROI
    blending/hysteresis — stability is geometric).
+
+   **2026-06-07 correction:** this parity claim was too broad. The upstream
+   `HandLandmarksToRectCalculator` applies its `4, 6, 8` constants to a partial
+   landmark subset, not directly to the full 21-landmark index space. The verified
+   full-landmark mapping is `5, 9, 13` (index/middle/ring MCPs), and the tracking
+   bounding box uses the same upstream 12-landmark subset rather than all 21
+   landmarks. `landmark.rs` now mirrors that mapping and has regression tests that
+   prove full-index `4, 6, 8` and excluded fingertips do not drive the tracking ROI.
 2. **Multi-second lag at good fps (frame backlog).** The worker capped itself by
    *sleeping* the rest of a fixed frame budget after each frame; while it slept the
    camera buffer filled, so it processed ever-staler frames and latency grew
-   unbounded. **Fix (FlowLimiter analogue):** drop the sleep cap — on a captured
-   frame, process immediately and let the next blocking camera read pace the loop,
-   always grabbing the freshest frame (≤1 in flight, newest wins). `max_hz` is
-   retained but no longer caps via sleep; a drop-not-sleep limiter can reinstate a
-   hard thermal cap later.
+   unbounded. **Fix (FlowLimiter analogue):** never sleep with a retained frame.
+   On a captured frame, either process immediately when the `max_hz` budget allows
+   it or drop/report the fresh over-budget frame and keep draining capture. This
+   preserves the newest-frame-wins invariant (≤1 in flight) while still restoring
+   the thermal cap.
 
 Possible follow-ups if anything still drifts/lags: drive re-detection by the
 landmark presence score instead of a fixed 500 ms timer (MediaPipe re-detects on
@@ -537,3 +568,54 @@ score, not a clock); a true two-thread FlowLimiter (capture overwrites a 1-slot
 latest-frame, processor consumes) if the single-thread pacing leaves residual lag;
 and re-check whether the render-rate output smoothing still earns its latency now
 that the pose is clean.
+
+## Reassessment & recovery sequence (2026-06-07)
+
+The branch should continue, but the work order changes. The fastest path to a
+reliable provider is **not** "Python sidecar now" and not another blind runtime
+swap. Fix the MediaPipe harness parity and observability first, then let NUC
+telemetry decide whether the current backend stack is good enough.
+
+**Observed implementation problems:**
+
+1. **Tracking-ROI graph parity was wrong before Phase 11.1.** `roi_from_landmarks`
+   used upstream partial-landmark indices as if they were full 21-landmark
+   indices, and it bounded all landmarks instead of the graph's tracking subset.
+   Phase 11.1 fixes the code and tests; live A/B against the Python/first-party
+   MediaPipe oracle is still useful before acceptance.
+2. **`max_inference_hz` needed drop-not-sleep semantics.** The previous sleep cap
+   caused camera backlog, but removing the cap entirely left no thermal budget.
+   Phase 11.3 restores the cap by dropping/reporting over-budget fresh frames
+   before inference, preserving freshness while honoring the thermal limit.
+3. **Diagnostics are not strong enough.** The design promised inference latency
+   and dropped frames, but the worker still surfaces coarse status. It needs
+   capture age, stage timings, palm-run reason, track churn, dropped-frame count,
+   backend name, selected camera format, and last pipeline error.
+4. **Camera format selection is uncontrolled.** `AbsoluteHighestFrameRate` can
+   choose a high-res or compressed mode that wastes CPU on decode. The provider
+   must enumerate supported modes and pick a bounded format that exists on the
+   device rather than requesting one blind.
+5. **Hot-path copies/allocations remain.** Preprocess/resize/warp/tensor wrapping
+   and the `ort` backend still copy owned buffers per frame. The pipeline needs
+   reusable scratch buffers; the `ort` path should use preallocated tensors or I/O
+   binding where the crate supports it, otherwise document the remaining copies.
+6. **`palm_velocity` is zeroed.** The pipeline passes `palm_pos` as both previous
+   and current position. Velocity-dependent consumers and diagnostics cannot be
+   trusted until the tracker exposes previous position.
+
+**Recommended sequence:**
+
+1. **Parity first:** verify landmark-to-rect against upstream MediaPipe and the
+   Python oracle, then replace tests that merely lock in the current assumption.
+   Code/tests for the upstream partial-landmark mapping landed in Phase 11.1;
+   manual camera A/B remains.
+2. **Instrumentation second:** add per-stage metrics before more tuning so every
+   feel complaint can be tied to frame age, model time, track churn, or capture.
+3. **Flow/capture third:** honor `max_inference_hz` with drop-not-sleep semantics
+   and choose camera formats from enumeration.
+4. **Allocation/copy cleanup fourth:** preallocate pipeline buffers and reduce
+   `ort` input/output copies after the metrics identify the real hot spots.
+5. **Hardware gate:** run the NUC with those metrics. If it is smooth and thermally
+   stable, stop there. If not, add platform-native `HandInference` backends
+   (OpenVINO/DirectML/CoreML) or a native MediaPipe/Tasks sidecar before choosing a
+   Python sidecar. Python remains the oracle and an emergency/demo fallback.

@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an in-process native-Rust `HandTrackingProvider` that derives 21-landmark hands from a conventional webcam using MediaPipe's two-stage ONNX models, emitting into the same Leap-device-mm coordinate convention so every existing sketch works unchanged.
+**Goal:** Add an in-process Rust-owned `HandTrackingProvider` that derives 21-landmark hands from a conventional webcam using MediaPipe's two-stage ONNX models, emitting into the same Leap-device-mm coordinate convention so every existing sketch works unchanged. Production should stay in-process; Python MediaPipe is an oracle/A-B tool and temporary fallback, not the default runtime architecture.
 
-**Architecture:** A dedicated worker thread owns the camera (`nokhwa`) and two `tract` ONNX sessions; it runs palm-detection → ROI → landmark, derives signals, and pushes `Hand` frames onto a lock-free `rtrb` SPSC ring. The Bevy-side `poll()` is a non-blocking drain. Inference runtime sits behind a `HandInference` trait (`tract` primary, `ort` fallback) decided by a day-one verification spike. All pre/post-processing glue (anchors, NMS, ROI affine, coordinate mapping, signals) is pure Rust with hermetic unit tests.
+**Architecture:** A dedicated worker thread owns the camera (`nokhwa`) and two ONNX model sessions behind `HandInference`; it runs palm-detection → ROI → landmark, derives signals, and pushes `Hand` frames onto a lock-free `rtrb` SPSC ring. The Bevy-side `poll()` is a non-blocking drain. `tract` remains the pure-Rust correctness baseline; optional `ort`/CoreML is a native accelerated backend behind the same trait, not a Rust-native inference stack. All pre/post-processing glue (anchors, NMS, ROI affine, coordinate mapping, signals) stays Rust-owned with hermetic unit tests.
 
-**Tech Stack:** Rust 1.96, Bevy 0.18, `tract-onnx` (pure-Rust inference), `nokhwa` (webcam), `rtrb` (lock-free ring), `image`, `smallvec`. Dev-only Python oracle via `uv` (`onnxruntime`, `numpy`) for the spike + golden generation.
+**Tech Stack:** Rust 1.96, Bevy 0.18, `tract-onnx` (pure-Rust baseline), optional `ort` (native ONNX Runtime/CoreML backend), `nokhwa` (webcam), `rtrb` (lock-free ring), `image`, `smallvec`. Dev-only Python oracle via `uv` (`onnxruntime`, `numpy`, first-party MediaPipe where useful) for spike, graph-parity checks, and golden generation.
 
 **Reference:** Spec `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`. Glue porting references: `WasmEdge/mediapipe-rs` (`src/tasks/vision/hand_landmark/`), `PINTO0309/hand-gesture-recognition-using-onnx`. Models: `opencv/palm_detection_mediapipe`, `opencv/handpose_estimation_mediapipe` (HuggingFace, Apache-2.0).
 
@@ -16,6 +16,12 @@
 Landed on `mediapipe-hand-tracking` (16 commits; full-workspace
 `--all-features` clippy `-D warnings`, `check-secrets`, and the per-crate test
 suites all green):
+
+**2026-06-07 reassessment:** do **not** treat this as merge-ready yet. The
+remaining work is now Phase 11, not just a golden image and subjective tuning:
+fix MediaPipe tracking-ROI parity, add real diagnostics, restore a fresh-frame
+rate cap, bound camera format selection, remove hot-path copies/allocations, fix
+`palm_velocity`, and then make a telemetry-based backend decision on the NUC.
 
 - ✅ **Phase 0** — Spike. Runtime: **`tract`**. Models vendored;
   `palm_detection.onnx` graph-surgeried (Resize→scales, bit-exact). Palm-Resize
@@ -39,8 +45,10 @@ suites all green):
   provider `Sync` without `unsafe`.
 - ✅ **Phase 10 (partial)** — stale `Hand` doc fixed; full CI gates green.
 
-**Remaining — needs Madison's hardware/content:**
+**Remaining:**
 
+- ⏳ **Phase 11** — reliability/performance recovery from the 2026-06-07
+  reassessment. This is the next implementation phase and blocks merge.
 - ⏳ **Phase 6.2** (committed CI golden): needs one hand image Madison is happy to
   commit (her own selfie). The env-var-gated e2e test
   (`WC_HANDTRACK_TEST_IMAGE`) already validates the full pipeline locally; the
@@ -999,7 +1007,7 @@ git commit -m "input/mediapipe: two-stage pipeline orchestration (ROI-reuse cont
 
 - [ ] **Step 2: Run / fail.**
 
-- [ ] **Step 3: Implement** `spawn_worker(config, frame_source, pipeline) -> WorkerHandle` — an OS thread looping at the rate cap: `next_frame` → `pipeline.process` → push `WorkerMessage::Frame(SmallVec<[Hand;2]>, capture_time)` and periodic `WorkerMessage::Status(ProviderStatus)`/`Diagnostics` onto the `rtrb` producer. `WorkerHandle` holds the join handle + a stop flag (`AtomicBool`); `Drop`/`stop()` joins cleanly. Rate-cap via `std::thread::sleep` to the remaining budget.
+- [ ] **Step 3: Implement** `spawn_worker(config, frame_source, pipeline) -> WorkerHandle` — an OS thread that reads the freshest available frame, runs `pipeline.process`, and pushes `WorkerMessage::Frame(SmallVec<[Hand;2]>, capture_time)` plus periodic `WorkerMessage::Status(ProviderStatus)`/`Diagnostics` onto the `rtrb` producer. `WorkerHandle` holds the join handle + a stop flag (`AtomicBool`); `Drop`/`stop()` joins cleanly. Do **not** rate-cap by sleeping after capture: that created stale camera backlog. If thermals need `max_inference_hz`, implement latest-frame/drop-not-sleep semantics (see Phase 11.3).
 
 - [ ] **Step 4: Run / pass.**
 
@@ -1136,6 +1144,178 @@ git commit -am "chore: clippy/docs cleanup for mediapipe provider; full gate gre
 ### Task 10.5: Branch finish
 
 - [ ] **Step 1:** Use the `superpowers:finishing-a-development-branch` skill to summarize the branch and prepare the merge-to-`v5-alpha` review for Madison's sign-off. Do **not** merge without her approval (per the goal directive).
+
+---
+
+## Phase 11 — Reassessment recovery work (2026-06-07)
+
+> Current main phase. Goal: make the in-process provider reliable enough to judge
+> on hardware before changing architecture. Keep Python MediaPipe as an oracle and
+> A/B reference; do not promote it to the production path unless this phase fails
+> a deadline-driven demo gate.
+
+### Task 11.1: Fix MediaPipe tracking-ROI graph parity
+
+**Files:**
+- Modify: `crates/wc-core/src/input/providers/mediapipe/landmark.rs`
+- Modify/add: `tools/handtrack-oracle/` parity dump, if needed
+- Modify/add tests in `landmark.rs`
+
+- [x] **Step 1: Verify upstream mapping.** Re-read MediaPipe's
+  `HandLandmarksToRectCalculator` and the hand-landmarks-to-rect graph path.
+  Confirm whether the `4, 6, 8` rotation constants are indices into a partial
+  landmark subset and map them to full 21-landmark indices. Current suspicion:
+  full landmarks `5, 9, 13`, not `4, 6, 8`.
+- [x] **Step 2: Replace assumption-locking tests.** Add a fixture with a known
+  asymmetric hand pose where full-index `4, 6, 8` and mapped-index `5, 9, 13`
+  produce measurably different rotations. Assert the MediaPipe-equivalent result.
+- [x] **Step 3: Update `roi_from_landmarks`.** Use the verified rotation subset
+  and matching bounding subset/transform parameters. Keep the transform
+  memoryless unless upstream evidence says otherwise.
+- [ ] **Step 4: A/B against the oracle.** Run with smoothing disabled or minimized:
+  `WAVECONDUCTOR_HAND_SMOOTHING=off WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo rund --features hand-tracking-mediapipe-ort,hand-tracking-mediapipe-camera`
+  and compare drift/warp to the Python/first-party MediaPipe oracle on the same
+  camera if available.
+- [ ] **Step 5: Commit.**
+
+**Progress (2026-06-07):** Code now mirrors the upstream full→partial landmark
+mapping (`[0,1,2,3,5,6,9,10,13,14,17,18]`), rotates from the mapped
+index/middle/ring MCP baseline (`5,9,13`), and bounds the tracking ROI on that
+same partial subset. Focused validation passed:
+`cargo test -p wc-core --features hand-tracking-mediapipe mediapipe -- --nocapture`
+(68 passed, 2 ignored).
+
+### Task 11.2: Add stage/frame-age diagnostics before more tuning
+
+**Files:**
+- Modify: `crates/wc-core/src/input/providers/mediapipe/pipeline.rs`
+- Modify: `crates/wc-core/src/input/providers/mediapipe/worker.rs`
+- Modify: `crates/wc-core/src/input/providers/mediapipe/mod.rs`
+- Modify: dev-panel diagnostics where `ProviderDiagnostics` render
+
+- [ ] **Step 1: Define metrics.** Add a small diagnostics snapshot carrying:
+  backend name, selected camera format, capture frame age, preprocess ms,
+  palm-run ms, landmark-run ms, postprocess ms, total pipeline ms, palm-run
+  reason (`cold_start`, `track_lost`, `below_max_hands`, etc.), track count,
+  track churn count, dropped/overwritten frames, and last pipeline error.
+- [ ] **Step 2: Preserve hot-path discipline.** Record timings with fixed-size
+  structs and overwrite snapshots; do not allocate strings per frame. Convert to
+  UI strings only when rendering diagnostics.
+- [ ] **Step 3: Surface diagnostics.** Include the metrics in the existing
+  provider diagnostics/dev panel so hardware tests can distinguish slow inference
+  from stale camera frames, bad ROI parity, and track-id churn.
+- [ ] **Step 4: Test with mocks.** Use a fake pipeline/source to assert metrics
+  update, errors are retained, and dropped-frame counters increment.
+- [ ] **Step 5: Commit.**
+
+**Progress (2026-06-07):** Initial typed metrics path landed. `ProviderDiagnostics`
+now has a static-label metric slot rendered by the dev panel; the MediaPipe
+pipeline records total/preprocess/palm/landmark durations, palm-run reason,
+track counts, hand count, and worker drop count without per-frame string
+formatting. Remaining in this task/adjacent tasks: capture frame age, selected
+camera format (Task 11.4), richer track-churn accounting, and retained last
+pipeline error.
+
+### Task 11.3: Restore `max_inference_hz` with latest-frame/drop-not-sleep semantics
+
+**Files:**
+- Modify: `crates/wc-core/src/input/providers/mediapipe/worker.rs`
+- Modify tests in `worker.rs`
+
+- [x] **Step 1: Keep freshness invariant.** Never sleep while an already-captured
+  frame ages in a camera buffer. If the single-thread source cannot drop stale
+  frames explicitly, split capture/processing into a one-slot latest-frame handoff:
+  capture overwrites the slot, processing consumes the newest frame.
+- [x] **Step 2: Honor `max_inference_hz`.** When over budget, drop/overwrite
+  frames before inference and report the drop. The cap is for thermals, not
+  latency; latest frame wins.
+- [x] **Step 3: Add regression tests.** A fast mock source with a low `max_hz`
+  should not process at source speed, should keep frame age bounded, and should
+  increment a dropped/overwritten counter.
+- [ ] **Step 4: Commit.**
+
+**Progress (2026-06-07):** `spawn_worker` now converts `max_inference_hz` into a
+minimum inference interval and drops/reports fresh over-budget frames instead of
+sleeping with a retained frame. `max_hz=0` remains uncapped. The worker tests now
+use a static fake inference backend, and
+`worker_honors_max_hz_by_dropping_over_budget_frames` verifies that a fast mock
+source under a 1 Hz cap emits at most one inference result in 120 ms while
+incrementing the dropped-frame counter.
+
+### Task 11.4: Choose camera formats from enumeration, not blind requests
+
+**Files:**
+- Modify: `crates/wc-core/src/input/providers/mediapipe/capture.rs`
+- Modify diagnostics from Task 11.2
+
+- [ ] **Step 1: Enumerate device formats.** Query supported modes and choose the
+  cheapest usable one that exists on the camera: prefer uncompressed RGB/YUYV when
+  available, otherwise MJPEG at a bounded size. Target 640x480 or 720p-class input
+  before falling back to the backend default.
+- [ ] **Step 2: Do not fail on exact-mode absence.** The previous blind
+  `Closest(640x480 MJPEG)` request failed on AVFoundation. Selection must degrade
+  gracefully and report the chosen format.
+- [ ] **Step 3: Manual smoke.** Open Madison's camera and the NUC camera, record
+  selected format and capture/decode cost in diagnostics.
+- [ ] **Step 4: Commit.**
+
+### Task 11.5: Remove hot-path copies/allocations and fix velocity
+
+**Files:**
+- Modify: `crates/wc-core/src/input/providers/mediapipe/pipeline.rs`
+- Modify: `crates/wc-core/src/input/providers/mediapipe/inference.rs`
+- Modify: `crates/wc-core/src/input/providers/mediapipe/inference_ort.rs`
+- Modify: `crates/wc-core/src/input/providers/mediapipe/signals.rs`
+
+- [ ] **Step 1: Preallocate pipeline scratch.** Reuse buffers for square pad,
+  resize, ROI warp, tensor input, projected landmarks, and hands. Avoid per-frame
+  `Vec` creation in preprocessing/postprocessing.
+- [ ] **Step 2: Reduce inference copies.** Keep `tract` as the baseline. For
+  `ort`, avoid `input.data.clone()` and output `to_vec()` where the crate permits
+  preallocated tensors or I/O binding. If the current `ort` API cannot do this
+  cleanly, document the exact copy cost in diagnostics and leave a narrow TODO
+  tied to the crate upgrade path.
+- [ ] **Step 3: Fix `palm_velocity`.** Store previous palm position per track and
+  pass previous/current positions into `palm_velocity`; assert nonzero velocity
+  for a moving hand fixture and zero velocity for `dt == 0`.
+- [ ] **Step 4: Profile.** Re-run `profile_pipeline_stages` and
+  `profile_inference_backends`; record before/after numbers in this plan or the
+  spec.
+- [ ] **Step 5: Commit.**
+
+### Task 11.6: Backend decision gate on the NUC
+
+**Files:**
+- Modify: this plan/spec with measured results
+- Code changes only if the gate fails
+
+- [ ] **Step 1: Run the NUC test.** Use the metrics from Task 11.2 in a
+  representative Line-sketch session long enough to expose thermal behavior
+  (minimum 30 minutes; longer soak remains the release gate).
+- [ ] **Step 2: Keep the current stack if it passes.** If tracking-frame latency,
+  frame age, track churn, and thermals are acceptable, do not migrate runtimes.
+- [ ] **Step 3: If it fails, choose the smallest backend change.** Prefer
+  platform-native `HandInference` backends (`ort` + OpenVINO/DirectML/CoreML) or a
+  native MediaPipe/Tasks sidecar before a Python sidecar. Python is acceptable
+  only for a temporary demo or as a last-resort fallback after this evidence.
+- [ ] **Step 4: Record the decision with numbers.**
+
+### Task 11.7: Acceptance cleanup
+
+**Files:**
+- Modify: plan/spec status
+- Add committed golden image if Madison approves one
+
+- [ ] **Step 1: Restore the hermetic positive-path golden** if an approved image
+  is available.
+- [ ] **Step 2: Run focused gates:**
+```bash
+cargo test -p wc-core --features hand-tracking-mediapipe mediapipe -- --nocapture
+cargo check -p wc-core --features hand-tracking-mediapipe-ort
+cargo xtask check-secrets
+```
+- [ ] **Step 3: Before merge, run the full AGENTS.md gate set** or explicitly
+  record any gate that was skipped and why.
 
 ---
 
