@@ -379,6 +379,59 @@ pub struct ProviderDiagnostics {
     /// [`ServiceConnection::Errored`] or [`DevicePresence::Failed`]. None when
     /// no error has occurred.
     pub last_error: Option<String>,
+    /// Provider-specific numeric/text metrics for the dev panel. Labels are
+    /// static so providers can update these without allocating strings in hot
+    /// paths.
+    pub metrics: SmallVec<[ProviderMetric; 16]>,
+}
+
+/// One provider-specific diagnostic metric.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProviderMetric {
+    /// Human-readable label shown in the dev panel.
+    pub label: &'static str,
+    /// Metric value.
+    pub value: ProviderMetricValue,
+}
+
+impl ProviderMetric {
+    /// Construct a duration metric.
+    #[must_use]
+    pub const fn duration(label: &'static str, value: Duration) -> Self {
+        Self {
+            label,
+            value: ProviderMetricValue::Duration(value),
+        }
+    }
+
+    /// Construct a counter metric.
+    #[must_use]
+    pub const fn count(label: &'static str, value: u64) -> Self {
+        Self {
+            label,
+            value: ProviderMetricValue::Count(value),
+        }
+    }
+
+    /// Construct a static text metric.
+    #[must_use]
+    pub const fn text(label: &'static str, value: &'static str) -> Self {
+        Self {
+            label,
+            value: ProviderMetricValue::Text(value),
+        }
+    }
+}
+
+/// Value for a provider-specific diagnostic metric.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProviderMetricValue {
+    /// A duration.
+    Duration(Duration),
+    /// An unsigned counter.
+    Count(u64),
+    /// Static text.
+    Text(&'static str),
 }
 
 /// One hand from a fused frame, tagged with the originating provider so

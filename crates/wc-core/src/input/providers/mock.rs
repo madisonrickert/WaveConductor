@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
+use smallvec::SmallVec;
 
 use crate::input::provider::HandTrackingProvider;
 use crate::input::state::{
@@ -134,6 +135,7 @@ impl HandTrackingProvider for MockProvider {
             active_policies: Vec::new(),
             dropped_frames: 0,
             last_error: None,
+            metrics: SmallVec::new(),
         }
     }
 }

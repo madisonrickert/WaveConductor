@@ -333,7 +333,33 @@ fn draw_hand_tracking_section(
                 ui.label(err);
                 ui.end_row();
             }
+
+            for metric in &diag.metrics {
+                draw_provider_metric_row(ui, metric);
+            }
         });
+}
+
+/// Render one provider-specific diagnostic metric row.
+fn draw_provider_metric_row(
+    ui: &mut bevy_egui::egui::Ui,
+    metric: &crate::input::state::ProviderMetric,
+) {
+    use crate::input::state::ProviderMetricValue;
+
+    ui.label(metric.label);
+    match metric.value {
+        ProviderMetricValue::Duration(value) => {
+            ui.label(format!("{} ms", value.as_millis()));
+        }
+        ProviderMetricValue::Count(value) => {
+            ui.label(value.to_string());
+        }
+        ProviderMetricValue::Text(value) => {
+            ui.label(value);
+        }
+    }
+    ui.end_row();
 }
 
 #[cfg(test)]

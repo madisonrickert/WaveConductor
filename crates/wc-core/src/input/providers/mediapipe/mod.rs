@@ -35,8 +35,8 @@ use self::worker::{spawn_worker, SourceFactory, WorkerHandle, WorkerMsg};
 use crate::input::hand::Hand;
 use crate::input::provider::{HandTrackingProvider, ProviderId};
 use crate::input::state::{
-    DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
-    ServiceConnection, MAX_HANDS,
+    DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderMetric,
+    ProviderStatus, ServiceConnection, MAX_HANDS,
 };
 
 mod anchors;
@@ -391,6 +391,7 @@ impl HandTrackingProvider for MediaPipeProvider {
         // target and apply the latest status.
         let mut new_target: Option<(SmallVec<[Hand; MAX_HANDS]>, Duration)> = None;
         let mut new_status = None;
+        let mut new_diagnostics = None;
         if let Ok(rt) = self.runtime.get_mut() {
             if let Some(consumer) = rt.consumer.as_mut() {
                 while let Ok(msg) = consumer.pop() {
@@ -399,6 +400,7 @@ impl HandTrackingProvider for MediaPipeProvider {
                             new_target = Some((hands, timestamp));
                         }
                         WorkerMsg::Status(s) => new_status = Some(s),
+                        WorkerMsg::Diagnostics(d) => new_diagnostics = Some(d),
                     }
                 }
             }
@@ -411,6 +413,29 @@ impl HandTrackingProvider for MediaPipeProvider {
         if let Some((hands, timestamp)) = new_target {
             self.target_hands = hands;
             self.target_ts = timestamp;
+        }
+        if let Some(worker_diag) = new_diagnostics {
+            if let Ok(mut d) = self.diagnostics.lock() {
+                d.dropped_frames = worker_diag.dropped_frames;
+                d.metrics.clear();
+                let p = worker_diag.pipeline;
+                d.metrics
+                    .push(ProviderMetric::text("Backend", backend_label()));
+                d.metrics
+                    .push(ProviderMetric::duration("Pipeline total", p.total));
+                d.metrics
+                    .push(ProviderMetric::duration("Preprocess", p.preprocess));
+                d.metrics.push(ProviderMetric::duration("Palm", p.palm));
+                d.metrics
+                    .push(ProviderMetric::duration("Landmark", p.landmark));
+                d.metrics
+                    .push(ProviderMetric::text("Palm reason", p.palm_reason.label()));
+                d.metrics
+                    .push(ProviderMetric::count("Tracks before", p.tracks_before));
+                d.metrics
+                    .push(ProviderMetric::count("Tracks after", p.tracks_after));
+                d.metrics.push(ProviderMetric::count("Hands", p.hands));
+            }
         }
 
         // Ease the exposed pose toward the held target every poll, so a

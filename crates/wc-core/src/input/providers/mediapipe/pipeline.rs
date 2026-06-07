@@ -17,7 +17,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::math::Vec3;
 use image::{imageops::FilterType, RgbImage};
@@ -77,6 +77,55 @@ impl Default for PipelineConfig {
     }
 }
 
+/// Why the palm detector ran or skipped for the latest processed frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PalmRunReason {
+    /// The pipeline had no carried track and needed initial acquisition.
+    #[default]
+    ColdStart,
+    /// Fewer than [`MAX_HANDS`] tracks were active, so detection searched for a
+    /// second/new hand.
+    BelowMaxHands,
+    /// The pipeline already had [`MAX_HANDS`] active tracks and skipped palm.
+    SkippedAtCapacity,
+    /// The frame was invalid; no model stage ran.
+    InvalidFrame,
+}
+
+impl PalmRunReason {
+    /// Static label for diagnostics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ColdStart => "cold_start",
+            Self::BelowMaxHands => "below_max_hands",
+            Self::SkippedAtCapacity => "skipped_at_capacity",
+            Self::InvalidFrame => "invalid_frame",
+        }
+    }
+}
+
+/// Timing and tracking metrics for the latest processed frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelineDiagnostics {
+    /// Total process time for one frame.
+    pub total: Duration,
+    /// Time spent on square padding / preprocessing before model stages.
+    pub preprocess: Duration,
+    /// Time spent in palm acquisition when it ran.
+    pub palm: Duration,
+    /// Time spent running landmark-path work across all ROIs.
+    pub landmark: Duration,
+    /// Why palm did or did not run.
+    pub palm_reason: PalmRunReason,
+    /// Number of carried tracks at frame start.
+    pub tracks_before: u64,
+    /// Number of tracks kept for the next frame.
+    pub tracks_after: u64,
+    /// Number of hands emitted for this frame.
+    pub hands: u64,
+}
+
 /// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
 ///
 /// [`grab_strength`] is calibrated to ideal open-hand geometry (fingers fully
@@ -120,6 +169,8 @@ pub struct Pipeline {
     /// deadzone while the worker thread runs. Refreshed at the top of each
     /// [`Self::process`]; `None` (tests, no UI) leaves the config value in force.
     live_grab_deadzone: Option<Arc<AtomicU32>>,
+    /// Diagnostics for the most recent processed frame.
+    last_diagnostics: PipelineDiagnostics,
 }
 
 impl Pipeline {
@@ -139,6 +190,7 @@ impl Pipeline {
             config,
             tracked: SmallVec::new(),
             live_grab_deadzone: None,
+            last_diagnostics: PipelineDiagnostics::default(),
         }
     }
 
@@ -147,6 +199,12 @@ impl Pipeline {
     /// worker thread. The bits are an `f32` (`to_bits`/`from_bits`).
     pub fn set_live_deadzone_source(&mut self, source: Arc<AtomicU32>) {
         self.live_grab_deadzone = Some(source);
+    }
+
+    /// Diagnostics for the most recent processed frame.
+    #[must_use]
+    pub fn diagnostics(&self) -> PipelineDiagnostics {
+        self.last_diagnostics
     }
 
     /// Run one frame through both stages and return the tracked hands.
@@ -160,6 +218,11 @@ impl Pipeline {
         frame: &Frame,
         dt: Duration,
     ) -> Result<SmallVec<[Hand; MAX_HANDS]>, InferenceError> {
+        let frame_start = Instant::now();
+        let mut diagnostics = PipelineDiagnostics {
+            tracks_before: u64::try_from(self.tracked.len()).unwrap_or(u64::MAX),
+            ..PipelineDiagnostics::default()
+        };
         // Pick up any live deadzone re-tune from the provider/UI before this
         // frame derives grab.
         if let Some(src) = &self.live_grab_deadzone {
@@ -169,11 +232,16 @@ impl Pipeline {
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
             self.tracker.end_frame();
             self.tracked.clear(); // a bad frame breaks tracking → re-acquire next
+            diagnostics.palm_reason = PalmRunReason::InvalidFrame;
+            diagnostics.total = frame_start.elapsed();
+            self.last_diagnostics = diagnostics;
             return Ok(hands);
         }
 
         // Square-pad to the larger side so detection coords are aspect-correct.
+        let stage_start = Instant::now();
         let square = square_pad(frame);
+        diagnostics.preprocess = stage_start.elapsed();
 
         // Count-gated re-detection (MediaPipe's detect-then-track): run palm
         // detection ONLY while fewer than MAX_HANDS are tracked — including cold
@@ -185,10 +253,18 @@ impl Pipeline {
         // [`associate`] merges fresh palm ROIs with the tracked ROIs: tracked win
         // (kept verbatim), only a non-overlapping detection is added as a new hand.
         let to_run: SmallVec<[RoiRect; MAX_HANDS]> = if self.tracked.len() < MAX_HANDS {
+            diagnostics.palm_reason = if self.tracked.is_empty() {
+                PalmRunReason::ColdStart
+            } else {
+                PalmRunReason::BelowMaxHands
+            };
+            let stage_start = Instant::now();
             let palm_rois = self.acquire_rois(&square)?;
+            diagnostics.palm = stage_start.elapsed();
             let tracked = std::mem::take(&mut self.tracked);
             associate(tracked, &palm_rois)
         } else {
+            diagnostics.palm_reason = PalmRunReason::SkippedAtCapacity;
             std::mem::take(&mut self.tracked)
         };
 
@@ -198,15 +274,21 @@ impl Pipeline {
         // next frame re-detects to re-acquire (or pick up a new hand).
         let mut next: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
         for roi in to_run {
+            let stage_start = Instant::now();
             if let Some((hand, next_roi)) = self.landmark_for(&square, roi, dt)? {
                 if roi_on_screen(&next_roi) {
                     hands.push(hand);
                     next.push(next_roi);
                 }
             }
+            diagnostics.landmark = diagnostics.landmark.saturating_add(stage_start.elapsed());
         }
         self.tracked = next;
         self.tracker.end_frame();
+        diagnostics.tracks_after = u64::try_from(self.tracked.len()).unwrap_or(u64::MAX);
+        diagnostics.hands = u64::try_from(hands.len()).unwrap_or(u64::MAX);
+        diagnostics.total = frame_start.elapsed();
+        self.last_diagnostics = diagnostics;
         Ok(hands)
     }
 
