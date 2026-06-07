@@ -145,6 +145,11 @@ pub struct HandTracker {
     /// Max palm-distance (same units as the positions) for two frames to count
     /// as the same hand.
     gate: f32,
+    /// Cumulative track lifecycle events (ids created + tracks aged out) since
+    /// construction. A churn signal for diagnostics: a stable pair of hands
+    /// leaves this flat, while flicker (acquire/lose loops, id swaps) makes it
+    /// climb. See [`Self::churn`].
+    churn: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +171,7 @@ impl Default for HandTracker {
             tracks: Vec::new(),
             next_id: 0,
             gate: 60.0,
+            churn: 0,
         }
     }
 }
@@ -221,6 +227,7 @@ impl HandTracker {
         }
         let id = self.next_id;
         self.next_id += 1;
+        self.churn = self.churn.saturating_add(1); // a new id is a churn event
         self.tracks.push(Track {
             id,
             chirality,
@@ -239,10 +246,21 @@ impl HandTracker {
     /// Call once per frame after all `assign` calls: drop tracks not seen this
     /// frame and reset the per-frame flags.
     pub fn end_frame(&mut self) {
+        let before = self.tracks.len();
         self.tracks.retain(|t| t.seen_this_frame);
+        let dropped = u64::try_from(before - self.tracks.len()).unwrap_or(0);
+        self.churn = self.churn.saturating_add(dropped); // aged-out tracks churn too
         for t in &mut self.tracks {
             t.seen_this_frame = false;
         }
+    }
+
+    /// Cumulative track churn (ids created + tracks aged out) since construction.
+    /// Surfaced in pipeline diagnostics so hardware tests can tell stable
+    /// tracking from acquire/lose flicker. Monotonic; never reset.
+    #[must_use]
+    pub fn churn(&self) -> u64 {
+        self.churn
     }
 }
 
@@ -407,6 +425,25 @@ mod tests {
         }
         assert_eq!(first.id, last.id, "id stays stable while chirality settles");
         assert_eq!(last.chirality, Chirality::Left, "flips after enough frames");
+    }
+
+    #[test]
+    fn tracker_churn_counts_creations_and_drops() {
+        let mut t = HandTracker::default();
+        assert_eq!(t.churn(), 0);
+        // Two fresh ids → churn 2.
+        t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        t.assign(Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
+        assert_eq!(t.churn(), 2, "two new ids");
+        // Next frame sees only one of them → the other ages out (+1 drop).
+        t.end_frame();
+        t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        t.end_frame();
+        assert_eq!(t.churn(), 3, "one track aged out");
+        // A stable hand adds no churn.
+        t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        t.end_frame();
+        assert_eq!(t.churn(), 3, "stable track does not churn");
     }
 
     #[test]

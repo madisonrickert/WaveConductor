@@ -55,6 +55,9 @@ pub enum WorkerMsg {
     Status(ProviderStatus),
     /// Pipeline diagnostics for the most recently processed frame.
     Diagnostics(MediaPipeWorkerDiagnostics),
+    /// A pipeline error string. Sent only on the (rare) error path, so the
+    /// `String` allocation never touches the steady-state frame loop.
+    Error(String),
 }
 
 /// Worker/pipeline diagnostics sent to the provider.
@@ -64,6 +67,15 @@ pub struct MediaPipeWorkerDiagnostics {
     pub pipeline: PipelineDiagnostics,
     /// Cumulative worker-side dropped messages/frames.
     pub dropped_frames: u64,
+    /// Wall time spent acquiring + decoding the frame that was just processed.
+    /// Separates a slow camera/decode from slow inference on hardware.
+    pub capture_decode: Duration,
+    /// Wall time since the previous processed frame: the effective inference
+    /// period (its inverse is the achieved inference rate, distinct from the
+    /// camera's capture rate).
+    pub inference_interval: Duration,
+    /// Cumulative count of pipeline (inference) errors since worker start.
+    pub pipeline_errors: u64,
 }
 
 /// Handle to a running worker; dropping or [`Self::stop`] joins the thread.
@@ -94,7 +106,7 @@ impl Drop for WorkerHandle {
 #[must_use]
 pub fn spawn_worker(
     make_source: SourceFactory,
-    mut pipeline: Pipeline,
+    pipeline: Pipeline,
     max_hz: u32,
     mut producer: Producer<WorkerMsg>,
 ) -> WorkerHandle {
@@ -110,86 +122,139 @@ pub fn spawn_worker(
         .name("wc-mediapipe-worker".into())
         .spawn(move || {
             // Build the source on this thread (so !Send backends are fine).
-            let Ok(mut source) = make_source() else {
+            let Ok(source) = make_source() else {
                 let _ = producer.push(WorkerMsg::Status(no_camera_status()));
                 return;
             };
-
-            let start = Instant::now();
-            let mut frame = Frame::default();
-            let mut last_inference = None;
-            let mut dropped_frames = 0_u64;
-            push_msg(
-                &mut producer,
-                WorkerMsg::Status(streaming_status(Duration::ZERO, 0)),
-                &mut dropped_frames,
+            run_worker_loop(
+                &stop_thread,
+                source,
+                pipeline,
+                min_inference_interval,
+                producer,
             );
-
-            while !stop_thread.load(Ordering::Relaxed) {
-                let loop_start = Instant::now();
-                match source.next_frame(&mut frame) {
-                    Ok(true) => {
-                        if !should_process_frame(last_inference, loop_start, min_inference_interval)
-                        {
-                            dropped_frames = dropped_frames.saturating_add(1);
-                            push_msg(
-                                &mut producer,
-                                WorkerMsg::Status(streaming_status(Duration::ZERO, dropped_frames)),
-                                &mut dropped_frames,
-                            );
-                            // Fast mocks and some non-blocking camera sources can
-                            // return frames immediately; after dropping one, back
-                            // off briefly so the cap doesn't busy-spin a core.
-                            std::thread::sleep(IDLE_POLL);
-                            continue;
-                        }
-
-                        // A budgeted frame is in hand: process it immediately.
-                        // No retained frame ages while we wait for the next budget
-                        // window; all over-budget frames have already been dropped.
-                        let now = loop_start.duration_since(start);
-                        let dt = last_inference
-                            .map_or(Duration::ZERO, |last| loop_start.duration_since(last));
-                        last_inference = Some(loop_start);
-                        if let Ok(hands) = pipeline.process(&frame, dt) {
-                            push_msg(
-                                &mut producer,
-                                WorkerMsg::Diagnostics(MediaPipeWorkerDiagnostics {
-                                    pipeline: pipeline.diagnostics(),
-                                    dropped_frames,
-                                }),
-                                &mut dropped_frames,
-                            );
-                            push_msg(
-                                &mut producer,
-                                WorkerMsg::Hands {
-                                    hands,
-                                    timestamp: now,
-                                },
-                                &mut dropped_frames,
-                            );
-                            push_msg(
-                                &mut producer,
-                                WorkerMsg::Status(streaming_status(Duration::ZERO, dropped_frames)),
-                                &mut dropped_frames,
-                            );
-                        }
-                    }
-                    Ok(false) => {
-                        // No frame ready (e.g. an exhausted mock): brief sleep so a
-                        // non-blocking source can't busy-spin a core.
-                        std::thread::sleep(IDLE_POLL);
-                    }
-                    Err(_) => {
-                        let _ = producer.push(WorkerMsg::Status(no_camera_status()));
-                        std::thread::sleep(IDLE_POLL);
-                    }
-                }
-            }
         })
         .ok();
 
     WorkerHandle { stop, join }
+}
+
+/// The worker's capture→process→publish loop, run on the worker thread until
+/// `stop` is set. Split out of [`spawn_worker`] so each stays readable. Captures
+/// the freshest frame, drops over-budget frames before inference (thermal cap,
+/// newest frame wins), runs the pipeline, and publishes hands, status, and
+/// diagnostics (including the rare error path) over the ring.
+fn run_worker_loop(
+    stop: &AtomicBool,
+    mut source: Box<dyn FrameSource>,
+    mut pipeline: Pipeline,
+    min_inference_interval: Option<Duration>,
+    mut producer: Producer<WorkerMsg>,
+) {
+    let start = Instant::now();
+    let mut frame = Frame::default();
+    let mut last_inference = None;
+    let mut dropped_frames = 0_u64;
+    let mut pipeline_errors = 0_u64;
+    push_msg(
+        &mut producer,
+        WorkerMsg::Status(streaming_status(Duration::ZERO, 0)),
+        &mut dropped_frames,
+    );
+
+    while !stop.load(Ordering::Relaxed) {
+        let loop_start = Instant::now();
+        let next = source.next_frame(&mut frame);
+        // Time from loop top to the frame being decoded in `frame`.
+        let capture_decode = loop_start.elapsed();
+        match next {
+            Ok(true) => {
+                if !should_process_frame(last_inference, loop_start, min_inference_interval) {
+                    dropped_frames = dropped_frames.saturating_add(1);
+                    push_msg(
+                        &mut producer,
+                        WorkerMsg::Status(streaming_status(Duration::ZERO, dropped_frames)),
+                        &mut dropped_frames,
+                    );
+                    // Fast mocks and some non-blocking camera sources can return
+                    // frames immediately; after dropping one, back off briefly so
+                    // the cap doesn't busy-spin a core.
+                    std::thread::sleep(IDLE_POLL);
+                    continue;
+                }
+
+                // A budgeted frame is in hand: process it immediately. No retained
+                // frame ages while we wait for the next budget window; all
+                // over-budget frames have already been dropped.
+                let now = loop_start.duration_since(start);
+                let dt =
+                    last_inference.map_or(Duration::ZERO, |last| loop_start.duration_since(last));
+                last_inference = Some(loop_start);
+                match pipeline.process(&frame, dt) {
+                    Ok(hands) => {
+                        let diag = worker_diag(
+                            &pipeline,
+                            dropped_frames,
+                            capture_decode,
+                            dt,
+                            pipeline_errors,
+                        );
+                        push_msg(
+                            &mut producer,
+                            WorkerMsg::Diagnostics(diag),
+                            &mut dropped_frames,
+                        );
+                        push_msg(
+                            &mut producer,
+                            WorkerMsg::Hands {
+                                hands,
+                                timestamp: now,
+                            },
+                            &mut dropped_frames,
+                        );
+                        // last_frame_ago = the inter-frame interval, so the dev
+                        // panel shows the achieved cadence rather than 0.
+                        push_msg(
+                            &mut producer,
+                            WorkerMsg::Status(streaming_status(dt, dropped_frames)),
+                            &mut dropped_frames,
+                        );
+                    }
+                    Err(e) => {
+                        // Surface the error rather than silently dropping the
+                        // frame; count it and forward the (rare) string.
+                        pipeline_errors = pipeline_errors.saturating_add(1);
+                        push_msg(
+                            &mut producer,
+                            WorkerMsg::Error(e.to_string()),
+                            &mut dropped_frames,
+                        );
+                        let diag = worker_diag(
+                            &pipeline,
+                            dropped_frames,
+                            capture_decode,
+                            dt,
+                            pipeline_errors,
+                        );
+                        push_msg(
+                            &mut producer,
+                            WorkerMsg::Diagnostics(diag),
+                            &mut dropped_frames,
+                        );
+                    }
+                }
+            }
+            Ok(false) => {
+                // No frame ready (e.g. an exhausted mock): brief sleep so a
+                // non-blocking source can't busy-spin a core.
+                std::thread::sleep(IDLE_POLL);
+            }
+            Err(_) => {
+                let _ = producer.push(WorkerMsg::Status(no_camera_status()));
+                std::thread::sleep(IDLE_POLL);
+            }
+        }
+    }
 }
 
 /// Minimum interval between inference runs for a requested max rate.
@@ -206,6 +271,24 @@ fn should_process_frame(
     match (last_inference, min_interval) {
         (_, None) | (None, Some(_)) => true,
         (Some(last), Some(interval)) => now.duration_since(last) >= interval,
+    }
+}
+
+/// Assemble a diagnostics snapshot for one processed frame (shared by the
+/// success and error paths so the field set stays in lockstep).
+fn worker_diag(
+    pipeline: &Pipeline,
+    dropped_frames: u64,
+    capture_decode: Duration,
+    inference_interval: Duration,
+    pipeline_errors: u64,
+) -> MediaPipeWorkerDiagnostics {
+    MediaPipeWorkerDiagnostics {
+        pipeline: pipeline.diagnostics(),
+        dropped_frames,
+        capture_decode,
+        inference_interval,
+        pipeline_errors,
     }
 }
 
@@ -347,7 +430,7 @@ mod tests {
                             max_dropped = max_dropped.max(dropped_since_start);
                         }
                     }
-                    WorkerMsg::Diagnostics(_) => {}
+                    WorkerMsg::Diagnostics(_) | WorkerMsg::Error(_) => {}
                 }
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -362,5 +445,50 @@ mod tests {
             max_dropped > 0,
             "over-budget fresh frames were not reported as dropped"
         );
+    }
+
+    /// Inference backend that always fails, so `Pipeline::process` returns `Err`.
+    struct FailingInference;
+
+    impl HandInference for FailingInference {
+        fn run(&mut self, _input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
+            Err(InferenceError::Run("boom".into()))
+        }
+    }
+
+    #[test]
+    fn worker_retains_pipeline_errors() {
+        let pipeline = Pipeline::new(
+            Box::new(FailingInference),
+            Box::new(FailingInference),
+            PipelineConfig::default(),
+        );
+        let make_source = looping_solid_source();
+        let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
+        let mut handle = spawn_worker(make_source, pipeline, 30, producer);
+
+        let deadline = Instant::now() + Duration::from_millis(120);
+        let mut saw_error = false;
+        let mut max_errors = 0_u64;
+        while Instant::now() < deadline {
+            while let Ok(msg) = consumer.pop() {
+                match msg {
+                    WorkerMsg::Error(_) => saw_error = true,
+                    WorkerMsg::Diagnostics(d) => max_errors = max_errors.max(d.pipeline_errors),
+                    _ => {}
+                }
+            }
+            if saw_error && max_errors > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        handle.stop();
+
+        assert!(
+            saw_error,
+            "pipeline error was not surfaced as WorkerMsg::Error"
+        );
+        assert!(max_errors > 0, "pipeline_errors counter did not increment");
     }
 }

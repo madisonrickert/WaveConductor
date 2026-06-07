@@ -124,6 +124,10 @@ pub struct PipelineDiagnostics {
     pub tracks_after: u64,
     /// Number of hands emitted for this frame.
     pub hands: u64,
+    /// Cumulative track churn (ids created + aged out) since pipeline start.
+    /// Flat for a stable hand; climbs under acquire/lose flicker. See
+    /// [`super::signals::HandTracker::churn`].
+    pub track_churn: u64,
 }
 
 /// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
@@ -287,6 +291,7 @@ impl Pipeline {
         self.tracker.end_frame();
         diagnostics.tracks_after = u64::try_from(self.tracked.len()).unwrap_or(u64::MAX);
         diagnostics.hands = u64::try_from(hands.len()).unwrap_or(u64::MAX);
+        diagnostics.track_churn = self.tracker.churn();
         diagnostics.total = frame_start.elapsed();
         self.last_diagnostics = diagnostics;
         Ok(hands)

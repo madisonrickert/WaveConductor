@@ -392,6 +392,7 @@ impl HandTrackingProvider for MediaPipeProvider {
         let mut new_target: Option<(SmallVec<[Hand; MAX_HANDS]>, Duration)> = None;
         let mut new_status = None;
         let mut new_diagnostics = None;
+        let mut new_error = None;
         if let Ok(rt) = self.runtime.get_mut() {
             if let Some(consumer) = rt.consumer.as_mut() {
                 while let Ok(msg) = consumer.pop() {
@@ -401,6 +402,7 @@ impl HandTrackingProvider for MediaPipeProvider {
                         }
                         WorkerMsg::Status(s) => new_status = Some(s),
                         WorkerMsg::Diagnostics(d) => new_diagnostics = Some(d),
+                        WorkerMsg::Error(e) => new_error = Some(e),
                     }
                 }
             }
@@ -414,27 +416,46 @@ impl HandTrackingProvider for MediaPipeProvider {
             self.target_hands = hands;
             self.target_ts = timestamp;
         }
-        if let Some(worker_diag) = new_diagnostics {
+        if new_diagnostics.is_some() || new_error.is_some() {
             if let Ok(mut d) = self.diagnostics.lock() {
-                d.dropped_frames = worker_diag.dropped_frames;
-                d.metrics.clear();
-                let p = worker_diag.pipeline;
-                d.metrics
-                    .push(ProviderMetric::text("Backend", backend_label()));
-                d.metrics
-                    .push(ProviderMetric::duration("Pipeline total", p.total));
-                d.metrics
-                    .push(ProviderMetric::duration("Preprocess", p.preprocess));
-                d.metrics.push(ProviderMetric::duration("Palm", p.palm));
-                d.metrics
-                    .push(ProviderMetric::duration("Landmark", p.landmark));
-                d.metrics
-                    .push(ProviderMetric::text("Palm reason", p.palm_reason.label()));
-                d.metrics
-                    .push(ProviderMetric::count("Tracks before", p.tracks_before));
-                d.metrics
-                    .push(ProviderMetric::count("Tracks after", p.tracks_after));
-                d.metrics.push(ProviderMetric::count("Hands", p.hands));
+                if let Some(err) = new_error {
+                    d.last_error = Some(err);
+                }
+                if let Some(worker_diag) = new_diagnostics {
+                    d.dropped_frames = worker_diag.dropped_frames;
+                    d.metrics.clear();
+                    let p = worker_diag.pipeline;
+                    d.metrics
+                        .push(ProviderMetric::text("Backend", backend_label()));
+                    d.metrics
+                        .push(ProviderMetric::duration("Pipeline total", p.total));
+                    d.metrics.push(ProviderMetric::duration(
+                        "Capture+decode",
+                        worker_diag.capture_decode,
+                    ));
+                    d.metrics.push(ProviderMetric::duration(
+                        "Inference interval",
+                        worker_diag.inference_interval,
+                    ));
+                    d.metrics
+                        .push(ProviderMetric::duration("Preprocess", p.preprocess));
+                    d.metrics.push(ProviderMetric::duration("Palm", p.palm));
+                    d.metrics
+                        .push(ProviderMetric::duration("Landmark", p.landmark));
+                    d.metrics
+                        .push(ProviderMetric::text("Palm reason", p.palm_reason.label()));
+                    d.metrics
+                        .push(ProviderMetric::count("Tracks before", p.tracks_before));
+                    d.metrics
+                        .push(ProviderMetric::count("Tracks after", p.tracks_after));
+                    d.metrics.push(ProviderMetric::count("Hands", p.hands));
+                    d.metrics
+                        .push(ProviderMetric::count("Track churn", p.track_churn));
+                    d.metrics.push(ProviderMetric::count(
+                        "Pipeline errors",
+                        worker_diag.pipeline_errors,
+                    ));
+                }
             }
         }
 
