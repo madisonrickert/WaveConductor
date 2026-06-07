@@ -109,14 +109,21 @@ pub fn palm_velocity(prev: Vec3, cur: Vec3, dt: Duration) -> Vec3 {
 /// is the other chirality. See [`HandTracker::assign`].
 const CHIRALITY_FLIP_FRAMES: u8 = 4;
 
-/// The result of [`HandTracker::assign`]: a stable track id and the track's
-/// held (hysteresis-smoothed) [`Chirality`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The result of [`HandTracker::assign`]: a stable track id, the track's
+/// held (hysteresis-smoothed) [`Chirality`], and the palm position this track
+/// held on the *previous* frame (for velocity).
+// Not `Eq`: `prev_pos` carries `f32`s.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Assigned {
     /// Stable per-hand id, reused only after the hand leaves.
     pub id: u32,
     /// Chirality held across brief per-frame handedness flips.
     pub chirality: Chirality,
+    /// The palm position this track held on the previous frame, or `None` on
+    /// the hand's first sighting. Pair with the current palm position and the
+    /// inter-frame `dt` in [`palm_velocity`] for a finite-difference velocity;
+    /// without it velocity is undefined (a fresh track has no history).
+    pub prev_pos: Option<Vec3>,
 }
 
 /// Assigns stable per-hand IDs across frames.
@@ -190,6 +197,9 @@ impl HandTracker {
         }
         if let Some((i, _)) = best {
             let t = &mut self.tracks[i];
+            // Capture last frame's position before overwriting, so the caller can
+            // finite-difference it against `pos` for velocity.
+            let prev_pos = Some(t.pos);
             t.pos = pos;
             t.seen_this_frame = true;
             // Sticky chirality: only flip after CHIRALITY_FLIP_FRAMES consecutive
@@ -206,6 +216,7 @@ impl HandTracker {
             return Assigned {
                 id: t.id,
                 chirality: t.chirality,
+                prev_pos,
             };
         }
         let id = self.next_id;
@@ -217,7 +228,12 @@ impl HandTracker {
             pos,
             seen_this_frame: true,
         });
-        Assigned { id, chirality }
+        // A brand-new track has no previous position → velocity starts at zero.
+        Assigned {
+            id,
+            chirality,
+            prev_pos: None,
+        }
     }
 
     /// Call once per frame after all `assign` calls: drop tracks not seen this
@@ -317,6 +333,29 @@ mod tests {
             palm_velocity(Vec3::ZERO, Vec3::ONE, Duration::ZERO),
             Vec3::ZERO
         );
+    }
+
+    #[test]
+    fn tracker_reports_prev_pos_for_velocity() {
+        // First sighting has no history; the next frame reports last frame's
+        // position so the caller can finite-difference it into a velocity.
+        let mut t = HandTracker::default();
+        let first = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        assert_eq!(first.prev_pos, None, "fresh track has no previous position");
+        t.end_frame();
+        let moved = t.assign(Chirality::Right, Vec3::new(10.0, 200.0, 0.0));
+        assert_eq!(
+            moved.prev_pos,
+            Some(Vec3::new(0.0, 200.0, 0.0)),
+            "prev_pos is the position held last frame",
+        );
+        // (10 mm − 0 mm) / 0.1 s = 100 mm/s in x.
+        let v = palm_velocity(
+            moved.prev_pos.unwrap_or(Vec3::ZERO),
+            Vec3::new(10.0, 200.0, 0.0),
+            Duration::from_millis(100),
+        );
+        assert!((v.x - 100.0).abs() < 1e-3, "v={v:?}");
     }
 
     #[test]

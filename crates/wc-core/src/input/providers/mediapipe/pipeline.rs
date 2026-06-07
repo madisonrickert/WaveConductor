@@ -356,10 +356,10 @@ impl Pipeline {
         // Position-based id with a hysteresis-held chirality, so a spurious
         // per-frame handedness flip neither churns the id nor flickers downstream.
         let assigned = self.tracker.assign(observed_chirality, palm_pos);
-        // Velocity needs the previous palm position; the tracker holds it, but a
-        // simple per-frame estimate is sufficient here (refined with history in
-        // a later pass). Start at zero on first sighting.
-        let velocity = palm_velocity(palm_pos, palm_pos, dt);
+        // Finite-difference the palm against its previous-frame position (held by
+        // the tracker) over the inter-frame `dt`. A fresh track has no history, so
+        // velocity starts at zero on first sighting; `dt == 0` is also zero.
+        let velocity = palm_velocity(assigned.prev_pos.unwrap_or(palm_pos), palm_pos, dt);
 
         // Next frame tracks from these landmarks, skipping palm detection.
         let next_roi = roi_from_landmarks(&img_landmarks);
