@@ -175,6 +175,16 @@ pub struct Pipeline {
     live_grab_deadzone: Option<Arc<AtomicU32>>,
     /// Diagnostics for the most recent processed frame.
     last_diagnostics: PipelineDiagnostics,
+    /// Reused square-pad scratch image (taken out via `mem::take` while
+    /// processing so the per-frame methods can borrow it without aliasing
+    /// `&mut self`). Avoids a per-frame `RgbImage` allocation.
+    square_buf: RgbImage,
+    /// Reused ROI-warp crop (`LM_SIZE`²), refilled per landmark stage.
+    warp_buf: RgbImage,
+    /// Reused palm-stage input tensor (`192²×3` f32), refilled each acquisition.
+    palm_input: Tensor,
+    /// Reused landmark-stage input tensor (`224²×3` f32), refilled per ROI.
+    landmark_input: Tensor,
 }
 
 impl Pipeline {
@@ -195,6 +205,20 @@ impl Pipeline {
             tracked: SmallVec::new(),
             live_grab_deadzone: None,
             last_diagnostics: PipelineDiagnostics::default(),
+            // Scratch buffers, pre-sized so steady-state processing allocates
+            // nothing: the input tensors fill to capacity on the first frame and
+            // are cleared+refilled thereafter; the images (re)allocate only if the
+            // camera frame size changes.
+            square_buf: RgbImage::default(),
+            warp_buf: RgbImage::new(LM_SIZE, LM_SIZE),
+            palm_input: Tensor {
+                data: Vec::with_capacity(idx(PALM_SIZE) * idx(PALM_SIZE) * 3),
+                shape: vec![1, idx(PALM_SIZE), idx(PALM_SIZE), 3],
+            },
+            landmark_input: Tensor {
+                data: Vec::with_capacity(idx(LM_SIZE) * idx(LM_SIZE) * 3),
+                shape: vec![1, idx(LM_SIZE), idx(LM_SIZE), 3],
+            },
         }
     }
 
@@ -243,8 +267,11 @@ impl Pipeline {
         }
 
         // Square-pad to the larger side so detection coords are aspect-correct.
+        // Take the reused buffer out of `self` so the per-frame methods below can
+        // borrow it alongside `&mut self` without aliasing; restored before return.
         let stage_start = Instant::now();
-        let square = square_pad(frame);
+        let mut square = std::mem::take(&mut self.square_buf);
+        square_pad_into(frame, &mut square);
         diagnostics.preprocess = stage_start.elapsed();
 
         // Count-gated re-detection (MediaPipe's detect-then-track): run palm
@@ -288,6 +315,7 @@ impl Pipeline {
             diagnostics.landmark = diagnostics.landmark.saturating_add(stage_start.elapsed());
         }
         self.tracked = next;
+        self.square_buf = square; // return the reused buffer to its home
         self.tracker.end_frame();
         diagnostics.tracks_after = u64::try_from(self.tracked.len()).unwrap_or(u64::MAX);
         diagnostics.hands = u64::try_from(hands.len()).unwrap_or(u64::MAX);
@@ -304,8 +332,11 @@ impl Pipeline {
         &mut self,
         square: &RgbImage,
     ) -> Result<SmallVec<[RoiRect; MAX_HANDS]>, InferenceError> {
-        let palm_in = to_nchw_unit(&resize(square, PALM_SIZE, PALM_SIZE), PALM_SIZE);
-        let out = self.palm.run(&palm_in)?;
+        // `resize` allocates its own output (an `image` crate limitation); the
+        // input tensor it feeds is the reused scratch (`palm_input`).
+        let resized = resize(square, PALM_SIZE, PALM_SIZE);
+        fill_nchw_unit(&resized, &mut self.palm_input);
+        let out = self.palm.run(&self.palm_input)?;
         let (boxes, scores) = pick_palm_outputs(&out)?;
         let mut dets = weighted_nms(
             decode_palm_detections(
@@ -331,9 +362,11 @@ impl Pipeline {
         roi: RoiRect,
         dt: Duration,
     ) -> Result<Option<(Hand, RoiRect)>, InferenceError> {
-        let crop = warp_roi(square, &roi, LM_SIZE);
-        let lm_in = to_nchw_unit(&crop, LM_SIZE);
-        let out = self.landmark.run(&lm_in)?;
+        // Warp the ROI into the reused crop buffer, then into the reused input
+        // tensor — no per-ROI image/tensor allocation.
+        warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
+        fill_nchw_unit(&self.warp_buf, &mut self.landmark_input);
+        let out = self.landmark.run(&self.landmark_input)?;
         let (raw_lms, presence, handed) = pick_landmark_outputs(&out)?;
         if presence < self.config.presence_threshold {
             return Ok(None);
@@ -470,10 +503,15 @@ fn byte(v: f32) -> u8 {
 
 // --- image helpers -------------------------------------------------------
 
-/// Square-pad a frame to its larger side (black bars), origin-centered.
-fn square_pad(frame: &Frame) -> RgbImage {
+/// Square-pad a frame to its larger side (black bars), origin-centered, into a
+/// reused `out` buffer. (Re)allocates `out` only when the side changes — i.e.
+/// once for a fixed camera resolution — so steady-state padding allocates
+/// nothing. The black bars stay zero across frames (they are never written).
+fn square_pad_into(frame: &Frame, out: &mut RgbImage) {
     let side = frame.width.max(frame.height);
-    let mut img = RgbImage::new(side, side);
+    if out.width() != side || out.height() != side {
+        *out = RgbImage::new(side, side);
+    }
     let ox = (side - frame.width) / 2;
     let oy = (side - frame.height) / 2;
     let w = idx(frame.width);
@@ -481,13 +519,19 @@ fn square_pad(frame: &Frame) -> RgbImage {
         let row = idx(y) * w * 3;
         for x in 0..frame.width {
             let i = row + idx(x) * 3;
-            img.put_pixel(
+            out.put_pixel(
                 ox + x,
                 oy + y,
                 image::Rgb([frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2]]),
             );
         }
     }
+}
+
+/// Allocating convenience wrapper over [`square_pad_into`] (tests/benchmarks).
+fn square_pad(frame: &Frame) -> RgbImage {
+    let mut img = RgbImage::default();
+    square_pad_into(frame, &mut img);
     img
 }
 
@@ -495,31 +539,46 @@ fn resize(img: &RgbImage, w: u32, h: u32) -> RgbImage {
     image::imageops::resize(img, w, h, FilterType::Triangle)
 }
 
-/// Convert an RGB image to an NHWC `[1, size, size, 3]` `f32` tensor in `[0,1]`.
-fn to_nchw_unit(img: &RgbImage, size: u32) -> Tensor {
-    let n = idx(size);
-    let mut data = Vec::with_capacity(n * n * 3);
+/// Fill `out` with the NHWC `[1, h, w, 3]` `f32` tensor (RGB in `[0,1]`) of
+/// `img`, reusing `out`'s buffers. `data.clear()` keeps capacity, so after the
+/// first frame this refills without allocating.
+fn fill_nchw_unit(img: &RgbImage, out: &mut Tensor) {
+    out.data.clear();
     for p in img.pixels() {
-        data.push(f32::from(p[0]) / 255.0);
-        data.push(f32::from(p[1]) / 255.0);
-        data.push(f32::from(p[2]) / 255.0);
+        out.data.push(f32::from(p[0]) / 255.0);
+        out.data.push(f32::from(p[1]) / 255.0);
+        out.data.push(f32::from(p[2]) / 255.0);
     }
-    Tensor {
-        data,
-        shape: vec![1, n, n, 3],
-    }
+    out.shape.clear();
+    out.shape
+        .extend_from_slice(&[1, idx(img.height()), idx(img.width()), 3]);
 }
 
-/// Warp the rotated normalized ROI out of `square` into an `out`×`out` RGB crop
-/// (bilinear). Inverse-maps each output pixel through the ROI, mirroring
-/// [`project_landmarks`].
-fn warp_roi(square: &RgbImage, roi: &RoiRect, out: u32) -> RgbImage {
+/// Allocating convenience wrapper over [`fill_nchw_unit`] (tests/benchmarks).
+/// `size` is unused except to document the expected square dimension.
+fn to_nchw_unit(img: &RgbImage, size: u32) -> Tensor {
+    let n = idx(size);
+    let mut out = Tensor {
+        data: Vec::with_capacity(n * n * 3),
+        shape: Vec::with_capacity(4),
+    };
+    fill_nchw_unit(img, &mut out);
+    out
+}
+
+/// Warp the rotated normalized ROI out of `square` into a reused `out_size`²
+/// RGB crop `dst` (bilinear). Inverse-maps each output pixel through the ROI,
+/// mirroring [`project_landmarks`]. (Re)allocates `dst` only when the side
+/// changes, so per-frame warping allocates nothing.
+fn warp_roi_into(square: &RgbImage, roi: &RoiRect, out_size: u32, dst: &mut RgbImage) {
+    if dst.width() != out_size || dst.height() != out_size {
+        *dst = RgbImage::new(out_size, out_size);
+    }
     let side = dim(square.width());
     let (sin, cos) = roi.rotation.sin_cos();
-    let mut dst = RgbImage::new(out, out);
-    let outf = dim(out);
-    for oy in 0..out {
-        for ox in 0..out {
+    let outf = dim(out_size);
+    for oy in 0..out_size {
+        for ox in 0..out_size {
             let u = (dim(ox) / outf - 0.5) * roi.size;
             let v = (dim(oy) / outf - 0.5) * roi.size;
             let nx = roi.cx + (u * cos - v * sin);
@@ -528,6 +587,12 @@ fn warp_roi(square: &RgbImage, roi: &RoiRect, out: u32) -> RgbImage {
             dst.put_pixel(ox, oy, px);
         }
     }
+}
+
+/// Allocating convenience wrapper over [`warp_roi_into`] (tests/benchmarks).
+fn warp_roi(square: &RgbImage, roi: &RoiRect, out: u32) -> RgbImage {
+    let mut dst = RgbImage::default();
+    warp_roi_into(square, roi, out, &mut dst);
     dst
 }
 

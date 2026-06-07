@@ -66,6 +66,17 @@ impl OrtInference {
 }
 
 impl HandInference for OrtInference {
+    /// Run one stage.
+    ///
+    /// Two residual copies remain, both bound by the `ort`/trait APIs rather than
+    /// the pipeline: the input is cloned into an owned `OrtTensor`
+    /// (`from_array` takes ownership; ≈110 KB palm / ≈150 KB landmark f32), and
+    /// each output is copied out of `ort`'s arena into our runtime-agnostic
+    /// `Tensor` (the trait returns owned `Vec`s; the largest is the ≈145 KB palm
+    /// box tensor). The pipeline's per-frame *input* buffer is already reused
+    /// upstream (see [`super::pipeline::Pipeline`]); removing these last copies
+    /// needs `ort` I/O binding with preallocated tensors — a narrow,
+    /// profiling-gated follow-up tied to the `ort` upgrade path, not done blind.
     fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
         let run_err = |e: ort::Error| InferenceError::Run(e.to_string());
 

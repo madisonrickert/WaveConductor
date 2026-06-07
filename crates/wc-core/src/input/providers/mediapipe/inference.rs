@@ -127,6 +127,13 @@ impl HandInference for TractInference {
         }
         // Fully-qualified: tract's `Tensor` is shadowed in this module by our
         // own public `Tensor` type (the trait's I/O type).
+        //
+        // `from_shape` copies `input.data` into tract's tensor, and the outputs
+        // below are copied back into owned `Tensor`s — both bound by the
+        // tract/trait APIs (the trait returns owned `Vec`s), not the pipeline,
+        // whose per-frame input buffer is already reused (see
+        // [`super::pipeline::Pipeline`]). Removing these residual copies would
+        // need tract input/output tensor reuse — a profiling-gated follow-up.
         let tensor = tract_onnx::prelude::Tensor::from_shape(&input.shape, &input.data)
             .map_err(|e| InferenceError::Run(e.to_string()))?;
         let outputs = self
