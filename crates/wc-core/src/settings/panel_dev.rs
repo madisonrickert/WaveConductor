@@ -9,9 +9,11 @@
 //! ## Task 19: v4 chrome
 //!
 //! The `egui::Window` is replaced by `egui::Area` + [`crate::ui::backdrop_blur_frame`]
-//! for the translucent frosted-glass look. A `ScrollArea` wraps the world
-//! inspector so it remains usable on shorter displays. Shift+D is the only
-//! toggle — there is no click-outside dismiss for this developer tool.
+//! for the translucent frosted-glass look. A single `ScrollArea` wraps the whole
+//! panel body — diagnostics, tuning, and the world inspector — with each section
+//! in a collapsible header, so nothing falls off the bottom on shorter displays.
+//! Shift+D is the only toggle — there is no click-outside dismiss for this
+//! developer tool.
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::ActionState;
@@ -60,8 +62,9 @@ fn dev_panel_visible(visible: Res<'_, DevPanelVisible>) -> bool {
 ///
 /// Uses `egui::Area` for fixed top-left positioning (below where the Home
 /// button sits) and wraps content in [`backdrop_blur_frame`] for the
-/// translucent frosted-glass look. A `ScrollArea` wraps the world inspector
-/// so it remains usable when the inspector content exceeds the window height.
+/// translucent frosted-glass look. A single `ScrollArea` wraps the whole panel
+/// body and each section sits in a collapsible header, so the panel stays
+/// on-screen when its content exceeds the window height.
 ///
 /// Only runs when [`DevPanelVisible`] is `true` (gated by the
 /// `dev_panel_visible` run condition in [`add_systems`]).
@@ -144,28 +147,44 @@ fn draw_dev_panel(world: &mut World) {
                     );
                     ui.separator();
 
-                    // Hand Tracking section — curated diagnostics from the multi-axis
-                    // ProviderStatus + ProviderDiagnostics. Falls back silently if the
-                    // resource doesn't exist (e.g., feature off, or pre-install state).
-                    //
-                    // Snapshot into locals before the closure so `world` is fully
-                    // released by the time `ui_for_world` takes its `&mut World` borrow.
-                    if let Some((primary_id, status, diag)) = &registry_snapshot {
-                        draw_hand_tracking_section(ui, *primary_id, status, diag);
-                        ui.separator();
-                    }
-
-                    // Live MediaPipe feel tuning — readout + sliders bound to the
-                    // persisted settings (edits committed after the closure).
-                    if let Some(t) = tuning.as_mut() {
-                        draw_hand_tuning_controls(ui, &style, t, hand_readout);
-                        ui.separator();
-                    }
-
+                    // One outer scroll area wraps every section so none can fall
+                    // off the bottom of the screen — the curated diagnostics grid
+                    // grew long enough to overflow on shorter displays. Sections
+                    // are collapsible so the long grid can be folded away, and the
+                    // world inspector no longer needs its own (nested) scroll.
+                    // `auto_shrink([false, true])`: keep a stable width, but be only
+                    // as tall as the content up to `max_height`, then scroll.
                     bevy_egui::egui::ScrollArea::vertical()
-                        .max_height((window_height - 200.0).max(100.0))
+                        .auto_shrink([false, true])
+                        .max_height((window_height - 140.0).max(120.0))
                         .show(ui, |ui| {
-                            bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+                            // Hand Tracking section — curated diagnostics from the
+                            // multi-axis ProviderStatus + ProviderDiagnostics.
+                            // Snapshotted into locals before the closure so `world`
+                            // is free for `ui_for_world`'s `&mut World` borrow below.
+                            if let Some((primary_id, status, diag)) = &registry_snapshot {
+                                bevy_egui::egui::CollapsingHeader::new("Hand tracking")
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        draw_hand_tracking_section(ui, *primary_id, status, diag);
+                                    });
+                            }
+
+                            // Live MediaPipe feel tuning — readout + sliders bound to
+                            // the persisted settings (edits committed after the closure).
+                            if let Some(t) = tuning.as_mut() {
+                                bevy_egui::egui::CollapsingHeader::new("Hand tuning (MediaPipe)")
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        draw_hand_tuning_controls(ui, &style, t, hand_readout);
+                                    });
+                            }
+
+                            bevy_egui::egui::CollapsingHeader::new("World inspector")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+                                });
                         });
                 },
             );
@@ -197,8 +216,6 @@ fn draw_hand_tuning_controls(
 ) {
     use bevy_egui::egui;
 
-    ui.label(egui::RichText::new("HAND TUNING (MediaPipe)").size(13.0));
-    ui.add_space(4.0);
     if let Some((count, grab, pinch)) = readout {
         ui.label(format!(
             "Live:  {count} hand(s)  ·  grab {grab:.2}  ·  pinch {pinch:.2}"
@@ -240,9 +257,6 @@ fn draw_hand_tracking_section(
     diag: &crate::input::state::ProviderDiagnostics,
 ) {
     use crate::input::state::{DevicePresence, ServiceConnection, TrackingFlow};
-
-    ui.label(bevy_egui::egui::RichText::new("HAND TRACKING").size(13.0));
-    ui.add_space(4.0);
 
     bevy_egui::egui::Grid::new("hand_tracking_diag")
         .num_columns(2)
