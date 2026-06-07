@@ -266,6 +266,12 @@ impl Pipeline {
             return Ok(hands);
         }
 
+        // The camera content occupies only part of the square-padded image (black
+        // bars when the frame isn't square). Compute the content rect now so the
+        // off-screen drop below treats a hand that has drifted into a bar — centre
+        // still in [0, 1] of the square — as gone, not as a lingering phantom.
+        let content = ContentRect::for_frame(frame.width, frame.height);
+
         // Square-pad to the larger side so detection coords are aspect-correct.
         // Take the reused buffer out of `self` so the per-frame methods below can
         // borrow it alongside `&mut self` without aliasing; restored before return.
@@ -307,7 +313,7 @@ impl Pipeline {
         for roi in to_run {
             let stage_start = Instant::now();
             if let Some((hand, next_roi)) = self.landmark_for(&square, roi, dt)? {
-                if roi_on_screen(&next_roi) {
+                if roi_on_screen(&next_roi, content) {
                     hands.push(hand);
                     next.push(next_roi);
                 }
@@ -457,12 +463,55 @@ fn roi_center_dist(a: &RoiRect, b: &RoiRect) -> f32 {
     (a.cx - b.cx).hypot(a.cy - b.cy)
 }
 
-/// True if the ROI's centre (the hand's palm in normalized image coordinates) is
-/// within the frame. A track whose centre has left the frame is an off-screen
-/// hand: drop it rather than let it linger as a drifting phantom (the landmark
-/// model can keep reporting high presence on a clamped edge crop).
-fn roi_on_screen(roi: &RoiRect) -> bool {
-    (0.0..=1.0).contains(&roi.cx) && (0.0..=1.0).contains(&roi.cy)
+/// The camera content rectangle inside the square-padded image, in
+/// square-normalized coordinates.
+///
+/// [`square_pad_into`] pads a non-square camera frame to its larger side with
+/// black bars (top/bottom for the usual landscape webcam, left/right for a
+/// portrait one). Those bars live *inside* `[0, 1]` of the padded square, so a
+/// hand that drifts off the camera into a bar still has a centre within `[0, 1]`.
+/// Tracking must treat the bars as off-screen, which a bare `[0, 1]` test does
+/// not — hence this explicit content rect. For an already-square frame it is the
+/// full `[0, 1]²`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContentRect {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl ContentRect {
+    /// Content rect for a `frame_w × frame_h` camera frame square-padded to its
+    /// larger side, matching [`square_pad_into`]'s `ox`/`oy` centring.
+    fn for_frame(frame_w: u32, frame_h: u32) -> Self {
+        let side = frame_w.max(frame_h).max(1);
+        let sidef = dim(side);
+        let ox = dim((side - frame_w) / 2);
+        let oy = dim((side - frame_h) / 2);
+        Self {
+            x0: ox / sidef,
+            y0: oy / sidef,
+            x1: (ox + dim(frame_w)) / sidef,
+            y1: (oy + dim(frame_h)) / sidef,
+        }
+    }
+
+    /// Whether the normalized point `(cx, cy)` lies within the content rect.
+    fn contains(self, cx: f32, cy: f32) -> bool {
+        (self.x0..=self.x1).contains(&cx) && (self.y0..=self.y1).contains(&cy)
+    }
+}
+
+/// True if the ROI's centre (the hand's palm in square-normalized coordinates)
+/// is within the camera content rect — i.e. the hand is still in the camera's
+/// view, not drifted into a square-padding bar. A track whose centre has left
+/// the content is an off-screen hand: drop it rather than let it linger as a
+/// drifting phantom (the landmark model can keep reporting high presence on a
+/// clamped/black-bar edge crop, and a stale phantom would hold a tracked slot
+/// and stay the focal hand, so a returning hand is ignored). See [`ContentRect`].
+fn roi_on_screen(roi: &RoiRect, content: ContentRect) -> bool {
+    content.contains(roi.cx, roi.cy)
 }
 
 // --- numeric conversion helpers (kept tiny + justified) ------------------
@@ -1042,12 +1091,15 @@ mod tests {
         (pipe, palm_calls, lm_calls)
     }
 
-    /// A consistent, non-empty frame for driving the pipeline.
+    /// A consistent, non-empty frame for driving the pipeline. Square, so its
+    /// content rect is the full `[0, 1]²` — these mock tests exercise the
+    /// palm/landmark/association path, not square-padding geometry (that is
+    /// covered separately by the `ContentRect` tests).
     fn consistent_frame() -> Frame {
         Frame {
             width: 64,
-            height: 48,
-            rgb: vec![128u8; 64 * 48 * 3],
+            height: 64,
+            rgb: vec![128u8; 64 * 64 * 3],
         }
     }
 
@@ -1141,15 +1193,89 @@ mod tests {
 
     #[test]
     fn off_screen_roi_is_dropped() {
-        assert!(roi_on_screen(&roi_at(0.5, 0.5)));
-        assert!(roi_on_screen(&roi_at(0.0, 1.0)), "edge is still on screen");
+        // A square frame's content rect is the full [0, 1]² — the original
+        // frame-edge behaviour.
+        let full = ContentRect::for_frame(64, 64);
+        assert!(roi_on_screen(&roi_at(0.5, 0.5), full));
         assert!(
-            !roi_on_screen(&roi_at(-0.01, 0.5)),
+            roi_on_screen(&roi_at(0.0, 1.0), full),
+            "edge is still on screen"
+        );
+        assert!(
+            !roi_on_screen(&roi_at(-0.01, 0.5), full),
             "palm left the frame on the left"
         );
         assert!(
-            !roi_on_screen(&roi_at(0.5, 1.2)),
+            !roi_on_screen(&roi_at(0.5, 1.2), full),
             "palm left the frame at the bottom"
+        );
+    }
+
+    #[test]
+    fn content_rect_excludes_landscape_padding_bars() {
+        // A 1280x720 landscape frame square-pads to 1280x1280 with black bars
+        // top and bottom: content y ∈ [280/1280, 1000/1280] = [0.219, 0.781],
+        // full width. This is the Bug-2/Bug-3 case — a hand leaving via the top
+        // or bottom enters a bar while its centre is still within [0, 1].
+        let c = ContentRect::for_frame(1280, 720);
+        assert!(
+            (c.x0 - 0.0).abs() < 1e-6 && (c.x1 - 1.0).abs() < 1e-6,
+            "{c:?}"
+        );
+        assert!(
+            (c.y0 - 0.218_75).abs() < 1e-4 && (c.y1 - 0.781_25).abs() < 1e-4,
+            "{c:?}"
+        );
+
+        // Centre frame: on screen. Mid-band edges: on screen.
+        assert!(roi_on_screen(&roi_at(0.5, 0.5), c));
+        assert!(
+            roi_on_screen(&roi_at(0.5, 0.22), c),
+            "just inside the top band"
+        );
+        // In a padding bar (top/bottom) with centre still in [0, 1]: OFF screen.
+        // Before the fix these counted as on-screen and lingered as phantoms.
+        assert!(
+            !roi_on_screen(&roi_at(0.5, 0.10), c),
+            "drifted into the top black bar"
+        );
+        assert!(
+            !roi_on_screen(&roi_at(0.5, 0.95), c),
+            "drifted into the bottom black bar"
+        );
+        // Horizontal exits still leave [0, 1] and are caught as before.
+        assert!(!roi_on_screen(&roi_at(-0.01, 0.5), c));
+    }
+
+    #[test]
+    fn content_rect_for_portrait_excludes_side_bars() {
+        // A portrait frame (taller than wide) pads left/right instead.
+        let c = ContentRect::for_frame(480, 640);
+        assert!(
+            (c.y0 - 0.0).abs() < 1e-6 && (c.y1 - 1.0).abs() < 1e-6,
+            "{c:?}"
+        );
+        assert!(
+            (c.x0 - 0.125).abs() < 1e-4 && (c.x1 - 0.875).abs() < 1e-4,
+            "{c:?}"
+        );
+        assert!(
+            !roi_on_screen(&roi_at(0.05, 0.5), c),
+            "drifted into the left bar"
+        );
+    }
+
+    #[test]
+    fn content_rect_for_square_is_full_unit_square() {
+        let c = ContentRect::for_frame(720, 720);
+        assert_eq!(
+            c,
+            ContentRect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 1.0,
+                y1: 1.0
+            }
         );
     }
 
