@@ -1154,6 +1154,28 @@ git commit -am "chore: clippy/docs cleanup for mediapipe provider; full gate gre
 > A/B reference; do not promote it to the production path unless this phase fails
 > a deadline-driven demo gate.
 
+**Status (2026-06-08):** All CI-verifiable code work for 11.1–11.5 is landed.
+The only remaining work is hardware/operator-gated: 11.1 Step 4 (A/B vs the
+oracle), 11.4 Step 3 (live-camera smoke on Mac + NUC), 11.5 Step 4 (on-target
+profiling), 11.6 (NUC decision gate), and 11.7 Step 1 (committed golden, pending
+an approved selfie).
+
+**Gate run (2026-06-08, `--all-features` where applicable):**
+- `cargo fmt --all -- --check` — PASS
+- `cargo clippy --all-targets --all-features --workspace -- -D warnings` — PASS
+- `cargo nextest run --workspace --all-features` — PASS (405 passed, 10 skipped)
+- `cargo test --doc --workspace --all-features` — PASS
+- `cargo doc --no-deps --workspace --document-private-items` — builds; no *new*
+  broken intra-doc links (pre-existing private-item-link warnings only)
+- `cargo xtask check-secrets` — PASS (0 findings)
+- `cargo deny check` — **licenses FAILED, pre-existing and unrelated to Phase 11.**
+  `webpki-roots`/`webpki-root-certs` v1.0.7 relicensed upstream to
+  `CDLA-Permissive-2.0`, which is not in `deny.toml`'s allow-list. These entered
+  `Cargo.lock` with the `ort` backend commit `ea18253a` (2026-06-05); no Phase 11
+  commit touches the dependency graph. CI's `cargo-deny-action` is affected by the
+  same. Recommended fix (Madison's licensing call): add `"CDLA-Permissive-2.0"` to
+  the `licenses.allow` list in `deny.toml`.
+
 ### Task 11.1: Fix MediaPipe tracking-ROI graph parity
 
 **Files:**
@@ -1172,11 +1194,11 @@ git commit -am "chore: clippy/docs cleanup for mediapipe provider; full gate gre
 - [x] **Step 3: Update `roi_from_landmarks`.** Use the verified rotation subset
   and matching bounding subset/transform parameters. Keep the transform
   memoryless unless upstream evidence says otherwise.
-- [ ] **Step 4: A/B against the oracle.** Run with smoothing disabled or minimized:
+- [ ] **Step 4: A/B against the oracle.** (Madison's hardware gate.) Run with smoothing disabled or minimized:
   `WAVECONDUCTOR_HAND_SMOOTHING=off WAVECONDUCTOR_HAND_PROVIDER=mediapipe cargo rund --features hand-tracking-mediapipe-ort,hand-tracking-mediapipe-camera`
   and compare drift/warp to the Python/first-party MediaPipe oracle on the same
   camera if available.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.** (Landed in `f0247d0d`.)
 
 **Progress (2026-06-07):** Code now mirrors the upstream full→partial landmark
 mapping (`[0,1,2,3,5,6,9,10,13,14,17,18]`), rotates from the mapped
@@ -1193,28 +1215,38 @@ same partial subset. Focused validation passed:
 - Modify: `crates/wc-core/src/input/providers/mediapipe/mod.rs`
 - Modify: dev-panel diagnostics where `ProviderDiagnostics` render
 
-- [ ] **Step 1: Define metrics.** Add a small diagnostics snapshot carrying:
+- [x] **Step 1: Define metrics.** Add a small diagnostics snapshot carrying:
   backend name, selected camera format, capture frame age, preprocess ms,
   palm-run ms, landmark-run ms, postprocess ms, total pipeline ms, palm-run
   reason (`cold_start`, `track_lost`, `below_max_hands`, etc.), track count,
   track churn count, dropped/overwritten frames, and last pipeline error.
-- [ ] **Step 2: Preserve hot-path discipline.** Record timings with fixed-size
+- [x] **Step 2: Preserve hot-path discipline.** Record timings with fixed-size
   structs and overwrite snapshots; do not allocate strings per frame. Convert to
   UI strings only when rendering diagnostics.
-- [ ] **Step 3: Surface diagnostics.** Include the metrics in the existing
+- [x] **Step 3: Surface diagnostics.** Include the metrics in the existing
   provider diagnostics/dev panel so hardware tests can distinguish slow inference
   from stale camera frames, bad ROI parity, and track-id churn.
-- [ ] **Step 4: Test with mocks.** Use a fake pipeline/source to assert metrics
+- [x] **Step 4: Test with mocks.** Use a fake pipeline/source to assert metrics
   update, errors are retained, and dropped-frame counters increment.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 **Progress (2026-06-07):** Initial typed metrics path landed. `ProviderDiagnostics`
 now has a static-label metric slot rendered by the dev panel; the MediaPipe
 pipeline records total/preprocess/palm/landmark durations, palm-run reason,
 track counts, hand count, and worker drop count without per-frame string
-formatting. Remaining in this task/adjacent tasks: capture frame age, selected
-camera format (Task 11.4), richer track-churn accounting, and retained last
-pipeline error.
+formatting.
+
+**Completed (2026-06-08):** Remaining items landed. The worker now records
+capture+decode time and the inter-frame inference interval (a frame-age signal)
+and stops hardcoding `TrackingFlow.last_frame_ago` to 0 (the success status
+reports the achieved cadence). `HandTracker` accumulates track churn (ids
+created + aged out), surfaced as a pipeline metric. The worker no longer
+silently drops `pipeline.process` errors: it counts them and forwards the rare
+error string (`WorkerMsg::Error`) so the provider retains it in
+`ProviderDiagnostics.last_error` — the `String` alloc never touches the happy
+path. New metrics (Capture+decode, Inference interval, Track churn, Pipeline
+errors) render via the generic dev-panel metric loop. `worker_retains_pipeline_errors`
+covers the error path with a failing fake backend.
 
 ### Task 11.3: Restore `max_inference_hz` with latest-frame/drop-not-sleep semantics
 
@@ -1232,7 +1264,7 @@ pipeline error.
 - [x] **Step 3: Add regression tests.** A fast mock source with a low `max_hz`
   should not process at source speed, should keep frame age bounded, and should
   increment a dropped/overwritten counter.
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.** (Landed in `7ef4b60e`.)
 
 **Progress (2026-06-07):** `spawn_worker` now converts `max_inference_hz` into a
 minimum inference interval and drops/reports fresh over-budget frames instead of
@@ -1248,16 +1280,27 @@ incrementing the dropped-frame counter.
 - Modify: `crates/wc-core/src/input/providers/mediapipe/capture.rs`
 - Modify diagnostics from Task 11.2
 
-- [ ] **Step 1: Enumerate device formats.** Query supported modes and choose the
+- [x] **Step 1: Enumerate device formats.** Query supported modes and choose the
   cheapest usable one that exists on the camera: prefer uncompressed RGB/YUYV when
   available, otherwise MJPEG at a bounded size. Target 640x480 or 720p-class input
   before falling back to the backend default.
-- [ ] **Step 2: Do not fail on exact-mode absence.** The previous blind
+- [x] **Step 2: Do not fail on exact-mode absence.** The previous blind
   `Closest(640x480 MJPEG)` request failed on AVFoundation. Selection must degrade
   gracefully and report the chosen format.
-- [ ] **Step 3: Manual smoke.** Open Madison's camera and the NUC camera, record
+- [ ] **Step 3: Manual smoke.** (Madison's hardware gate.) Open Madison's camera and the NUC camera, record
   selected format and capture/decode cost in diagnostics.
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
+
+**Completed (2026-06-08):** `NokhwaFrameSource::open` opens at
+`AbsoluteHighestFrameRate` (the request that reliably opens across
+V4L2/AVFoundation/MSMF), enumerates `compatible_camera_formats()`, and narrows
+via the pure, unit-tested `choose_camera_format`: only formats `next_frame` can
+decode (MJPEG/YUYV/RAWRGB) within 320x240..=1280x720, preferring uncompressed,
+then resolution nearest 640x480, then higher fps. Enumeration/set failures
+degrade gracefully to the opened format (uses the non-deprecated
+`set_camera_requset` with `Closest(chosen)`). The negotiated format is reported
+once (`WorkerMsg::CameraFormat`) and folded into `device_serial`. Step 3 (live
+cameras) remains Madison's manual gate.
 
 ### Task 11.5: Remove hot-path copies/allocations and fix velocity
 
@@ -1267,21 +1310,37 @@ incrementing the dropped-frame counter.
 - Modify: `crates/wc-core/src/input/providers/mediapipe/inference_ort.rs`
 - Modify: `crates/wc-core/src/input/providers/mediapipe/signals.rs`
 
-- [ ] **Step 1: Preallocate pipeline scratch.** Reuse buffers for square pad,
+- [x] **Step 1: Preallocate pipeline scratch.** Reuse buffers for square pad,
   resize, ROI warp, tensor input, projected landmarks, and hands. Avoid per-frame
   `Vec` creation in preprocessing/postprocessing.
-- [ ] **Step 2: Reduce inference copies.** Keep `tract` as the baseline. For
+- [x] **Step 2: Reduce inference copies.** Keep `tract` as the baseline. For
   `ort`, avoid `input.data.clone()` and output `to_vec()` where the crate permits
   preallocated tensors or I/O binding. If the current `ort` API cannot do this
   cleanly, document the exact copy cost in diagnostics and leave a narrow TODO
   tied to the crate upgrade path.
-- [ ] **Step 3: Fix `palm_velocity`.** Store previous palm position per track and
+- [x] **Step 3: Fix `palm_velocity`.** Store previous palm position per track and
   pass previous/current positions into `palm_velocity`; assert nonzero velocity
   for a moving hand fixture and zero velocity for `dt == 0`.
-- [ ] **Step 4: Profile.** Re-run `profile_pipeline_stages` and
+- [ ] **Step 4: Profile.** (Madison's hardware gate.) Re-run `profile_pipeline_stages` and
   `profile_inference_backends`; record before/after numbers in this plan or the
   spec.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
+
+**Completed (2026-06-08):** Step 3 (velocity) fixed first: `HandTracker::assign`
+now returns the track's previous-frame position (None on first sighting), and
+`landmark_for` finite-differences it against the current palm over `dt` (was
+passing `palm_pos` as both args → always zero). Step 1: the pipeline owns and
+reuses its scratch (square-pad buffer via `mem::take` to dodge `&mut self`
+aliasing; ROI-warp crop; both input tensors via `data.clear()` + refill), so
+steady-state processing allocates nothing per frame; `square_pad`/`warp_roi`/
+`to_nchw_unit` keep thin allocating wrappers for tests/benchmarks. The only
+remaining per-frame image allocation is `image::imageops::resize`'s own output
+(an `image`-crate limitation), noted inline. Step 2: tract and ort each retain
+one input copy (into the backend's native tensor) and one output copy (the trait
+returns owned `Vec`s); both are crate/trait-API-bound, documented with sizes and
+flagged as a profiling-gated I/O-binding follow-up. Output correctness unchanged
+(real-model pipeline tests pass). Step 4 (on-target profiling) remains Madison's
+hardware gate.
 
 ### Task 11.6: Backend decision gate on the NUC
 
