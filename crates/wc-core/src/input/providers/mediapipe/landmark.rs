@@ -93,39 +93,58 @@ pub const TRACK_ROI_SCALE: f32 = 2.0;
 /// [`ROI_SHIFT_Y`].
 pub const TRACK_ROI_SHIFT_Y: f32 = -0.1;
 
-/// Landmark indices that, with the wrist, define the tracking-ROI rotation
-/// baseline. `MediaPipe`'s `HandLandmarksToRectCalculator` rotates the crop so the
-/// vector from the wrist to the **weighted mean of landmarks 4, 6, 8**
-/// (`((L4 + L8)/2 + L6) / 2`) points up. That long, three-point-averaged baseline
-/// is far more rotation-stable than a single short wrist→MCP vector — whose angle
-/// noise is what made the tracking ROI rotate, stretch, and drift off-screen
-/// between re-detects. (Upstream the constants are misnamed `*PIPJoint` but the
-/// literal indices 4/6/8 are what the model was tuned against; match them.)
-const ROT_REF_A: usize = 4;
-const ROT_REF_B: usize = 6;
-const ROT_REF_C: usize = 8;
+/// Full-landmark indices that `MediaPipe` keeps when it converts full hand
+/// landmarks into the partial list consumed by `HandLandmarksToRectCalculator`.
+///
+/// Upstream then computes both rotation and bounds on this partial list. The
+/// calculator's internal constants `4, 6, 8` are indices **within this partial
+/// list**, mapping to full landmarks 5, 9, and 13 (index/middle/ring MCPs).
+const TRACK_LANDMARK_INDICES: [usize; 12] = [
+    LandmarkIndex::Wrist.as_index(),
+    LandmarkIndex::ThumbCmc.as_index(),
+    LandmarkIndex::ThumbMcp.as_index(),
+    LandmarkIndex::ThumbIp.as_index(),
+    LandmarkIndex::IndexMcp.as_index(),
+    LandmarkIndex::IndexPip.as_index(),
+    LandmarkIndex::MiddleMcp.as_index(),
+    LandmarkIndex::MiddlePip.as_index(),
+    LandmarkIndex::RingMcp.as_index(),
+    LandmarkIndex::RingPip.as_index(),
+    LandmarkIndex::PinkyMcp.as_index(),
+    LandmarkIndex::PinkyPip.as_index(),
+];
+
+/// Full-landmark index for the first outer MCP used by the rotation baseline.
+const ROT_REF_INDEX_MCP: usize = LandmarkIndex::IndexMcp.as_index();
+/// Full-landmark index for the middle MCP used by the rotation baseline.
+const ROT_REF_MIDDLE_MCP: usize = LandmarkIndex::MiddleMcp.as_index();
+/// Full-landmark index for the second outer MCP used by the rotation baseline.
+const ROT_REF_RING_MCP: usize = LandmarkIndex::RingMcp.as_index();
 
 /// Compute the next-frame tracking ROI directly from this frame's landmarks, so
 /// tracking frames can skip the expensive palm-detection stage (`MediaPipe`'s
 /// detect-then-track design).
 ///
-/// Rotation aligns the wrist→weighted-mean(4,6,8) axis to vertical — `MediaPipe`'s
-/// landmark-path baseline (see [`ROT_REF_A`]), which is far more rotation-stable
-/// than the short wrist→MCP vector. The square side is the longer side of the
-/// landmarks' bounding box measured *in that rotated frame* (so the rotated square
-/// tightly bounds the hand), expanded by [`TRACK_ROI_SCALE`]; the centre is that
-/// box's centre, shifted toward the fingers by [`TRACK_ROI_SHIFT_Y`] along the
-/// rotated axis. `landmarks` are normalized `[0, 1]` image coordinates, as
-/// produced by [`project_landmarks`].
+/// Rotation aligns the wrist→weighted-mean(index/middle/ring MCP) axis to
+/// vertical, matching `MediaPipe`'s partial-landmark path. The square side is the
+/// longer side of that same partial landmark set's bounding box measured *in the
+/// rotated frame* (so the rotated square tightly bounds the hand), expanded by
+/// [`TRACK_ROI_SCALE`]; the centre is that box's centre, shifted toward the
+/// fingers by [`TRACK_ROI_SHIFT_Y`] along the rotated axis. `landmarks` are
+/// normalized `[0, 1]` image coordinates, as produced by [`project_landmarks`].
 #[must_use]
 pub fn roi_from_landmarks(landmarks: &[Vec3; LANDMARK_COUNT]) -> RoiRect {
     let wrist = landmarks[LandmarkIndex::Wrist.as_index()];
-    // MediaPipe's weighted mean of landmarks 4, 6, 8: `((L4 + L8)/2 + L6) / 2`.
-    let ref_pt = ((landmarks[ROT_REF_A] + landmarks[ROT_REF_C]) / 2.0 + landmarks[ROT_REF_B]) / 2.0;
+    // MediaPipe's weighted mean after full→partial mapping:
+    // `((index_mcp + ring_mcp) / 2 + middle_mcp) / 2`.
+    let ref_pt = ((landmarks[ROT_REF_INDEX_MCP] + landmarks[ROT_REF_RING_MCP]) / 2.0
+        + landmarks[ROT_REF_MIDDLE_MCP])
+        / 2.0;
     // Bring the wrist→ref axis to vertical (target 90°).
     let rotation = FRAC_PI_2 - (-(ref_pt.y - wrist.y)).atan2(ref_pt.x - wrist.x);
 
-    // Bounding box of all landmarks expressed in the ROI's upright frame
+    // Bounding box of MediaPipe's partial tracking landmark set in the ROI's
+    // upright frame
     // (each point rotated by -rotation), matching project_landmarks' convention
     // so a crop from this ROI inverts correctly.
     let (sin, cos) = rotation.sin_cos();
@@ -133,7 +152,8 @@ pub fn roi_from_landmarks(landmarks: &[Vec3; LANDMARK_COUNT]) -> RoiRect {
     let mut min_v = f32::MAX;
     let mut max_u = f32::MIN;
     let mut max_v = f32::MIN;
-    for lm in landmarks {
+    for idx in TRACK_LANDMARK_INDICES {
+        let lm = landmarks[idx];
         let u = lm.x * cos + lm.y * sin;
         let v = -lm.x * sin + lm.y * cos;
         min_u = min_u.min(u);
@@ -309,25 +329,31 @@ mod tests {
     }
 
     /// Build a 21-landmark hand in normalized image coords with a known
-    /// axis-aligned bounding box. All landmarks sit at the centre except the
-    /// five that pin the bbox extremes and the wrist/middle-MCP rotation axis.
-    fn upright_hand() -> [Vec3; LANDMARK_COUNT] {
+    /// axis-aligned tracking bbox. All landmarks sit at the centre except the
+    /// `MediaPipe` partial-tracking landmarks that pin bbox extremes and rotation.
+    fn upright_tracking_hand() -> [Vec3; LANDMARK_COUNT] {
         let mut lm = [Vec3::new(0.5, 0.5, 0.0); LANDMARK_COUNT];
         lm[LandmarkIndex::Wrist.as_index()] = Vec3::new(0.5, 0.7, 0.0); // bottom (max y)
-        lm[LandmarkIndex::MiddleMcp.as_index()] = Vec3::new(0.5, 0.45, 0.0); // above wrist
-        lm[LandmarkIndex::IndexMcp.as_index()] = Vec3::new(0.4, 0.5, 0.0); // left (min x)
+        lm[LandmarkIndex::IndexMcp.as_index()] = Vec3::new(0.45, 0.4, 0.0);
+        lm[LandmarkIndex::MiddleMcp.as_index()] = Vec3::new(0.5, 0.4, 0.0);
+        lm[LandmarkIndex::RingMcp.as_index()] = Vec3::new(0.55, 0.4, 0.0);
+        lm[LandmarkIndex::MiddlePip.as_index()] = Vec3::new(0.5, 0.3, 0.0); // top (min y)
+        lm[LandmarkIndex::IndexPip.as_index()] = Vec3::new(0.4, 0.5, 0.0); // left (min x)
         lm[LandmarkIndex::PinkyMcp.as_index()] = Vec3::new(0.6, 0.5, 0.0); // right (max x)
-        lm[LandmarkIndex::MiddleTip.as_index()] = Vec3::new(0.5, 0.3, 0.0); // top (min y)
         lm
     }
 
     #[test]
-    fn track_roi_centers_and_scales_on_landmark_bbox() {
-        // Upright hand (landmarks 4,6,8 default to centre, so wrist→ref points
-        // straight up) → no rotation; bbox x∈[0.4,0.6] y∈[0.3,0.7] → long side
-        // 0.4, square side 0.4*TRACK_ROI_SCALE. The centre x stays 0.5; the centre
-        // y is shifted toward the fingers by height*shift_y = 0.4*(-0.1) = -0.04.
-        let roi = roi_from_landmarks(&upright_hand());
+    fn track_roi_uses_mediapipe_partial_landmark_bbox() {
+        // Upright partial-tracking hand → no rotation; bbox x∈[0.4,0.6]
+        // y∈[0.3,0.7] → long side 0.4. Deliberately put excluded fingertips far
+        // outside the hand; MediaPipe's landmark→rect path ignores them.
+        let mut hand = upright_tracking_hand();
+        hand[LandmarkIndex::ThumbTip.as_index()] = Vec3::new(0.1, 0.9, 0.0);
+        hand[LandmarkIndex::MiddleTip.as_index()] = Vec3::new(0.9, 0.0, 0.0);
+        hand[LandmarkIndex::PinkyTip.as_index()] = Vec3::new(0.8, 0.95, 0.0);
+
+        let roi = roi_from_landmarks(&hand);
         assert!(roi.rotation.abs() < 1e-4, "rot={}", roi.rotation);
         assert!((roi.cx - 0.5).abs() < 1e-4, "cx={}", roi.cx);
         assert!(
@@ -343,15 +369,20 @@ mod tests {
     }
 
     #[test]
-    fn track_roi_rotation_follows_wrist_to_finger_baseline() {
-        // The rotation baseline is wrist → weighted-mean(4,6,8), not wrist→MCP.
-        // Put landmarks 4,6,8 to the right of the wrist → rotate the crop 90°
-        // upright, matching roi_from_palm's convention.
+    fn track_roi_rotation_uses_partial_indices_mapped_to_mcps() {
+        // Upstream constants 4,6,8 are partial-list indices. With full 21
+        // landmarks they map to index/middle/ring MCPs (5,9,13), not full
+        // landmarks 4,6,8. Put the old full-index interpretation above the wrist
+        // and the mapped MCP baseline to the right; the rightward MCP baseline
+        // must win and rotate the crop 90°.
         let mut lm = [Vec3::new(0.5, 0.5, 0.0); LANDMARK_COUNT];
         lm[LandmarkIndex::Wrist.as_index()] = Vec3::new(0.5, 0.5, 0.0);
-        lm[ROT_REF_A] = Vec3::new(0.7, 0.5, 0.0);
-        lm[ROT_REF_B] = Vec3::new(0.7, 0.5, 0.0);
-        lm[ROT_REF_C] = Vec3::new(0.7, 0.5, 0.0);
+        lm[LandmarkIndex::ThumbTip.as_index()] = Vec3::new(0.5, 0.3, 0.0);
+        lm[LandmarkIndex::IndexPip.as_index()] = Vec3::new(0.5, 0.3, 0.0);
+        lm[LandmarkIndex::IndexTip.as_index()] = Vec3::new(0.5, 0.3, 0.0);
+        lm[LandmarkIndex::IndexMcp.as_index()] = Vec3::new(0.7, 0.5, 0.0);
+        lm[LandmarkIndex::MiddleMcp.as_index()] = Vec3::new(0.7, 0.5, 0.0);
+        lm[LandmarkIndex::RingMcp.as_index()] = Vec3::new(0.7, 0.5, 0.0);
         assert!(
             (roi_from_landmarks(&lm).rotation - FRAC_PI_2).abs() < 1e-4,
             "rot={}",
