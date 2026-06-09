@@ -464,6 +464,9 @@ impl HandTrackingProvider for MediaPipeProvider {
         let hands = if self.config.smoothing {
             self.smoother.smooth(&self.target_hands, now)
         } else {
+            // NOT an allocation: `Hand` is heap-free (fixed arrays + scalars)
+            // and the SmallVec holds ≤ MAX_HANDS inline, so this clone is a
+            // stack memcpy. Fine on the per-poll path — do not "fix".
             self.target_hands.clone()
         };
         // Emit while a hand is present, plus one clearing frame when the last

@@ -119,20 +119,26 @@ pub fn sigmoid(x: f32) -> f32 {
     }
 }
 
-/// Decode raw model outputs into detections above `score_threshold`.
+/// Decode raw model outputs into detections above `score_threshold`, into a
+/// reused `out` buffer.
 ///
 /// `raw_boxes` is row-major `[num_anchors, PALM_REGRESSION_LEN]`; `raw_scores`
 /// is `[num_anchors]`; both index-align with `anchors`. Centre/keypoint offsets
 /// are relative to the anchor centre; sizes are absolute (normalized).
-#[must_use]
-pub fn decode_palm_detections(
+///
+/// `out` is cleared first (`Vec::clear` keeps capacity), so a caller that
+/// reuses one buffer across frames allocates nothing in steady state — the
+/// pipeline's detect path requires this (no per-frame allocation in the worker
+/// loop).
+pub fn decode_palm_detections_into(
     raw_boxes: &[f32],
     raw_scores: &[f32],
     anchors: &[Anchor],
     opts: &PalmDecodeOptions,
     score_threshold: f32,
-) -> Vec<PalmDetection> {
-    let mut out = Vec::new();
+    out: &mut Vec<PalmDetection>,
+) {
+    out.clear();
     for (i, anchor) in anchors.iter().enumerate() {
         let Some(&raw_score) = raw_scores.get(i) else {
             break;
@@ -171,37 +177,100 @@ pub fn decode_palm_detections(
             keypoints,
         });
     }
+}
+
+/// Allocating convenience wrapper over [`decode_palm_detections_into`].
+///
+/// Tests/benchmarks only — the pipeline's steady-state detect path uses the
+/// `_into` form with a buffer reused across frames.
+#[must_use]
+pub fn decode_palm_detections(
+    raw_boxes: &[f32],
+    raw_scores: &[f32],
+    anchors: &[Anchor],
+    opts: &PalmDecodeOptions,
+    score_threshold: f32,
+) -> Vec<PalmDetection> {
+    let mut out = Vec::new();
+    decode_palm_detections_into(
+        raw_boxes,
+        raw_scores,
+        anchors,
+        opts,
+        score_threshold,
+        &mut out,
+    );
     out
 }
 
-/// Weighted non-maximum suppression (`MediaPipe`'s "weighted" mode).
+/// Reusable scratch buffers for [`weighted_nms_into`].
+///
+/// Owned by the caller for the life of a session (the pipeline keeps one) and
+/// cleared-and-refilled on every call, so all three capacities persist and
+/// steady-state NMS allocates nothing — the worker-loop no-allocation rule.
+#[derive(Debug, Default)]
+pub struct PalmNmsScratch {
+    /// Per-detection "already merged into a cluster" mask.
+    used: Vec<bool>,
+    /// Indices of the cluster currently being blended (cleared per seed
+    /// detection — this was a fresh `vec![i]` per loop iteration before).
+    cluster: Vec<usize>,
+    /// Blended output detections; swapped into the caller's `dets` on return,
+    /// so the old `dets` storage becomes next call's `kept` buffer.
+    kept: Vec<PalmDetection>,
+}
+
+/// Weighted non-maximum suppression (`MediaPipe`'s "weighted" mode), in place.
 ///
 /// Repeatedly takes the highest-scoring detection, gathers every detection with
 /// `IoU ≥ iou_threshold` against it, and blends the cluster's boxes and
 /// keypoints into one detection (a score-weighted average), carrying the
 /// cluster's maximum score. Blending — rather than plain suppression — is what
 /// gives `MediaPipe` its stable palm boxes.
-#[must_use]
-pub fn weighted_nms(mut dets: Vec<PalmDetection>, iou_threshold: f32) -> Vec<PalmDetection> {
+///
+/// On return `dets` holds the blended clusters (in seed order: highest-scoring
+/// seed first); `scratch` keeps its buffers for reuse, so a caller looping with
+/// the same `dets`/`scratch` pair allocates nothing in steady state.
+pub fn weighted_nms_into(
+    dets: &mut Vec<PalmDetection>,
+    iou_threshold: f32,
+    scratch: &mut PalmNmsScratch,
+) {
     dets.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let mut kept = Vec::new();
-    let mut used = vec![false; dets.len()];
+    // clear + resize keeps capacity: a reused mask refills without allocating.
+    scratch.used.clear();
+    scratch.used.resize(dets.len(), false);
+    scratch.kept.clear();
 
     for i in 0..dets.len() {
-        if used[i] {
+        if scratch.used[i] {
             continue;
         }
-        let mut cluster = vec![i];
+        scratch.cluster.clear();
+        scratch.cluster.push(i);
         for j in (i + 1)..dets.len() {
-            if !used[j] && dets[i].bbox.iou(&dets[j].bbox) >= iou_threshold {
-                used[j] = true;
-                cluster.push(j);
+            if !scratch.used[j] && dets[i].bbox.iou(&dets[j].bbox) >= iou_threshold {
+                scratch.used[j] = true;
+                scratch.cluster.push(j);
             }
         }
-        used[i] = true;
-        kept.push(blend(&dets, &cluster));
+        scratch.used[i] = true;
+        scratch.kept.push(blend(dets, &scratch.cluster));
     }
-    kept
+    // Hand the result back through `dets`; the old `dets` storage becomes the
+    // scratch's `kept` buffer for the next call. Both capacities persist.
+    std::mem::swap(dets, &mut scratch.kept);
+}
+
+/// Allocating convenience wrapper over [`weighted_nms_into`].
+///
+/// Tests/benchmarks only — the pipeline's steady-state detect path uses the
+/// `_into` form with a [`PalmNmsScratch`] reused across frames.
+#[must_use]
+pub fn weighted_nms(mut dets: Vec<PalmDetection>, iou_threshold: f32) -> Vec<PalmDetection> {
+    let mut scratch = PalmNmsScratch::default();
+    weighted_nms_into(&mut dets, iou_threshold, &mut scratch);
+    dets
 }
 
 /// Score-weighted average of a cluster of detections; keeps the max score.
@@ -332,5 +401,53 @@ mod tests {
         // centre between the two overlapping boxes.
         assert!((kept[0].score - 0.9).abs() < 1e-6);
         assert!(kept[0].bbox.xmin > 0.0 && kept[0].bbox.xmin < 0.05);
+    }
+
+    #[test]
+    fn nms_scratch_reuse_is_identical_to_fresh_allocation() {
+        // The bit-identical bar for the scratch refactor: dirty one
+        // `PalmNmsScratch` with a first input, re-run it on a different
+        // (larger) input, and require both results to equal the allocating
+        // wrapper's (which builds fresh buffers every call).
+        let case_a = vec![
+            det(0.9, 0.0, 0.0, 1.0),
+            det(0.8, 0.05, 0.05, 1.0),
+            det(0.7, 5.0, 5.0, 1.0),
+        ];
+        let case_b = vec![
+            det(0.5, 2.0, 2.0, 1.0),
+            det(0.95, 0.1, 0.1, 1.0),
+            det(0.6, 0.12, 0.1, 1.0),
+            det(0.4, 9.0, 9.0, 1.0),
+        ];
+        let mut scratch = PalmNmsScratch::default();
+        let mut a = case_a.clone();
+        weighted_nms_into(&mut a, 0.3, &mut scratch); // dirties used/cluster/kept
+        let mut b = case_b.clone();
+        weighted_nms_into(&mut b, 0.3, &mut scratch);
+        assert_eq!(a, weighted_nms(case_a, 0.3));
+        assert_eq!(b, weighted_nms(case_b, 0.3));
+    }
+
+    #[test]
+    fn decode_into_reused_buffer_matches_fresh_allocation() {
+        // A reused (dirty, over-capacity) decode buffer must produce exactly
+        // what the allocating wrapper does — clear() semantics, no stale tail.
+        let anchor = Anchor {
+            cx: 0.5,
+            cy: 0.5,
+            w: 1.0,
+            h: 1.0,
+        };
+        let opts = PalmDecodeOptions::mediapipe_palm_192();
+        let mut raw = vec![0.0; PALM_REGRESSION_LEN];
+        raw[2] = opts.x_scale * 0.2;
+        raw[3] = opts.y_scale * 0.2;
+        let mut out = vec![PalmDetection::default(); 7]; // dirty + larger than needed
+        decode_palm_detections_into(&raw, &[100.0], &[anchor], &opts, 0.5, &mut out);
+        assert_eq!(
+            out,
+            decode_palm_detections(&raw, &[100.0], &[anchor], &opts, 0.5)
+        );
     }
 }

@@ -55,7 +55,10 @@ use super::capture::Frame;
 use super::coords::{estimate_depth_mm, image_norm_to_leap_mm, DEFAULT_DEPTH_CALIBRATION_K};
 use super::inference::{HandInference, InferenceError, Tensor};
 use super::landmark::{project_landmarks, roi_from_landmarks, roi_from_palm, RoiRect};
-use super::palm::{decode_palm_detections, weighted_nms, PalmDecodeOptions};
+use super::palm::{
+    decode_palm_detections_into, weighted_nms_into, PalmDecodeOptions, PalmDetection,
+    PalmNmsScratch,
+};
 use super::signals::{
     grab_strength, palm_center, palm_normal, palm_velocity, pinch_strength, HandTracker,
 };
@@ -317,10 +320,18 @@ pub struct Pipeline {
     square_buf: RgbImage,
     /// Reused ROI-warp crop (`LM_SIZE`²), refilled per landmark stage.
     warp_buf: RgbImage,
+    /// Reused palm-stage resize target (`PALM_SIZE`²), refilled each
+    /// acquisition by [`resize_into`].
+    palm_resize_buf: RgbImage,
     /// Reused palm-stage input tensor (`192²×3` f32), refilled each acquisition.
     palm_input: Tensor,
     /// Reused landmark-stage input tensor (`224²×3` f32), refilled per ROI.
     landmark_input: Tensor,
+    /// Reused decoded-palm-detections buffer, cleared+refilled each acquisition
+    /// ([`decode_palm_detections_into`], then NMS'd in place).
+    palm_dets: Vec<PalmDetection>,
+    /// Reused weighted-NMS scratch (mask, cluster, kept buffers).
+    palm_nms: PalmNmsScratch,
 }
 
 impl Pipeline {
@@ -347,6 +358,7 @@ impl Pipeline {
             // camera frame size changes.
             square_buf: RgbImage::default(),
             warp_buf: RgbImage::new(LM_SIZE, LM_SIZE),
+            palm_resize_buf: RgbImage::new(PALM_SIZE, PALM_SIZE),
             palm_input: Tensor {
                 data: Vec::with_capacity(idx(PALM_SIZE) * idx(PALM_SIZE) * 3),
                 shape: vec![1, idx(PALM_SIZE), idx(PALM_SIZE), 3],
@@ -355,6 +367,8 @@ impl Pipeline {
                 data: Vec::with_capacity(idx(LM_SIZE) * idx(LM_SIZE) * 3),
                 shape: vec![1, idx(LM_SIZE), idx(LM_SIZE), 3],
             },
+            palm_dets: Vec::new(),
+            palm_nms: PalmNmsScratch::default(),
         }
     }
 
@@ -482,25 +496,31 @@ impl Pipeline {
         &mut self,
         square: &RgbImage,
     ) -> Result<SmallVec<[RoiRect; MAX_HANDS]>, InferenceError> {
-        // `resize` allocates its own output (an `image` crate limitation); the
-        // input tensor it feeds is the reused scratch (`palm_input`).
-        let resized = resize(square, PALM_SIZE, PALM_SIZE);
-        fill_nchw_unit(&resized, &mut self.palm_input);
+        // Bilinear-resize into the reused 192² buffer (see [`resize_into`] for
+        // the equivalence story vs the image crate's Triangle resize), then
+        // refill the reused input tensor — no per-acquisition allocation.
+        resize_into(square, PALM_SIZE, PALM_SIZE, &mut self.palm_resize_buf);
+        fill_nchw_unit(&self.palm_resize_buf, &mut self.palm_input);
         let out = self.palm.run(&self.palm_input)?;
         let (boxes, scores) = pick_palm_outputs(&out)?;
-        let mut dets = weighted_nms(
-            decode_palm_detections(
-                boxes,
-                scores,
-                &self.anchors,
-                &self.decode,
-                self.config.palm_score_threshold,
-            ),
-            0.3,
+        // Decode + NMS through the reused scratch buffers: the `_into` forms
+        // clear-and-refill, so capacities persist across frames and the
+        // steady-state acquisition path allocates nothing (worker-loop rule).
+        decode_palm_detections_into(
+            boxes,
+            scores,
+            &self.anchors,
+            &self.decode,
+            self.config.palm_score_threshold,
+            &mut self.palm_dets,
         );
-        dets.sort_by(|a, b| b.score.total_cmp(&a.score));
-        dets.truncate(MAX_HANDS);
-        Ok(dets.iter().map(roi_from_palm).collect())
+        weighted_nms_into(&mut self.palm_dets, 0.3, &mut self.palm_nms);
+        self.palm_dets.sort_by(|a, b| b.score.total_cmp(&a.score));
+        self.palm_dets.truncate(MAX_HANDS);
+        // NOT an allocation: SmallVec<[RoiRect; MAX_HANDS]> keeps up to
+        // MAX_HANDS (= 2) elements inline on the stack, and `dets` was just
+        // truncated to that, so this collect never spills to the heap.
+        Ok(self.palm_dets.iter().map(roi_from_palm).collect())
     }
 
     /// Run the landmark stage for one ROI. Returns the tracked hand and the ROI
@@ -908,6 +928,43 @@ fn square_pad(frame: &Frame) -> RgbImage {
     img
 }
 
+/// Bilinearly resize `src` into a reused `dst` buffer. (Re)allocates `dst`
+/// only when the target size changes — i.e. never in steady state — replacing
+/// the per-acquisition output allocation of `image::imageops::resize`.
+///
+/// Sampling is plain bilinear at each output-pixel centre, with the same
+/// half-pixel-centre mapping and clamp-to-edge as [`sample_bilinear`] /
+/// [`warp_roi_into`]. For **upscales** (ratio < 1) this is exactly what the
+/// `image` crate's `FilterType::Triangle` computes. For **downscales** Triangle
+/// widens its kernel to average over the scale ratio while bilinear
+/// point-samples a 2×2 neighbourhood — which is also what `MediaPipe`'s own
+/// `ImageToTensor` preprocessing does (`OpenCV` `INTER_LINEAR` on CPU, GPU
+/// bilinear sampling), so the palm model sees the resize conditions it was
+/// built for. Agreement with Triangle on smooth content is pinned by
+/// `resize_into_matches_triangle_resize_on_gradients`.
+fn resize_into(src: &RgbImage, w: u32, h: u32, dst: &mut RgbImage) {
+    if dst.width() != w || dst.height() != h {
+        *dst = RgbImage::new(w, h);
+    }
+    if src.width() == 0 || src.height() == 0 || w == 0 || h == 0 {
+        return;
+    }
+    // Output-pixel centre → source coordinates (half-pixel-centre convention):
+    // src_x = (dst_x + 0.5) · (src_w / dst_w) − 0.5, src_y analog.
+    let sx = dim(src.width()) / dim(w);
+    let sy = dim(src.height()) / dim(h);
+    for oy in 0..h {
+        let y = (dim(oy) + 0.5) * sy - 0.5;
+        for ox in 0..w {
+            let x = (dim(ox) + 0.5) * sx - 0.5;
+            dst.put_pixel(ox, oy, sample_bilinear(src, x, y));
+        }
+    }
+}
+
+/// `image`-crate Triangle resize (allocates its output). Tests/benchmarks
+/// only — the equivalence-test oracle for [`resize_into`], which is what the
+/// pipeline's detect path uses.
 fn resize(img: &RgbImage, w: u32, h: u32) -> RgbImage {
     image::imageops::resize(img, w, h, FilterType::Triangle)
 }
@@ -1277,9 +1334,9 @@ mod tests {
             let t_pad = bench(20, &mut || {
                 sq = square_pad(&frame);
             });
-            let mut small = resize(&sq, PALM_SIZE, PALM_SIZE);
+            let mut small = RgbImage::default();
             let t_resize = bench(20, &mut || {
-                small = resize(&sq, PALM_SIZE, PALM_SIZE);
+                resize_into(&sq, PALM_SIZE, PALM_SIZE, &mut small);
             });
             eprintln!(
                 "  preprocess @ {w}x{h}: square_pad {t_pad:.2}  resize->192 {t_resize:.2}  (sum {:.2})",
@@ -1327,8 +1384,9 @@ mod tests {
         let t_pad_720 = bench(20, &mut || {
             let _ = square_pad(&f720);
         });
+        let mut small_720 = RgbImage::default();
         let t_resize_720 = bench(20, &mut || {
-            let _ = resize(&s720, PALM_SIZE, PALM_SIZE);
+            resize_into(&s720, PALM_SIZE, PALM_SIZE, &mut small_720);
         });
         // Acquisition frame: square_pad + resize->192 + palm + warp + landmark.
         let acquire = t_pad_720 + t_resize_720 + t_palm + t_warp + t_lm;
@@ -2298,6 +2356,65 @@ mod tests {
         // Centre of the crop maps to ~(2.5,2.5) in the source — near the bright px.
         let c = crop.get_pixel(4, 4);
         assert!(c[0] > 0, "expected non-black centre, got {c:?}");
+    }
+
+    /// A `side`² image with smooth per-channel linear gradients (x ramp, y
+    /// ramp, diagonal ramp) — content on which a triangle kernel and bilinear
+    /// point-sampling agree up to `u8` rounding and edge clamping.
+    fn gradient_image(side: u32) -> RgbImage {
+        let mut img = RgbImage::new(side, side);
+        let denom = dim(side - 1);
+        for y in 0..side {
+            for x in 0..side {
+                let r = byte(dim(x) / denom * 255.0);
+                let g = byte(dim(y) / denom * 255.0);
+                let b = byte((dim(x) + dim(y)) * 0.5 / denom * 255.0);
+                img.put_pixel(x, y, image::Rgb([r, g, b]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn resize_into_matches_triangle_resize_on_gradients() {
+        // Pixel-equivalence pin for the reused-buffer resize: on smooth
+        // (linear) content the reused bilinear resize and the image crate's
+        // FilterType::Triangle oracle must agree to within u8 rounding.
+        // Covers the real camera downscale (square side → 192) and the mock
+        // tests' upscale (64 → 192, where Triangle IS bilinear). The
+        // threshold is mean abs diff < 1.0 across all channels — i.e. the
+        // total error budget is below one intensity level per sample.
+        for (side, label) in [(640u32, "downscale"), (64u32, "upscale")] {
+            let src = gradient_image(side);
+            let oracle = resize(&src, PALM_SIZE, PALM_SIZE);
+            let mut got = RgbImage::default();
+            resize_into(&src, PALM_SIZE, PALM_SIZE, &mut got);
+            let mut total_abs_diff = 0u64;
+            for (a, b) in oracle.pixels().zip(got.pixels()) {
+                for c in 0..3 {
+                    total_abs_diff += u64::from(a[c].abs_diff(b[c]));
+                }
+            }
+            let samples = u64::from(PALM_SIZE) * u64::from(PALM_SIZE) * 3;
+            // mean < 1.0 ⇔ total < samples (integer form, no float casts).
+            assert!(
+                total_abs_diff < samples,
+                "{label} {side}→{PALM_SIZE}: mean abs diff {total_abs_diff}/{samples} >= 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn resize_into_reused_buffer_matches_fresh_buffer() {
+        // A dirty reused buffer (previous frame's pixels, same dimensions)
+        // must produce exactly what a fresh buffer does — every pixel is
+        // rewritten, no stale content survives.
+        let src = gradient_image(640);
+        let mut fresh = RgbImage::default();
+        resize_into(&src, PALM_SIZE, PALM_SIZE, &mut fresh);
+        let mut reused = RgbImage::from_pixel(PALM_SIZE, PALM_SIZE, image::Rgb([7, 77, 177]));
+        resize_into(&src, PALM_SIZE, PALM_SIZE, &mut reused);
+        assert_eq!(fresh, reused);
     }
 
     // --- ContentRect::to_content_norm (Phase P3: letterbox unprojection) -----
