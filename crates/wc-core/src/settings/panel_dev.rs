@@ -234,7 +234,7 @@ fn draw_hand_tuning_controls(
         egui::Slider::new(&mut settings.grab_rest_deadzone, 0.0..=0.6).text("Grab rest deadzone"),
     );
     ui.add(
-        egui::Slider::new(&mut settings.smoothing_min_cutoff, 0.1..=10.0)
+        egui::Slider::new(&mut settings.smoothing_min_cutoff, 0.1..=20.0)
             .text("Smoothing min cutoff (Hz)"),
     );
     ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));

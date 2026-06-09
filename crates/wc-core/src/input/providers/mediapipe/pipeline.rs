@@ -50,6 +50,29 @@ const LM_SIZE: u32 = 224;
 /// well-separated detection is added as a new hand. See [`associate`].
 const ASSOCIATION_GATE: f32 = 0.25;
 
+/// Smallest landmark-derived ROI that is still plausible as a track.
+///
+/// When a hand leaves the camera, the landmark model can report high presence
+/// on an edge/empty crop with all landmarks collapsed together. The resulting
+/// ROI centre may still be in-frame, so size is the signal that the track is no
+/// longer usable. Below this, drop the hand and let palm detection reacquire.
+const MIN_TRACK_ROI_SIZE: f32 = 0.05;
+
+/// Smallest mean x/y landmark spread that still looks like a hand.
+///
+/// Line's grab model divides by hand scale; when the landmark model collapses
+/// points onto a tiny high-presence cluster, that geometry reads like a full
+/// fist and fires an attractor. Reject the pose before deriving grab.
+const MIN_TRACK_LANDMARK_SPREAD: f32 = 0.04;
+
+/// Normalized margin inside the camera content that landmarks must stay within.
+///
+/// Once landmarks touch the square-padded frame edge, the ROI warp is already
+/// sampling clamped pixels and the hand geometry is no longer trustworthy.
+/// Dropping at a small inset is preferable to letting border-pinned points
+/// produce a false fist/grab for one more frame.
+const TRACK_LANDMARK_EDGE_MARGIN: f32 = 0.015;
+
 /// Tunables for the pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -165,8 +188,8 @@ pub struct Pipeline {
     /// tracks landmark-only; palm re-runs only when fewer than [`MAX_HANDS`] are
     /// tracked (count-gated re-detection), so a healthy pair of hands is never
     /// re-seeded. A track is dropped when its hand is lost (landmark presence below
-    /// threshold), when its centre leaves the frame ([`roi_on_screen`]), or when
-    /// the frame is unusable.
+    /// threshold), when it leaves the frame ([`roi_trackable`]), or when the
+    /// frame is unusable.
     tracked: SmallVec<[RoiRect; MAX_HANDS]>,
     /// Optional live source for [`PipelineConfig::grab_rest_deadzone`], shared
     /// (lock-free `f32` bits) with the provider so a tuning UI can re-tune the
@@ -312,8 +335,8 @@ impl Pipeline {
         let mut next: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
         for roi in to_run {
             let stage_start = Instant::now();
-            if let Some((hand, next_roi)) = self.landmark_for(&square, roi, dt)? {
-                if roi_on_screen(&next_roi, content) {
+            if let Some((hand, next_roi)) = self.landmark_for(&square, roi, content, dt)? {
+                if roi_trackable(&next_roi, content) {
                     hands.push(hand);
                     next.push(next_roi);
                 }
@@ -366,6 +389,7 @@ impl Pipeline {
         &mut self,
         square: &RgbImage,
         roi: RoiRect,
+        content: ContentRect,
         dt: Duration,
     ) -> Result<Option<(Hand, RoiRect)>, InferenceError> {
         // Warp the ROI into the reused crop buffer, then into the reused input
@@ -379,6 +403,10 @@ impl Pipeline {
         }
 
         let img_landmarks = project_landmarks(raw_lms, &roi);
+        if !landmarks_trackable(&img_landmarks, content) {
+            return Ok(None);
+        }
+
         // Map every landmark into the Leap-device-mm convention.
         let mut landmarks = [Vec3::ZERO; LANDMARK_COUNT];
         for (dst, src) in landmarks.iter_mut().zip(img_landmarks.iter()) {
@@ -501,6 +529,15 @@ impl ContentRect {
     fn contains(self, cx: f32, cy: f32) -> bool {
         (self.x0..=self.x1).contains(&cx) && (self.y0..=self.y1).contains(&cy)
     }
+
+    /// Whether `(cx, cy)` lies inside the content rect after insetting all edges.
+    fn contains_inset(self, cx: f32, cy: f32, margin: f32) -> bool {
+        let x0 = self.x0 + margin;
+        let y0 = self.y0 + margin;
+        let x1 = self.x1 - margin;
+        let y1 = self.y1 - margin;
+        x0 <= x1 && y0 <= y1 && (x0..=x1).contains(&cx) && (y0..=y1).contains(&cy)
+    }
 }
 
 /// True if the ROI's centre (the hand's palm in square-normalized coordinates)
@@ -512,6 +549,32 @@ impl ContentRect {
 /// and stay the focal hand, so a returning hand is ignored). See [`ContentRect`].
 fn roi_on_screen(roi: &RoiRect, content: ContentRect) -> bool {
     content.contains(roi.cx, roi.cy)
+}
+
+/// True if the landmark-derived ROI is worth carrying into the next frame.
+fn roi_trackable(roi: &RoiRect, content: ContentRect) -> bool {
+    roi_on_screen(roi, content) && roi.size.is_finite() && roi.size >= MIN_TRACK_ROI_SIZE
+}
+
+/// True when the projected landmark set is finite and spatially hand-like.
+fn landmarks_trackable(landmarks: &[Vec3; LANDMARK_COUNT], content: ContentRect) -> bool {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for lm in landmarks {
+        if !lm.x.is_finite()
+            || !lm.y.is_finite()
+            || !content.contains_inset(lm.x, lm.y, TRACK_LANDMARK_EDGE_MARGIN)
+        {
+            return false;
+        }
+        min_x = min_x.min(lm.x);
+        min_y = min_y.min(lm.y);
+        max_x = max_x.max(lm.x);
+        max_y = max_y.max(lm.y);
+    }
+    (((max_x - min_x) + (max_y - min_y)) * 0.5) >= MIN_TRACK_LANDMARK_SPREAD
 }
 
 // --- numeric conversion helpers (kept tiny + justified) ------------------
@@ -1025,26 +1088,6 @@ mod tests {
         std::sync::Arc<std::sync::atomic::AtomicU32>,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
     ) {
-        use std::sync::atomic::AtomicU32;
-        use std::sync::Arc;
-
-        // Palm: anchor 0 hot → one 0.2×0.2 detection; all other anchors drop.
-        let mut scores = vec![-100.0f32; 2016];
-        scores[0] = 100.0;
-        let mut boxes = vec![0.0f32; 2016 * 18];
-        boxes[2] = 192.0 * 0.2;
-        boxes[3] = 192.0 * 0.2;
-        let palm_out = vec![
-            Tensor {
-                data: boxes,
-                shape: vec![1, 2016, 18],
-            },
-            Tensor {
-                data: scores,
-                shape: vec![1, 2016, 1],
-            },
-        ];
-
         // Landmark: a spread hand with high presence + handedness.
         let mut lms = vec![112.0f32; 63];
         let mut set = |i: usize, x: f32, y: f32| {
@@ -1056,6 +1099,42 @@ mod tests {
         set(5, 85.0, 110.0); // index MCP
         set(17, 140.0, 110.0); // pinky MCP
         set(12, 112.0, 50.0); // middle tip
+        counting_pipeline_with_landmarks(lms)
+    }
+
+    fn counting_pipeline_with_landmarks(
+        lms: Vec<f32>,
+    ) -> (
+        Pipeline,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Arc;
+
+        // Palm: one central stride-8 anchor hot → one 0.2×0.2 detection; all
+        // other anchors drop. Keep the mock away from frame edges so tests that
+        // expect a healthy hand are not exercising the edge-invalidation path.
+        let mut scores = vec![-100.0f32; 2016];
+        let hot_anchor = (12 * 24 + 12) * 2;
+        scores[hot_anchor] = 100.0;
+        let mut boxes = vec![0.0f32; 2016 * 18];
+        let hot_box = hot_anchor * 18;
+        boxes[hot_box + 2] = 192.0 * 0.2;
+        boxes[hot_box + 3] = 192.0 * 0.2;
+        boxes[hot_box + 5] = 192.0 * 0.1;
+        boxes[hot_box + 9] = -192.0 * 0.1;
+        let palm_out = vec![
+            Tensor {
+                data: boxes,
+                shape: vec![1, 2016, 18],
+            },
+            Tensor {
+                data: scores,
+                shape: vec![1, 2016, 1],
+            },
+        ];
+
         let lm_out = vec![
             Tensor {
                 data: lms,
@@ -1147,6 +1226,22 @@ mod tests {
         }
     }
 
+    fn roi_with_size(cx: f32, cy: f32, size: f32) -> RoiRect {
+        RoiRect {
+            size,
+            ..roi_at(cx, cy)
+        }
+    }
+
+    fn landmark_set_with_spread(spread: f32) -> [Vec3; LANDMARK_COUNT] {
+        let mut landmarks = [Vec3::splat(0.5); LANDMARK_COUNT];
+        landmarks[0].x -= spread * 0.5;
+        landmarks[1].x += spread * 0.5;
+        landmarks[2].y -= spread * 0.5;
+        landmarks[3].y += spread * 0.5;
+        landmarks
+    }
+
     /// Build a track set from `(cx, cy)` centres.
     fn tracks(items: &[(f32, f32)]) -> SmallVec<[RoiRect; MAX_HANDS]> {
         items.iter().map(|&(cx, cy)| roi_at(cx, cy)).collect()
@@ -1208,6 +1303,79 @@ mod tests {
         assert!(
             !roi_on_screen(&roi_at(0.5, 1.2), full),
             "palm left the frame at the bottom"
+        );
+    }
+
+    #[test]
+    fn collapsed_roi_is_not_trackable() {
+        let full = ContentRect::for_frame(64, 64);
+        assert!(
+            roi_trackable(&roi_with_size(0.5, 0.5, MIN_TRACK_ROI_SIZE), full),
+            "minimum plausible ROI is still tracked"
+        );
+        assert!(
+            !roi_trackable(&roi_with_size(0.5, 0.5, MIN_TRACK_ROI_SIZE * 0.5), full),
+            "collapsed ROI is dropped even when its centre is on screen"
+        );
+    }
+
+    #[test]
+    fn collapsed_landmarks_are_not_trackable() {
+        let full = ContentRect::for_frame(64, 64);
+        assert!(
+            landmarks_trackable(
+                &landmark_set_with_spread(MIN_TRACK_LANDMARK_SPREAD * 1.1),
+                full
+            ),
+            "minimum plausible landmark spread is still tracked"
+        );
+        assert!(
+            !landmarks_trackable(
+                &landmark_set_with_spread(MIN_TRACK_LANDMARK_SPREAD * 0.5),
+                full
+            ),
+            "tiny high-presence landmark clusters are dropped"
+        );
+    }
+
+    #[test]
+    fn edge_pinned_landmarks_are_not_trackable() {
+        let full = ContentRect::for_frame(64, 64);
+        let mut landmarks = landmark_set_with_spread(MIN_TRACK_LANDMARK_SPREAD * 1.1);
+        landmarks[0].x = TRACK_LANDMARK_EDGE_MARGIN * 0.5;
+
+        assert!(
+            !landmarks_trackable(&landmarks, full),
+            "landmarks touching the camera edge are dropped before grab is derived"
+        );
+    }
+
+    #[test]
+    fn landmarks_in_padding_bars_are_not_trackable() {
+        let landscape = ContentRect::for_frame(1280, 720);
+        let mut landmarks = landmark_set_with_spread(MIN_TRACK_LANDMARK_SPREAD * 1.1);
+        landmarks[0].y = landscape.y0 - TRACK_LANDMARK_EDGE_MARGIN;
+
+        assert!(
+            !landmarks_trackable(&landmarks, landscape),
+            "square-padding bars are outside the usable camera content"
+        );
+    }
+
+    #[test]
+    fn high_presence_collapsed_landmarks_do_not_keep_a_track() {
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_landmarks(vec![112.0f32; 63]);
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+
+        assert!(
+            hands.is_empty(),
+            "collapsed high-presence landmarks should emit no hand"
+        );
+        assert!(
+            pipe.tracked.is_empty(),
+            "collapsed high-presence landmarks should not occupy a tracking slot"
         );
     }
 

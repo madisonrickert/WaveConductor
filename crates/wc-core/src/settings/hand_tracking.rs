@@ -30,7 +30,7 @@ pub struct HandTrackingSettings {
     /// MediaPipe-only: grab rest-deadzone — a relaxed-open hand whose raw grab is
     /// at/under this reads exactly `0`, so the attractor releases. Raise if the
     /// attractor lingers when the hand is open; lower if grab feels weak/late.
-    /// Default must match `mediapipe::pipeline::PipelineConfig` (`0.12`).
+    /// Default must match `mediapipe::pipeline::PipelineConfig` (`0.2`).
     #[setting(
         default = 0.2_f32,
         min = 0.0,
@@ -45,11 +45,11 @@ pub struct HandTrackingSettings {
 
     /// MediaPipe-only: One-Euro min cutoff (Hz) — at-rest smoothing. Lower =
     /// steadier when the hand holds still (more lag on slow motion). Default must
-    /// match `mediapipe::smoothing::DEFAULT_MIN_CUTOFF` (`1.0`).
+    /// match `mediapipe::smoothing::DEFAULT_MIN_CUTOFF` (`10.0`).
     #[setting(
-        default = 5.0_f32,
+        default = 10.0_f32,
         min = 0.1,
-        max = 10.0,
+        max = 20.0,
         step = 0.05,
         category = Dev,
         section = "Hand Tracking",
@@ -60,7 +60,7 @@ pub struct HandTrackingSettings {
 
     /// MediaPipe-only: One-Euro speed coefficient — higher opens the cutoff
     /// faster during motion (less lag). Scale-normalized hand-lengths/sec.
-    /// Default must match `mediapipe::smoothing::DEFAULT_BETA` (`2.0`).
+    /// Default must match `mediapipe::smoothing::DEFAULT_BETA` (`6.0`).
     #[setting(
         default = 6.0_f32,
         min = 0.0,
@@ -80,7 +80,7 @@ fn default_grab_rest_deadzone() -> f32 {
     0.2
 }
 fn default_smoothing_min_cutoff() -> f32 {
-    5.0
+    10.0
 }
 fn default_smoothing_beta() -> f32 {
     6.0

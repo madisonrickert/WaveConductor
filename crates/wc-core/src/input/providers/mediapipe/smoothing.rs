@@ -40,7 +40,7 @@ use crate::input::state::MAX_HANDS;
 /// output smoothing mostly added lag, so this hardware-validated higher value
 /// feels more responsive. Live-tunable from the dev panel
 /// (`HandTrackingSettings::smoothing_min_cutoff`).
-pub const DEFAULT_MIN_CUTOFF: f32 = 5.0;
+pub const DEFAULT_MIN_CUTOFF: f32 = 10.0;
 
 /// Default speed coefficient: how fast the cutoff opens up with hand speed (less
 /// lag during motion). Because the speed is object-scale-normalized (see the
@@ -112,6 +112,12 @@ impl OneEuroFilter {
         let x_hat = low_pass(x, smoothing_alpha(cutoff, dt), x_prev);
         self.x_prev = Some(x_hat);
         x_hat
+    }
+
+    /// Set the filtered value immediately, clearing derivative momentum.
+    fn snap_to(&mut self, x: f32) {
+        self.x_prev = Some(x);
+        self.dx_prev = 0.0;
     }
 
     /// Live-update the One-Euro parameters without disturbing the filter state,
@@ -198,6 +204,19 @@ impl HandFilters {
         for (filter, lm) in self.landmarks.iter_mut().zip(landmarks.iter_mut()) {
             *lm = filter.filter(*lm, dt, pos_scale);
         }
+        let grab_strength = if target.grab_strength <= 0.0 {
+            // `Pipeline` already applies the configurable rest deadzone. Preserve
+            // that exact release through smoothing; otherwise Line's
+            // `grab > 0` gate sees an asymptotic tail and keeps the attractor
+            // alive after an open/resting hand.
+            self.grab.snap_to(0.0);
+            0.0
+        } else {
+            self.grab
+                .filter(target.grab_strength, dt, 1.0)
+                .clamp(0.0, 1.0)
+        };
+
         Hand {
             palm_position: self
                 .palm_position
@@ -211,10 +230,7 @@ impl HandFilters {
                 .pinch
                 .filter(target.pinch_strength, dt, 1.0)
                 .clamp(0.0, 1.0),
-            grab_strength: self
-                .grab
-                .filter(target.grab_strength, dt, 1.0)
-                .clamp(0.0, 1.0),
+            grab_strength,
             landmarks,
             // id, chirality, and palm_velocity carry through unchanged.
             ..target.clone()
@@ -330,6 +346,13 @@ mod tests {
         }
     }
 
+    fn hand_with_grab(id: u32, grab_strength: f32) -> Hand {
+        Hand {
+            grab_strength,
+            ..hand_with(id, 0.0)
+        }
+    }
+
     #[test]
     fn first_sample_passes_through() {
         let mut f = OneEuroFilter::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
@@ -431,6 +454,19 @@ mod tests {
             (back[0].palm_position.x - 80.0).abs() < 1e-6,
             "returning hand should be fresh, got {}",
             back[0].palm_position.x
+        );
+    }
+
+    #[test]
+    fn smoother_preserves_exact_grab_release() {
+        let mut s = HandSmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        s.smooth(&[hand_with_grab(1, 1.0)], Duration::from_millis(0));
+
+        let released = s.smooth(&[hand_with_grab(1, 0.0)], Duration::from_millis(16));
+
+        assert!(
+            released[0].grab_strength <= f32::EPSILON,
+            "a deadzoned open hand must not publish a smoothed positive grab tail"
         );
     }
 
