@@ -65,17 +65,27 @@ use crate::input::state::MAX_HANDS;
 const PALM_SIZE: u32 = 192;
 const LM_SIZE: u32 = 224;
 
-/// Normalized centre distance below which a fresh palm detection is taken to be
-/// the *same* hand as an existing track (the merge gate of `MediaPipe`'s
-/// `AssociationNormRectCalculator`, expressed as centre distance rather than
-/// `IoU`: our palm ROI (scale 2.6, shift −0.5) and landmark-track ROI (scale 2.0,
-/// shift −0.1) for one hand can have `IoU` below 0.5, so `IoU` would *duplicate*
-/// the hand;
-/// their centres are always close, so centre distance matches reliably). On a
-/// re-detect the smooth tracked ROI wins; a detection whose centre is within this
-/// of a kept ROI is discarded (no duplicate, no identity reset), and only a
-/// well-separated detection is added as a new hand. See [`associate`].
-const ASSOCIATION_GATE: f32 = 0.25;
+/// Scale factor applied to `max(size_a, size_b)` to compute the association gate.
+///
+/// **Why scale-relative, not fixed:** the palm-path ROI (scale 2.6, shift −0.5)
+/// and the track-path ROI (scale 2.0, shift −0.1) for the *same* hand can have
+/// centres up to ~0.3× the ROI size apart (dominated by the shift mismatch).  A
+/// gate must exceed that to keep merging the same-hand pair reliably. At the same
+/// time, two *distinct* hands cannot interpenetrate: their ROI centres sit at
+/// least ~0.7–0.8× ROI size apart (ROIs are 2–2.6× the palm box), so
+/// `0.5×max(size)` cleanly splits the "same hand" and "distinct hands" bands and
+/// scales correctly whether hands are near or far. Using `max(size_a, size_b)` is
+/// conservative (prefers merging over duplication), which is the safer failure
+/// mode: a duplicated hand consumes the second `MAX_HANDS` slot and hides the
+/// real second hand.
+const ASSOCIATION_GATE_FACTOR: f32 = 0.5;
+
+/// Absolute floor for the scale-relative gate (normalized square units).
+///
+/// For tiny or distant ROIs the geometric gate (`0.5×size`) can underestimate
+/// detector jitter and split a single hand into two identities. The floor keeps
+/// the gate wide enough to absorb that noise: `max(0.5×size, 0.08)`.
+const ASSOCIATION_GATE_FLOOR: f32 = 0.08;
 
 /// Smallest landmark-derived ROI that is still plausible as a track.
 ///
@@ -85,11 +95,17 @@ const ASSOCIATION_GATE: f32 = 0.25;
 /// longer usable. Below this, drop the hand and let palm detection reacquire.
 const MIN_TRACK_ROI_SIZE: f32 = 0.05;
 
-/// Smallest mean x/y landmark spread that still looks like a hand.
+/// Minimum landmark bounding-box extent (in both axes) that still looks like a hand.
 ///
-/// Line's grab model divides by hand scale; when the landmark model collapses
-/// points onto a tiny high-presence cluster, that geometry reads like a full
-/// fist and fires an attractor. Reject the pose before deriving grab.
+/// Checked against `min(bbox_width, bbox_height)` so a line-collapsed set (wide
+/// in x, near-zero in y, or vice versa) is caught even when the mean of the two
+/// axes looks plausible. A set collapsed to a line in one axis triggers a false
+/// fist in Line's grab model (grab divides by hand scale); rejecting it before
+/// deriving grab prevents a phantom attractor.
+///
+/// The threshold is kept at 0.04 pending hardware retune; the retune starts at
+/// 0.03 (see the hardware-tuning session plan). Code change here is the metric
+/// (min instead of mean), not the value.
 const MIN_TRACK_LANDMARK_SPREAD: f32 = 0.04;
 
 /// Normalized margin inside the camera content that landmarks must stay within.
@@ -622,7 +638,7 @@ impl Pipeline {
 ///
 /// Each kept ROI is the smooth landmark-derived track, never replaced by a jumpy
 /// fresh palm ROI. A fresh detection is added (as a new hand) only if its centre
-/// is more than [`ASSOCIATION_GATE`] from every already-kept ROI, so an existing
+/// is more than [`association_gate`] from every already-kept ROI, so an existing
 /// hand is never duplicated or snapped to a new identity. The result is capped at
 /// [`MAX_HANDS`].
 fn associate(
@@ -636,12 +652,23 @@ fn associate(
         }
         if out
             .iter()
-            .all(|kept| roi_center_dist(kept, p) > ASSOCIATION_GATE)
+            .all(|kept| roi_center_dist(kept, p) > association_gate(kept, p))
         {
             out.push(*p);
         }
     }
     out
+}
+
+/// Scale-relative merge gate for [`associate`].
+///
+/// Returns `max(`[`ASSOCIATION_GATE_FACTOR`]` × max(a.size, b.size),`
+/// [`ASSOCIATION_GATE_FLOOR`]`)`.
+///
+/// Using `max(a.size, b.size)` is conservative (wider gate → prefers merging
+/// over duplication). See [`ASSOCIATION_GATE_FACTOR`] for the geometric rationale.
+fn association_gate(a: &RoiRect, b: &RoiRect) -> f32 {
+    (ASSOCIATION_GATE_FACTOR * a.size.max(b.size)).max(ASSOCIATION_GATE_FLOOR)
 }
 
 /// Centre-to-centre distance between two ROIs in normalized image units.
@@ -764,7 +791,10 @@ fn landmarks_trackable(landmarks: &[Vec3; LANDMARK_COUNT], content: ContentRect)
         max_x = max_x.max(lm.x);
         max_y = max_y.max(lm.y);
     }
-    (((max_x - min_x) + (max_y - min_y)) * 0.5) >= MIN_TRACK_LANDMARK_SPREAD
+    // Use min(width, height) rather than mean so a line-collapsed set (large in
+    // one axis, near-zero in the other) is rejected even when the mean looks
+    // plausible. A line of landmarks triggers a false fist in the grab model.
+    (max_x - min_x).min(max_y - min_y) >= MIN_TRACK_LANDMARK_SPREAD
 }
 
 // --- world-landmark gesture geometry --------------------------------------
@@ -1624,6 +1654,87 @@ mod tests {
         assert!(
             (out[0].cx - 0.5).abs() < 1e-6 && (out[0].cy - 0.5).abs() < 1e-6,
             "kept the track, not the palm ROI",
+        );
+    }
+
+    // --- Phase P6: scale-relative association gate + min-based spread check ---
+
+    /// Two small far-away ROIs (size 0.1) whose centres are 0.12 apart.
+    ///
+    /// Old fixed gate 0.25: 0.12 <= 0.25 → merged into one hand (swallowed the
+    /// second). New scale-relative gate: max(0.5×0.1, 0.08) = 0.08, and
+    /// 0.12 > 0.08 → treated as distinct hands.
+    #[test]
+    fn associate_small_rois_close_but_distinct_are_kept_separately() {
+        let a = roi_with_size(0.3, 0.5, 0.1);
+        let b = roi_with_size(0.42, 0.5, 0.1); // distance = 0.12
+        let out = associate(SmallVec::from_slice(&[a]), &[b]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two small hands at distance 0.12 must not be merged; old 0.25 gate swallowed the second"
+        );
+    }
+
+    /// Large tracked ROI (size 0.6) with a detection 0.25 away must still merge.
+    ///
+    /// Scale-relative gate: max(0.5×0.6, 0.08) = 0.3 > 0.25 → detection is
+    /// within the gate → merged. Confirms at-scale behaviour is preserved.
+    #[test]
+    fn associate_large_roi_merges_detection_within_scaled_gate() {
+        let tracked = roi_with_size(0.5, 0.5, 0.6);
+        let detection = roi_with_size(0.75, 0.5, 0.3); // distance = 0.25
+        let out = associate(SmallVec::from_slice(&[tracked]), &[detection]);
+        assert_eq!(
+            out.len(),
+            1,
+            "detection 0.25 away from a size-0.6 track must merge"
+        );
+        assert!(
+            (out[0].cx - 0.5).abs() < 1e-6,
+            "tracked ROI wins (kept verbatim)"
+        );
+    }
+
+    /// Floor case: two tiny ROIs (size 0.05) at centre distance 0.05.
+    ///
+    /// Geometric gate 0.5×0.05 = 0.025 is below the floor 0.08; the floor
+    /// applies, and 0.05 <= 0.08 → merged. Prevents detector jitter on
+    /// small/far ROIs from duplicating a single hand.
+    #[test]
+    fn associate_floor_merges_tiny_rois_with_detector_jitter() {
+        let a = roi_with_size(0.5, 0.5, 0.05);
+        let b = roi_with_size(0.55, 0.5, 0.05); // distance = 0.05
+        let out = associate(SmallVec::from_slice(&[a]), &[b]);
+        assert_eq!(
+            out.len(),
+            1,
+            "tiny ROIs within the 0.08 floor must be treated as the same hand"
+        );
+    }
+
+    /// Line-collapsed landmark set (wide bbox but nearly zero height) must fail
+    /// the spread check.
+    ///
+    /// Old metric: mean((w+h)/2) = (0.2+0.01)/2 = 0.105 >= 0.04 → passed (BUG).
+    /// New metric: min(w, h) = 0.01 < 0.04 → rejected. A line-shaped cluster
+    /// (all landmarks collapsed onto a horizontal line) triggers a false fist in
+    /// Line's grab model and must be dropped before grab is derived.
+    #[test]
+    fn line_collapsed_landmarks_fail_spread_check() {
+        // Place wrist at left, middle-MCP directly right (wide x), zero y spread.
+        let mut landmarks = [Vec3::splat(0.5); LANDMARK_COUNT];
+        // Create a bbox that is 0.2 wide but 0.01 tall: x spans [0.4, 0.6], y
+        // spans [0.495, 0.505].
+        landmarks[0] = Vec3::new(0.40, 0.5, 0.0); // leftmost
+        landmarks[1] = Vec3::new(0.60, 0.5, 0.0); // rightmost
+        landmarks[2] = Vec3::new(0.5, 0.495, 0.0); // topmost
+        landmarks[3] = Vec3::new(0.5, 0.505, 0.0); // bottommost
+                                                   // All other landmarks at (0.5, 0.5) — inside both bbox extents.
+        let full = ContentRect::for_frame(64, 64);
+        assert!(
+            !landmarks_trackable(&landmarks, full),
+            "line-collapsed landmarks (w=0.2, h=0.01) must fail: min(w,h)=0.01 < 0.04"
         );
     }
 
