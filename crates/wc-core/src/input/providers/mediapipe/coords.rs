@@ -38,10 +38,15 @@ use crate::input::projection::{LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, LEAP_Y_MIN_MM
 /// hardware.
 pub const MEDIAPIPE_DEPTH_PROXY_MM: f32 = 120.0;
 
-/// Map a `MediaPipe` normalized image point into the Leap-device-mm convention.
+/// Map a content-normalized `MediaPipe` image point into the Leap-device-mm
+/// convention.
 ///
-/// - `p.x`, `p.y` are normalized image coordinates in `[0, 1]` (origin top-left,
-///   +y down).
+/// - `p.x`, `p.y` are **content-normalized** coordinates in `[0, 1]` (origin
+///   top-left, +y down). The pipeline's `ContentRect::to_content_norm` step
+///   strips the square-padding bars before this call, so `[0, 1]` spans the
+///   camera's actual image area and the full Leap Y range is reachable.
+///   (Prior to Phase P3 this received raw square-norm coordinates, which
+///   compressed vertical reach to 56% for a 1280×720 camera.)
 /// - `p.z` is the caller-supplied depth proxy already expressed in the mm
 ///   convention the power model expects (passed through unchanged here; hand-Z
 ///   is not required deck-wide, so it is best-effort — see the design spec).

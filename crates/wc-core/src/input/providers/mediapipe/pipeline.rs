@@ -13,6 +13,24 @@
 //!
 //! Foundation module: driven by the worker (plan Phase 8.2); exercised by a
 //! hermetic mock test plus an env-var-gated end-to-end check.
+//!
+//! ## Coordinate spaces
+//!
+//! Three spaces flow through the pipeline (documented here to prevent
+//! coordinate-space bugs from regressing silently):
+//!
+//! 1. **Square-norm** `[0, 1]²` — the padded-square image space. The model
+//!    runs here; all gating (`landmarks_trackable`, `roi_trackable`) and ROI
+//!    derivation (`roi_from_landmarks`, `roi_from_palm`, association) stay here.
+//!    Gesture signals (`grab_strength`, `pinch_strength`) also use square-norm
+//!    landmarks because they measure relative geometry, not absolute position.
+//! 2. **Content-norm** `[0, 1]²` — the camera-content rect with black-padding
+//!    bars removed. Produced by `ContentRect::to_content_norm` immediately
+//!    before the Leap-mm mapping. Without this step a 1280×720 camera's hands
+//!    reach only 56 % of the Leap Y range (`y ∈ [0.219, 0.781]` of the square)
+//!    and vertical motion is compressed 1.78×.
+//! 3. **Leap mm** — the output convention expected by all downstream consumers:
+//!    `x ∈ [−200, +200]`, `y ∈ [40, 350]` (height above device).
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -417,17 +435,33 @@ impl Pipeline {
             return Ok(None);
         }
 
-        // Map every landmark into the Leap-device-mm convention.
+        // Map every landmark through content-norm then into Leap-device-mm.
+        //
+        // `content.to_content_norm` strips the square-padding bars first, so
+        // landmark y ∈ [y0, y1] of the square maps to [0, 1] of the content,
+        // giving `image_norm_to_leap_mm` a full [0, 1] input in both axes.
+        // Without this step, a 1280×720 camera (y0=0.219, y1=0.781) exposes
+        // only 56% of the Leap Y range and compresses vertical motion 1.78×.
+        //
+        // Gating (`landmarks_trackable`), ROI derivation (`roi_from_landmarks`),
+        // and gesture signals (`grab_strength`, `pinch_strength`) stay in
+        // square-norm; only the Leap-mm mapping step changes space here.
         let mut landmarks = [Vec3::ZERO; LANDMARK_COUNT];
         for (dst, src) in landmarks.iter_mut().zip(img_landmarks.iter()) {
-            *dst = image_norm_to_leap_mm(*src, self.config.mirror);
+            // square-norm → content-norm → Leap mm
+            *dst = image_norm_to_leap_mm(content.to_content_norm(*src), self.config.mirror);
         }
         let observed_chirality = if handed >= 0.5 {
             Chirality::Right
         } else {
             Chirality::Left
         };
-        let mut palm_pos = image_norm_to_leap_mm(palm_center(&img_landmarks), self.config.mirror);
+        // palm_center is computed in square-norm; unproject before mm mapping
+        // so palm position and per-landmark positions are consistent.
+        let mut palm_pos = image_norm_to_leap_mm(
+            content.to_content_norm(palm_center(&img_landmarks)),
+            self.config.mirror,
+        );
         // A single webcam has no reliable hand depth, and the landmark model's z
         // is a near-zero relative value rather than a Leap-range depth. Pin z to
         // a fixed mid-range proxy so the Line power model's `5^((−z+350)/160)`
@@ -533,6 +567,35 @@ impl ContentRect {
             x1: (ox + dim(frame_w)) / sidef,
             y1: (oy + dim(frame_h)) / sidef,
         }
+    }
+
+    /// Map a square-normalized point into content-normalized coordinates.
+    ///
+    /// `x' = (x − x0) / (x1 − x0)`, `y'` analog, `z` passes through.
+    ///
+    /// Transforms a point expressed in the full `[0, 1]²` of the square-padded
+    /// image into `[0, 1]²` of the camera content rect, stripping the black-bar
+    /// padding that [`square_pad_into`] adds. Feeding content-normalized
+    /// coordinates to `image_norm_to_leap_mm` makes the full Leap Y range
+    /// reachable regardless of the camera's aspect ratio.
+    ///
+    /// # Invariant
+    /// The rect is built from a non-zero frame (`for_frame` enforces
+    /// `frame_w >= 1`, `frame_h >= 1`, `side >= 1`), so `x1 > x0` and
+    /// `y1 > y0` always hold; division by their differences is safe.
+    /// `debug_assert!` guards this in debug/test builds.
+    fn to_content_norm(self, p: Vec3) -> Vec3 {
+        // Width and height of the content window in square-normalized units.
+        // For a 1280×720 frame: w = 1.0, h ≈ 0.5625 (720/1280).
+        let w = self.x1 - self.x0;
+        let h = self.y1 - self.y0;
+        // Invariant: for_frame guarantees non-zero frame dims → w > 0, h > 0.
+        debug_assert!(w > 0.0, "content rect has zero width: {self:?}");
+        debug_assert!(h > 0.0, "content rect has zero height: {self:?}");
+        // x' = (x − x0) / w  maps square-norm x into content [0, 1].
+        // y' = (y − y0) / h  maps square-norm y into content [0, 1].
+        // z is already in the Leap-mm convention (depth proxy); pass through.
+        Vec3::new((p.x - self.x0) / w, (p.y - self.y0) / h, p.z)
     }
 
     /// Whether the normalized point `(cx, cy)` lies within the content rect.
@@ -881,6 +944,11 @@ mod tests {
             h.palm_position.x.abs() <= 220.0,
             "palm x={}",
             h.palm_position.x
+        );
+        assert!(
+            h.palm_position.y >= 40.0 && h.palm_position.y <= 350.0,
+            "palm y={} out of Leap range [40, 350]; letterbox unprojection missing?",
+            h.palm_position.y
         );
         let spread = h
             .landmarks
@@ -1608,5 +1676,96 @@ mod tests {
         // Centre of the crop maps to ~(2.5,2.5) in the source — near the bright px.
         let c = crop.get_pixel(4, 4);
         assert!(c[0] > 0, "expected non-black centre, got {c:?}");
+    }
+
+    // --- ContentRect::to_content_norm (Phase P3: letterbox unprojection) -----
+
+    #[test]
+    fn content_norm_landscape_top_edge_maps_to_zero_y() {
+        // 1280×720: content y0 = 280/1280 = 0.21875.
+        // Square-norm y = y0 is the content top edge; content-norm y must be 0.0.
+        let c = ContentRect::for_frame(1280, 720);
+        let p = c.to_content_norm(Vec3::new(0.5, c.y0, 0.0));
+        assert!(
+            p.y.abs() < 1e-6,
+            "content top: sq y={:.5} → content y={:.7} (want 0.0)",
+            c.y0,
+            p.y
+        );
+    }
+
+    #[test]
+    fn content_norm_landscape_bottom_edge_maps_to_one_y() {
+        // 1280×720: content y1 = 1000/1280 = 0.78125.
+        // Square-norm y = y1 is the content bottom edge; content-norm y must be 1.0.
+        let c = ContentRect::for_frame(1280, 720);
+        let p = c.to_content_norm(Vec3::new(0.5, c.y1, 0.0));
+        assert!(
+            (p.y - 1.0).abs() < 1e-6,
+            "content bottom: sq y={:.5} → content y={:.7} (want 1.0)",
+            c.y1,
+            p.y
+        );
+    }
+
+    #[test]
+    fn content_norm_landscape_x_is_identity() {
+        // 1280×720: x0=0, x1=1 (camera fills the full width), so content-norm x
+        // equals square-norm x — no horizontal compression to undo.
+        let c = ContentRect::for_frame(1280, 720);
+        let p = c.to_content_norm(Vec3::new(0.7, 0.5, 0.0));
+        assert!(
+            (p.x - 0.7).abs() < 1e-6,
+            "landscape full-width: x={:.7} (want 0.7)",
+            p.x
+        );
+    }
+
+    #[test]
+    fn content_norm_square_frame_is_identity() {
+        // Square frame → content rect is full [0,1]² → to_content_norm is identity.
+        let c = ContentRect::for_frame(720, 720);
+        let p = c.to_content_norm(Vec3::new(0.3, 0.7, 99.0));
+        assert!((p.x - 0.3).abs() < 1e-6, "x={}", p.x);
+        assert!((p.y - 0.7).abs() < 1e-6, "y={}", p.y);
+        assert!((p.z - 99.0).abs() < 1e-6, "z passes through: {}", p.z);
+    }
+
+    /// Content top edge, unprojected through `to_content_norm`, must map to
+    /// `LEAP_Y_MAX_MM` (350 mm).
+    ///
+    /// Pre-fix (direct square-norm → mm): 1280×720 content top at sq y=0.21875
+    /// → `350 − 0.21875 × 310 ≈ 282 mm` (only 56% of the Leap Y range).
+    /// Post-fix: `to_content_norm(y=0.21875)` → `y'=0.0` → `350 mm`.
+    #[test]
+    fn unproject_content_top_reaches_leap_y_max() {
+        use crate::input::projection::LEAP_Y_MAX_MM;
+        let c = ContentRect::for_frame(1280, 720);
+        let p = c.to_content_norm(Vec3::new(0.5, c.y0, 0.0));
+        let mm = image_norm_to_leap_mm(p, false);
+        assert!(
+            (mm.y - LEAP_Y_MAX_MM).abs() < 0.5,
+            "content top → {:.1} mm (want {LEAP_Y_MAX_MM:.0}, pre-fix was ~282)",
+            mm.y
+        );
+    }
+
+    /// Content bottom edge, unprojected through `to_content_norm`, must map to
+    /// `LEAP_Y_MIN_MM` (40 mm).
+    ///
+    /// Pre-fix (direct square-norm → mm): 1280×720 content bottom at sq y=0.78125
+    /// → `350 − 0.78125 × 310 ≈ 108 mm` (only 56% of the Leap Y range).
+    /// Post-fix: `to_content_norm(y=0.78125)` → `y'=1.0` → `40 mm`.
+    #[test]
+    fn unproject_content_bottom_reaches_leap_y_min() {
+        use crate::input::projection::LEAP_Y_MIN_MM;
+        let c = ContentRect::for_frame(1280, 720);
+        let p = c.to_content_norm(Vec3::new(0.5, c.y1, 0.0));
+        let mm = image_norm_to_leap_mm(p, false);
+        assert!(
+            (mm.y - LEAP_Y_MIN_MM).abs() < 0.5,
+            "content bottom → {:.1} mm (want {LEAP_Y_MIN_MM:.0}, pre-fix was ~108)",
+            mm.y
+        );
     }
 }
