@@ -81,6 +81,11 @@ const LM_SIZE: u32 = 224;
 /// conservative (prefers merging over duplication), which is the safer failure
 /// mode: a duplicated hand consumes the second `MAX_HANDS` slot and hides the
 /// real second hand.
+///
+/// Safe tuning range is roughly `[0.35, 0.65]`: below that the gate dips under
+/// the ~0.3× same-hand centre offset and risks splitting one hand into two
+/// identities; above it the gate approaches the ~0.7× distinct-hand separation
+/// floor and risks merging two real hands.
 const ASSOCIATION_GATE_FACTOR: f32 = 0.5;
 
 /// Absolute floor for the scale-relative gate (normalized square units).
@@ -88,6 +93,12 @@ const ASSOCIATION_GATE_FACTOR: f32 = 0.5;
 /// For tiny or distant ROIs the geometric gate (`0.5×size`) can underestimate
 /// detector jitter and split a single hand into two identities. The floor keeps
 /// the gate wide enough to absorb that noise: `max(0.5×size, 0.08)`.
+///
+/// 0.08 is a design assumption, not a measured bound: it gives a few-× headroom
+/// over the centre jitter expected of the palm detector on small/far ROIs
+/// (anchor quantization plus decode noise, a fraction of the ROI size). If a
+/// hardware session shows small-ROI jitter exceeding it, raise the floor rather
+/// than the factor.
 const ASSOCIATION_GATE_FLOOR: f32 = 0.08;
 
 /// Smallest landmark-derived ROI that is still plausible as a track.
@@ -106,9 +117,11 @@ const MIN_TRACK_ROI_SIZE: f32 = 0.05;
 /// fist in Line's grab model (grab divides by hand scale); rejecting it before
 /// deriving grab prevents a phantom attractor.
 ///
-/// The threshold is kept at 0.04 pending hardware retune; the retune starts at
-/// 0.03 (see the hardware-tuning session plan). Code change here is the metric
-/// (min instead of mean), not the value.
+/// TODO: re-pick this threshold after a sustained two-hand hardware session
+/// (candidate 0.03) — under the min metric, 0.04 may drop a legitimately
+/// edge-on hand whose thin axis dips below it. The P6 change is the metric
+/// (min instead of mean), not the value; threshold changes are
+/// hardware-validated.
 const MIN_TRACK_LANDMARK_SPREAD: f32 = 0.04;
 
 /// Normalized margin inside the camera content that landmarks must stay within.
@@ -1668,8 +1681,10 @@ mod tests {
         }
     }
 
-    /// A square ROI centred at `(cx, cy)` (size/rotation irrelevant to
-    /// association, which matches on centres).
+    /// A square ROI centred at `(cx, cy)` with a typical mid-range size (0.3).
+    /// Size feeds the scale-relative association gate
+    /// ([`association_gate`] = `max(0.5×max(size), 0.08)` → 0.15 here);
+    /// rotation is irrelevant to association.
     fn roi_at(cx: f32, cy: f32) -> RoiRect {
         RoiRect {
             cx,
@@ -1714,6 +1729,9 @@ mod tests {
 
     // --- Phase P6: scale-relative association gate + min-based spread check ---
 
+    // regression: these two ran red against the old code (fixed 0.25 gate /
+    // mean-based spread metric) — each pins a defect the old constants had.
+
     /// Two small far-away ROIs (size 0.1) whose centres are 0.12 apart.
     ///
     /// Old fixed gate 0.25: 0.12 <= 0.25 → merged into one hand (swallowed the
@@ -1728,43 +1746,6 @@ mod tests {
             out.len(),
             2,
             "two small hands at distance 0.12 must not be merged; old 0.25 gate swallowed the second"
-        );
-    }
-
-    /// Large tracked ROI (size 0.6) with a detection 0.25 away must still merge.
-    ///
-    /// Scale-relative gate: max(0.5×0.6, 0.08) = 0.3 > 0.25 → detection is
-    /// within the gate → merged. Confirms at-scale behaviour is preserved.
-    #[test]
-    fn associate_large_roi_merges_detection_within_scaled_gate() {
-        let tracked = roi_with_size(0.5, 0.5, 0.6);
-        let detection = roi_with_size(0.75, 0.5, 0.3); // distance = 0.25
-        let out = associate(SmallVec::from_slice(&[tracked]), &[detection]);
-        assert_eq!(
-            out.len(),
-            1,
-            "detection 0.25 away from a size-0.6 track must merge"
-        );
-        assert!(
-            (out[0].cx - 0.5).abs() < 1e-6,
-            "tracked ROI wins (kept verbatim)"
-        );
-    }
-
-    /// Floor case: two tiny ROIs (size 0.05) at centre distance 0.05.
-    ///
-    /// Geometric gate 0.5×0.05 = 0.025 is below the floor 0.08; the floor
-    /// applies, and 0.05 <= 0.08 → merged. Prevents detector jitter on
-    /// small/far ROIs from duplicating a single hand.
-    #[test]
-    fn associate_floor_merges_tiny_rois_with_detector_jitter() {
-        let a = roi_with_size(0.5, 0.5, 0.05);
-        let b = roi_with_size(0.55, 0.5, 0.05); // distance = 0.05
-        let out = associate(SmallVec::from_slice(&[a]), &[b]);
-        assert_eq!(
-            out.len(),
-            1,
-            "tiny ROIs within the 0.08 floor must be treated as the same hand"
         );
     }
 
@@ -1790,6 +1771,51 @@ mod tests {
         assert!(
             !landmarks_trackable(&landmarks, full),
             "line-collapsed landmarks (w=0.2, h=0.01) must fail: min(w,h)=0.01 < 0.04"
+        );
+    }
+
+    // design-range: these two pin the new gate's intended band behaviour
+    // (scale-widened merge near a large ROI; the jitter floor on tiny ROIs).
+
+    /// Large tracked ROI (size 0.6) with a detection 0.27 away must merge.
+    ///
+    /// The distance is chosen inside the (0.25, 0.30) discrimination band: the
+    /// old fixed 0.25 gate would have **added** this detection as a phantom
+    /// second hand (0.27 > 0.25), while the scale-relative gate
+    /// max(0.5×0.6, 0.08) = 0.30 merges it (0.27 ≤ 0.30). This pins that the
+    /// gate *widens* with ROI size — not merely that the old behaviour is
+    /// preserved.
+    #[test]
+    fn associate_large_roi_merges_detection_within_scaled_gate() {
+        let tracked = roi_with_size(0.5, 0.5, 0.6);
+        let detection = roi_with_size(0.77, 0.5, 0.3); // distance = 0.27
+        let out = associate(SmallVec::from_slice(&[tracked]), &[detection]);
+        assert_eq!(
+            out.len(),
+            1,
+            "detection 0.27 away from a size-0.6 track must merge; \
+             the old fixed 0.25 gate added it as a phantom second hand"
+        );
+        assert!(
+            (out[0].cx - 0.5).abs() < 1e-6,
+            "tracked ROI wins (kept verbatim)"
+        );
+    }
+
+    /// Floor case: two tiny ROIs (size 0.05) at centre distance 0.05.
+    ///
+    /// Geometric gate 0.5×0.05 = 0.025 is below the floor 0.08; the floor
+    /// applies, and 0.05 <= 0.08 → merged. Prevents detector jitter on
+    /// small/far ROIs from duplicating a single hand.
+    #[test]
+    fn associate_floor_merges_tiny_rois_with_detector_jitter() {
+        let a = roi_with_size(0.5, 0.5, 0.05);
+        let b = roi_with_size(0.55, 0.5, 0.05); // distance = 0.05
+        let out = associate(SmallVec::from_slice(&[a]), &[b]);
+        assert_eq!(
+            out.len(),
+            1,
+            "tiny ROIs within the 0.08 floor must be treated as the same hand"
         );
     }
 
