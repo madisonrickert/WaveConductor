@@ -16,7 +16,7 @@
 //!
 //! ## Coordinate spaces
 //!
-//! Three spaces flow through the pipeline (documented here to prevent
+//! Four spaces flow through the pipeline (documented here to prevent
 //! coordinate-space bugs from regressing silently):
 //!
 //! 1. **Square-norm** `[0, 1]²` — the padded-square image space. The model
@@ -478,6 +478,11 @@ impl Pipeline {
         for roi in to_run {
             let stage_start = Instant::now();
             if let Some((hand, next_roi)) = self.landmark_for(&square, roi, content, dt)? {
+                // `landmark_for` already refreshed this hand's signals-level
+                // track (`HandTracker::assign`), so a hand dropped by the ROI
+                // check below keeps its track id for one extra frame — id
+                // continuity on reacquire is deliberate; `track_churn` counts
+                // the drop one frame late.
                 if roi_trackable(&next_roi, content) {
                     if hands.is_empty() {
                         // First (focal) hand: surface its smoothed depth for the
@@ -781,9 +786,11 @@ impl ContentRect {
         // x' = (x − x0) / w  maps square-norm x into content [0, 1].
         // y' = (y − y0) / h  maps square-norm y into content [0, 1].
         // z passes through untouched: at this stage it is still the landmark
-        // model's relative image-z; the pipeline overwrites palm z with the
+        // model's relative image-z. The pipeline overwrites *palm* z with the
         // smoothed size-estimated depth after track assignment (see
-        // `landmark_for`), so nothing downstream reads this z.
+        // `landmark_for`); the 21 per-landmark z values keep the relative
+        // image-z into `Hand::landmarks` (mixed z units by design — a future
+        // consumer of landmark depth must convert deliberately).
         Vec3::new((p.x - self.x0) / w, (p.y - self.y0) / h, p.z)
     }
 
