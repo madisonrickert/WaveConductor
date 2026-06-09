@@ -29,17 +29,11 @@ hand-tracking-gestures = [
 ]
 # In-process MediaPipe webcam hand-tracking. Pulls the camera sub-feature (the
 # real binary needs a real webcam) and the sketch hand-consumers. Additive to
-# `hand-tracking-gestures`; not in `default` (opt in explicitly).
+# `hand-tracking-gestures`; not in `default` (opt in explicitly). The ort/CoreML
+# inference backend is unconditional — it is part of `wc-core/hand-tracking-mediapipe`.
 hand-tracking-mediapipe = [
     "wc-core/hand-tracking-mediapipe-camera",
     "wc-sketches/hand-tracking-gestures",
-]
-# MediaPipe webcam provider with the GPU (ort/CoreML) inference backend on top of
-# the camera build. Run `cargo rund --features hand-tracking-mediapipe-ort` to test
-# GPU inference; tract remains available via WAVECONDUCTOR_HAND_INFERENCE=tract.
-hand-tracking-mediapipe-ort = [
-    "hand-tracking-mediapipe",
-    "wc-core/hand-tracking-mediapipe-ort",
 ]
 
 [dependencies]

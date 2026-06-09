@@ -1,24 +1,21 @@
 //! ONNX inference behind a runtime-agnostic trait.
 //!
-//! `tract` (pure Rust, single self-contained binary) is the primary
-//! implementation — the verification spike confirmed it runs both `MediaPipe`
-//! hand models (the landmark model bit-exactly; the palm model after the
-//! committed `Resize`→`scales` graph surgery). An `OrtInference` could replace
-//! it behind this same trait if the palm-ROI fidelity gate ever demands it (see
-//! the design spec's *Spike results*); the rest of the pipeline never names a
-//! concrete runtime.
+//! Defines the shared types used by all inference backends: [`Tensor`] (a dense
+//! row-major `f32` buffer with a shape), [`InferenceError`], and [`HandInference`]
+//! (run one ONNX model stage, input tensor → raw output tensors). The concrete
+//! implementation is [`super::inference_ort::OrtInference`] (`ort`/ONNX Runtime
+//! with `CoreML` acceleration on macOS).
 //!
 //! Pre/post-processing (anchor decode, NMS, ROI affine) lives in the sibling
 //! `palm`/`landmark` modules, not here, so this trait stays runtime-agnostic:
 //! it runs one model stage on one pre-shaped input tensor and returns the raw
 //! output tensors.
-//!
-//! Foundation module: the production caller (the worker pipeline) lands in a
-//! later phase, so the public items here are exercised by tests for now.
+// `Tensor::new`, `Tensor::zeros`, and `InferenceError::ShapeMismatch` are public
+// testing/construction helpers; they are not called on the production hot path
+// but are part of this module's API surface (used in tests across the pipeline).
 #![allow(dead_code)]
 
 use thiserror::Error;
-use tract_onnx::prelude::*;
 
 /// Error from loading or running an inference model.
 #[derive(Debug, Error)]
@@ -86,98 +83,10 @@ pub trait HandInference: Send {
     fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError>;
 }
 
-/// `tract`-backed inference for a single model with a fixed input shape.
-pub struct TractInference {
-    plan: Arc<TypedSimplePlan>,
-    input_shape: Vec<usize>,
-}
-
-impl TractInference {
-    /// Load and optimize an ONNX model from its bytes, fixing the input to
-    /// `input_shape` so tract can fully constant-fold shapes.
-    ///
-    /// # Errors
-    /// Returns [`InferenceError::Load`] if the model cannot be parsed,
-    /// type-checked, or optimized.
-    pub fn load(model_bytes: &[u8], input_shape: &[usize]) -> Result<Self, InferenceError> {
-        let load_err = |e: TractError| InferenceError::Load(e.to_string());
-        let mut reader = model_bytes;
-        let typed = tract_onnx::onnx()
-            .model_for_read(&mut reader)
-            .map_err(load_err)?
-            .with_input_fact(0, f32::fact(input_shape).into())
-            .map_err(load_err)?
-            .into_optimized()
-            .map_err(load_err)?;
-        let plan = typed.into_runnable().map_err(load_err)?;
-        Ok(Self {
-            plan,
-            input_shape: input_shape.to_vec(),
-        })
-    }
-}
-
-impl HandInference for TractInference {
-    fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
-        if input.shape != self.input_shape {
-            return Err(InferenceError::Run(format!(
-                "expected input shape {:?}, got {:?}",
-                self.input_shape, input.shape
-            )));
-        }
-        // Fully-qualified: tract's `Tensor` is shadowed in this module by our
-        // own public `Tensor` type (the trait's I/O type).
-        //
-        // `from_shape` copies `input.data` into tract's tensor, and the outputs
-        // below are copied back into owned `Tensor`s — both bound by the
-        // tract/trait APIs (the trait returns owned `Vec`s), not the pipeline,
-        // whose per-frame input buffer is already reused (see
-        // [`super::pipeline::Pipeline`]). Removing these residual copies would
-        // need tract input/output tensor reuse — a profiling-gated follow-up.
-        let tensor = tract_onnx::prelude::Tensor::from_shape(&input.shape, &input.data)
-            .map_err(|e| InferenceError::Run(e.to_string()))?;
-        let outputs = self
-            .plan
-            .run(tvec!(tensor.into()))
-            .map_err(|e| InferenceError::Run(e.to_string()))?;
-
-        outputs
-            .into_iter()
-            .map(|o| {
-                // tract 0.23 returns `TValue`s, and the old `Tensor::to_array_view`
-                // is now `to_plain_array_view` (the safe, checked accessor).
-                // Materialize the owned tensor, then take a plain array view.
-                let tensor = o.into_tensor();
-                let array = tensor
-                    .to_plain_array_view::<f32>()
-                    .map_err(|e| InferenceError::Run(e.to_string()))?;
-                Ok(Tensor {
-                    shape: array.shape().to_vec(),
-                    data: array.iter().copied().collect(),
-                })
-            })
-            .collect()
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn model_path(name: &str) -> PathBuf {
-        // Models are vendored at the workspace root; tests run from the crate
-        // manifest dir (crates/wc-core).
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/models/hand")
-            .join(name)
-    }
-
-    fn load_model(name: &str, input_shape: &[usize]) -> TractInference {
-        let bytes = std::fs::read(model_path(name)).expect("read vendored model");
-        TractInference::load(&bytes, input_shape).expect("load vendored model")
-    }
 
     #[test]
     fn tensor_new_validates_shape() {
@@ -186,57 +95,5 @@ mod tests {
             Tensor::new(vec![1.0, 2.0], vec![3]),
             Err(InferenceError::ShapeMismatch { .. })
         ));
-    }
-
-    #[test]
-    fn palm_model_runs_and_emits_raw_box_and_score_tensors() {
-        // The graph-surgeried palm detector: input [1,192,192,3] → raw
-        // [1,2016,18] boxes + [1,2016,1] scores (anchor decode + NMS are done
-        // in Rust, not in the graph). Proves tract runs it in-crate.
-        let mut model = load_model("palm_detection.onnx", &[1, 192, 192, 3]);
-        let out = model
-            .run(&Tensor::zeros(vec![1, 192, 192, 3]))
-            .expect("palm forward pass");
-        let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
-        assert!(
-            shapes.contains(&[1, 2016, 18].as_slice()),
-            "shapes={shapes:?}"
-        );
-        assert!(
-            shapes.contains(&[1, 2016, 1].as_slice()),
-            "shapes={shapes:?}"
-        );
-    }
-
-    #[test]
-    fn landmark_model_runs_and_emits_landmarks_handedness_world() {
-        // Landmark model: input [1,224,224,3] → [1,63] image landmarks,
-        // [1,1] presence, [1,1] handedness, [1,63] world landmarks.
-        let mut model = load_model("hand_landmark.onnx", &[1, 224, 224, 3]);
-        let out = model
-            .run(&Tensor::zeros(vec![1, 224, 224, 3]))
-            .expect("landmark forward pass");
-        let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
-        assert_eq!(out.len(), 4, "shapes={shapes:?}");
-        // Two 63-element landmark tensors (image + world) and two scalars.
-        assert_eq!(
-            shapes.iter().filter(|s| **s == [1, 63]).count(),
-            2,
-            "shapes={shapes:?}"
-        );
-        assert_eq!(
-            shapes.iter().filter(|s| **s == [1, 1]).count(),
-            2,
-            "shapes={shapes:?}"
-        );
-    }
-
-    #[test]
-    fn run_rejects_wrong_input_shape() {
-        let mut model = load_model("hand_landmark.onnx", &[1, 224, 224, 3]);
-        let err = model
-            .run(&Tensor::zeros(vec![1, 192, 192, 3]))
-            .expect_err("shape mismatch should error");
-        assert!(matches!(err, InferenceError::Run(_)));
     }
 }

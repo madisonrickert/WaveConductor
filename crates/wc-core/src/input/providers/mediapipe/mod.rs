@@ -2,10 +2,11 @@
 //!
 //! Derives 21-landmark hands from a conventional webcam using `MediaPipe`'s
 //! two-stage ONNX models (palm detection → ROI → landmark regression), run
-//! in-process via the pure-Rust `tract` runtime. All pre/post-processing glue
-//! (anchors, NMS, ROI affine, coordinate mapping, signals) lives in this module
-//! directory; the provider emits into the same Leap-device-millimetre
-//! convention the Leap provider uses, so every downstream consumer is unchanged.
+//! in-process via ONNX Runtime (`ort`) with CoreML acceleration on macOS. All
+//! pre/post-processing glue (anchors, NMS, ROI affine, coordinate mapping,
+//! signals) lives in this module directory; the provider emits into the same
+//! Leap-device-millimetre convention the Leap provider uses, so every downstream
+//! consumer is unchanged.
 //!
 //! Data flow: [`HandTrackingProvider::start`] loads the two ONNX models, opens a
 //! [`capture::FrameSource`] (a real webcam under the
@@ -28,7 +29,7 @@ use rtrb::Consumer;
 use smallvec::SmallVec;
 
 use self::capture::{CaptureError, FrameSource};
-use self::inference::{HandInference, TractInference};
+use self::inference::HandInference;
 use self::pipeline::{Pipeline, PipelineConfig};
 use self::smoothing::{HandSmoother, DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
 use self::worker::{spawn_worker, SourceFactory, WorkerHandle, WorkerMsg};
@@ -43,9 +44,8 @@ mod anchors;
 mod capture;
 mod coords;
 mod inference;
-/// GPU inference backend (`ort`/ONNX Runtime); alternative to `inference`'s tract
-/// path. Compiled only under `hand-tracking-mediapipe-ort`.
-#[cfg(feature = "hand-tracking-mediapipe-ort")]
+/// ONNX Runtime (`ort`) inference backend; the sole concrete [`inference::HandInference`]
+/// implementation used by this pipeline.
 mod inference_ort;
 mod landmark;
 mod palm;
@@ -214,8 +214,8 @@ impl MediaPipeProvider {
     /// Build the pipeline from the vendored models.
     fn build_pipeline(&self) -> Result<Pipeline, HandTrackingError> {
         let dir = &self.config.model_dir;
-        let palm = load_model(dir, "palm_detection.onnx", &[1, 192, 192, 3])?;
-        let landmark = load_model(dir, "hand_landmark.onnx", &[1, 224, 224, 3])?;
+        let palm = load_model(dir, "palm_detection.onnx")?;
+        let landmark = load_model(dir, "hand_landmark.onnx")?;
         let cfg = PipelineConfig {
             mirror: self.config.mirror,
             grab_rest_deadzone: self.config.grab_rest_deadzone,
@@ -277,50 +277,18 @@ fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Capture
 
 /// Load one ONNX model and wrap it as a boxed [`HandInference`].
 ///
-/// Backend selection: the pure-Rust `tract` path is the default. When the
-/// `hand-tracking-mediapipe-ort` feature is compiled, the GPU `ort`/`CoreML` path
-/// is used unless `WAVECONDUCTOR_HAND_INFERENCE=tract` forces tract (see
-/// [`use_ort_backend`]). Both consume the same vendored ONNX models.
-fn load_model(
-    dir: &Path,
-    name: &str,
-    input_shape: &[usize],
-) -> Result<Box<dyn HandInference>, HandTrackingError> {
+/// Reads the model file from `dir/name` and builds an [`inference_ort::OrtInference`]
+/// session. ONNX Runtime reads input/output shapes directly from the graph, so no
+/// shape hint is needed here.
+fn load_model(dir: &Path, name: &str) -> Result<Box<dyn HandInference>, HandTrackingError> {
     let path = dir.join(name);
     let bytes = std::fs::read(&path).map_err(|e| {
         HandTrackingError::Misconfigured(format!("read model {}: {e}", path.display()))
     })?;
-    #[cfg(feature = "hand-tracking-mediapipe-ort")]
-    if use_ort_backend() {
-        let model = inference_ort::OrtInference::load(&bytes)
-            .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
-        let boxed: Box<dyn HandInference> = Box::new(model);
-        return Ok(boxed);
-    }
-    let model = TractInference::load(&bytes, input_shape)
+    let model = inference_ort::OrtInference::load(&bytes)
         .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
     let boxed: Box<dyn HandInference> = Box::new(model);
     Ok(boxed)
-}
-
-/// Whether to use the `ort` GPU backend. Only meaningful when the
-/// `hand-tracking-mediapipe-ort` feature is compiled: the feature defaults to
-/// `ort` (it was opted into to test the GPU path); `WAVECONDUCTOR_HAND_INFERENCE=tract`
-/// forces the pure-Rust path for an A/B without recompiling.
-#[cfg(feature = "hand-tracking-mediapipe-ort")]
-fn use_ort_backend() -> bool {
-    !std::env::var("WAVECONDUCTOR_HAND_INFERENCE")
-        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("tract"))
-}
-
-/// Short label for the active inference backend, surfaced in diagnostics so the
-/// dev panel shows whether tract (CPU) or ort (GPU) is running.
-fn backend_label() -> &'static str {
-    #[cfg(feature = "hand-tracking-mediapipe-ort")]
-    if use_ort_backend() {
-        return "ort/CoreML";
-    }
-    "tract"
 }
 
 impl HandTrackingProvider for MediaPipeProvider {
@@ -360,7 +328,7 @@ impl HandTrackingProvider for MediaPipeProvider {
             s.device = DevicePresence::Attached;
         }
         if let Ok(mut d) = self.diagnostics.lock() {
-            d.sdk_version = Some(format!("MediaPipe ({}) palm+landmark", backend_label()));
+            d.sdk_version = Some("MediaPipe (ort/CoreML) palm+landmark".into());
             d.device_serial = Some(format!("camera{}", self.config.camera_index));
         }
         // Cold-start the smoothing so a restart carries no stale pose/momentum.
@@ -433,7 +401,7 @@ impl HandTrackingProvider for MediaPipeProvider {
                     d.metrics.clear();
                     let p = worker_diag.pipeline;
                     d.metrics
-                        .push(ProviderMetric::text("Backend", backend_label()));
+                        .push(ProviderMetric::text("Backend", "ort/CoreML"));
                     d.metrics
                         .push(ProviderMetric::duration("Pipeline total", p.total));
                     d.metrics.push(ProviderMetric::duration(

@@ -782,19 +782,19 @@ mod tests {
     use super::*;
     use crate::input::providers::mediapipe::capture::{FrameSource, MockFrameSource};
 
-    fn model(name: &str, shape: &[usize]) -> Box<dyn HandInference> {
-        use super::super::inference::TractInference;
+    fn model(name: &str) -> Box<dyn HandInference> {
+        use super::super::inference_ort::OrtInference;
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/models/hand")
             .join(name);
         let bytes = std::fs::read(path).expect("read model");
-        Box::new(TractInference::load(&bytes, shape).expect("load model"))
+        Box::new(OrtInference::load(&bytes).expect("load model"))
     }
 
     fn real_pipeline() -> Pipeline {
         Pipeline::new(
-            model("palm_detection.onnx", &[1, 192, 192, 3]),
-            model("hand_landmark.onnx", &[1, 224, 224, 3]),
+            model("palm_detection.onnx"),
+            model("hand_landmark.onnx"),
             PipelineConfig::default(),
         )
     }
@@ -860,7 +860,7 @@ mod tests {
     }
 
     /// Per-stage latency breakdown for the two-stage pipeline, in the profile
-    /// `cargo rund` uses (our code at opt-level 1, tract/image at opt-level 3).
+    /// `cargo rund` uses (our code at opt-level 1, ort/image at opt-level 3).
     /// Not a correctness test — a measurement harness for the framerate work.
     /// Run with:
     ///   `cargo test -p wc-core --features hand-tracking-mediapipe \
@@ -870,8 +870,8 @@ mod tests {
     fn profile_pipeline_stages() {
         use std::time::Instant;
 
-        let mut palm = model("palm_detection.onnx", &[1, 192, 192, 3]);
-        let mut landmark = model("hand_landmark.onnx", &[1, 224, 224, 3]);
+        let mut palm = model("palm_detection.onnx");
+        let mut landmark = model("hand_landmark.onnx");
 
         // Time `body` N times after one warm-up; return mean milliseconds.
         let bench = |iters: u32, body: &mut dyn FnMut()| -> f64 {
@@ -974,95 +974,6 @@ mod tests {
             1000.0 / tracking
         );
         eprintln!("=======================================================\n");
-    }
-
-    /// Inference-backend latency comparison: tract (CPU) vs ort (`CoreML`) on the
-    /// raw palm + landmark forward passes (data-independent, so a zeros tensor
-    /// measures it faithfully). The hard before/after for the GPU-inference move.
-    /// Needs the `hand-tracking-mediapipe-ort` feature. Run with:
-    ///   `cargo test -p wc-core --features hand-tracking-mediapipe-ort \
-    ///    -- --ignored --nocapture profile_inference_backends`
-    #[cfg(feature = "hand-tracking-mediapipe-ort")]
-    #[test]
-    #[ignore = "measurement harness, not a correctness assertion; run with --nocapture"]
-    fn profile_inference_backends() {
-        use super::super::inference::TractInference;
-        use super::super::inference_ort::OrtInference;
-        use std::time::Instant;
-
-        let bench = |iters: u32, body: &mut dyn FnMut()| -> f64 {
-            body(); // warm-up (the first ort run also compiles the CoreML model)
-            let t = Instant::now();
-            for _ in 0..iters {
-                body();
-            }
-            (t.elapsed().as_secs_f64() * 1000.0) / f64::from(iters)
-        };
-
-        let read = |name: &str| {
-            std::fs::read(
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../assets/models/hand")
-                    .join(name),
-            )
-            .expect("read model")
-        };
-        let palm_bytes = read("palm_detection.onnx");
-        let lm_bytes = read("hand_landmark.onnx");
-
-        let palm_in = Tensor {
-            data: vec![0.0; idx(PALM_SIZE) * idx(PALM_SIZE) * 3],
-            shape: vec![1, idx(PALM_SIZE), idx(PALM_SIZE), 3],
-        };
-        let lm_in = Tensor {
-            data: vec![0.0; idx(LM_SIZE) * idx(LM_SIZE) * 3],
-            shape: vec![1, idx(LM_SIZE), idx(LM_SIZE), 3],
-        };
-
-        eprintln!("\n=== inference backend comparison (mean ms over 20 iters) ===");
-
-        let mut tract_palm =
-            TractInference::load(&palm_bytes, &[1, 192, 192, 3]).expect("tract palm");
-        let mut tract_lm =
-            TractInference::load(&lm_bytes, &[1, 224, 224, 3]).expect("tract landmark");
-        let tp = bench(20, &mut || {
-            let _ = tract_palm.run(&palm_in).expect("tract palm run");
-        });
-        let tl = bench(20, &mut || {
-            let _ = tract_lm.run(&lm_in).expect("tract landmark run");
-        });
-        eprintln!("  tract  (CPU):    palm.run {tp:8.2}   landmark.run {tl:8.2}");
-
-        let mut ort_palm = OrtInference::load(&palm_bytes).expect("ort palm");
-        let mut ort_lm = OrtInference::load(&lm_bytes).expect("ort landmark");
-        let op = bench(20, &mut || {
-            let _ = ort_palm.run(&palm_in).expect("ort palm run");
-        });
-        let ol = bench(20, &mut || {
-            let _ = ort_lm.run(&lm_in).expect("ort landmark run");
-        });
-        eprintln!("  ort    (CoreML): palm.run {op:8.2}   landmark.run {ol:8.2}");
-
-        // A tracking frame is one landmark pass; an acquisition / re-detect frame
-        // is palm + landmark. Show both per-frame budgets per backend.
-        eprintln!(
-            "  tracking frame:  tract {tl:7.2} ms (~{:.0} fps)   ort {ol:7.2} ms (~{:.0} fps)",
-            1000.0 / tl,
-            1000.0 / ol,
-        );
-        eprintln!(
-            "  acquire/redetect:tract {:7.2} ms (~{:.0} fps)   ort {:7.2} ms (~{:.0} fps)",
-            tp + tl,
-            1000.0 / (tp + tl),
-            op + ol,
-            1000.0 / (op + ol),
-        );
-        eprintln!(
-            "  speedup:         palm {:.1}x   landmark {:.1}x",
-            tp / op,
-            tl / ol
-        );
-        eprintln!("========================================================\n");
     }
 
     /// Inference stub that counts `run` calls and returns canned outputs, so a

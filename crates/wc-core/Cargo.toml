@@ -19,20 +19,16 @@ default = []
 # tests can opt in selectively.
 hand-tracking-gestures = ["dep:leaprs"]
 # In-process MediaPipe webcam hand-tracking provider. Additive and independent
-# of `hand-tracking-gestures` (which brings in leaprs). Pure-Rust inference via
-# tract → no native blob, no extra cargo-deny SOURCES surface. The base feature
-# is the inference + two-stage glue (CI-testable headless against vendored
-# models); the real webcam capture is the `-camera` sub-feature below so the
-# base build never needs camera platform libraries.
-hand-tracking-mediapipe = ["dep:tract-onnx", "dep:image"]
+# of `hand-tracking-gestures` (which brings in leaprs). Uses ONNX Runtime (`ort`)
+# with CoreML acceleration on macOS; `ort` downloads a prebuilt C++ ONNX Runtime
+# binary at build time (`download-binaries`) under the CDLA-Permissive-2.0 license
+# (already allowed in deny.toml). The base feature is the inference + two-stage
+# glue (CI-testable headless against vendored models); the real webcam capture is
+# the `-camera` sub-feature below so the base build never needs camera platform
+# libraries.
+hand-tracking-mediapipe = ["dep:ort", "dep:image"]
 # Adds the production webcam `FrameSource` (nokhwa) on top of the base feature.
 hand-tracking-mediapipe-camera = ["hand-tracking-mediapipe", "dep:nokhwa"]
-# GPU-accelerated inference backend (ort / ONNX Runtime, CoreML on macOS) as an
-# alternative to the pure-Rust tract path, for when CPU inference is too slow.
-# Both backends compile in; `WAVECONDUCTOR_HAND_INFERENCE=tract` forces tract,
-# otherwise this feature defaults to ort. Pulls in the C++ ONNX Runtime (a native
-# blob via download-binaries) — kept opt-in so the default build stays pure-Rust.
-hand-tracking-mediapipe-ort = ["hand-tracking-mediapipe", "dep:ort"]
 # Enables real OS temperature sensing for the screensaver's `ThermalState`
 # signal. On Linux this is a ZERO-DEPENDENCY `std::fs` reader of the kernel
 # `hwmon`/`thermal_zone` sysfs interface (see `lifecycle::thermal::platform::
@@ -72,14 +68,12 @@ dirs.workspace = true
 rfd = { workspace = true }
 leaprs = { workspace = true, optional = true }
 # MediaPipe webcam provider deps (optional; gated by `hand-tracking-mediapipe`
-# / `-camera`). tract = pure-Rust ONNX inference; image = frame decode/resize;
-# nokhwa = webcam capture (camera sub-feature only).
-tract-onnx = { workspace = true, optional = true }
+# / `-camera`). ort = ONNX Runtime inference (CoreML EP on macOS); image = frame
+# decode/resize; nokhwa = webcam capture (camera sub-feature only). ort wraps
+# the C++ ONNX Runtime, so it sits under the non-wasm target.
+ort = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 nokhwa = { workspace = true, optional = true }
-# GPU inference backend (optional; gated by `hand-tracking-mediapipe-ort`). Native
-# only — wraps the C++ ONNX Runtime, so it sits under the non-wasm target like tract.
-ort = { workspace = true, optional = true }
 # Linux temperature sensing (the `native::SysfsThermalSensor` reader) needs NO
 # dependency — it reads the kernel `hwmon`/`thermal_zone` sysfs files with
 # `std::fs`. We surveyed `sysinfo` (pulls ~30 crates for file reads we can do
