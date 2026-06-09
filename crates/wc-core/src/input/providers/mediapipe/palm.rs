@@ -10,9 +10,10 @@
 //! The 7 keypoints (wrist, index/middle/ring/pinky MCPs, thumb CMC region, and
 //! the palm centre) drive the rotated ROI in [`super::landmark`].
 //!
-//! Foundation module: consumed by the pipeline (plan Phase 8); exercised by
-//! tests until then.
-#![allow(dead_code)]
+//! The pipeline ([`super::pipeline`]) is the primary consumer, through the
+//! reused-buffer `_into` forms on its detect path; the allocating wrappers
+//! ([`decode_palm_detections`], [`weighted_nms`]) exist for tests and carry
+//! per-item `#[allow(dead_code)]`.
 
 use bevy::math::Vec2;
 
@@ -183,6 +184,10 @@ pub fn decode_palm_detections_into(
 ///
 /// Tests/benchmarks only — the pipeline's steady-state detect path uses the
 /// `_into` form with a buffer reused across frames.
+#[allow(
+    dead_code,
+    reason = "test convenience wrapper; the production path uses the _into form"
+)]
 #[must_use]
 pub fn decode_palm_detections(
     raw_boxes: &[f32],
@@ -228,15 +233,26 @@ pub struct PalmNmsScratch {
 /// cluster's maximum score. Blending — rather than plain suppression — is what
 /// gives `MediaPipe` its stable palm boxes.
 ///
-/// On return `dets` holds the blended clusters (in seed order: highest-scoring
-/// seed first); `scratch` keeps its buffers for reuse, so a caller looping with
-/// the same `dets`/`scratch` pair allocates nothing in steady state.
+/// On return `dets` holds the blended clusters in **non-increasing score
+/// order**: seeds are visited in descending score order and every blended
+/// cluster carries exactly its seed's score (each other member joined a
+/// cluster whose seed outscored it, so the seed is the cluster maximum).
+/// Callers may truncate top-k without re-sorting — the pipeline's
+/// `acquire_rois` relies on this; pinned by
+/// `nms_output_is_sorted_by_descending_score`. `scratch` keeps its buffers
+/// for reuse, so a caller looping with the same `dets`/`scratch` pair
+/// allocates nothing in steady state.
 pub fn weighted_nms_into(
     dets: &mut Vec<PalmDetection>,
     iou_threshold: f32,
     scratch: &mut PalmNmsScratch,
 ) {
-    dets.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // sort_unstable: the stable `sort_by` allocates an auxiliary buffer for
+    // slices longer than ~20 elements, and a close hand fires well over 20
+    // anchors — a per-acquisition-frame allocation. Unstable ordering can
+    // differ only between bit-equal scores (`total_cmp`), where either of the
+    // tied detections is an equally valid NMS seed.
+    dets.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
     // clear + resize keeps capacity: a reused mask refills without allocating.
     scratch.used.clear();
     scratch.used.resize(dets.len(), false);
@@ -266,6 +282,10 @@ pub fn weighted_nms_into(
 ///
 /// Tests/benchmarks only — the pipeline's steady-state detect path uses the
 /// `_into` form with a [`PalmNmsScratch`] reused across frames.
+#[allow(
+    dead_code,
+    reason = "test convenience wrapper; the production path uses the _into form"
+)]
 #[must_use]
 pub fn weighted_nms(mut dets: Vec<PalmDetection>, iou_threshold: f32) -> Vec<PalmDetection> {
     let mut scratch = PalmNmsScratch::default();
@@ -401,6 +421,36 @@ mod tests {
         // centre between the two overlapping boxes.
         assert!((kept[0].score - 0.9).abs() < 1e-6);
         assert!(kept[0].bbox.xmin > 0.0 && kept[0].bbox.xmin < 0.05);
+    }
+
+    #[test]
+    fn nms_output_is_sorted_by_descending_score() {
+        // Ordering invariant the pipeline's acquire_rois relies on (it
+        // truncates to the top MAX_HANDS without re-sorting): seeds are
+        // visited in descending score order and every blended cluster carries
+        // its seed's (maximal) score, so the output is non-increasing even
+        // for deliberately shuffled input with merged clusters.
+        let dets = vec![
+            det(0.55, 5.0, 5.0, 1.0),
+            det(0.9, 0.0, 0.0, 1.0),
+            det(0.6, 10.0, 10.0, 1.0),
+            det(0.85, 0.05, 0.05, 1.0), // merges into the 0.9 cluster
+            det(0.7, 5.05, 5.0, 1.0),   // seeds the cluster that absorbs 0.55
+        ];
+        let kept = weighted_nms(dets, 0.3);
+        assert_eq!(kept.len(), 3);
+        for pair in kept.windows(2) {
+            assert!(
+                pair[0].score >= pair[1].score,
+                "NMS output must be non-increasing by score: {} then {}",
+                pair[0].score,
+                pair[1].score
+            );
+        }
+        // The cluster maxima land in seed order: 0.9, 0.7, 0.6.
+        assert!((kept[0].score - 0.9).abs() < 1e-6);
+        assert!((kept[1].score - 0.7).abs() < 1e-6);
+        assert!((kept[2].score - 0.6).abs() < 1e-6);
     }
 
     #[test]

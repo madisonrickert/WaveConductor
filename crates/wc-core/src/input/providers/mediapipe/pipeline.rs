@@ -530,7 +530,12 @@ impl Pipeline {
             &mut self.palm_dets,
         );
         weighted_nms_into(&mut self.palm_dets, 0.3, &mut self.palm_nms);
-        self.palm_dets.sort_by(|a, b| b.score.total_cmp(&a.score));
+        // No re-sort: weighted_nms_into documents (and palm.rs's
+        // `nms_output_is_sorted_by_descending_score` pins) that its output is
+        // already non-increasing by score — each blended cluster carries its
+        // seed's maximal score and seeds are visited in descending order — so
+        // truncating keeps the top MAX_HANDS. (The stable sort_by that stood
+        // here also allocated an aux buffer above ~20 elements.)
         self.palm_dets.truncate(MAX_HANDS);
         // NOT an allocation: SmallVec<[RoiRect; MAX_HANDS]> keeps up to
         // MAX_HANDS (= 2) elements inline on the stack, and `dets` was just
@@ -958,15 +963,21 @@ fn square_pad(frame: &Frame) -> RgbImage {
 /// [`warp_roi_into`]. For **upscales** (ratio < 1) this is exactly what the
 /// `image` crate's `FilterType::Triangle` computes. For **downscales** Triangle
 /// widens its kernel to average over the scale ratio while bilinear
-/// point-samples a 2×2 neighbourhood — which is also what `MediaPipe`'s own
-/// `ImageToTensor` preprocessing does (`OpenCV` `INTER_LINEAR` on CPU, GPU
-/// bilinear sampling), so the palm model sees the resize conditions it was
-/// built for. Agreement with Triangle on smooth content is pinned by
+/// point-samples a 2×2 neighbourhood. The accepted tradeoff: point sampling
+/// **aliases on high-frequency content** (fine texture/edges can shimmer
+/// frame-to-frame) where Triangle would low-pass it away. That is also exactly
+/// what `MediaPipe`'s own `ImageToTensor` preprocessing does (`OpenCV`
+/// `INTER_LINEAR` on CPU, GPU bilinear sampling), so the palm model sees the
+/// resize conditions — aliasing included — it was built for. Agreement with
+/// Triangle on smooth content is pinned by
 /// `resize_into_matches_triangle_resize_on_gradients`.
 fn resize_into(src: &RgbImage, w: u32, h: u32, dst: &mut RgbImage) {
     if dst.width() != w || dst.height() != h {
         *dst = RgbImage::new(w, h);
     }
+    // Degenerate sizes leave dst's previous pixels in place; unreachable from
+    // the pipeline (process() rejects zero-dimension frames before acquisition,
+    // and w/h are the nonzero PALM_SIZE) — guarded here only against div-by-zero.
     if src.width() == 0 || src.height() == 0 || w == 0 || h == 0 {
         return;
     }
