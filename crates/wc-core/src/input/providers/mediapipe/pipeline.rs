@@ -22,8 +22,6 @@
 //! 1. **Square-norm** `[0, 1]²` — the padded-square image space. The model
 //!    runs here; all gating (`landmarks_trackable`, `roi_trackable`) and ROI
 //!    derivation (`roi_from_landmarks`, `roi_from_palm`, association) stay here.
-//!    Gesture signals (`grab_strength`, `pinch_strength`) also use square-norm
-//!    landmarks because they measure relative geometry, not absolute position.
 //! 2. **Content-norm** `[0, 1]²` — the camera-content rect with black-padding
 //!    bars removed. Produced by `ContentRect::to_content_norm` immediately
 //!    before the Leap-mm mapping. Without this step a 1280×720 camera's hands
@@ -31,6 +29,15 @@
 //!    and vertical motion is compressed 1.78×.
 //! 3. **Leap mm** — the output convention expected by all downstream consumers:
 //!    `x ∈ [−200, +200]`, `y ∈ [40, 350]` (height above device).
+//! 4. **World metric** — the landmark model's world output: metres,
+//!    wrist/hand-centred, camera-axis-aligned (x right, y down, z toward/away
+//!    from the camera — image-space axes, but orthographic and metric).
+//!    Gesture signals (`grab_strength`, `pinch_strength`, the palm normal)
+//!    derive from these rather than from the perspective-projected image
+//!    landmarks, so a hand tilted toward the camera (foreshortened in image
+//!    space) cannot read as partially grabbed. Pipeline-internal: world
+//!    coordinates never reach the public [`Hand`] and are never mapped to
+//!    positions.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -418,13 +425,11 @@ impl Pipeline {
         warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
         fill_nchw_unit(&self.warp_buf, &mut self.landmark_input);
         let out = self.landmark.run(&self.landmark_input)?;
-        // World landmarks are selected/shape-checked but not consumed yet — a
-        // later phase derives metric hand geometry from them.
         let LandmarkOutputs {
             image: raw_lms,
             presence,
             handedness: handed,
-            world: _,
+            world: raw_world,
         } = pick_landmark_outputs(&out)?;
         if presence < self.config.presence_threshold {
             return Ok(None);
@@ -435,6 +440,19 @@ impl Pipeline {
             return Ok(None);
         }
 
+        // Metric world landmarks (space 4 of the module doc) for the gesture
+        // signals: pose-invariant geometry a perspective-projected hand can't
+        // give (a hand tilted toward the camera foreshortens its image-space
+        // tip-to-palm distances and used to read as partially grabbed).
+        let world = decode_world_landmarks(raw_world);
+        // Orientation frame for the palm normal: world axes mapped into the
+        // Leap convention (see [`world_to_leap_orientation`]). Stack array —
+        // the per-frame path stays allocation-free.
+        let mut world_leap = [Vec3::ZERO; LANDMARK_COUNT];
+        for (dst, src) in world_leap.iter_mut().zip(world.iter()) {
+            *dst = world_to_leap_orientation(*src, self.config.mirror);
+        }
+
         // Map every landmark through content-norm then into Leap-device-mm.
         //
         // `content.to_content_norm` strips the square-padding bars first, so
@@ -443,9 +461,10 @@ impl Pipeline {
         // Without this step, a 1280×720 camera (y0=0.219, y1=0.781) exposes
         // only 56% of the Leap Y range and compresses vertical motion 1.78×.
         //
-        // Gating (`landmarks_trackable`), ROI derivation (`roi_from_landmarks`),
-        // and gesture signals (`grab_strength`, `pinch_strength`) stay in
-        // square-norm; only the Leap-mm mapping step changes space here.
+        // Gating (`landmarks_trackable`) and ROI derivation
+        // (`roi_from_landmarks`) stay in square-norm; gesture signals derive
+        // from the metric world landmarks decoded above; only the Leap-mm
+        // mapping step changes space here.
         let mut landmarks = [Vec3::ZERO; LANDMARK_COUNT];
         for (dst, src) in landmarks.iter_mut().zip(img_landmarks.iter()) {
             // square-norm → content-norm → Leap mm
@@ -485,13 +504,17 @@ impl Pipeline {
                 id: assigned.id,
                 chirality: assigned.chirality,
                 palm_position: palm_pos,
-                palm_normal: palm_normal(&landmarks, assigned.chirality),
+                // Orientation from the Leap-mapped world landmarks; the held
+                // (hysteresis-smoothed) chirality picks the cross-product sign.
+                palm_normal: palm_normal(&world_leap, assigned.chirality),
                 palm_velocity: velocity,
-                pinch_strength: pinch_strength(&img_landmarks),
+                // Pinch/grab from the metric world landmarks: pose-invariant,
+                // so a tilted-open hand no longer reads as pinched/grabbed.
+                pinch_strength: pinch_strength(&world),
                 // Rest-deadzone the grab so a relaxed-open hand reads exactly 0
                 // (otherwise its small positive floor keeps Line's attractor on).
                 grab_strength: apply_grab_deadzone(
-                    grab_strength(&img_landmarks),
+                    grab_strength(&world),
                     self.config.grab_rest_deadzone,
                 ),
                 landmarks,
@@ -648,6 +671,47 @@ fn landmarks_trackable(landmarks: &[Vec3; LANDMARK_COUNT], content: ContentRect)
         max_y = max_y.max(lm.y);
     }
     (((max_x - min_x) + (max_y - min_y)) * 0.5) >= MIN_TRACK_LANDMARK_SPREAD
+}
+
+// --- world-landmark gesture geometry --------------------------------------
+
+/// Decode the landmark model's `[1, 63]` WORLD output into per-landmark points.
+///
+/// Same 21 × `(x, y, z)` row-major layout as the image output, but the values
+/// are already metric hand-space — metres, wrist/hand-centred, camera-axis
+/// aligned (x right, y down, z toward/away from the camera) — **not**
+/// crop-relative, so unlike [`project_landmarks`] there is no ROI unprojection.
+/// Returns a stack array: no heap allocation on the per-frame path.
+fn decode_world_landmarks(raw: &[f32]) -> [Vec3; LANDMARK_COUNT] {
+    let mut out = [Vec3::ZERO; LANDMARK_COUNT];
+    for (i, lm) in out.iter_mut().enumerate() {
+        let base = i * 3;
+        *lm = Vec3::new(
+            raw.get(base).copied().unwrap_or(0.0),
+            raw.get(base + 1).copied().unwrap_or(0.0),
+            raw.get(base + 2).copied().unwrap_or(0.0),
+        );
+    }
+    out
+}
+
+/// Map a metric world-landmark point into the Leap **orientation** convention
+/// consumed by [`palm_normal`] (orientation only — world coords never feed the
+/// positional path).
+///
+/// - `x` — negated when the webcam is mirrored: the positional path mirrors x
+///   (`1 − x` in [`image_norm_to_leap_mm`]), which reverses cross-product
+///   handedness, so the orientation frame must mirror with it or the normal
+///   flips relative to the rendered hand.
+/// - `y` — negated: image/world y points down, Leap y points up (height above
+///   the device).
+/// - `z` — passed through: both conventions keep z on the camera axis.
+///
+/// The resulting normal's *internal* consistency (perpendicularity, mirror
+/// flip) is pinned by tests; whether its absolute sign matches the Leap
+/// provider's out-of-the-palm convention still needs hardware validation.
+fn world_to_leap_orientation(v: Vec3, mirror: bool) -> Vec3 {
+    Vec3::new(if mirror { -v.x } else { v.x }, -v.y, v.z)
 }
 
 // --- numeric conversion helpers (kept tiny + justified) ------------------
@@ -840,7 +904,8 @@ struct LandmarkOutputs<'a> {
     /// Handedness probability in `[0, 1]`; `>= 0.5` reads as a right hand.
     handedness: f32,
     /// World-space landmarks, 21 × (x, y, z) in hand-centred metres (`[1, 63]`).
-    /// Selected and shape-checked now; consumed by a later phase.
+    /// Decoded by [`decode_world_landmarks`]; the pose-invariant gesture
+    /// signals (grab, pinch, palm normal) derive from these.
     world: &'a [f32],
 }
 
@@ -878,10 +943,81 @@ fn pick_landmark_outputs(out: &[Tensor]) -> Result<LandmarkOutputs<'_>, Inferenc
     })
 }
 
+/// Test fixtures shared between this module's tests and the worker's
+/// ([`super::worker`]): plausible WORLD-landmark mock data.
+///
+/// Gesture signals derive from the landmark model's world output, and
+/// [`super::signals::hand_scale`] divides by the wrist→middle-MCP distance — a
+/// degenerate all-zeros world tensor collapses that to `f32::EPSILON` and turns
+/// grab/pinch into divide-by-epsilon garbage. Every landmark-model mock
+/// therefore emits this anatomically plausible open hand instead of zeros.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use bevy::math::Vec3;
+
+    use crate::input::hand::{LandmarkIndex, LANDMARK_COUNT};
+
+    /// An open right hand in the landmark model's WORLD space: metric metres,
+    /// wrist at the origin, camera-axis-aligned (x right, y **down** — fingers
+    /// extend toward −y, i.e. upward in the image), flat in the XY plane
+    /// (z = 0, palm plane facing the camera). Wrist → middle MCP is 0.09 m
+    /// (the `hand_scale` reference); fingertips sit roughly a full hand-scale
+    /// beyond the palm centre; the thumb splays toward −x.
+    pub(crate) fn open_world_hand() -> [Vec3; LANDMARK_COUNT] {
+        use LandmarkIndex as L;
+        let mut lm = [Vec3::ZERO; LANDMARK_COUNT];
+        let mut set = |i: L, x: f32, y: f32| lm[i.as_index()] = Vec3::new(x, y, 0.0);
+        set(L::Wrist, 0.0, 0.0);
+        // Thumb column, splayed toward −x.
+        set(L::ThumbCmc, -0.025, -0.020);
+        set(L::ThumbMcp, -0.045, -0.040);
+        set(L::ThumbIp, -0.060, -0.055);
+        set(L::ThumbTip, -0.075, -0.065);
+        // Index finger.
+        set(L::IndexMcp, -0.025, -0.090);
+        set(L::IndexPip, -0.027, -0.125);
+        set(L::IndexDip, -0.028, -0.150);
+        set(L::IndexTip, -0.029, -0.170);
+        // Middle finger.
+        set(L::MiddleMcp, 0.0, -0.090);
+        set(L::MiddlePip, 0.0, -0.130);
+        set(L::MiddleDip, 0.0, -0.160);
+        set(L::MiddleTip, 0.0, -0.185);
+        // Ring finger.
+        set(L::RingMcp, 0.025, -0.088);
+        set(L::RingPip, 0.026, -0.125);
+        set(L::RingDip, 0.027, -0.150);
+        set(L::RingTip, 0.028, -0.170);
+        // Pinky.
+        set(L::PinkyMcp, 0.050, -0.080);
+        set(L::PinkyPip, 0.052, -0.110);
+        set(L::PinkyDip, 0.054, -0.130);
+        set(L::PinkyTip, 0.056, -0.150);
+        lm
+    }
+
+    /// Flatten 21 world points into the model's `[1, 63]` row-major
+    /// `(x, y, z)` tensor data layout.
+    pub(crate) fn world_tensor(points: &[Vec3; LANDMARK_COUNT]) -> Vec<f32> {
+        let mut data = Vec::with_capacity(LANDMARK_COUNT * 3);
+        for p in points {
+            data.extend_from_slice(&[p.x, p.y, p.z]);
+        }
+        data
+    }
+
+    /// [`open_world_hand`] as ready-to-mock `[1, 63]` tensor data.
+    pub(crate) fn open_world_tensor() -> Vec<f32> {
+        world_tensor(&open_world_hand())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
+    use super::super::signals;
     use super::*;
+    use crate::input::hand::LandmarkIndex;
     use crate::input::providers::mediapipe::capture::{FrameSource, MockFrameSource};
 
     fn model(name: &str) -> Box<dyn HandInference> {
@@ -1114,6 +1250,59 @@ mod tests {
         lms
     }
 
+    /// Image landmarks for an OPEN hand tilted toward the camera: perspective
+    /// foreshortening collapses the projected fingertips onto the palm centroid
+    /// (~`(112, 127)` crop px for [`spread_landmarks`]' wrist/MCPs) while the
+    /// hand is actually open. The wrist/MCP/PIP geometry the trackability gates
+    /// and tracking ROI use stays hand-like; only the tip-to-palm distances —
+    /// the grab/pinch geometry — are corrupted by the projection.
+    fn foreshortened_image_landmarks() -> Vec<f32> {
+        let mut lms = spread_landmarks();
+        let mut set = |i: usize, x: f32, y: f32| {
+            lms[i * 3] = x;
+            lms[i * 3 + 1] = y;
+        };
+        set(LandmarkIndex::IndexTip.as_index(), 108.0, 122.0);
+        set(LandmarkIndex::MiddleTip.as_index(), 112.0, 120.0);
+        set(LandmarkIndex::RingTip.as_index(), 116.0, 122.0);
+        set(LandmarkIndex::PinkyTip.as_index(), 120.0, 124.0);
+        lms
+    }
+
+    /// Pull the four non-thumb fingertips of a world hand to `frac` hand-scales
+    /// from the palm centre (`0` = touching the palm; the open fixture sits at
+    /// roughly `1.3`). Leaves every other landmark — including `hand_scale`'s
+    /// wrist/middle-MCP reference — untouched.
+    fn curl_world_fingertips(
+        mut hand: [Vec3; LANDMARK_COUNT],
+        frac: f32,
+    ) -> [Vec3; LANDMARK_COUNT] {
+        let palm = palm_center(&hand);
+        let scale = signals::hand_scale(&hand);
+        for tip in [
+            LandmarkIndex::IndexTip,
+            LandmarkIndex::MiddleTip,
+            LandmarkIndex::RingTip,
+            LandmarkIndex::PinkyTip,
+        ] {
+            let dir = (hand[tip.as_index()] - palm).normalize_or_zero();
+            hand[tip.as_index()] = palm + dir * (frac * scale);
+        }
+        hand
+    }
+
+    /// Rotate world points about the camera X axis — the tilt-toward-the-camera
+    /// motion that foreshortens a hand in image space.
+    fn rotate_world_about_x(hand: &[Vec3; LANDMARK_COUNT], radians: f32) -> [Vec3; LANDMARK_COUNT] {
+        let (sin, cos) = radians.sin_cos();
+        let mut out = *hand;
+        for p in &mut out {
+            // Standard rotation about X: y' = y·cosθ − z·sinθ, z' = y·sinθ + z·cosθ.
+            *p = Vec3::new(p.x, p.y * cos - p.z * sin, p.y * sin + p.z * cos);
+        }
+        out
+    }
+
     /// Build a pipeline wired with call-counting mocks: palm yields exactly one
     /// detection, landmark yields one high-presence hand. Returns the pipeline
     /// plus the palm and landmark call counters.
@@ -1137,15 +1326,52 @@ mod tests {
         counting_pipeline_with_outputs(lms, 0.98, 0.9)
     }
 
-    /// Counting-mock pipeline whose landmark stage emits the given landmarks,
-    /// presence, and handedness. The mock mirrors the vendored model's declared
-    /// output order — image landmarks, presence, handedness, world landmarks —
-    /// with the scalars as real probabilities (the model's graph applies the
-    /// sigmoid itself).
+    /// [`counting_pipeline_with_image_and_world`] with the plausible open-hand
+    /// world fixture: image-landmark-focused tests get world-derived gesture
+    /// signals reading "open" by default (an all-zeros world hand would make
+    /// `hand_scale` ≈ epsilon and the signals garbage).
     fn counting_pipeline_with_outputs(
         lms: Vec<f32>,
         presence: f32,
         handedness: f32,
+    ) -> (
+        Pipeline,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        counting_pipeline_with_image_and_world(
+            lms,
+            fixtures::open_world_tensor(),
+            presence,
+            handedness,
+        )
+    }
+
+    /// [`counting_pipeline_with_config`] with the default [`PipelineConfig`].
+    fn counting_pipeline_with_image_and_world(
+        lms: Vec<f32>,
+        world: Vec<f32>,
+        presence: f32,
+        handedness: f32,
+    ) -> (
+        Pipeline,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        counting_pipeline_with_config(lms, world, presence, handedness, PipelineConfig::default())
+    }
+
+    /// Counting-mock pipeline whose landmark stage emits the given image and
+    /// world landmarks, presence, and handedness. The mock mirrors the vendored
+    /// model's declared output order — image landmarks, presence, handedness,
+    /// world landmarks — with the scalars as real probabilities (the model's
+    /// graph applies the sigmoid itself).
+    fn counting_pipeline_with_config(
+        lms: Vec<f32>,
+        world: Vec<f32>,
+        presence: f32,
+        handedness: f32,
+        config: PipelineConfig,
     ) -> (
         Pipeline,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -1194,7 +1420,7 @@ mod tests {
                 shape: vec![1, 1],
             },
             Tensor {
-                data: vec![0.0; 63],
+                data: world,
                 shape: vec![1, 63],
             },
         ];
@@ -1210,7 +1436,7 @@ mod tests {
                 calls: Arc::clone(&lm_calls),
                 outputs: lm_out,
             }),
-            PipelineConfig::default(),
+            config,
         );
         (pipe, palm_calls, lm_calls)
     }
@@ -1530,11 +1756,128 @@ mod tests {
         );
     }
 
+    // --- Phase P4: pose-invariant gesture signals from world landmarks -----
+
+    #[test]
+    fn tilted_open_hand_does_not_read_grabbed() {
+        // Review finding #5 / "tilted hands read as grabbed": the WORLD tensor
+        // says the hand is open; the IMAGE tensor shows it foreshortened by a
+        // tilt toward the camera (projected tips collapsed onto the palm).
+        // Signals must come from the world landmarks — on image landmarks this
+        // hand reads as a full grab (and a strong pinch).
+        let (mut pipe, _p, _l) = counting_pipeline_with_image_and_world(
+            foreshortened_image_landmarks(),
+            fixtures::open_world_tensor(),
+            0.98,
+            0.9,
+        );
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1);
+        assert!(
+            hands[0].grab_strength < 0.3,
+            "open-but-tilted hand reads grab={} (image-landmark foreshortening)",
+            hands[0].grab_strength
+        );
+        assert!(
+            hands[0].pinch_strength < 0.3,
+            "open-but-tilted hand reads pinch={} (image-landmark foreshortening)",
+            hands[0].pinch_strength
+        );
+    }
+
+    #[test]
+    fn flat_world_hand_palm_normal_maps_axes_for_both_mirrors() {
+        // The fixture hand is flat in the world XY plane (all z = 0): after the
+        // world→Leap orientation map the palm normal must be a pure ±z, and
+        // mirroring must flip it (the x flip reverses cross-product handedness,
+        // matching the positional mirror). For the right-hand fixture with the
+        // held chirality Right, mirror OFF:
+        //   a = index_mcp − wrist = (−0.025, +0.09, 0) after the y flip,
+        //   b = pinky_mcp − wrist = (+0.05, +0.08, 0)
+        //   a × b = (0, 0, −0.0065) → normal −z; mirror ON negates x → +z.
+        // The physical sign (toward vs away from the camera, vs the Leap
+        // provider's out-of-the-palm convention) still needs hardware
+        // validation; this pins internal consistency of the axis map.
+        for (mirror, want_z) in [(false, -1.0_f32), (true, 1.0_f32)] {
+            let config = PipelineConfig {
+                mirror,
+                ..PipelineConfig::default()
+            };
+            let (mut pipe, _p, _l) = counting_pipeline_with_config(
+                spread_landmarks(),
+                fixtures::open_world_tensor(),
+                0.98,
+                0.9,
+                config,
+            );
+            let hands = pipe
+                .process(&consistent_frame(), Duration::from_millis(33))
+                .expect("process");
+            assert_eq!(hands.len(), 1);
+            let n = hands[0].palm_normal;
+            assert!(
+                n.x.abs() < 1e-4 && n.y.abs() < 1e-4,
+                "mirror={mirror}: normal {n:?} is not perpendicular to the flat world hand"
+            );
+            assert!(
+                (n.z - want_z).abs() < 1e-3,
+                "mirror={mirror}: normal {n:?}, want z = {want_z}"
+            );
+        }
+    }
+
+    #[test]
+    fn world_signals_are_invariant_under_hand_tilt() {
+        // Rotating the world hand ~60° about the camera X axis (the tilt that
+        // foreshortens image landmarks) must not move world-derived grab/pinch.
+        // Use a half-curled, mid-pinch hand: the open fixture clamps both
+        // signals to 0 and would make the invariance assertion vacuous.
+        let mut base = curl_world_fingertips(fixtures::open_world_hand(), 0.6);
+        // Bring the thumb tip near (not onto) the index tip for a mid-range
+        // pinch; the non-axis-aligned offset keeps the rotation non-trivial.
+        base[LandmarkIndex::ThumbTip.as_index()] =
+            base[LandmarkIndex::IndexTip.as_index()] + Vec3::splat(0.0125);
+        let tilted = rotate_world_about_x(&base, 60.0_f32.to_radians());
+
+        let run = |world: Vec<f32>| {
+            let (mut pipe, _p, _l) =
+                counting_pipeline_with_image_and_world(spread_landmarks(), world, 0.98, 0.9);
+            let hands = pipe
+                .process(&consistent_frame(), Duration::from_millis(33))
+                .expect("process");
+            assert_eq!(hands.len(), 1);
+            (hands[0].grab_strength, hands[0].pinch_strength)
+        };
+        let (g0, p0) = run(fixtures::world_tensor(&base));
+        let (g1, p1) = run(fixtures::world_tensor(&tilted));
+
+        // Guard against vacuity: both signals must be mid-range, i.e. actually
+        // derived from this world hand rather than clamped or image-derived.
+        assert!(g0 > 0.1 && g0 < 0.9, "grab {g0} should be mid-range");
+        assert!(p0 > 0.1 && p0 < 0.9, "pinch {p0} should be mid-range");
+        assert!(
+            (g0 - g1).abs() < 0.05,
+            "grab changed under tilt: {g0} → {g1}"
+        );
+        assert!(
+            (p0 - p1).abs() < 0.05,
+            "pinch changed under tilt: {p0} → {p1}"
+        );
+    }
+
     #[test]
     fn live_deadzone_source_overrides_config_grab() {
         // The tuning UI shares an atomic f32-bits cell with the worker pipeline;
         // process() must pick up a re-tune before deriving this frame's grab.
-        let (mut pipe, _p, _l) = counting_pipeline();
+        // The world hand is half-curled so the raw (deadzone-0) grab is real.
+        let (mut pipe, _p, _l) = counting_pipeline_with_image_and_world(
+            spread_landmarks(),
+            fixtures::world_tensor(&curl_world_fingertips(fixtures::open_world_hand(), 0.6)),
+            0.98,
+            0.9,
+        );
         let cell = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
         pipe.set_live_deadzone_source(Arc::clone(&cell));
         let frame = consistent_frame();

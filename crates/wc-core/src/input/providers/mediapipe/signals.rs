@@ -3,10 +3,25 @@
 //! The landmark model gives positions, presence, handedness, and world
 //! landmarks; the [`crate::input::hand::Hand`] fields the rest of the app
 //! consumes (`pinch_strength`, `grab_strength`, `palm_normal`, `palm_velocity`,
-//! stable `id`) are derived here with documented, deterministic geometry. The
-//! pinch/grab magnitudes are normalized by hand scale so they are roughly
+//! stable `id`) are derived here with documented, deterministic geometry.
+//!
+//! [`hand_scale`], [`pinch_strength`], [`grab_strength`], and [`palm_center`]
+//! are **space-agnostic** distance geometry — they hold in whatever coordinate
+//! space the caller's 21 landmarks are expressed in. The `MediaPipe` pipeline
+//! feeds the gesture magnitudes the model's **world** landmarks (metric metres,
+//! wrist/hand-centred, orthographic), making them invariant to perspective
+//! foreshortening: a hand tilted toward the camera no longer reads as partially
+//! grabbed, which it did when these ran on projected image landmarks.
+//! (`palm_center` is additionally used on square-norm *image* landmarks for the
+//! positional palm path — same math, different space.) The pinch/grab
+//! magnitudes are normalized by [`hand_scale`] so they are also
 //! distance-invariant; their exact thresholds are tuned against real hands
-//! during the Phase 6/8 hardware validation.
+//! during hardware validation.
+//!
+//! [`palm_normal`] is the exception: it is **orientation-sensitive**, so its
+//! caller must supply landmarks already expressed in the Leap orientation
+//! convention (the pipeline maps world axes into it first — see
+//! `world_to_leap_orientation` in [`super::pipeline`]).
 //!
 //! Foundation module: consumed by the pipeline (plan Phase 8); exercised by
 //! tests until then.
@@ -20,6 +35,8 @@ use crate::input::hand::{Chirality, LandmarkIndex, LANDMARK_COUNT};
 
 /// Reference hand scale: wrist → middle-finger MCP distance. Used to normalize
 /// pinch/grab so they don't change with the hand's distance from the camera.
+/// Space-agnostic pure distance; the pipeline passes metric world landmarks,
+/// where this is ~0.09 m for an adult hand.
 #[must_use]
 pub fn hand_scale(lm: &[Vec3; LANDMARK_COUNT]) -> f32 {
     let wrist = lm[LandmarkIndex::Wrist.as_index()];
@@ -29,7 +46,8 @@ pub fn hand_scale(lm: &[Vec3; LANDMARK_COUNT]) -> f32 {
 
 /// Pinch strength in `[0, 1]`: thumb-tip ↔ index-tip proximity, normalized by
 /// hand scale. `1.0` when the tips touch, falling to `0.0` once they are about
-/// half a hand-scale apart.
+/// half a hand-scale apart. Space-agnostic ratio of distances; the pipeline
+/// passes world landmarks so the value is pose-invariant.
 #[must_use]
 pub fn pinch_strength(lm: &[Vec3; LANDMARK_COUNT]) -> f32 {
     let thumb = lm[LandmarkIndex::ThumbTip.as_index()];
@@ -42,6 +60,9 @@ pub fn pinch_strength(lm: &[Vec3; LANDMARK_COUNT]) -> f32 {
 /// Grab strength in `[0, 1]`: mean fingertip closure toward the palm centre,
 /// normalized by hand scale. `0.0` for an open hand (tips extended ~one
 /// hand-scale out), approaching `1.0` as the four fingers curl into a fist.
+/// Space-agnostic ratio of distances; the pipeline passes world landmarks —
+/// on perspective-projected image landmarks a hand tilted toward the camera
+/// foreshortens its tip-to-palm distances and falsely reads as grabbed.
 #[must_use]
 pub fn grab_strength(lm: &[Vec3; LANDMARK_COUNT]) -> f32 {
     let palm = palm_center(lm);
@@ -64,6 +85,9 @@ pub fn grab_strength(lm: &[Vec3; LANDMARK_COUNT]) -> f32 {
 }
 
 /// Palm centre: centroid of the wrist and the index/pinky MCP knuckles.
+/// Space-agnostic; the pipeline uses it in two spaces — on world landmarks
+/// (inside [`grab_strength`]) and on square-norm image landmarks for the
+/// positional palm path.
 #[must_use]
 pub fn palm_center(lm: &[Vec3; LANDMARK_COUNT]) -> Vec3 {
     let wrist = lm[LandmarkIndex::Wrist.as_index()];
@@ -75,6 +99,11 @@ pub fn palm_center(lm: &[Vec3; LANDMARK_COUNT]) -> Vec3 {
 /// Unit normal to the palm plane, from the wrist→index-MCP and wrist→pinky-MCP
 /// edges. Points out of the palm. Chirality flips the sign so both hands' normals
 /// agree with the Leap convention (away from the back of the hand).
+///
+/// **Orientation-sensitive** (unlike the distance signals above): `lm` must
+/// already be in the Leap orientation convention — x mirrored to match the
+/// positional mirror, y up, z on the camera axis. The pipeline maps the metric
+/// world landmarks through `world_to_leap_orientation` before calling this.
 #[must_use]
 pub fn palm_normal(lm: &[Vec3; LANDMARK_COUNT], chirality: Chirality) -> Vec3 {
     let wrist = lm[LandmarkIndex::Wrist.as_index()];
