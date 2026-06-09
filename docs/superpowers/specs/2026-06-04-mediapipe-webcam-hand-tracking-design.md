@@ -619,3 +619,67 @@ telemetry decide whether the current backend stack is good enough.
    stable, stop there. If not, add platform-native `HandInference` backends
    (OpenVINO/DirectML/CoreML) or a native MediaPipe/Tasks sidecar before choosing a
    Python sidecar. Python remains the oracle and an emergency/demo fallback.
+
+---
+
+## Post-review architecture revisions (2026-06-09)
+
+This addendum records the **current** architecture on the
+`mediapipe-hand-tracking` branch as of 2026-06-09. It supersedes any section
+above where there is a conflict.
+
+### 1. ort-only inference backend
+
+`tract` has been deleted. `ort` (ONNX Runtime) with the CoreML execution
+provider on macOS and a CPU fallback elsewhere is now the sole backend. The
+feature flag `hand-tracking-mediapipe-ort` has been collapsed into
+`hand-tracking-mediapipe` — there is no runtime-selection toggle.
+
+### 2. Real presence gating (phantom-hand fix)
+
+The ONNX landmark model's presence and handedness heads have Sigmoid baked into
+the graph. Outputs are selected by declared index order (`LandmarkOutputs`:
+index 0 image, 1 presence, 2 handedness, 3 world). The pipeline consumes raw
+probabilities — no second sigmoid pass. The presence gate (threshold 0.5)
+genuinely evicts tracks when the model reports no hand, fixing the phantom-hand
+symptom. Handedness is live (was always Right).
+
+### 3. Letterbox unprojection (content-rect coordinates)
+
+Landmarks and palm centers are computed in square-normalized coordinates (the
+padded square the models see), then unmapped through `ContentRect::to_content_norm`
+before the `image_norm_to_leap_mm` call. On a 16:9 source, the old path
+compressed Y to 56% of the Leap range (1.78× squeeze); the full Leap range is
+now reachable.
+
+### 4. World-landmark gesture signals
+
+Grab, pinch, and palm normal are derived from the model's metric WORLD
+landmarks (pose-invariant, wrist-centred metres). The previous image-landmark
+derivation produced false fists with a tilted open hand; world landmarks fix
+that. World landmarks remain pipeline-internal and are not exposed on `Hand`.
+
+### 5. Size-estimated depth with k calibration
+
+A fixed 120 mm depth pin has been superseded by pinhole-inversion depth
+estimation: `distance = k * world_size / image_size`. The calibration gain `k`
+(default 0.8, dev-panel slider "Depth calibration k") is live-tunable. Setting
+`k = 0` restores the 120 mm pin — the instant rollback knob on stage. Estimated
+distance is EMA-smoothed per-track (0.4 s time constant); association gating
+uses xy only so z noise does not spawn phantom ids. A "Est. distance (mm)"
+dev-panel diagnostic shows the live estimate.
+
+### 6. Scale-relative association gate
+
+The fixed 0.25 association gate has been replaced by `0.5 * max(sizes)` floored
+at 0.08. The spread check uses `min(bbox_w, bbox_h)` instead of the mean, so a
+line-collapsed landmark set is rejected. Regression tests pin both the old
+defects (phantom second hand from the fixed gate; false fist from the mean
+metric).
+
+### 7. Allocation-free detect path
+
+The hot path is free of per-iteration allocations. Decode, NMS, and resize use
+reusable scratch buffers (pre-allocated at init, cleared with `vec.clear()` to
+preserve capacity). Sort uses `sort_unstable`; the no-op re-sort on the tracking
+path was deleted. Worker and pipeline loops are allocation-free by construction.

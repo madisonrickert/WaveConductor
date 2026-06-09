@@ -1,12 +1,13 @@
 //! Render-rate temporal smoothing for the `MediaPipe` provider.
 //!
-//! The worker produces hand poses at the inference rate (~15–20 fps), but the
-//! app renders at ~60 fps. Re-showing each pose for several frames reads as
-//! stutter. [`HandSmoother`] eases the exposed pose toward the latest inference
-//! result *every render frame* with a One-Euro filter (Casiez et al. 2012) — a
-//! low-pass whose cutoff rises with the signal's speed, so it suppresses jitter
-//! when the hand is still and keeps lag low when it moves fast. The result is
-//! fluid 60 fps motion derived from a 15–20 fps source.
+//! The worker runs the ort backend (`CoreML` on macOS, CPU fallback elsewhere)
+//! and produces hand poses at a hardware-dependent inference rate. Re-showing
+//! each pose for several frames reads as stutter. [`HandSmoother`] eases the
+//! exposed pose toward the latest inference result *every render frame* with a
+//! One-Euro filter (Casiez et al. 2012) — a low-pass whose cutoff rises with
+//! the signal's speed, so it suppresses jitter when the hand is still and keeps
+//! lag low when it moves fast. The result is fluid render-rate motion bridged
+//! from whatever cadence the backend achieves on the current hardware.
 //!
 //! Scope: this is **`MediaPipe`-only**, applied inside the provider's `poll`.
 //! The Leap provider (~110 fps, already hardware-smoothed) never passes through

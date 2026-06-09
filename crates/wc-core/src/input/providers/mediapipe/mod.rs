@@ -65,7 +65,7 @@ pub struct MediaPipeConfig {
     /// capping leaves CPU headroom for the render thread and lowers heat.
     pub max_inference_hz: u32,
     /// Apply render-rate One-Euro smoothing (see [`smoothing`]). On by default;
-    /// turn off to expose the raw ~15–20 fps inference poses (for A/B comparison
+    /// turn off to expose the raw inference poses at the backend's cadence (for A/B comparison
     /// during tuning). This on/off escape hatch is the only smoothing knob still
     /// read from an env var at startup (`WAVECONDUCTOR_HAND_SMOOTHING=off`); the
     /// One-Euro *parameters* below are live-tunable through
@@ -132,9 +132,10 @@ pub struct MediaPipeProvider {
     /// (`get_mut`), so there is no real contention.
     runtime: Mutex<Runtime>,
     /// Render-rate One-Euro smoothing. The worker produces poses at the
-    /// inference rate (~15–20 fps); `poll` runs at render rate (~60 fps) and
-    /// eases the exposed pose toward [`Self::target_hands`] each call so motion
-    /// reads as fluid. `MediaPipe`-only — all of this lives in this provider.
+    /// backend's inference cadence (hardware-dependent); `poll` runs at render
+    /// rate (~60 fps) and eases the exposed pose toward [`Self::target_hands`]
+    /// each call so motion reads as fluid. `MediaPipe`-only — all of this lives
+    /// in this provider.
     smoother: HandSmoother,
     /// Latest inference result from the worker, held between worker frames as
     /// the smoothing target.
@@ -460,8 +461,8 @@ impl HandTrackingProvider for MediaPipeProvider {
             }
         }
 
-        // Ease the exposed pose toward the held target every poll, so a
-        // ~15–20 fps inference source renders as fluid ~60 fps motion. `now` is
+        // Ease the exposed pose toward the held target every poll, so the
+        // backend's inference cadence renders as fluid ~60 fps motion. `now` is
         // `Time::elapsed` (monotonic), giving the One-Euro filter its dt. When
         // smoothing is disabled, emit the raw held pose for A/B comparison.
         let hands = if self.config.smoothing {

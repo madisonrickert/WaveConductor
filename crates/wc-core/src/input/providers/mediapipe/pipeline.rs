@@ -288,11 +288,10 @@ pub struct PipelineDiagnostics {
 /// [`grab_strength`] is calibrated to ideal open-hand geometry (fingers fully
 /// extended one hand-scale out → `0`); a real relaxed hand sits slightly curled
 /// and landmark noise jitters the fingertips, so the raw signal carries a small
-/// positive floor at rest. That floor matters now that the depth proxy makes
-/// grab the *sole* attractor driver: Line's decay gate is `grab > 0`, so any
-/// positive floor keeps the attractor faintly — and, via the slow attack EMA,
-/// increasingly — on even with the hand wide open. Subtracting a rest deadzone
-/// and rescaling pins `grab <= deadzone → 0` while a full fist still reaches `1`.
+/// positive floor at rest. That floor matters because Line's decay gate is
+/// `grab > 0`: any positive open-hand floor keeps the attractor faintly — and,
+/// via the slow attack EMA, increasingly — alive even with the hand wide open.
+/// Subtracting a rest deadzone and rescaling pins `grab <= deadzone → 0` while a full fist still reaches `1`.
 ///
 /// `deadzone` is clamped to `[0, 0.95]`; `0` is a pass-through.
 fn apply_grab_deadzone(grab: f32, deadzone: f32) -> f32 {
