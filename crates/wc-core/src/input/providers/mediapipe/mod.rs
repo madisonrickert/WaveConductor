@@ -20,7 +20,6 @@
 //! `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +29,7 @@ use smallvec::SmallVec;
 
 use self::capture::{CaptureError, FrameSource};
 use self::inference::HandInference;
-use self::pipeline::{Pipeline, PipelineConfig};
+use self::pipeline::{MediaPipeLiveTuning, Pipeline, PipelineConfig};
 use self::smoothing::{HandSmoother, DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
 use self::worker::{spawn_worker, SourceFactory, WorkerHandle, WorkerMsg};
 use crate::input::hand::Hand;
@@ -73,6 +72,11 @@ pub struct MediaPipeConfig {
     /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Seeded from and
     /// kept in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
     pub grab_rest_deadzone: f32,
+    /// Calibration gain `k` for the size-estimated hand depth; `<= 0` disables
+    /// the estimator and pins depth to the fixed 120 mm proxy (see
+    /// [`pipeline::PipelineConfig::depth_calibration_k`]). Seeded from and kept
+    /// in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
+    pub depth_calibration_k: f32,
     /// One-Euro minimum cutoff (Hz) for render-rate smoothing — the at-rest
     /// smoothing strength (see [`smoothing::DEFAULT_MIN_CUTOFF`]). Seeded from and
     /// kept in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
@@ -95,6 +99,7 @@ impl Default for MediaPipeConfig {
             max_inference_hz: 30,
             smoothing: true,
             grab_rest_deadzone: PipelineConfig::default().grab_rest_deadzone,
+            depth_calibration_k: PipelineConfig::default().depth_calibration_k,
             smoothing_min_cutoff: DEFAULT_MIN_CUTOFF,
             smoothing_beta: DEFAULT_BETA,
             model_dir: PathBuf::from("assets/models/hand"),
@@ -136,10 +141,12 @@ pub struct MediaPipeProvider {
     /// Whether the previous `poll` emitted a hand — lets us emit a single
     /// clearing frame when the last hand leaves, then go quiet.
     had_hands: bool,
-    /// Live grab rest-deadzone (`f32` bits), shared with the worker's
-    /// [`Pipeline`] so the dev tuning panel can re-tune it without a restart.
-    /// Written by [`Self::set_grab_deadzone`]; read by the pipeline each frame.
-    live_grab_deadzone: Arc<AtomicU32>,
+    /// Live pipeline tunables (grab rest-deadzone, depth calibration `k`;
+    /// lock-free `f32` bits), shared with the worker's [`Pipeline`] so the dev
+    /// tuning panel can re-tune them without a restart. Written by
+    /// [`Self::set_grab_deadzone`] / [`Self::set_depth_calibration_k`]; read by
+    /// the pipeline each frame.
+    live_tuning: Arc<MediaPipeLiveTuning>,
 }
 
 /// The provider's running state (everything that exists only between `start`
@@ -158,7 +165,10 @@ impl MediaPipeProvider {
     #[must_use]
     pub fn new(config: MediaPipeConfig) -> Self {
         let smoother = HandSmoother::new(config.smoothing_min_cutoff, config.smoothing_beta);
-        let live_grab_deadzone = Arc::new(AtomicU32::new(config.grab_rest_deadzone.to_bits()));
+        let live_tuning = Arc::new(MediaPipeLiveTuning::new(
+            config.grab_rest_deadzone,
+            config.depth_calibration_k,
+        ));
         Self {
             config,
             status: Arc::new(Mutex::new(ProviderStatus::default())),
@@ -168,15 +178,21 @@ impl MediaPipeProvider {
             target_hands: SmallVec::new(),
             target_ts: Duration::ZERO,
             had_hands: false,
-            live_grab_deadzone,
+            live_tuning,
         }
     }
 
     /// Live-set the grab rest-deadzone (shared with the running worker pipeline).
     /// Cheap and lock-free; safe to call every frame from a tuning system.
     pub fn set_grab_deadzone(&self, deadzone: f32) {
-        self.live_grab_deadzone
-            .store(deadzone.to_bits(), Ordering::Relaxed);
+        self.live_tuning.set_grab_deadzone(deadzone);
+    }
+
+    /// Live-set the depth calibration gain `k` (shared with the running worker
+    /// pipeline). `<= 0` disables the size estimator (fixed 120 mm depth pin).
+    /// Cheap and lock-free; safe to call every frame from a tuning system.
+    pub fn set_depth_calibration_k(&self, k: f32) {
+        self.live_tuning.set_depth_k(k);
     }
 
     /// Live-retune the render-rate smoothing (applies to tracked hands and to
@@ -219,11 +235,12 @@ impl MediaPipeProvider {
         let cfg = PipelineConfig {
             mirror: self.config.mirror,
             grab_rest_deadzone: self.config.grab_rest_deadzone,
+            depth_calibration_k: self.config.depth_calibration_k,
             ..PipelineConfig::default()
         };
         let mut pipeline = Pipeline::new(palm, landmark, cfg);
-        // Share the live deadzone cell so the tuning UI reaches the worker.
-        pipeline.set_live_deadzone_source(Arc::clone(&self.live_grab_deadzone));
+        // Share the live tuning cell so the dev panel reaches the worker.
+        pipeline.set_live_tuning_source(Arc::clone(&self.live_tuning));
         Ok(pipeline)
     }
 }
@@ -232,9 +249,9 @@ impl MediaPipeProvider {
 ///
 /// Mirrors `apply_leap_background_setting`: a `PreUpdate` system (after polling)
 /// that, when [`crate::settings::HandTrackingSettings`] changes, re-tunes the
-/// `MediaPipe` provider in place — the grab rest-deadzone (forwarded lock-free to
-/// the worker pipeline) and the One-Euro smoothing parameters. No restart, so the
-/// dev tuning panel adjusts feel live.
+/// `MediaPipe` provider in place — the grab rest-deadzone and depth calibration
+/// `k` (forwarded lock-free to the worker pipeline) and the One-Euro smoothing
+/// parameters. No restart, so the dev tuning panel adjusts feel live.
 pub fn apply_mediapipe_tuning_settings(
     settings: Res<'_, crate::settings::HandTrackingSettings>,
     mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
@@ -252,6 +269,7 @@ pub fn apply_mediapipe_tuning_settings(
             .and_then(|any| any.downcast_mut::<MediaPipeProvider>())
         {
             mp.set_grab_deadzone(settings.grab_rest_deadzone);
+            mp.set_depth_calibration_k(settings.depth_calibration_k);
             mp.set_smoothing_params(settings.smoothing_min_cutoff, settings.smoothing_beta);
         }
     }
@@ -424,6 +442,11 @@ impl HandTrackingProvider for MediaPipeProvider {
                     d.metrics
                         .push(ProviderMetric::count("Tracks after", p.tracks_after));
                     d.metrics.push(ProviderMetric::count("Hands", p.hands));
+                    // Smoothed size-estimated depth of the focal hand — the
+                    // tape-measure calibration readout for depth_calibration_k
+                    // (0 when no hand; 120 when the estimator is off).
+                    d.metrics
+                        .push(ProviderMetric::count("Est. distance (mm)", p.est_depth_mm));
                     d.metrics
                         .push(ProviderMetric::count("Track churn", p.track_churn));
                     d.metrics.push(ProviderMetric::count(

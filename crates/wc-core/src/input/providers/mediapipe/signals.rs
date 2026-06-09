@@ -138,10 +138,20 @@ pub fn palm_velocity(prev: Vec3, cur: Vec3, dt: Duration) -> Vec3 {
 /// is the other chirality. See [`HandTracker::assign`].
 const CHIRALITY_FLIP_FRAMES: u8 = 4;
 
+/// Time constant τ (seconds) of the per-track depth EMA in
+/// [`HandTracker::assign`]. The raw size-estimated depth jitters with landmark
+/// noise on the measured segment; a τ = 0.4 s exponential smoother
+/// (`alpha = 1 − exp(−dt/τ)`) settles a step ~63 % in 0.4 s and ~95 % in 1.2 s —
+/// slow enough to swallow per-frame noise, fast enough that a deliberate
+/// push toward the camera reads within a beat. The render-rate One-Euro filter
+/// ([`super::smoothing`]) adds its own, lighter pass downstream.
+const DEPTH_EMA_TAU_S: f32 = 0.4;
+
 /// The result of [`HandTracker::assign`]: a stable track id, the track's
-/// held (hysteresis-smoothed) [`Chirality`], and the palm position this track
-/// held on the *previous* frame (for velocity).
-// Not `Eq`: `prev_pos` carries `f32`s.
+/// held (hysteresis-smoothed) [`Chirality`], the palm position this track
+/// held on the *previous* frame (for velocity), and the track's EMA-smoothed
+/// depth.
+// Not `Eq`: `prev_pos`/`depth_mm` carry `f32`s.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Assigned {
     /// Stable per-hand id, reused only after the hand leaves.
@@ -151,8 +161,14 @@ pub struct Assigned {
     /// The palm position this track held on the previous frame, or `None` on
     /// the hand's first sighting. Pair with the current palm position and the
     /// inter-frame `dt` in [`palm_velocity`] for a finite-difference velocity;
-    /// without it velocity is undefined (a fresh track has no history).
+    /// without it velocity is undefined (a fresh track has no history). Its z
+    /// is the previous frame's smoothed [`Self::depth_mm`], matching the palm
+    /// position the pipeline emitted that frame.
     pub prev_pos: Option<Vec3>,
+    /// EMA-smoothed depth (mm, Leap z convention; τ = [`DEPTH_EMA_TAU_S`]).
+    /// Seeded with the raw estimate on the hand's first sighting. The pipeline
+    /// writes this into the emitted palm position's z.
+    pub depth_mm: f32,
 }
 
 /// Assigns stable per-hand IDs across frames.
@@ -188,7 +204,11 @@ struct Track {
     chirality: Chirality,
     /// Consecutive frames the observed chirality disagreed with `chirality`.
     chirality_disagrees: u8,
+    /// Palm position last frame; z holds [`Self::depth_mm`] (the smoothed
+    /// depth), matching the palm position the pipeline emits.
     pos: Vec3,
+    /// EMA-smoothed depth (mm); see [`DEPTH_EMA_TAU_S`].
+    depth_mm: f32,
     seen_this_frame: bool,
 }
 
@@ -216,16 +236,35 @@ impl HandTracker {
     }
 
     /// Assign (or reuse) a track for a hand observed with `chirality` at palm
-    /// position `pos`, returning its stable id and held chirality.
-    pub fn assign(&mut self, chirality: Chirality, pos: Vec3) -> Assigned {
+    /// position `pos`, returning its stable id, held chirality, and smoothed
+    /// depth.
+    ///
+    /// `raw_depth_mm` is this frame's unsmoothed size-estimated depth (Leap z
+    /// mm, [`super::coords::estimate_depth_mm`]); the track EMA-smooths it
+    /// (τ = [`DEPTH_EMA_TAU_S`], hence `dt`, the time since the previous
+    /// processed frame) and stores the smoothed value as its position's z.
+    /// `pos.z` itself is ignored — the gate is xy-only and the stored z is the
+    /// smoothed depth.
+    pub fn assign(
+        &mut self,
+        chirality: Chirality,
+        pos: Vec3,
+        raw_depth_mm: f32,
+        dt: Duration,
+    ) -> Assigned {
         // Nearest unclaimed track within the gate — by POSITION ALONE (chirality
-        // is held per-track, not matched on; see the type docs).
+        // is held per-track, not matched on; see the type docs), and by **xy
+        // only**: the raw size-estimated depth is far noisier than the image
+        // xy, and a single-frame z spike larger than the gate would otherwise
+        // spawn a fresh id (resetting that hand's render-rate smoothing bank).
+        // Zeroing z preserves the pre-estimator behaviour exactly, where every
+        // track's z was the same 120 mm pin and so never affected the distance.
         let mut best: Option<(usize, f32)> = None;
         for (i, t) in self.tracks.iter().enumerate() {
             if t.seen_this_frame {
                 continue;
             }
-            let d = t.pos.distance(pos);
+            let d = t.pos.truncate().distance(pos.truncate());
             if d <= self.gate && best.is_none_or(|(_, bd)| d < bd) {
                 best = Some((i, d));
             }
@@ -235,7 +274,14 @@ impl HandTracker {
             // Capture last frame's position before overwriting, so the caller can
             // finite-difference it against `pos` for velocity.
             let prev_pos = Some(t.pos);
-            t.pos = pos;
+            // Depth EMA: alpha = 1 − e^(−dt/τ) is the exact discrete step of a
+            // first-order low-pass with time constant τ, so smoothing strength
+            // is framerate-independent (dt = 0 → alpha = 0 → unchanged).
+            let alpha = 1.0 - (-dt.as_secs_f32() / DEPTH_EMA_TAU_S).exp();
+            t.depth_mm = alpha.mul_add(raw_depth_mm - t.depth_mm, t.depth_mm);
+            // Store the smoothed depth as z so prev_pos finite-differences into
+            // a velocity consistent with the emitted palm position.
+            t.pos = Vec3::new(pos.x, pos.y, t.depth_mm);
             t.seen_this_frame = true;
             // Sticky chirality: only flip after CHIRALITY_FLIP_FRAMES consecutive
             // disagreements, so a one-frame handedness flicker is ignored.
@@ -252,6 +298,7 @@ impl HandTracker {
                 id: t.id,
                 chirality: t.chirality,
                 prev_pos,
+                depth_mm: t.depth_mm,
             };
         }
         let id = self.next_id;
@@ -261,7 +308,10 @@ impl HandTracker {
             id,
             chirality,
             chirality_disagrees: 0,
-            pos,
+            // First sighting: seed the depth EMA with the raw estimate (no
+            // history to smooth against) and store it as the position's z.
+            pos: Vec3::new(pos.x, pos.y, raw_depth_mm),
+            depth_mm: raw_depth_mm,
             seen_this_frame: true,
         });
         // A brand-new track has no previous position → velocity starts at zero.
@@ -269,6 +319,7 @@ impl HandTracker {
             id,
             chirality,
             prev_pos: None,
+            depth_mm: raw_depth_mm,
         }
     }
 
@@ -382,19 +433,29 @@ mod tests {
         );
     }
 
+    /// [`HandTracker::assign`] with a constant raw depth (the old fixed pin) and
+    /// a nominal 33 ms inter-frame dt — for tests exercising the id/chirality
+    /// logic where depth is irrelevant.
+    fn assign_at(t: &mut HandTracker, chirality: Chirality, pos: Vec3) -> Assigned {
+        t.assign(chirality, pos, 120.0, Duration::from_millis(33))
+    }
+
     #[test]
     fn tracker_reports_prev_pos_for_velocity() {
         // First sighting has no history; the next frame reports last frame's
         // position so the caller can finite-difference it into a velocity.
         let mut t = HandTracker::default();
-        let first = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        let first = assign_at(&mut t, Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
         assert_eq!(first.prev_pos, None, "fresh track has no previous position");
         t.end_frame();
-        let moved = t.assign(Chirality::Right, Vec3::new(10.0, 200.0, 0.0));
+        let moved = assign_at(&mut t, Chirality::Right, Vec3::new(10.0, 200.0, 0.0));
         assert_eq!(
+            // The track stores its smoothed depth as z (here the constant 120
+            // raw seed), so prev_pos carries it — consistent with the palm
+            // position the pipeline emits after writing the smoothed depth.
             moved.prev_pos,
-            Some(Vec3::new(0.0, 200.0, 0.0)),
-            "prev_pos is the position held last frame",
+            Some(Vec3::new(0.0, 200.0, 120.0)),
+            "prev_pos is the position held last frame (z = smoothed depth)",
         );
         // (10 mm − 0 mm) / 0.1 s = 100 mm/s in x.
         let v = palm_velocity(
@@ -408,18 +469,18 @@ mod tests {
     #[test]
     fn tracker_keeps_id_for_nearby_hand() {
         let mut t = HandTracker::default();
-        let a = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        let a = assign_at(&mut t, Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
         t.end_frame();
-        let b = t.assign(Chirality::Right, Vec3::new(5.0, 205.0, 0.0));
+        let b = assign_at(&mut t, Chirality::Right, Vec3::new(5.0, 205.0, 0.0));
         assert_eq!(a.id, b.id);
     }
 
     #[test]
     fn tracker_gives_new_id_for_far_hand() {
         let mut t = HandTracker::default();
-        let a = t.assign(Chirality::Right, Vec3::new(-200.0, 100.0, 0.0));
+        let a = assign_at(&mut t, Chirality::Right, Vec3::new(-200.0, 100.0, 0.0));
         t.end_frame();
-        let b = t.assign(Chirality::Right, Vec3::new(200.0, 300.0, 0.0));
+        let b = assign_at(&mut t, Chirality::Right, Vec3::new(200.0, 300.0, 0.0));
         assert_ne!(a.id, b.id);
     }
 
@@ -430,9 +491,9 @@ mod tests {
         // reset the smoothing bank), and the held chirality must not flip on a
         // lone disagreement.
         let mut t = HandTracker::default();
-        let a = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        let a = assign_at(&mut t, Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
         t.end_frame();
-        let b = t.assign(Chirality::Left, Vec3::new(2.0, 201.0, 0.0));
+        let b = assign_at(&mut t, Chirality::Left, Vec3::new(2.0, 201.0, 0.0));
         assert_eq!(a.id, b.id, "id stable across a chirality flicker");
         assert_eq!(
             b.chirality,
@@ -446,11 +507,11 @@ mod tests {
         // Sustained disagreement (the hand really is the other chirality) flips
         // the held value after CHIRALITY_FLIP_FRAMES, keeping the same id.
         let mut t = HandTracker::default();
-        let first = t.assign(Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        let first = assign_at(&mut t, Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
         let mut last = first;
         for _ in 0..CHIRALITY_FLIP_FRAMES {
             t.end_frame();
-            last = t.assign(Chirality::Left, Vec3::new(0.0, 200.0, 0.0));
+            last = assign_at(&mut t, Chirality::Left, Vec3::new(0.0, 200.0, 0.0));
         }
         assert_eq!(first.id, last.id, "id stays stable while chirality settles");
         assert_eq!(last.chirality, Chirality::Left, "flips after enough frames");
@@ -461,18 +522,83 @@ mod tests {
         let mut t = HandTracker::default();
         assert_eq!(t.churn(), 0);
         // Two fresh ids → churn 2.
-        t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
-        t.assign(Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
+        assign_at(&mut t, Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        assign_at(&mut t, Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
         assert_eq!(t.churn(), 2, "two new ids");
         // Next frame sees only one of them → the other ages out (+1 drop).
         t.end_frame();
-        t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        assign_at(&mut t, Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
         t.end_frame();
         assert_eq!(t.churn(), 3, "one track aged out");
         // A stable hand adds no churn.
-        t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        assign_at(&mut t, Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
         t.end_frame();
         assert_eq!(t.churn(), 3, "stable track does not churn");
+    }
+
+    // --- per-track depth EMA + xy-only gating (Phase P5) -------------------
+
+    #[test]
+    fn depth_seeds_raw_on_first_sighting() {
+        // A fresh track has no depth history; the EMA seeds with the raw
+        // estimate rather than easing in from some default.
+        let mut t = HandTracker::default();
+        let a = t.assign(
+            Chirality::Right,
+            Vec3::new(0.0, 200.0, 0.0),
+            97.5,
+            Duration::from_millis(33),
+        );
+        assert!((a.depth_mm - 97.5).abs() < 1e-6, "depth {}", a.depth_mm);
+    }
+
+    #[test]
+    fn depth_ema_converges_with_tau_0_4s() {
+        // τ = 0.4 s time-constant EMA: after a single dt = τ step toward a new
+        // target, the smoothed depth is 1 − e⁻¹ ≈ 63.2 % of the way there.
+        let mut t = HandTracker::default();
+        let pos = Vec3::new(0.0, 200.0, 0.0);
+        t.assign(Chirality::Right, pos, 100.0, Duration::from_millis(33));
+        t.end_frame();
+        let stepped = t.assign(Chirality::Right, pos, 300.0, Duration::from_secs_f32(0.4));
+        // 100 + (1 − e⁻¹) · (300 − 100) ≈ 226.4 mm.
+        let want = 200.0f32.mul_add(1.0 - (-1.0f32).exp(), 100.0);
+        assert!(
+            (stepped.depth_mm - want).abs() < 0.5,
+            "depth {} (want ≈ {want})",
+            stepped.depth_mm
+        );
+        // And it keeps converging on subsequent steps (monotonic toward 300).
+        t.end_frame();
+        let again = t.assign(Chirality::Right, pos, 300.0, Duration::from_secs_f32(0.4));
+        assert!(
+            again.depth_mm > stepped.depth_mm && again.depth_mm < 300.0,
+            "depth {} should keep approaching 300",
+            again.depth_mm
+        );
+    }
+
+    #[test]
+    fn gate_compares_xy_only_so_depth_jumps_keep_identity() {
+        // Two assigns differing ONLY in z (a full-range raw-depth jump, far
+        // larger than the 60 mm gate) must keep the same track id: identity
+        // association is xy-only so depth noise can never churn ids (which
+        // would reset the render-rate smoothing bank keyed on the id).
+        let mut t = HandTracker::default();
+        let a = t.assign(
+            Chirality::Right,
+            Vec3::new(0.0, 200.0, 40.0),
+            40.0,
+            Duration::from_millis(33),
+        );
+        t.end_frame();
+        let b = t.assign(
+            Chirality::Right,
+            Vec3::new(0.0, 200.0, 350.0),
+            350.0,
+            Duration::from_millis(33),
+        );
+        assert_eq!(a.id, b.id, "a raw z jump must not break identity");
     }
 
     #[test]
@@ -480,8 +606,8 @@ mod tests {
         // Two hands far apart keep distinct ids even with the same observed
         // chirality (position-based association).
         let mut t = HandTracker::default();
-        let left_hand = t.assign(Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
-        let right_hand = t.assign(Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
+        let left_hand = assign_at(&mut t, Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
+        let right_hand = assign_at(&mut t, Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
         assert_ne!(left_hand.id, right_hand.id);
     }
 }

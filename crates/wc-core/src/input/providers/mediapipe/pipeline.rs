@@ -37,7 +37,9 @@
 //!    landmarks, so a hand tilted toward the camera (foreshortened in image
 //!    space) cannot read as partially grabbed. Pipeline-internal: world
 //!    coordinates never reach the public [`Hand`] and are never mapped to
-//!    positions.
+//!    xy positions — though the metric wrist→middle-MCP segment, paired with
+//!    its square-norm image projection, feeds the size-estimated depth that
+//!    becomes palm z ([`super::coords::estimate_depth_mm`]).
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -50,7 +52,7 @@ use smallvec::SmallVec;
 
 use super::anchors::{generate_palm_anchors, Anchor, PalmAnchorOptions};
 use super::capture::Frame;
-use super::coords::{image_norm_to_leap_mm, MEDIAPIPE_DEPTH_PROXY_MM};
+use super::coords::{estimate_depth_mm, image_norm_to_leap_mm, DEFAULT_DEPTH_CALIBRATION_K};
 use super::inference::{HandInference, InferenceError, Tensor};
 use super::landmark::{project_landmarks, roi_from_landmarks, roi_from_palm, RoiRect};
 use super::palm::{decode_palm_detections, weighted_nms, PalmDecodeOptions};
@@ -113,8 +115,17 @@ pub struct PipelineConfig {
     /// Rest deadzone subtracted from the geometric grab so a *relaxed-open* hand
     /// reads exactly `0`. See [`apply_grab_deadzone`]. Live-tunable from the dev
     /// panel (`HandTrackingSettings::grab_rest_deadzone`); on the worker pipeline
-    /// it is refreshed each frame from the provider's shared cell.
+    /// it is refreshed each frame from the provider's shared
+    /// [`MediaPipeLiveTuning`].
     pub grab_rest_deadzone: f32,
+    /// Calibration gain `k` for the size-estimated hand depth (the camera
+    /// focal length in square-side units — see
+    /// [`super::coords::estimate_depth_mm`]). `<= 0` disables the estimator and
+    /// pins depth to [`MEDIAPIPE_DEPTH_PROXY_MM`] (the live-set rollback knob).
+    /// Live-tunable from the dev panel
+    /// (`HandTrackingSettings::depth_calibration_k`); refreshed each frame from
+    /// the shared [`MediaPipeLiveTuning`].
+    pub depth_calibration_k: f32,
 }
 
 impl Default for PipelineConfig {
@@ -124,7 +135,58 @@ impl Default for PipelineConfig {
             palm_score_threshold: 0.5,
             presence_threshold: 0.5,
             grab_rest_deadzone: 0.2,
+            depth_calibration_k: DEFAULT_DEPTH_CALIBRATION_K,
         }
+    }
+}
+
+/// Live (lock-free) pipeline tunables shared between the Bevy main thread
+/// (dev-panel sliders, via the provider) and the worker thread's [`Pipeline`].
+///
+/// Each value is an `f32` stored as its bit pattern in an `AtomicU32`
+/// (`to_bits`/`from_bits`) — no `Mutex`, no allocation, safe to write every
+/// frame from a tuning system and read every frame from the worker loop.
+/// The pipeline refreshes its [`PipelineConfig`] copies at the top of each
+/// [`Pipeline::process`].
+#[derive(Debug)]
+pub struct MediaPipeLiveTuning {
+    /// [`PipelineConfig::grab_rest_deadzone`] as `f32` bits.
+    grab_deadzone: AtomicU32,
+    /// [`PipelineConfig::depth_calibration_k`] as `f32` bits.
+    depth_k: AtomicU32,
+}
+
+impl MediaPipeLiveTuning {
+    /// Build a tuning cell seeded with the given values.
+    #[must_use]
+    pub fn new(grab_deadzone: f32, depth_k: f32) -> Self {
+        Self {
+            grab_deadzone: AtomicU32::new(grab_deadzone.to_bits()),
+            depth_k: AtomicU32::new(depth_k.to_bits()),
+        }
+    }
+
+    /// Live-set the grab rest-deadzone.
+    pub fn set_grab_deadzone(&self, deadzone: f32) {
+        self.grab_deadzone
+            .store(deadzone.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The current grab rest-deadzone.
+    #[must_use]
+    pub fn grab_deadzone(&self) -> f32 {
+        f32::from_bits(self.grab_deadzone.load(Ordering::Relaxed))
+    }
+
+    /// Live-set the depth calibration gain `k` (`<= 0` disables the estimator).
+    pub fn set_depth_k(&self, k: f32) {
+        self.depth_k.store(k.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The current depth calibration gain `k`.
+    #[must_use]
+    pub fn depth_k(&self) -> f32 {
+        f32::from_bits(self.depth_k.load(Ordering::Relaxed))
     }
 }
 
@@ -179,6 +241,12 @@ pub struct PipelineDiagnostics {
     /// Flat for a stable hand; climbs under acquire/lose flicker. See
     /// [`super::signals::HandTracker::churn`].
     pub track_churn: u64,
+    /// Smoothed size-estimated depth (mm, Leap z, rounded) of the first
+    /// emitted hand this frame — the "Est. distance (mm)" dev-panel metric for
+    /// calibrating `depth_calibration_k` against a tape measure. `0` when no
+    /// hand; reads the [`MEDIAPIPE_DEPTH_PROXY_MM`] pin when the estimator is
+    /// disabled (`k <= 0`).
+    pub est_depth_mm: u64,
 }
 
 /// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
@@ -219,11 +287,12 @@ pub struct Pipeline {
     /// threshold), when it leaves the frame ([`roi_trackable`]), or when the
     /// frame is unusable.
     tracked: SmallVec<[RoiRect; MAX_HANDS]>,
-    /// Optional live source for [`PipelineConfig::grab_rest_deadzone`], shared
-    /// (lock-free `f32` bits) with the provider so a tuning UI can re-tune the
-    /// deadzone while the worker thread runs. Refreshed at the top of each
-    /// [`Self::process`]; `None` (tests, no UI) leaves the config value in force.
-    live_grab_deadzone: Option<Arc<AtomicU32>>,
+    /// Optional live source for the tunable config values (grab rest-deadzone,
+    /// depth calibration `k`), shared lock-free with the provider so a tuning
+    /// UI can re-tune them while the worker thread runs. Refreshed at the top
+    /// of each [`Self::process`]; `None` (tests, no UI) leaves the config
+    /// values in force.
+    live_tuning: Option<Arc<MediaPipeLiveTuning>>,
     /// Diagnostics for the most recent processed frame.
     last_diagnostics: PipelineDiagnostics,
     /// Reused square-pad scratch image (taken out via `mem::take` while
@@ -254,7 +323,7 @@ impl Pipeline {
             tracker: HandTracker::default(),
             config,
             tracked: SmallVec::new(),
-            live_grab_deadzone: None,
+            live_tuning: None,
             last_diagnostics: PipelineDiagnostics::default(),
             // Scratch buffers, pre-sized so steady-state processing allocates
             // nothing: the input tensors fill to capacity on the first frame and
@@ -273,11 +342,11 @@ impl Pipeline {
         }
     }
 
-    /// Attach a shared, lock-free source for the grab rest-deadzone so a tuning
-    /// UI on the main thread can re-tune it while this pipeline runs on the
-    /// worker thread. The bits are an `f32` (`to_bits`/`from_bits`).
-    pub fn set_live_deadzone_source(&mut self, source: Arc<AtomicU32>) {
-        self.live_grab_deadzone = Some(source);
+    /// Attach the shared, lock-free tuning cell so a tuning UI on the main
+    /// thread can re-tune the grab rest-deadzone and depth calibration `k`
+    /// while this pipeline runs on the worker thread.
+    pub fn set_live_tuning_source(&mut self, source: Arc<MediaPipeLiveTuning>) {
+        self.live_tuning = Some(source);
     }
 
     /// Diagnostics for the most recent processed frame.
@@ -302,10 +371,11 @@ impl Pipeline {
             tracks_before: u64::try_from(self.tracked.len()).unwrap_or(u64::MAX),
             ..PipelineDiagnostics::default()
         };
-        // Pick up any live deadzone re-tune from the provider/UI before this
-        // frame derives grab.
-        if let Some(src) = &self.live_grab_deadzone {
-            self.config.grab_rest_deadzone = f32::from_bits(src.load(Ordering::Relaxed));
+        // Pick up any live re-tune from the provider/UI before this frame
+        // derives grab and depth.
+        if let Some(tuning) = &self.live_tuning {
+            self.config.grab_rest_deadzone = tuning.grab_deadzone();
+            self.config.depth_calibration_k = tuning.depth_k();
         }
         let mut hands: SmallVec<[Hand; MAX_HANDS]> = SmallVec::new();
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
@@ -365,6 +435,13 @@ impl Pipeline {
             let stage_start = Instant::now();
             if let Some((hand, next_roi)) = self.landmark_for(&square, roi, content, dt)? {
                 if roi_trackable(&next_roi, content) {
+                    if hands.is_empty() {
+                        // First (focal) hand: surface its smoothed depth for the
+                        // dev panel's "Est. distance (mm)" calibration metric.
+                        // z is finite and clamped to [40, 350], so rounding via
+                        // floor(z + 0.5) is exact and in-range.
+                        diagnostics.est_depth_mm = u64::from(floor_u32(hand.palm_position.z + 0.5));
+                    }
                     hands.push(hand);
                     next.push(next_roi);
                 }
@@ -481,16 +558,30 @@ impl Pipeline {
             content.to_content_norm(palm_center(&img_landmarks)),
             self.config.mirror,
         );
-        // A single webcam has no reliable hand depth, and the landmark model's z
-        // is a near-zero relative value rather than a Leap-range depth. Pin z to
-        // a fixed mid-range proxy so the Line power model's `5^((−z+350)/160)`
-        // term is a constant (~10×) and grab alone drives attractor strength —
-        // otherwise z≈0 makes that term ~34× and the attractor sticks on. See
-        // [`MEDIAPIPE_DEPTH_PROXY_MM`].
-        palm_pos.z = MEDIAPIPE_DEPTH_PROXY_MM;
+        // Live size-estimated depth: a single webcam has no direct hand-Z (the
+        // landmark model's z is a near-zero relative value), but apparent size
+        // gives one — the wrist→middle-MCP segment is metric in the WORLD
+        // landmarks and measured in square-norm xy in the IMAGE landmarks
+        // (square-norm because it is isotropic; content-norm rescales the axes
+        // unevenly), so similar triangles yield a camera distance, remapped
+        // into the Leap z range Line's `5^((−z+350)/160)` power model expects.
+        // Closer ⇒ stronger, like Leap. `k <= 0` disables the estimator and
+        // restores the fixed [`MEDIAPIPE_DEPTH_PROXY_MM`] pin (the live-set
+        // rollback knob). The raw estimate is noisy, so the tracker EMA-smooths
+        // it per track inside `assign`; the smoothed value lands in
+        // `palm_pos.z` below, AFTER identity assignment.
+        let raw_depth_mm =
+            estimate_depth_mm(&world, &img_landmarks, self.config.depth_calibration_k);
         // Position-based id with a hysteresis-held chirality, so a spurious
-        // per-frame handedness flip neither churns the id nor flickers downstream.
-        let assigned = self.tracker.assign(observed_chirality, palm_pos);
+        // per-frame handedness flip neither churns the id nor flickers
+        // downstream. The gate inside `assign` compares xy only (palm_pos.z is
+        // ignored), so raw depth noise can never break identity association.
+        let assigned = self
+            .tracker
+            .assign(observed_chirality, palm_pos, raw_depth_mm, dt);
+        // Emit the track's EMA-smoothed depth as palm z, replacing the
+        // meaningless image-z that rode through the mm mapping.
+        palm_pos.z = assigned.depth_mm;
         // Finite-difference the palm against its previous-frame position (held by
         // the tracker) over the inter-frame `dt`. A fresh track has no history, so
         // velocity starts at zero on first sighting; `dt == 0` is also zero.
@@ -617,7 +708,10 @@ impl ContentRect {
         debug_assert!(h > 0.0, "content rect has zero height: {self:?}");
         // x' = (x − x0) / w  maps square-norm x into content [0, 1].
         // y' = (y − y0) / h  maps square-norm y into content [0, 1].
-        // z is already in the Leap-mm convention (depth proxy); pass through.
+        // z passes through untouched: at this stage it is still the landmark
+        // model's relative image-z; the pipeline overwrites palm z with the
+        // smoothed size-estimated depth after track assignment (see
+        // `landmark_for`), so nothing downstream reads this z.
         Vec3::new((p.x - self.x0) / w, (p.y - self.y0) / h, p.z)
     }
 
@@ -1015,6 +1109,9 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
+    use super::super::coords::{
+        distance_m_to_leap_z_mm, size_estimated_distance_m, MEDIAPIPE_DEPTH_PROXY_MM,
+    };
     use super::super::signals;
     use super::*;
     use crate::input::hand::LandmarkIndex;
@@ -1718,20 +1815,88 @@ mod tests {
         );
     }
 
+    /// Invert [`image_norm_to_leap_mm`] (mirror on, square frame → content-norm
+    /// is identity) to recover a landmark's square-norm xy from the emitted
+    /// Leap-mm value. Used to compute the expected size-estimated depth from
+    /// the same image geometry the pipeline saw.
+    fn mm_to_square_norm_xy(p: Vec3) -> bevy::math::Vec2 {
+        use crate::input::projection::{LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, LEAP_Y_MIN_MM};
+        // x_mm = (1 − x − 0.5) · 2·HALF  ⇒  x = 0.5 − x_mm / (2·HALF).
+        let x = 0.5 - p.x / (2.0 * LEAP_X_HALFRANGE_MM);
+        // y_mm = MAX − y · (MAX − MIN)  ⇒  y = (MAX − y_mm) / (MAX − MIN).
+        let y = (LEAP_Y_MAX_MM - p.y) / (LEAP_Y_MAX_MM - LEAP_Y_MIN_MM);
+        bevy::math::Vec2::new(x, y)
+    }
+
     #[test]
-    fn palm_position_reports_the_depth_proxy() {
-        // A webcam gives no real hand-Z, so the provider pins palm z to a fixed
-        // mid-range proxy (keeps Line's `5^((−z+350)/160)` power term constant so
-        // grab — not a bogus z≈0 → ~34× term — drives the attractor).
+    fn palm_z_is_the_size_estimated_depth_when_k_positive() {
+        // Phase P5: with the estimator on (default k = 0.8) the emitted palm z
+        // is the size-estimated depth — k · |world wrist→middleMCP| /
+        // |image wrist→middleMCP| remapped into Leap z — NOT the old 120 pin.
+        // One frame in, so the per-track EMA is freshly seeded with the raw
+        // estimate and the emitted z equals it exactly.
         let (mut pipe, _palm, _lm) = counting_pipeline();
-        let frame = consistent_frame();
         let hands = pipe
-            .process(&frame, Duration::from_millis(33))
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1);
+        let h = &hands[0];
+
+        // Reconstruct the segment the estimator measured: world side from the
+        // mock's world fixture, image side by inverting the mm mapping on the
+        // emitted wrist/middle-MCP landmarks (square 64×64 frame → content-norm
+        // is identity, so this recovers square-norm exactly).
+        let world = fixtures::open_world_hand();
+        let world_size = world[LandmarkIndex::Wrist.as_index()]
+            .distance(world[LandmarkIndex::MiddleMcp.as_index()]);
+        let image_size = mm_to_square_norm_xy(h.landmarks[LandmarkIndex::Wrist.as_index()])
+            .distance(mm_to_square_norm_xy(
+                h.landmarks[LandmarkIndex::MiddleMcp.as_index()],
+            ));
+        let want = distance_m_to_leap_z_mm(size_estimated_distance_m(
+            world_size,
+            image_size,
+            PipelineConfig::default().depth_calibration_k,
+        ));
+        // Guard against a vacuous fixture: the expected depth must be a live
+        // mid-range value, away from both rails and from the old pin.
+        assert!(
+            want > 41.0 && want < 349.0,
+            "fixture depth {want} should be off both rails"
+        );
+        assert!(
+            (want - MEDIAPIPE_DEPTH_PROXY_MM).abs() > 1.0,
+            "fixture depth {want} must differ from the 120 pin to be probative"
+        );
+        assert!(
+            (h.palm_position.z - want).abs() < 0.1,
+            "palm z = {} (want size-estimated {want})",
+            h.palm_position.z
+        );
+    }
+
+    #[test]
+    fn palm_z_falls_back_to_the_pin_when_k_disabled() {
+        // The escape hatch: k = 0 disables the estimator and restores exactly
+        // today's fixed 120 mm pin (instant rollback knob during a live set).
+        let config = PipelineConfig {
+            depth_calibration_k: 0.0,
+            ..PipelineConfig::default()
+        };
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_config(
+            spread_landmarks(),
+            fixtures::open_world_tensor(),
+            0.98,
+            0.9,
+            config,
+        );
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
             .expect("process");
         assert_eq!(hands.len(), 1);
         assert!(
             (hands[0].palm_position.z - MEDIAPIPE_DEPTH_PROXY_MM).abs() < 1e-3,
-            "palm z = {} (want {MEDIAPIPE_DEPTH_PROXY_MM})",
+            "palm z = {} (want the {MEDIAPIPE_DEPTH_PROXY_MM} fallback pin)",
             hands[0].palm_position.z
         );
     }
@@ -1878,8 +2043,11 @@ mod tests {
             0.98,
             0.9,
         );
-        let cell = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
-        pipe.set_live_deadzone_source(Arc::clone(&cell));
+        let cell = Arc::new(MediaPipeLiveTuning::new(
+            0.0,
+            PipelineConfig::default().depth_calibration_k,
+        ));
+        pipe.set_live_tuning_source(Arc::clone(&cell));
         let frame = consistent_frame();
         let dt = Duration::from_millis(33);
 
@@ -1893,7 +2061,7 @@ mod tests {
 
         // Crank the live deadzone high → grab collapses to 0 on the next frame,
         // with no restart.
-        cell.store(0.99_f32.to_bits(), Ordering::Relaxed);
+        cell.set_grab_deadzone(0.99);
         let h1 = pipe.process(&frame, dt).expect("frame 1");
         assert!(
             h1[0].grab_strength < 1e-6,

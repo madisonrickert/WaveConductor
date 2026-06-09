@@ -233,6 +233,13 @@ fn draw_hand_tuning_controls(
     ui.add(
         egui::Slider::new(&mut settings.grab_rest_deadzone, 0.0..=0.6).text("Grab rest deadzone"),
     );
+    // Size-estimated depth calibration. The "0 = off" in the label keeps the
+    // escape hatch discoverable mid-set: dragging to 0 disables the estimator
+    // and restores the fixed 120 mm depth pin (grab-only attractor control).
+    ui.add(
+        egui::Slider::new(&mut settings.depth_calibration_k, 0.0..=1.5)
+            .text("Depth calibration k (0 = off)"),
+    );
     ui.add(
         egui::Slider::new(&mut settings.smoothing_min_cutoff, 0.1..=20.0)
             .text("Smoothing min cutoff (Hz)"),

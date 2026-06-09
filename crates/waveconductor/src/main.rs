@@ -284,14 +284,16 @@ fn register_mediapipe(
             )
         });
 
-    // The numeric feel tunables (grab deadzone, smoothing min-cutoff/beta) are
-    // owned by HandTrackingSettings — the Dev panel edits them live and they
+    // The numeric feel tunables (grab deadzone, depth calibration k, smoothing
+    // min-cutoff/beta) are owned by HandTrackingSettings — the Dev panel edits
+    // them live and they
     // persist. Seed the provider from the (possibly persisted) settings so a
     // saved value applies at startup; `apply_mediapipe_tuning_settings` keeps it
     // in sync on every change.
     let config = MediaPipeConfig {
         smoothing,
         grab_rest_deadzone: settings.grab_rest_deadzone,
+        depth_calibration_k: settings.depth_calibration_k,
         smoothing_min_cutoff: settings.smoothing_min_cutoff,
         smoothing_beta: settings.smoothing_beta,
         ..MediaPipeConfig::default()

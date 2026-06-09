@@ -43,6 +43,26 @@ pub struct HandTrackingSettings {
     #[serde(default = "default_grab_rest_deadzone")]
     pub grab_rest_deadzone: f32,
 
+    /// MediaPipe-only: depth calibration gain `k` for the size-estimated hand
+    /// depth — the camera focal length in square-side units (≈ `0.82` for a
+    /// typical 63° HFOV webcam). `0` disables the estimator entirely (fixed
+    /// 120 mm depth, grab-only attractor control — the instant rollback during
+    /// a live set). Calibrate against a tape measure: stand at 0.5 m with an
+    /// open hand and tune until the dev panel's "Est. distance (mm)" reads
+    /// ≈ 500. Default must match
+    /// `mediapipe::coords::DEFAULT_DEPTH_CALIBRATION_K` (`0.8`).
+    #[setting(
+        default = 0.8_f32,
+        min = 0.0,
+        max = 1.5,
+        step = 0.01,
+        category = Dev,
+        section = "Hand Tracking",
+        label = "Depth calibration k (0 = off)"
+    )]
+    #[serde(default = "default_depth_calibration_k")]
+    pub depth_calibration_k: f32,
+
     /// MediaPipe-only: One-Euro min cutoff (Hz) — at-rest smoothing. Lower =
     /// steadier when the hand holds still (more lag on slow motion). Default must
     /// match `mediapipe::smoothing::DEFAULT_MIN_CUTOFF` (`10.0`).
@@ -78,6 +98,9 @@ pub struct HandTrackingSettings {
 /// (the values stay in sync with the provider's compile-time defaults).
 fn default_grab_rest_deadzone() -> f32 {
     0.2
+}
+fn default_depth_calibration_k() -> f32 {
+    0.8
 }
 fn default_smoothing_min_cutoff() -> f32 {
     10.0
