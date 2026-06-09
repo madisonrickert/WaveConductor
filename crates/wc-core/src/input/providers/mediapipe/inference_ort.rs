@@ -24,8 +24,9 @@ use super::inference::{HandInference, InferenceError, Tensor};
 /// `ort`-backed inference for one ONNX model stage.
 ///
 /// Output tensors are read back in the model's **declared output order** (not the
-/// map iteration order), because the landmark stage's downstream selection treats
-/// the first `[1, 1]` output as presence and the second as handedness.
+/// map iteration order), because the landmark stage's downstream selection is
+/// index-based on that order: 0 image landmarks, 1 presence, 2 handedness,
+/// 3 world landmarks.
 pub struct OrtInference {
     session: Session,
     input_name: String,
@@ -151,8 +152,8 @@ mod tests {
 
     #[test]
     fn ort_landmark_model_runs_and_emits_expected_shapes() {
-        // The ort backend must yield the same output set the pipeline matches on
-        // by shape, in declared order: two [1,63] landmark tensors and two [1,1]
+        // The ort backend must yield the output set the pipeline selects by
+        // declared index order: two [1,63] landmark tensors and two [1,1]
         // scalars. On a host without CoreML, ort falls back to CPU — still
         // exercising load + run + the declared-order shape extraction.
         let mut model =
@@ -171,6 +172,37 @@ mod tests {
             shapes.iter().filter(|s| **s == [1, 1]).count(),
             2,
             "shapes={shapes:?}"
+        );
+    }
+
+    #[test]
+    fn ort_landmark_presence_is_a_probability_from_the_graph() {
+        // Premise lock: the vendored hand_landmark.onnx applies a Sigmoid op to
+        // the presence head INSIDE the graph, so declared output 1 is already a
+        // probability and the pipeline must NOT sigmoid it again. An all-zeros
+        // input contains no hand, so presence must read low. If a future model
+        // swap ships raw logits instead (no baked-in activation), an empty
+        // input's logit would be strongly negative — outside what this asserts
+        // only by luck — while a logit-positive model or a non-[0,1] head fails
+        // here loudly before the pipeline silently misreads it.
+        let mut model =
+            OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
+        let out = model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]))
+            .expect("ort landmark forward pass");
+        assert_eq!(
+            out[1].shape,
+            vec![1, 1],
+            "declared output 1 must be the presence scalar"
+        );
+        let presence = *out[1].data.first().expect("presence scalar");
+        assert!(
+            (0.0..=1.0).contains(&presence),
+            "presence {presence} outside [0, 1] — model head is not pre-activated"
+        );
+        assert!(
+            presence < 0.5,
+            "presence {presence} on an empty (all-zeros) input should be < 0.5"
         );
     }
 

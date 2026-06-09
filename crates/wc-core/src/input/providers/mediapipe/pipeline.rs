@@ -80,7 +80,10 @@ pub struct PipelineConfig {
     pub mirror: bool,
     /// Minimum palm-detection score to accept.
     pub palm_score_threshold: f32,
-    /// Minimum landmark-presence score to keep a hand.
+    /// Minimum hand-presence probability to keep a hand. Compared against the
+    /// landmark model's presence head, a real probability in `[0, 1]` (the
+    /// sigmoid is baked into the model graph). The `0.5` default matches the
+    /// `MediaPipe` web demo's `minTrackingConfidence`.
     pub presence_threshold: f32,
     /// Rest deadzone subtracted from the geometric grab so a *relaxed-open* hand
     /// reads exactly `0`. See [`apply_grab_deadzone`]. Live-tunable from the dev
@@ -397,7 +400,14 @@ impl Pipeline {
         warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
         fill_nchw_unit(&self.warp_buf, &mut self.landmark_input);
         let out = self.landmark.run(&self.landmark_input)?;
-        let (raw_lms, presence, handed) = pick_landmark_outputs(&out)?;
+        // World landmarks are selected/shape-checked but not consumed yet — a
+        // later phase derives metric hand geometry from them.
+        let LandmarkOutputs {
+            image: raw_lms,
+            presence,
+            handedness: handed,
+            world: _,
+        } = pick_landmark_outputs(&out)?;
         if presence < self.config.presence_threshold {
             return Ok(None);
         }
@@ -749,31 +759,60 @@ fn pick_palm_outputs(out: &[Tensor]) -> Result<(&[f32], &[f32]), InferenceError>
     Ok((&boxes.data, &scores.data))
 }
 
-fn pick_landmark_outputs(out: &[Tensor]) -> Result<(&[f32], f32, f32), InferenceError> {
-    // Two [1,63] tensors (image + world landmarks) and two [1,1] scalars
-    // (presence, handedness). Image landmarks are output 0; presence is the
-    // first scalar, handedness the second (model output order).
-    let lms = out
-        .iter()
-        .find(|t| t.shape == [1, 63])
-        .ok_or_else(|| InferenceError::Run("landmark: no [1,63] output".into()))?;
-    let scalars: Vec<f32> = out
-        .iter()
-        .filter(|t| t.shape == [1, 1])
-        .map(|t| sigmoid(t.data.first().copied().unwrap_or(0.0)))
-        .collect();
-    let presence = scalars.first().copied().unwrap_or(0.0);
-    let handed = scalars.get(1).copied().unwrap_or(0.5);
-    Ok((&lms.data, presence, handed))
+/// The landmark model's four outputs, selected by declared index order.
+///
+/// The scalar heads carry **Sigmoid ops inside the graph**, so [`Self::presence`]
+/// and [`Self::handedness`] are already probabilities in `[0, 1]` — they must be
+/// consumed raw. (Applying sigmoid again, as the old shape-matching selection
+/// did, squashes any `[0, 1]` input into `[0.5, 0.731]`, which disabled both the
+/// presence gate and the Left half of the handedness test.) The premise is
+/// pinned against the vendored model by the `inference_ort` test
+/// `ort_landmark_presence_is_a_probability_from_the_graph`.
+#[derive(Debug)]
+struct LandmarkOutputs<'a> {
+    /// Crop-space landmarks, 21 × (x, y, z) in landmark-crop pixels (`[1, 63]`).
+    image: &'a [f32],
+    /// Hand-presence probability in `[0, 1]`.
+    presence: f32,
+    /// Handedness probability in `[0, 1]`; `>= 0.5` reads as a right hand.
+    handedness: f32,
+    /// World-space landmarks, 21 × (x, y, z) in hand-centred metres (`[1, 63]`).
+    /// Selected and shape-checked now; consumed by a later phase.
+    world: &'a [f32],
 }
 
-fn sigmoid(x: f32) -> f32 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let e = x.exp();
-        e / (1.0 + e)
+/// Select the landmark model's outputs by declared index order — `0` image
+/// landmarks `[1, 63]`, `1` presence `[1, 1]`, `2` handedness `[1, 1]`,
+/// `3` world landmarks `[1, 63]` (the inference backend preserves the
+/// session's declared output order). Each index is shape-sanity-checked; a
+/// mismatch reports the observed shapes. No per-call allocation on the
+/// success path (the error strings allocate only when returned).
+fn pick_landmark_outputs(out: &[Tensor]) -> Result<LandmarkOutputs<'_>, InferenceError> {
+    const WANT: [&[usize]; 4] = [&[1, 63], &[1, 1], &[1, 1], &[1, 63]];
+    let shapes_ok = out.len() == WANT.len()
+        && out
+            .iter()
+            .zip(WANT)
+            .all(|(tensor, want)| tensor.shape == want);
+    if !shapes_ok {
+        let observed: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
+        return Err(InferenceError::Run(format!(
+            "landmark: unexpected output shapes {observed:?}; want {WANT:?} in declared order"
+        )));
     }
+    let scalar = |index: usize| {
+        out[index]
+            .data
+            .first()
+            .copied()
+            .ok_or_else(|| InferenceError::Run(format!("landmark: output {index} has no data")))
+    };
+    Ok(LandmarkOutputs {
+        image: &out[0].data,
+        presence: scalar(1)?,
+        handedness: scalar(2)?,
+        world: &out[3].data,
+    })
 }
 
 #[cfg(test)]
@@ -991,15 +1030,9 @@ mod tests {
         }
     }
 
-    /// Build a pipeline wired with call-counting mocks: palm yields exactly one
-    /// detection, landmark yields one high-presence hand. Returns the pipeline
-    /// plus the palm and landmark call counters.
-    fn counting_pipeline() -> (
-        Pipeline,
-        std::sync::Arc<std::sync::atomic::AtomicU32>,
-        std::sync::Arc<std::sync::atomic::AtomicU32>,
-    ) {
-        // Landmark: a spread hand with high presence + handedness.
+    /// A plausibly spread mock hand (wrist + MCPs + middle tip placed apart) in
+    /// landmark-crop pixels, for tests that need the geometry gates to pass.
+    fn spread_landmarks() -> Vec<f32> {
         let mut lms = vec![112.0f32; 63];
         let mut set = |i: usize, x: f32, y: f32| {
             lms[i * 3] = x;
@@ -1010,11 +1043,41 @@ mod tests {
         set(5, 85.0, 110.0); // index MCP
         set(17, 140.0, 110.0); // pinky MCP
         set(12, 112.0, 50.0); // middle tip
-        counting_pipeline_with_landmarks(lms)
+        lms
     }
 
+    /// Build a pipeline wired with call-counting mocks: palm yields exactly one
+    /// detection, landmark yields one high-presence hand. Returns the pipeline
+    /// plus the palm and landmark call counters.
+    fn counting_pipeline() -> (
+        Pipeline,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        counting_pipeline_with_landmarks(spread_landmarks())
+    }
+
+    /// [`counting_pipeline_with_outputs`] with probability-realistic scalars for
+    /// a confidently present right hand.
     fn counting_pipeline_with_landmarks(
         lms: Vec<f32>,
+    ) -> (
+        Pipeline,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        counting_pipeline_with_outputs(lms, 0.98, 0.9)
+    }
+
+    /// Counting-mock pipeline whose landmark stage emits the given landmarks,
+    /// presence, and handedness. The mock mirrors the vendored model's declared
+    /// output order — image landmarks, presence, handedness, world landmarks —
+    /// with the scalars as real probabilities (the model's graph applies the
+    /// sigmoid itself).
+    fn counting_pipeline_with_outputs(
+        lms: Vec<f32>,
+        presence: f32,
+        handedness: f32,
     ) -> (
         Pipeline,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -1046,17 +1109,20 @@ mod tests {
             },
         ];
 
+        // Declared landmark-model output order: image landmarks, presence,
+        // handedness, world landmarks. Selection is index-based, so the mock
+        // must emit all four in this order.
         let lm_out = vec![
             Tensor {
                 data: lms,
                 shape: vec![1, 63],
             },
             Tensor {
-                data: vec![5.0],
+                data: vec![presence],
                 shape: vec![1, 1],
             },
             Tensor {
-                data: vec![5.0],
+                data: vec![handedness],
                 shape: vec![1, 1],
             },
             Tensor {
@@ -1423,6 +1489,107 @@ mod tests {
             "deadzoned grab {}",
             h1[0].grab_strength
         );
+    }
+
+    #[test]
+    fn pick_landmark_outputs_passes_probabilities_through_raw() {
+        // The vendored hand_landmark.onnx applies Sigmoid to the presence and
+        // handedness heads INSIDE the graph, so the outputs are already
+        // probabilities. Selection must pass them through untouched — the old
+        // shape-matching code sigmoided them again, squashing every value into
+        // [0.5, 0.731] (sigmoid(0.02) ≈ 0.505) so the presence gate could never
+        // reject and handedness always read Right.
+        let out = vec![
+            Tensor {
+                data: vec![0.25; 63],
+                shape: vec![1, 63],
+            },
+            Tensor {
+                data: vec![0.02],
+                shape: vec![1, 1],
+            },
+            Tensor {
+                data: vec![0.85],
+                shape: vec![1, 1],
+            },
+            Tensor {
+                data: vec![0.5; 63],
+                shape: vec![1, 63],
+            },
+        ];
+        let picked = pick_landmark_outputs(&out).expect("pick");
+        assert!(
+            (picked.presence - 0.02).abs() < 1e-6,
+            "presence {} must be the raw graph output, not re-sigmoided",
+            picked.presence
+        );
+        assert!(
+            (picked.handedness - 0.85).abs() < 1e-6,
+            "handedness {} must be the raw graph output",
+            picked.handedness
+        );
+        assert!(
+            (picked.image[0] - 0.25).abs() < 1e-6,
+            "image landmarks come from declared output 0"
+        );
+        assert!(
+            (picked.world[0] - 0.5).abs() < 1e-6,
+            "world landmarks come from declared output 3"
+        );
+    }
+
+    #[test]
+    fn pick_landmark_outputs_rejects_unexpected_shapes() {
+        // Index-based selection is only safe with the declared layout; anything
+        // else (wrong count, transposed order) must error with the shapes seen.
+        let missing_world = vec![
+            Tensor {
+                data: vec![0.0; 63],
+                shape: vec![1, 63],
+            },
+            Tensor {
+                data: vec![0.9],
+                shape: vec![1, 1],
+            },
+            Tensor {
+                data: vec![0.9],
+                shape: vec![1, 1],
+            },
+        ];
+        let err = pick_landmark_outputs(&missing_world).expect_err("3 outputs must be rejected");
+        assert!(matches!(err, InferenceError::Run(_)), "{err:?}");
+    }
+
+    #[test]
+    fn low_presence_emits_no_hand_and_frees_the_track_slot() {
+        // Phantom-track regression: presence 0.3 is the model saying "no hand
+        // in this ROI". Pre-fix, the double sigmoid mapped it to ≈0.574, the
+        // 0.5 gate could never reject, and the empty ROI persisted as a
+        // phantom track holding a slot (so palm re-detection never ran).
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_outputs(spread_landmarks(), 0.3, 0.9);
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert!(
+            hands.is_empty(),
+            "presence 0.3 < threshold 0.5 must emit no hand"
+        );
+        assert!(
+            pipe.tracked.is_empty(),
+            "low-presence ROI must free its slot so palm re-detection runs next frame"
+        );
+    }
+
+    #[test]
+    fn handedness_probability_below_half_reads_left() {
+        // Handedness 0.2 is a confident Left. Pre-fix, sigmoid(0.2) ≈ 0.55 met
+        // the `>= 0.5` Right test — every hand read Right.
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_outputs(spread_landmarks(), 0.98, 0.2);
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1);
+        assert_eq!(hands[0].chirality, Chirality::Left);
     }
 
     #[test]
