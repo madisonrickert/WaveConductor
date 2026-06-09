@@ -10,10 +10,11 @@
 //! `palm`/`landmark` modules, not here, so this trait stays runtime-agnostic:
 //! it runs one model stage on one pre-shaped input tensor and returns the raw
 //! output tensors.
-// `Tensor::new`, `Tensor::zeros`, and `InferenceError::ShapeMismatch` are public
-// testing/construction helpers; they are not called on the production hot path
-// but are part of this module's API surface (used in tests across the pipeline).
-#![allow(dead_code)]
+//!
+//! [`Tensor::new`], [`Tensor::zeros`], and [`InferenceError::ShapeMismatch`]
+//! are testing/construction helpers: part of this module's API surface and
+//! used by tests across the pipeline, but never called on the production hot
+//! path — hence the per-item `#[allow(dead_code)]` each carries.
 
 use thiserror::Error;
 
@@ -27,6 +28,10 @@ pub enum InferenceError {
     #[error("inference run failed: {0}")]
     Run(String),
     /// The input tensor's element count did not match its declared shape.
+    #[allow(
+        dead_code,
+        reason = "constructed only by the test/construction helper Tensor::new"
+    )]
     #[error("input shape {shape:?} does not match {len} elements")]
     ShapeMismatch {
         /// The declared shape.
@@ -51,6 +56,10 @@ impl Tensor {
     /// # Errors
     /// Returns [`InferenceError::ShapeMismatch`] if `data.len()` is not the
     /// product of `shape`.
+    #[allow(
+        dead_code,
+        reason = "test/construction helper; off the production hot path"
+    )]
     pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Result<Self, InferenceError> {
         let expected: usize = shape.iter().product();
         if expected != data.len() {
@@ -63,6 +72,10 @@ impl Tensor {
     }
 
     /// Zero-filled tensor of the given shape.
+    #[allow(
+        dead_code,
+        reason = "test/construction helper; off the production hot path"
+    )]
     #[must_use]
     pub fn zeros(shape: Vec<usize>) -> Self {
         let len = shape.iter().product();

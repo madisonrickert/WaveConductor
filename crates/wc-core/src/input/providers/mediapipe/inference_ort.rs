@@ -163,16 +163,12 @@ mod tests {
             .expect("ort landmark forward pass");
         let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
         assert_eq!(out.len(), 4, "shapes={shapes:?}");
-        assert_eq!(
-            shapes.iter().filter(|s| **s == [1, 63]).count(),
-            2,
-            "shapes={shapes:?}"
-        );
-        assert_eq!(
-            shapes.iter().filter(|s| **s == [1, 1]).count(),
-            2,
-            "shapes={shapes:?}"
-        );
+        // Positional: the pipeline selects by declared index order, so each
+        // index must carry its declared shape — not merely the right multiset.
+        assert_eq!(out[0].shape, vec![1, 63], "output 0: image landmarks");
+        assert_eq!(out[1].shape, vec![1, 1], "output 1: presence");
+        assert_eq!(out[2].shape, vec![1, 1], "output 2: handedness");
+        assert_eq!(out[3].shape, vec![1, 63], "output 3: world landmarks");
     }
 
     #[test]
@@ -185,6 +181,12 @@ mod tests {
         // input's logit would be strongly negative — outside what this asserts
         // only by luck — while a logit-positive model or a non-[0,1] head fails
         // here loudly before the pipeline silently misreads it.
+        //
+        // The handedness head's baked-in sigmoid (declared output 2) is NOT
+        // separately pinned here: proving it needs a hand-shaped input (an
+        // empty frame says nothing about handedness either way). It is covered
+        // at the mock level by the pipeline test
+        // `handedness_probability_below_half_reads_left`.
         let mut model =
             OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
         let out = model

@@ -1370,7 +1370,7 @@ hardware gate.
 - [ ] **Step 2: Run focused gates:**
 ```bash
 cargo test -p wc-core --features hand-tracking-mediapipe mediapipe -- --nocapture
-cargo check -p wc-core --features hand-tracking-mediapipe-ort
+cargo check -p wc-core --features hand-tracking-mediapipe
 cargo xtask check-secrets
 ```
 - [ ] **Step 3: Before merge, run the full AGENTS.md gate set** or explicitly

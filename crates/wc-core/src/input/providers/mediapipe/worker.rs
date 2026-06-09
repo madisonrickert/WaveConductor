@@ -368,7 +368,7 @@ mod tests {
             outputs: vec![
                 Tensor::zeros(vec![1, 63]),
                 Tensor::zeros(vec![1, 1]), // presence 0 → no hand kept
-                Tensor::zeros(vec![1, 1]),
+                Tensor::zeros(vec![1, 1]), // handedness 0 → reads Left (moot: presence drops it)
                 // Plausible open-hand WORLD landmarks, never zeros: gesture
                 // signals divide by the world hand_scale, so a degenerate
                 // all-zeros world hand would read as epsilon-scale garbage if

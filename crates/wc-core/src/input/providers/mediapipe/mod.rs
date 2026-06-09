@@ -66,7 +66,10 @@ pub struct MediaPipeConfig {
     pub max_inference_hz: u32,
     /// Apply render-rate One-Euro smoothing (see [`smoothing`]). On by default;
     /// turn off to expose the raw ~15–20 fps inference poses (for A/B comparison
-    /// during tuning). The app wires this to `WAVECONDUCTOR_HAND_SMOOTHING`.
+    /// during tuning). This on/off escape hatch is the only smoothing knob still
+    /// read from an env var at startup (`WAVECONDUCTOR_HAND_SMOOTHING=off`); the
+    /// One-Euro *parameters* below are live-tunable through
+    /// [`crate::settings::HandTrackingSettings`] (dev panel, no restart).
     pub smoothing: bool,
     /// Rest deadzone for the grab signal so a relaxed-open hand reads exactly
     /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Seeded from and

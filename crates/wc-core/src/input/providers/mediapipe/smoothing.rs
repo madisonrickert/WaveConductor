@@ -35,10 +35,10 @@ use crate::input::state::MAX_HANDS;
 
 /// Default minimum cutoff frequency (Hz) — the cutoff when the hand is still, so
 /// it sets the at-rest smoothing. Higher = lighter smoothing (more responsive,
-/// less lag) at the cost of more jitter passing. `5.0` is deliberately light:
+/// less lag) at the cost of more jitter passing. `10.0` is deliberately light:
 /// once GPU inference and the stabilized tracking ROI cleaned up the pose, heavy
-/// output smoothing mostly added lag, so this hardware-validated higher value
-/// feels more responsive. Live-tunable from the dev panel
+/// output smoothing mostly added lag, so this hardware-validated value favours
+/// responsiveness. Live-tunable from the dev panel
 /// (`HandTrackingSettings::smoothing_min_cutoff`).
 pub const DEFAULT_MIN_CUTOFF: f32 = 10.0;
 
@@ -199,6 +199,9 @@ impl HandFilters {
     fn filter_hand(&mut self, target: &Hand, dt: f32) -> Hand {
         // Positional channels normalize by apparent hand size; already-normalized
         // channels (unit normal, [0,1] pinch/grab) use a unit scale.
+        // Known asymmetry: palm_position.z is already EMA-smoothed depth (the
+        // tracker's size estimator) and object_scale is xy-based, so z gets an
+        // acceptable second light pass here — documented, not a bug.
         let pos_scale = 1.0 / object_scale(&target.landmarks);
         let mut landmarks = target.landmarks;
         for (filter, lm) in self.landmarks.iter_mut().zip(landmarks.iter_mut()) {

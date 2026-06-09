@@ -166,7 +166,9 @@ impl Default for PipelineConfig {
 /// (`to_bits`/`from_bits`) — no `Mutex`, no allocation, safe to write every
 /// frame from a tuning system and read every frame from the worker loop.
 /// The pipeline refreshes its [`PipelineConfig`] copies at the top of each
-/// [`Pipeline::process`].
+/// [`Pipeline::process`]. All accesses use `Ordering::Relaxed`: the fields are
+/// independent scalars with no cross-field happens-before requirement, and a
+/// one-frame-stale read is harmless (the next frame picks the value up).
 #[derive(Debug)]
 pub struct MediaPipeLiveTuning {
     /// [`PipelineConfig::grab_rest_deadzone`] as `f32` bits.
@@ -500,7 +502,7 @@ impl Pipeline {
         // the equivalence story vs the image crate's Triangle resize), then
         // refill the reused input tensor — no per-acquisition allocation.
         resize_into(square, PALM_SIZE, PALM_SIZE, &mut self.palm_resize_buf);
-        fill_nchw_unit(&self.palm_resize_buf, &mut self.palm_input);
+        fill_nhwc_unit(&self.palm_resize_buf, &mut self.palm_input);
         let out = self.palm.run(&self.palm_input)?;
         let (boxes, scores) = pick_palm_outputs(&out)?;
         // Decode + NMS through the reused scratch buffers: the `_into` forms
@@ -536,7 +538,7 @@ impl Pipeline {
         // Warp the ROI into the reused crop buffer, then into the reused input
         // tensor — no per-ROI image/tensor allocation.
         warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
-        fill_nchw_unit(&self.warp_buf, &mut self.landmark_input);
+        fill_nhwc_unit(&self.warp_buf, &mut self.landmark_input);
         let out = self.landmark.run(&self.landmark_input)?;
         let LandmarkOutputs {
             image: raw_lms,
@@ -556,7 +558,7 @@ impl Pipeline {
         // Metric world landmarks (space 4 of the module doc) for the gesture
         // signals: pose-invariant geometry a perspective-projected hand can't
         // give (a hand tilted toward the camera foreshortens its image-space
-        // tip-to-palm distances and used to read as partially grabbed).
+        // tip-to-palm distances and would previously read as partially grabbed).
         let world = decode_world_landmarks(raw_world);
         // Orientation frame for the palm normal: world axes mapped into the
         // Leap convention (see [`world_to_leap_orientation`]). Stack array —
@@ -621,6 +623,8 @@ impl Pipeline {
         // Finite-difference the palm against its previous-frame position (held by
         // the tracker) over the inter-frame `dt`. A fresh track has no history, so
         // velocity starts at zero on first sighting; `dt == 0` is also zero.
+        // palm_velocity.z is now the smoothed-depth derivative (it was always 0
+        // under the fixed depth pin); no current consumer reads velocity z.
         let velocity = palm_velocity(assigned.prev_pos.unwrap_or(palm_pos), palm_pos, dt);
 
         // Next frame tracks from these landmarks, skipping palm detection.
@@ -633,6 +637,10 @@ impl Pipeline {
                 palm_position: palm_pos,
                 // Orientation from the Leap-mapped world landmarks; the held
                 // (hysteresis-smoothed) chirality picks the cross-product sign.
+                // No sketch currently consumes palm_normal from this provider
+                // (input::systems stubs it to Vec3::Y when rebuilding hands);
+                // the first real consumer should hardware-validate the sign
+                // convention first (see [`world_to_leap_orientation`]).
                 palm_normal: palm_normal(&world_leap, assigned.chirality),
                 palm_velocity: velocity,
                 // Pinch/grab from the metric world landmarks: pose-invariant,
@@ -972,7 +980,7 @@ fn resize(img: &RgbImage, w: u32, h: u32) -> RgbImage {
 /// Fill `out` with the NHWC `[1, h, w, 3]` `f32` tensor (RGB in `[0,1]`) of
 /// `img`, reusing `out`'s buffers. `data.clear()` keeps capacity, so after the
 /// first frame this refills without allocating.
-fn fill_nchw_unit(img: &RgbImage, out: &mut Tensor) {
+fn fill_nhwc_unit(img: &RgbImage, out: &mut Tensor) {
     out.data.clear();
     for p in img.pixels() {
         out.data.push(f32::from(p[0]) / 255.0);
@@ -984,15 +992,15 @@ fn fill_nchw_unit(img: &RgbImage, out: &mut Tensor) {
         .extend_from_slice(&[1, idx(img.height()), idx(img.width()), 3]);
 }
 
-/// Allocating convenience wrapper over [`fill_nchw_unit`] (tests/benchmarks).
+/// Allocating convenience wrapper over [`fill_nhwc_unit`] (tests/benchmarks).
 /// `size` is unused except to document the expected square dimension.
-fn to_nchw_unit(img: &RgbImage, size: u32) -> Tensor {
+fn to_nhwc_unit(img: &RgbImage, size: u32) -> Tensor {
     let n = idx(size);
     let mut out = Tensor {
         data: Vec::with_capacity(n * n * 3),
         shape: Vec::with_capacity(4),
     };
-    fill_nchw_unit(img, &mut out);
+    fill_nhwc_unit(img, &mut out);
     out
 }
 
@@ -1489,26 +1497,15 @@ mod tests {
     }
 
     /// Build a pipeline wired with call-counting mocks: palm yields exactly one
-    /// detection, landmark yields one high-presence hand. Returns the pipeline
-    /// plus the palm and landmark call counters.
+    /// detection, landmark yields one high-presence hand (probability-realistic
+    /// scalars for a confidently present right hand). Returns the pipeline plus
+    /// the palm and landmark call counters.
     fn counting_pipeline() -> (
         Pipeline,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
     ) {
-        counting_pipeline_with_landmarks(spread_landmarks())
-    }
-
-    /// [`counting_pipeline_with_outputs`] with probability-realistic scalars for
-    /// a confidently present right hand.
-    fn counting_pipeline_with_landmarks(
-        lms: Vec<f32>,
-    ) -> (
-        Pipeline,
-        std::sync::Arc<std::sync::atomic::AtomicU32>,
-        std::sync::Arc<std::sync::atomic::AtomicU32>,
-    ) {
-        counting_pipeline_with_outputs(lms, 0.98, 0.9)
+        counting_pipeline_with_outputs(spread_landmarks(), 0.98, 0.9)
     }
 
     /// [`counting_pipeline_with_image_and_world`] with the plausible open-hand
@@ -1901,7 +1898,7 @@ mod tests {
 
     #[test]
     fn high_presence_collapsed_landmarks_do_not_keep_a_track() {
-        let (mut pipe, _palm, _lm) = counting_pipeline_with_landmarks(vec![112.0f32; 63]);
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_outputs(vec![112.0f32; 63], 0.98, 0.9);
         let hands = pipe
             .process(&consistent_frame(), Duration::from_millis(33))
             .expect("process");
@@ -2306,6 +2303,31 @@ mod tests {
         ];
         let err = pick_landmark_outputs(&missing_world).expect_err("3 outputs must be rejected");
         assert!(matches!(err, InferenceError::Run(_)), "{err:?}");
+
+        // Right COUNT, wrong shapes at each index (the scalars and landmark
+        // tensors transposed): per-index shape checking must reject this too,
+        // not just a wrong tensor count.
+        let transposed = vec![
+            Tensor {
+                data: vec![0.9],
+                shape: vec![1, 1],
+            },
+            Tensor {
+                data: vec![0.0; 63],
+                shape: vec![1, 63],
+            },
+            Tensor {
+                data: vec![0.0; 63],
+                shape: vec![1, 63],
+            },
+            Tensor {
+                data: vec![0.9],
+                shape: vec![1, 1],
+            },
+        ];
+        let err = pick_landmark_outputs(&transposed)
+            .expect_err("4 outputs with wrong per-index shapes must be rejected");
+        assert!(matches!(err, InferenceError::Run(_)), "{err:?}");
     }
 
     #[test]
@@ -2456,6 +2478,34 @@ mod tests {
         assert!(
             (p.x - 0.7).abs() < 1e-6,
             "landscape full-width: x={:.7} (want 0.7)",
+            p.x
+        );
+    }
+
+    #[test]
+    fn content_norm_portrait_left_edge_maps_to_zero_x() {
+        // 480×640 portrait: bars left/right, content x0 = 80/640 = 0.125.
+        // Square-norm x = x0 is the content left edge; content-norm x must be 0.0.
+        let c = ContentRect::for_frame(480, 640);
+        let p = c.to_content_norm(Vec3::new(c.x0, 0.5, 0.0));
+        assert!(
+            p.x.abs() < 1e-6,
+            "content left: sq x={:.5} → content x={:.7} (want 0.0)",
+            c.x0,
+            p.x
+        );
+    }
+
+    #[test]
+    fn content_norm_portrait_right_edge_maps_to_one_x() {
+        // 480×640 portrait: content x1 = 560/640 = 0.875.
+        // Square-norm x = x1 is the content right edge; content-norm x must be 1.0.
+        let c = ContentRect::for_frame(480, 640);
+        let p = c.to_content_norm(Vec3::new(c.x1, 0.5, 0.0));
+        assert!(
+            (p.x - 1.0).abs() < 1e-6,
+            "content right: sq x={:.5} → content x={:.7} (want 1.0)",
+            c.x1,
             p.x
         );
     }
