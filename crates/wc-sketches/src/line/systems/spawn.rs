@@ -203,6 +203,9 @@ pub fn spawn_line(
         particles: particles_handle.clone(),
         star_texture,
         solid_color,
+        // Velocity tint off at spawn (Active-mode value); the attract driver
+        // ramps it with the screensaver fade.
+        attract_color: LineMaterial::attract_color_off(),
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

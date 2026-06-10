@@ -51,14 +51,19 @@
 pub mod choreography;
 
 use bevy::prelude::*;
+use bevy::sprite_render::MeshMaterial2d;
+use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
+use wc_core::sketch::sketch_active;
 
 use crate::line::compute::LineSimParams;
+use crate::line::material::LineMaterial;
 use crate::line::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::sim_params::{bake_post_base, bake_sim_params, AttractGate, WindowGeom};
+use crate::line::LineRoot;
 
 /// Plugin wiring the Line attract driver.
 pub struct LineScreensaverPlugin;
@@ -68,6 +73,23 @@ impl Plugin for LineScreensaverPlugin {
         app.add_systems(
             Update,
             drive_line_attract.run_if(in_screensaver(AppState::Line)),
+        );
+        // The velocity-color strength follows the ScreensaverFade envelope,
+        // which ramps *up* during Screensaver and back *down* during Active
+        // (the wake transition happens in Active). The driver therefore runs
+        // under BOTH gates — registered twice, with mutually-exclusive run
+        // conditions, rather than once unconditionally, so Line still runs
+        // zero systems in `SketchActivity::Idle` and other app states
+        // (AGENTS.md "zero systems when idle"). The system is change-gated
+        // internally: outside the 1.5 s fade ramps it compares one float and
+        // returns.
+        app.add_systems(
+            Update,
+            drive_attract_color.run_if(in_screensaver(AppState::Line)),
+        );
+        app.add_systems(
+            Update,
+            drive_attract_color.run_if(sketch_active(AppState::Line)),
         );
     }
 }
@@ -128,6 +150,52 @@ fn drive_line_attract(
     post.i_mouse_factor = (1.0 / 15.0) / (frame.activity + 1.0);
 }
 
+/// Map the screensaver fade envelope and the operator's strength knob onto
+/// the material's `attract_color` uniform value (`x` = strength, rest
+/// reserved). Pure helper so the mapping is unit-testable without assets.
+#[must_use]
+fn attract_color_params(fade_alpha: f32, strength: f32) -> Vec4 {
+    Vec4::new(
+        fade_alpha.clamp(0.0, 1.0) * strength.max(0.0),
+        0.0,
+        0.0,
+        0.0,
+    )
+}
+
+/// Drive [`LineMaterial::attract_color`] from the [`ScreensaverFade`]
+/// envelope × [`LineSettings::attract_color_strength`].
+///
+/// Runs during both Screensaver (fade-in) and Active (fade-out after wake) —
+/// see the plugin registration for the gating rationale. Mutating the
+/// material asset re-prepares its bind group, so the write is change-gated on
+/// the strength actually moving: in the settled states (fade at exactly zero
+/// or one) this system is a single float compare per frame, no asset churn.
+/// `last` is only advanced when the material was actually written, so a frame
+/// where the asset isn't loaded yet retries instead of losing the value.
+fn drive_attract_color(
+    fade: Res<'_, ScreensaverFade>,
+    settings: Res<'_, LineSettings>,
+    roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<LineMaterial>>,
+    mut last: Local<'_, f32>,
+) {
+    let target = attract_color_params(fade.alpha(), settings.attract_color_strength);
+    // Two instances of this system exist (one per activity gate), each with
+    // its own `Local`. A stale `last` in the instance that was not running
+    // self-corrects: the fade envelope is continuous, so the first frame the
+    // instance runs with a differing target rewrites the material and resyncs.
+    if (target.x - *last).abs() < f32::EPSILON {
+        return;
+    }
+    for handle in &roots {
+        if let Some(material) = materials.get_mut(&handle.0) {
+            material.attract_color = target;
+            *last = target.x;
+        }
+    }
+}
+
 /// Pack the choreography frame's attractors (pulses, then meteors) into the
 /// GPU `[Attractor; N]` array, returning `(array, live_count)`.
 ///
@@ -167,6 +235,22 @@ fn build_attractor_array(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attract_color_params_scales_and_clamps() {
+        // Hidden (Active steady state): strength is exactly zero — the shader
+        // tint is provably inert.
+        assert_eq!(attract_color_params(0.0, 0.35), Vec4::ZERO);
+        // Fully shown: strength = the operator's knob.
+        let full = attract_color_params(1.0, 0.35);
+        assert!((full.x - 0.35).abs() < 1e-6);
+        assert_eq!((full.y, full.z, full.w), (0.0, 0.0, 0.0));
+        // Mid-fade: linear in the envelope.
+        assert!((attract_color_params(0.5, 0.35).x - 0.175).abs() < 1e-6);
+        // Out-of-range inputs clamp instead of inverting the tint.
+        assert_eq!(attract_color_params(-1.0, 0.35), Vec4::ZERO);
+        assert_eq!(attract_color_params(0.5, -2.0), Vec4::ZERO);
+    }
 
     #[test]
     fn build_attractor_array_packs_active_samples_and_bakes_gravity() {

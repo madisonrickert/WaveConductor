@@ -28,7 +28,8 @@ use bevy::sprite_render::{AlphaMode2d, Material2d};
 /// Bind-group layout: `@group(2) @binding(0)` is the particle storage buffer
 /// (read-only at the render stage; write happens in the compute stage);
 /// `@binding(1)` is the star sprite texture and `@binding(2)` its sampler,
-/// both sampled in the fragment shader.
+/// both sampled in the fragment shader; `@binding(3)` is the debug solid
+/// override and `@binding(4)` the attract-mode velocity-color params.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct LineMaterial {
     /// Particle storage buffer, read-only from the vertex shader.
@@ -47,12 +48,27 @@ pub struct LineMaterial {
     /// builds always seed this with the off sentinel.
     #[uniform(3)]
     pub solid_color: Vec4,
+    /// Attract-mode velocity-color params: `x` = tint strength `0..=1`
+    /// (`ScreensaverFade × LineSettings::attract_color_strength`), `y`/`z`/`w`
+    /// reserved (zero). Driven by
+    /// [`crate::line::screensaver::drive_attract_color`]; spawned at (and
+    /// driven back to) [`Self::attract_color_off`] outside attract, where
+    /// strength 0 makes the fragment tint a provable no-op (`mix(rgb, _, 0.0)`
+    /// returns `rgb` bit-exactly) — Active rendering is unchanged.
+    #[uniform(4)]
+    pub attract_color: Vec4,
 }
 
 impl LineMaterial {
     /// The `solid_color` sentinel meaning "off" (use the star texture). Shared
     /// by the spawn site and the tests so they agree on the off value.
     pub fn solid_off() -> Vec4 {
+        Vec4::ZERO
+    }
+
+    /// The `attract_color` value meaning "no velocity tint" (live / Active
+    /// rendering). Shared by the spawn site, the attract driver, and tests.
+    pub fn attract_color_off() -> Vec4 {
         Vec4::ZERO
     }
 }
@@ -83,5 +99,11 @@ mod tests {
         // alpha == 0 means "off" (use the star texture). Constructed via the
         // helper so spawn.rs and tests agree on the off-sentinel.
         assert_eq!(LineMaterial::solid_off(), Vec4::ZERO);
+    }
+
+    #[test]
+    fn default_attract_color_is_off() {
+        // strength (x) == 0 means "no velocity tint" — the Active-mode value.
+        assert_eq!(LineMaterial::attract_color_off(), Vec4::ZERO);
     }
 }

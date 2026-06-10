@@ -40,6 +40,8 @@
 //!   Browse… file picker in the user panel (Plan 11 Phase C).
 //! - **`attract_particle_fraction`** — fraction of particles kept alive during
 //!   attract mode; the rest fade out and stay dead until wake. Dev-only knob.
+//! - **`attract_color_strength`** — peak strength of the attract-mode
+//!   velocity tint (meteor wakes pull toward a cool colour). Dev-only knob.
 //! - **`synth_volume_scale`** — master output gain trim for the synth voice.
 //!   1.0 = unchanged. Lower values reduce kiosk loudness without touching
 //!   system volume.
@@ -163,6 +165,23 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_attract_particle_fraction")]
     pub attract_particle_fraction: f32,
+
+    /// Peak strength of the attract-mode velocity tint (fast particles —
+    /// meteor wakes — pull toward a desaturated cool colour). Scaled by the
+    /// screensaver fade envelope, so it ramps in/out with attract mode and is
+    /// exactly 0 during live interaction. `0.0` disables the tint entirely;
+    /// keep it subtle — the calm field's warm-white personality must hold.
+    /// Dev-only knob.
+    #[setting(
+        default = 0.35_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Attract color strength",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_color_strength")]
+    pub attract_color_strength: f32,
 
     /// Master output gain trim for the synth voice. `1.0` = unchanged.
     /// Applied as a final multiplier on the `volume` audio param so kiosk
@@ -311,6 +330,10 @@ fn default_attract_particle_fraction() -> f32 {
     0.6
 }
 
+fn default_attract_color_strength() -> f32 {
+    0.35
+}
+
 fn default_synth_volume_scale() -> f32 {
     1.0
 }
@@ -380,6 +403,10 @@ mod tests {
         assert!(
             (parsed.attract_particle_fraction - 0.6).abs() < 1e-6,
             "attract_particle_fraction not default"
+        );
+        assert!(
+            (parsed.attract_color_strength - 0.35).abs() < 1e-6,
+            "attract_color_strength not default"
         );
     }
 }
