@@ -15,7 +15,7 @@
 //!   multiplier from the window width, and publishes the attractor array
 //!   alongside the constrain-to-box bounds. The param-baking core is factored
 //!   into the shared `bake_sim_params` / `bake_post_base` fns (Plan 11.8 Condition
-//!   A1) so the live writer here and the screensaver's phantom-hand writer
+//!   A1) so the live writer here and the screensaver's wandering-pulse writer
 //!   (`crate::line::screensaver`) bake identically and cannot drift.
 
 pub mod mouse;

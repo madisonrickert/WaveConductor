@@ -60,20 +60,23 @@ Scenarios defined today:
 |------|--------|----------|--------|--------|-------|
 | `line-synthetic` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
 | `line-synthetic-no-bloom` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | `DISABLE_BLOOM = "1"` |
-| `line-screensaver-cool` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "cool"` |
-| `line-screensaver-warm` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "warm"` |
-| `line-screensaver-hot` | `line` | `mock` | `clean` | `[0, 270, 540, 810]` | `FORCE_SCREENSAVER`, `FORCE_TIER = "hot"` |
+| `line-screensaver` | `line` | `mock` | `clean` | `[180, 258, 276, 294, 522, 810]` | `FORCE_SCREENSAVER` |
 
-The `line-screensaver-*` scenarios drive Line's attract mode (Plan 11.8). They force
-`SketchActivity::Screensaver` at startup and pin a thermal tier so each tier's
-attract visual is reproducible (the live sensor is hardware/load-dependent). The
-frame spread (0 / 270 / 540 / 810 at dt=1/60) samples the ~9 s invitation pulse
-across **dream → rising → peak grab → release**. Expected per-frame signal: Cool
-and Warm animate (`delta_prev` ~7–24, peaking at frame 540 as particles converge
-at the vessel); Hot freezes the compute dispatch, so its `delta_prev` is ~0 after
-frame 0 (a static-but-bloom-breathing "ember"). Review the PNGs to confirm: (a)
-visibly Line, (b) two phantom hands read as a gesture over a central vessel at the
-grab, (c) Hot is calm-but-alive, not black.
+The `line-screensaver` scenario drives Line's attract mode: the "Wandering
+Pulses" choreography (`wc-sketches/src/line/screensaver/choreography.rs`) —
+three slow Lissajous walkers, each briefly pulsing gentle attraction
+(peak 0.35, 1.2 s on, once per 14 / 19 / 23.5 s). It forces
+`SketchActivity::Screensaver` at startup; the choreography is thermal-tier
+agnostic, so one scenario covers all tiers (the tier only changes present
+rate, which the capture clock ignores). The frame spread samples **rest →
+pulse onset → peak → decay → second pulse (different region) → rest**
+against walker 0's first pulse window (t = 4.0–5.2 s; indices documented in
+`scenarios.toml`). Expected per-frame signal: `delta_prev` ~10–30 (continuous
+gentle motion — never ~0/frozen, never the old grab's mass convergence).
+Review the PNGs to confirm: (a) visibly Line — the particle line spans the
+frame and stays readable in *every* frame, (b) pulses read as a gentle local
+bow/wave in the line near the walker, not a collapse toward it, (c) rest
+frames are calm but not dead (soft smear-ripple halo).
 
 Schema:
 
