@@ -223,3 +223,42 @@ Still deferred (unchanged from §6, plus): the warm-up-then-freeze Hot escalatio
 real macOS sensing (toolchain-gated); presence-reactivity; other sketches'
 attract visuals; the 8-hour never-exited soak slice to tune the thermal
 thresholds; hardware verification of the Leap pause's controller-heat effect.
+
+### 10.4 Screensaver compute/thermal refinement (2026-06-10, post-MediaPipe)
+
+After the MediaPipe merge (4 Hz idle inference throttle, `b3d6589a`) and the
+wandering-pulses choreography (`3ee38e93`), the Seam 2 present-rate throttle was
+audited for the screensaver compute/thermal budget. Findings and changes:
+
+- **Restore defect fixed (real bug).** `restore_present_rate` hard-coded
+  `Continuous` for both modes on exit. The app runs `WinitSettings::default()`
+  (= `game()`): focused `Continuous`, unfocused `reactive_low_power(1/60)` — so
+  one screensaver cycle silently upgraded an *unfocused* window to an uncapped
+  burn. Entry now snapshots both modes into a `SavedPresentMode` resource
+  (`OnEnter`) and any exit restores them exactly (`OnExit`), falling back to
+  `WinitSettings::default()` if the snapshot is ever absent. Regression-tested
+  end-to-end in `tests/screensaver.rs`
+  (`present_rate_throttles_in_screensaver_and_restores_prior_modes`).
+- **Cap named and derived.** The temperature-independent screensaver cap is now
+  the documented `SCREENSAVER_FPS = 30.0` const; the Cool-tier wait derives from
+  it (`1/30 s`). Arithmetic: against an uncapped/ProMotion 60–120 Hz display the
+  cap cuts sustained render + particle compute + smear energy by ≥ 50% (the
+  reactive loop gates the whole schedule, render world included). Warm/Hot tier
+  waits compose *below* the cap, unchanged.
+- **Hand-wake chain documented (MediaPipe).** Camera frames are not winit
+  events; wake is polled, and nothing wakes the loop early, so each step costs
+  a full reactive tick: 4 Hz idle inference emits a hand-bearing frame → tick
+  N's `poll_all_providers` (PreUpdate) drains it and `reset_on_interaction` /
+  `advance_activity` write `NextState` in tick N's Update — but
+  `StateTransition` runs *before* Update in the `Main` schedule, so the
+  `Active` flip and the snapshot restore land in tick N+1's `StateTransition`,
+  a second full wait later. The throttle therefore adds ≤ 2 reactive ticks:
+  ~66 ms at the 30 fps cap (≈ 366 ms total against the documented ~300 ms
+  worst-case wake); Hot adds ≤ 666 ms (≈ 0.97 s worst case, accepted in a
+  thermal emergency). During the screensaver the *unfocused* mode is set to the
+  same reactive mode — intentionally more device-event-responsive than the
+  `game()` unfocused baseline (`react_to_device_events: true` vs `false`) so a
+  passer-by can wake an unfocused window.
+- **No additional smear/compute gating.** At 30 fps the dispatch + smear already
+  run at half rate via the present gate; a true dispatch freeze remains the
+  deferred warm-up-then-freeze escalation (§10.1), still soak-gated.

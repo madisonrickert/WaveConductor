@@ -80,7 +80,7 @@ impl WindowGeom {
 /// **Plan 11.8 Condition A1 (shared bake fn).** Build the full [`SimParams`] for a
 /// frame from a baked attractor array, the frame `dt`, and the window geometry.
 /// Both the live writer ([`update_sim_params`]) and the screensaver's
-/// phantom-hand writer (`crate::line::screensaver`) call this so the two
+/// wandering-pulse writer (`crate::line::screensaver`) call this so the two
 /// producers cannot drift in their drag-baking, size-scaling, fade duration, or
 /// constrain-box derivation.
 ///
@@ -131,8 +131,8 @@ pub fn bake_sim_params(
 /// truly-shared derivation.
 ///
 /// `focal_world` is the world-space focal point (mouse for the live writer, the
-/// vessel anchor for the attract writer); it is converted to the shader's
-/// window-pixel space (top-left origin, +y down) for `i_mouse`.
+/// pulse-weighted centroid for the attract writer); it is converted to the
+/// shader's window-pixel space (top-left origin, +y down) for `i_mouse`.
 pub fn bake_post_base(
     post: &mut LinePostParams,
     geom: WindowGeom,

@@ -9,12 +9,16 @@
 //!   `Active`.
 //! - The framework does zero attract work outside `Screensaver` (no marker, fade
 //!   at 0).
+//! - The present-rate throttle engages on entry (a reactive wait at the 30 fps
+//!   cap) and the prior winit modes — focused *and* unfocused — are restored
+//!   exactly on exit.
 //!
-//! `MinimalPlugins` omits `EguiPlugin` and `WinitPlugin`, so the caption overlay
-//! and present-rate throttle systems are inert (they early-return when their
-//! resources/contexts are absent) — the lifecycle, fade, and marker logic are
-//! still fully exercised. These complement the unit tests colocated in the
-//! framework modules.
+//! `MinimalPlugins` omits `WinitPlugin`, but `test_app` inserts a
+//! `WinitSettings` resource by hand, so the present-rate throttle systems
+//! (snapshot, throttle, restore) run **live** against it here — there is simply
+//! no window presenting. `EguiPlugin` is likewise omitted, so the caption
+//! overlay is inert (it early-returns without an egui context). These
+//! complement the unit tests colocated in the framework modules.
 
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
@@ -149,6 +153,53 @@ fn fade_rises_in_screensaver_and_falls_on_return() {
     assert!(
         dark < lit,
         "fade should fall after leaving screensaver (lit={lit}, dark={dark})"
+    );
+}
+
+#[test]
+fn present_rate_throttles_in_screensaver_and_restores_prior_modes() {
+    use bevy::winit::{UpdateMode, WinitSettings};
+    use std::time::Duration;
+
+    let mut app = test_app();
+    // `test_app` inserts `WinitSettings::default()` (= `game()`): focused
+    // `Continuous`, unfocused `reactive_low_power(1/60)`. The unfocused mode is
+    // deliberately NOT `Continuous` — this is the regression the restore-path
+    // test guards: a restore that *assumes* `Continuous` would clobber it.
+    let prior_focused = app.world().resource::<WinitSettings>().focused_mode;
+    let prior_unfocused = app.world().resource::<WinitSettings>().unfocused_mode;
+    assert_ne!(
+        prior_unfocused,
+        UpdateMode::Continuous,
+        "precondition: the baseline unfocused mode must differ from Continuous \
+         for this test to detect a hard-coded restore"
+    );
+
+    // Entering the screensaver throttles the present rate: a reactive wait at
+    // or below the 30 fps screensaver cap (the default tier is Cool).
+    enter_line_activity(&mut app, SketchActivity::Screensaver);
+    let throttled = app.world().resource::<WinitSettings>();
+    assert!(
+        matches!(
+            throttled.focused_mode,
+            UpdateMode::Reactive { wait, .. } if wait >= Duration::from_millis(33)
+        ),
+        "screensaver must switch to a reactive wait capping presents at <= 30 fps, got {:?}",
+        throttled.focused_mode
+    );
+
+    // Leaving the screensaver restores the modes that were in effect *before*
+    // it — exactly, both focused and unfocused — not an assumed Continuous.
+    return_to_active(&mut app);
+    let restored = app.world().resource::<WinitSettings>();
+    assert_eq!(
+        restored.focused_mode, prior_focused,
+        "focused mode must be restored to its pre-screensaver value"
+    );
+    assert_eq!(
+        restored.unfocused_mode, prior_unfocused,
+        "unfocused mode must be restored to its pre-screensaver value \
+         (not clobbered to Continuous)"
     );
 }
 

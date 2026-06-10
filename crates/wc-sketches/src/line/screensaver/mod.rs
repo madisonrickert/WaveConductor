@@ -11,13 +11,14 @@
 //! 1. **`LineSimParams.params`** — the normal `update_sim_params` writer is
 //!    gated on `Active` and does not run here, so this is the param *producer*
 //!    during attract. It builds the attractor array from
-//!    [`choreography::attract_frame`] (dream wanderers + invitation-pulse
-//!    phantom hands) and bakes it via the shared
+//!    [`choreography::attract_frame`] (the "Wandering Pulses" composition:
+//!    three slow Lissajous walkers, each briefly swelling to a gentle
+//!    attraction pulse) and bakes it via the shared
 //!    [`crate::line::systems::sim_params::bake_sim_params`] (Condition A1 — one
 //!    baker, two writers, cannot drift).
 //! 2. **`LinePostParams`** — `i_resolution` / `i_mouse` / `i_global_time` /
-//!    `gamma` via the shared [`bake_post_base`], plus a pulse-scaled
-//!    `g_constant` so the gravity smear breathes with the invitation pulse.
+//!    `gamma` via the shared [`bake_post_base`], plus an activity-scaled
+//!    `g_constant` so the gravity smear swells softly with each pulse.
 //!
 //! ## Thermal cooldown is the present-rate's job, not this driver's ("Low-Rate Ember")
 //!
@@ -72,11 +73,12 @@ impl Plugin for LineScreensaverPlugin {
 
 /// Drive `LineSimParams.params` + `LinePostParams` from the choreography frame.
 ///
-/// Builds the attractor array (dream wanderers + phantom hands), bakes the sim
-/// params via the shared baker (A1), and writes the smear uniforms with a
-/// pulse-scaled `g_constant` so the gravity smear breathes with the pulse. The
-/// particle count is left at the full spawned value — cooldown is the present
-/// rate's job (see module docs), so this driver never touches the dispatch size.
+/// Builds the attractor array (the wandering pulse points), bakes the sim
+/// params via the shared baker (A1), and writes the smear uniforms with an
+/// activity-scaled `g_constant` so the gravity smear swells softly with each
+/// pulse. The particle count is left at the full spawned value — cooldown is
+/// the present rate's job (see module docs), so this driver never touches the
+/// dispatch size.
 fn drive_line_attract(
     time: Res<'_, Time>,
     settings: Res<'_, LineSettings>,
@@ -100,24 +102,30 @@ fn drive_line_attract(
         time.elapsed_secs(),
         settings.gamma,
     );
-    // The smear breathes with the invitation pulse: a calm baseline glow in the
-    // resting dream (0.35), swelling as the hands grab. Scaled into the smear
-    // shader's expected magnitude range (matches the live coupling's ~15000
-    // ceiling).
-    post.g_constant = (0.35 + 0.65 * frame.pulse) * 15_000.0;
-    // Soften the per-step pull as the pulse rises, mirroring the live coupling.
-    post.i_mouse_factor = (1.0 / 15.0) / (frame.pulse + 1.0);
+    // The smear swells with pulse activity: a faint baseline glow over the
+    // settled field (0.10 — gentled from the old design's 0.35 so the particle
+    // picture, not the trail echo, dominates at rest), rising to 0.35 at a
+    // pulse crest (vs the old 1.0 grab; capture-tuned — 0.60 still blanketed
+    // the frame in concentric rings). Scaled into the smear shader's expected
+    // magnitude range (matches the live coupling's ~15000 ceiling).
+    post.g_constant = (0.10 + 0.25 * frame.activity) * 15_000.0;
+    // Soften the per-step pull as activity rises, mirroring the live coupling.
+    post.i_mouse_factor = (1.0 / 15.0) / (frame.activity + 1.0);
 }
 
 /// Pack the choreography frame's attractors into the GPU `[Attractor; N]` array,
 /// returning `(array, live_count)`.
 ///
-/// Order: dream wanderers first, then phantom hands. Each sample's power is baked
-/// with `gravity_constant` exactly as the live mouse/hand writers do (A1 parity).
-/// Zero-power samples (inactive hands in the resting dream) are skipped so they
-/// don't consume uniform slots. `slot` (usize) and the returned count (u32)
-/// advance in lockstep, both capped at `MAX_ATTRACTORS`, avoiding a numeric `as`
-/// cast in the loop (workspace `as_conversions` lint).
+/// Each sample's power is baked with `gravity_constant` exactly as the live
+/// mouse/hand writers do (A1 parity). Zero-power samples are skipped so they
+/// don't consume uniform slots — in the settled field that is *all* of them
+/// (zero attractors packed, putting the kernel in inertial drag); only
+/// walkers inside their pulse window pack. If a nonzero ambient floor were
+/// ever restored, every walker would pack every frame — see
+/// [`choreography::AMBIENT_POWER`] for why it must not be. `slot` (usize)
+/// and the returned count (u32) advance in lockstep, both capped at
+/// `MAX_ATTRACTORS`, avoiding a numeric `as` cast in the loop (workspace
+/// `as_conversions` lint).
 #[must_use]
 fn build_attractor_array(
     frame: &choreography::AttractFrame,
@@ -125,7 +133,7 @@ fn build_attractor_array(
 ) -> ([Attractor; MAX_ATTRACTORS], u32) {
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
     let mut slot = 0_usize;
-    for sample in frame.dreamers.into_iter().chain(frame.hands) {
+    for sample in frame.pulses {
         if slot >= MAX_ATTRACTORS || sample.power <= 0.0 {
             continue;
         }
@@ -145,17 +153,21 @@ mod tests {
 
     #[test]
     fn build_attractor_array_packs_active_samples_and_bakes_gravity() {
-        // Resting dream (t=0): 2 dream wanderers active, hands at zero power.
+        // Settled field (t=0): zero ambient, every walker is off — no slots
+        // pack, so the kernel sees zero attractors (inertial-drag mode).
         let bounds = choreography::Bounds::from_size(1280.0, 720.0);
-        let dream = choreography::attract_frame(0.0, bounds);
-        let (arr, count) = build_attractor_array(&dream, 280.0);
-        assert_eq!(count, 2, "only the two dreamers are active in the dream");
-        // Power baked with gravity_constant (dreamer raw power × 280).
-        assert!(arr[0].power > 0.0);
+        let settled = choreography::attract_frame(0.0, bounds);
+        let (_arr, count) = build_attractor_array(&settled, 280.0);
+        assert_eq!(count, 0, "settled field packs no attractors");
 
-        // Peak grab: dreamers + 2 phantom hands all active.
-        let grab = choreography::attract_frame(choreography::PULSE_PERIOD_SECS * 0.5, bounds);
-        let (_arr, grab_count) = build_attractor_array(&grab, 280.0);
-        assert_eq!(grab_count, 4, "dreamers + two phantom hands at the grab");
+        // Pulse crest (walker 0's first window midpoint, t = 4.6): exactly
+        // one slot packs, baked at peak power × gravity_constant.
+        let crest = choreography::attract_frame(4.0 + choreography::PULSE_ON_SECS * 0.5, bounds);
+        let (crest_arr, crest_count) = build_attractor_array(&crest, 280.0);
+        assert_eq!(crest_count, 1, "only the cresting walker packs");
+        assert!(
+            (crest_arr[0].power - choreography::PULSE_PEAK_POWER * 280.0).abs() < 1.0,
+            "cresting walker bakes peak power × gravity_constant"
+        );
     }
 }
