@@ -112,6 +112,16 @@ pub struct Hand {
     pub grab_strength: f32,
     /// 21 landmarks in `MediaPipe` Hands layout. See [`LandmarkIndex`].
     pub landmarks: [Vec3; LANDMARK_COUNT],
+    /// Estimated physical distance from the sensor/camera to the hand, in
+    /// millimetres; **`0.0` = unknown / not provided**. Unlike
+    /// `palm_position.z` (the Leap-convention depth, remapped and clamped to
+    /// `[40, 350]` mm), this is an unclamped physical estimate that keeps
+    /// tracking past a metre — the kiosk audio distance band reads it so a
+    /// hand can fade out across several feet. Today only the `MediaPipe`
+    /// provider populates it (size-estimated, per-track EMA-smoothed); Leap
+    /// and the mock fixtures report `0.0`, and consumers fall back to their
+    /// Leap-z behaviour for unknown.
+    pub camera_distance_mm: f32,
 }
 
 impl Hand {
@@ -171,6 +181,7 @@ mod tests {
             pinch_strength: 0.0,
             grab_strength: 0.0,
             landmarks,
+            camera_distance_mm: 0.0,
         };
         assert_eq!(
             hand.landmark(LandmarkIndex::IndexTip),

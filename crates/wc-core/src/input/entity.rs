@@ -79,6 +79,14 @@ pub struct PinchStrength(pub f32);
 #[reflect(Component)]
 pub struct GrabStrength(pub f32);
 
+/// Estimated physical camera→hand distance in millimetres; `0.0` = unknown.
+/// Mirrored from [`crate::input::hand::Hand::camera_distance_mm`] (see its
+/// docs for the unknown-fallback contract). Read by Line's hand→volume drive
+/// to attenuate far hands across the kiosk distance band.
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
+pub struct CameraDistance(pub f32);
+
 /// 21-landmark `MediaPipe`-style layout. Filled by the provider.
 #[derive(Component, Debug, Clone)]
 pub struct Landmarks(pub [Vec3; LANDMARK_COUNT]);

@@ -457,6 +457,9 @@ pub struct FusedHand {
     pub pinch_strength: f32,
     /// Grab strength in `[0, 1]`.
     pub grab_strength: f32,
+    /// Physical camera→hand distance estimate (mm); `0.0` = unknown.
+    /// Mirrored from [`super::hand::Hand::camera_distance_mm`].
+    pub camera_distance_mm: f32,
     /// 21-landmark `MediaPipe` layout.
     pub landmarks: [Vec3; super::hand::LANDMARK_COUNT],
     /// 20 bone centers (5 fingers × 4 bones each) for `HandMesh` rendering.
@@ -488,6 +491,7 @@ mod tests {
             pinch_strength: 0.0,
             grab_strength: 0.0,
             landmarks: [Vec3::ZERO; LANDMARK_COUNT],
+            camera_distance_mm: 0.0,
         }
     }
 

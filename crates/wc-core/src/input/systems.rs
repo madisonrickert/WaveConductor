@@ -33,8 +33,8 @@ use super::state::{
     FusedHand, FusedHandFrame, HandTrackingFrame, HandTrackingState, PrimaryState, MAX_HANDS,
 };
 use crate::input::entity::{
-    BoneCenters, GrabStrength, HandId, Landmarks, PalmPosition, PalmVelocity, PinchStrength,
-    Provenance, TrackedHand,
+    BoneCenters, CameraDistance, GrabStrength, HandId, Landmarks, PalmPosition, PalmVelocity,
+    PinchStrength, Provenance, TrackedHand,
 };
 use crate::input::hand::LandmarkIndex;
 
@@ -180,6 +180,7 @@ pub fn fuse_hand_frames(
                     palm_velocity: h.palm_velocity,
                     pinch_strength: h.pinch_strength,
                     grab_strength: h.grab_strength,
+                    camera_distance_mm: h.camera_distance_mm,
                     landmarks: h.landmarks,
                     bone_centers,
                 }
@@ -291,6 +292,7 @@ type TrackedHandReadComponents<'w> = (
     &'w PalmVelocity,
     &'w PinchStrength,
     &'w GrabStrength,
+    &'w CameraDistance,
     &'w Landmarks,
 );
 
@@ -302,6 +304,7 @@ type TrackedHandComponents<'w> = (
     &'w mut PalmVelocity,
     &'w mut PinchStrength,
     &'w mut GrabStrength,
+    &'w mut CameraDistance,
     &'w mut Landmarks,
     &'w mut BoneCenters,
 );
@@ -339,6 +342,7 @@ pub fn sync_hand_entities(
                     mut vel,
                     mut pinch,
                     mut grab,
+                    mut dist,
                     mut lms,
                     mut bones,
                 )) = tracked.get_mut(entity)
@@ -347,6 +351,7 @@ pub fn sync_hand_entities(
                     vel.0 = hand.palm_velocity;
                     pinch.0 = hand.pinch_strength;
                     grab.0 = hand.grab_strength;
+                    dist.0 = hand.camera_distance_mm;
                     lms.0 = hand.landmarks;
                     bones.0 = hand.bone_centers;
                 }
@@ -364,6 +369,7 @@ pub fn sync_hand_entities(
                         PalmVelocity(hand.palm_velocity),
                         PinchStrength(hand.pinch_strength),
                         GrabStrength(hand.grab_strength),
+                        CameraDistance(hand.camera_distance_mm),
                         Landmarks(hand.landmarks),
                         BoneCenters(hand.bone_centers),
                     ))
@@ -419,7 +425,7 @@ pub fn mirror_state_resource(
 
     // Build a fresh frame snapshot from the entity query.
     let mut hands: SmallVec<[Hand; MAX_HANDS]> = SmallVec::new();
-    for (id, chirality, palm, vel, pinch, grab, lms) in tracked.iter() {
+    for (id, chirality, palm, vel, pinch, grab, dist, lms) in tracked.iter() {
         hands.push(Hand {
             id: id.0,
             chirality: *chirality,
@@ -431,6 +437,7 @@ pub fn mirror_state_resource(
             pinch_strength: pinch.0,
             grab_strength: grab.0,
             landmarks: lms.0,
+            camera_distance_mm: dist.0,
         });
     }
     let frame = HandTrackingFrame {

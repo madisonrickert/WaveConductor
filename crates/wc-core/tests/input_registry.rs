@@ -22,6 +22,7 @@ fn test_hand(id: u32, chirality: Chirality) -> Hand {
         pinch_strength: 0.0,
         grab_strength: 0.0,
         landmarks: [Vec3::ZERO; LANDMARK_COUNT],
+        camera_distance_mm: 0.0,
     }
 }
 

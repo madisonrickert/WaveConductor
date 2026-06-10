@@ -74,6 +74,7 @@ fn frame_for_tick(t: u32) -> HandTrackingFrame {
             pinch_strength: 0.0,
             grab_strength: grab,
             landmarks: [Vec3::ZERO; LANDMARK_COUNT],
+            camera_distance_mm: 0.0,
         }],
         timestamp: Duration::from_secs_f32(secs),
     }

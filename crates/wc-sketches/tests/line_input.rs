@@ -426,6 +426,7 @@ fn hand_with_grab(id: u32, chirality: Chirality, palm: Vec3, grab: f32) -> Hand 
         pinch_strength: 0.0,
         grab_strength: grab,
         landmarks: [Vec3::ZERO; LANDMARK_COUNT],
+        camera_distance_mm: 0.0,
     }
 }
 

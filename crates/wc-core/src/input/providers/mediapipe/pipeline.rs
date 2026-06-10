@@ -692,9 +692,13 @@ impl Pipeline {
         // per-frame handedness flip neither churns the id nor flickers
         // downstream. The gate inside `assign` compares xy only (palm_pos.z is
         // ignored), so raw depth noise can never break identity association.
-        let assigned = self
-            .tracker
-            .assign(observed_chirality, palm_pos, raw_depth_mm, dt);
+        let assigned = self.tracker.assign(
+            observed_chirality,
+            palm_pos,
+            raw_depth_mm,
+            depth.distance_mm,
+            dt,
+        );
         // Emit the track's EMA-smoothed depth as palm z, replacing the
         // meaningless image-z that rode through the mm mapping.
         palm_pos.z = assigned.depth_mm;
@@ -732,6 +736,12 @@ impl Pipeline {
                 // (otherwise its small positive floor keeps Line's attractor on).
                 grab_strength: apply_grab_deadzone(grab_raw, self.config.grab_rest_deadzone),
                 landmarks,
+                // The track's EMA-smoothed physical distance (unclamped, so it
+                // keeps tracking past the 1 m Leap-z far rail); 0.0 when the
+                // estimator is off (k <= 0) — consumers fall back to Leap-z
+                // behaviour for unknown. Smoothed with the same τ as palm z so
+                // the audio distance band doesn't flutter with landmark noise.
+                camera_distance_mm: assigned.distance_mm,
             },
             next_roi,
             est_distance_mm: depth.distance_mm,

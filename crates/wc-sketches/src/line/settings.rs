@@ -53,6 +53,11 @@
 //!   drive ([`crate::line::leap_attractors::HandAudioDrive`]). Dev-only knob.
 //! - **`synth_distance_falloff`** — exponent on the hand-depth attenuation in
 //!   the hand→volume drive. Dev-only knob.
+//! - **`synth_full_volume_mm`** / **`synth_silence_mm`** — the physical
+//!   distance band of that attenuation: a hand at or nearer than
+//!   `synth_full_volume_mm` plays at full drive, fading to silence at
+//!   `synth_silence_mm`. Kiosk-tuning knobs (a kiosk visitor stands ~0.5 m
+//!   out and should fade over several feet, not by 1 m). Dev-only knobs.
 //!
 //! ## Synth timing chain (for tuners)
 //!
@@ -228,6 +233,42 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_synth_distance_falloff")]
     pub synth_distance_falloff: f32,
+
+    /// Near rail of the hand→volume distance band, in **physical camera
+    /// millimetres** ([`wc_core::input::hand::Hand::camera_distance_mm`]): a
+    /// hand at or nearer than this plays at full drive. Default 500 mm — a
+    /// kiosk visitor's natural standing distance is full volume, not a
+    /// special "lean in" reward. Only applies when the provider estimates a
+    /// physical distance (`MediaPipe` with the depth estimator on); otherwise
+    /// the drive falls back to the legacy Leap-z band. Dev-only knob.
+    #[setting(
+        default = 500.0_f32,
+        min = 100.0_f32,
+        max = 1500.0_f32,
+        step = 10.0_f32,
+        label = "Audio full-volume distance (mm)",
+        category = Dev
+    )]
+    #[serde(default = "default_synth_full_volume_mm")]
+    pub synth_full_volume_mm: f32,
+
+    /// Far rail of the hand→volume distance band (physical camera mm): the
+    /// drive reaches silence here. Default 2400 mm (~8 ft, the middle of the
+    /// kiosk's 5–10 ft falloff target); values at or below the near rail are
+    /// guarded against in the drive math. Note the *visual* attractor power
+    /// still fades by ~1 m (the Leap-z far rail), so a far grab past that
+    /// moves particles weakly while the sound carries further out. Dev-only
+    /// knob.
+    #[setting(
+        default = 2400.0_f32,
+        min = 600.0_f32,
+        max = 4000.0_f32,
+        step = 50.0_f32,
+        label = "Audio silence distance (mm)",
+        category = Dev
+    )]
+    #[serde(default = "default_synth_silence_mm")]
+    pub synth_silence_mm: f32,
 }
 
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
@@ -267,6 +308,14 @@ fn default_synth_evolution_release_s() -> f32 {
 
 fn default_synth_grab_gamma() -> f32 {
     1.0
+}
+
+fn default_synth_full_volume_mm() -> f32 {
+    500.0
+}
+
+fn default_synth_silence_mm() -> f32 {
+    2400.0
 }
 
 fn default_synth_distance_falloff() -> f32 {

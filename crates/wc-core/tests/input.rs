@@ -36,6 +36,7 @@ fn fake_hand(chirality: Chirality, pinch: f32, grab: f32) -> Hand {
         pinch_strength: pinch,
         grab_strength: grab,
         landmarks: [Vec3::ZERO; LANDMARK_COUNT],
+        camera_distance_mm: 0.0,
     }
 }
 

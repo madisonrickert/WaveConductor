@@ -169,6 +169,14 @@ pub struct Assigned {
     /// Seeded with the raw estimate on the hand's first sighting. The pipeline
     /// writes this into the emitted palm position's z.
     pub depth_mm: f32,
+    /// EMA-smoothed **physical** camera distance (mm; same τ as
+    /// [`Self::depth_mm`]); `0.0` = estimator off (the `k <= 0` pin). Unlike
+    /// the Leap-remapped depth this is unclamped, so it keeps tracking past
+    /// the 1 m far rail — the value the pipeline emits as
+    /// [`crate::input::hand::Hand::camera_distance_mm`]. The on/off boundary
+    /// snaps instead of smoothing (see `ema_distance`): easing 0 ↔ positive
+    /// would sweep through small values that read as "hand at the lens".
+    pub distance_mm: f32,
 }
 
 /// Assigns stable per-hand IDs across frames.
@@ -209,6 +217,9 @@ struct Track {
     pos: Vec3,
     /// EMA-smoothed depth (mm); see [`DEPTH_EMA_TAU_S`].
     depth_mm: f32,
+    /// EMA-smoothed physical camera distance (mm); `0.0` = estimator off.
+    /// See [`Assigned::distance_mm`].
+    distance_mm: f32,
     seen_this_frame: bool,
 }
 
@@ -251,12 +262,16 @@ impl HandTracker {
     /// (τ = [`DEPTH_EMA_TAU_S`], hence `dt`, the time since the previous
     /// processed frame) and stores the smoothed value as its position's z.
     /// `pos.z` itself is ignored — the gate is xy-only and the stored z is the
-    /// smoothed depth.
+    /// smoothed depth. `raw_distance_mm` is the matching unsmoothed *physical*
+    /// distance ([`super::coords::DepthEstimate::distance_mm`]; `0.0` =
+    /// estimator off), EMA-smoothed with the same τ into
+    /// [`Assigned::distance_mm`].
     pub fn assign(
         &mut self,
         chirality: Chirality,
         pos: Vec3,
         raw_depth_mm: f32,
+        raw_distance_mm: f32,
         dt: Duration,
     ) -> Assigned {
         // Nearest unclaimed track within the gate — by POSITION ALONE (chirality
@@ -286,6 +301,7 @@ impl HandTracker {
             // is framerate-independent (dt = 0 → alpha = 0 → unchanged).
             let alpha = 1.0 - (-dt.as_secs_f32() / DEPTH_EMA_TAU_S).exp();
             t.depth_mm = alpha.mul_add(raw_depth_mm - t.depth_mm, t.depth_mm);
+            t.distance_mm = ema_distance(t.distance_mm, raw_distance_mm, alpha);
             // Store the smoothed depth as z so prev_pos finite-differences into
             // a velocity consistent with the emitted palm position.
             t.pos = Vec3::new(pos.x, pos.y, t.depth_mm);
@@ -306,6 +322,7 @@ impl HandTracker {
                 chirality: t.chirality,
                 prev_pos,
                 depth_mm: t.depth_mm,
+                distance_mm: t.distance_mm,
             };
         }
         let id = self.next_id;
@@ -319,6 +336,7 @@ impl HandTracker {
             // history to smooth against) and store it as the position's z.
             pos: Vec3::new(pos.x, pos.y, raw_depth_mm),
             depth_mm: raw_depth_mm,
+            distance_mm: raw_distance_mm.max(0.0),
             seen_this_frame: true,
         });
         // A brand-new track has no previous position → velocity starts at zero.
@@ -327,6 +345,7 @@ impl HandTracker {
             chirality,
             prev_pos: None,
             depth_mm: raw_depth_mm,
+            distance_mm: raw_distance_mm.max(0.0),
         }
     }
 
@@ -348,6 +367,23 @@ impl HandTracker {
     #[must_use]
     pub fn churn(&self) -> u64 {
         self.churn
+    }
+}
+
+/// One EMA step of a track's physical camera distance, with sentinel-aware
+/// boundaries: `0.0` means "estimator off / unknown" (the `k <= 0` pin), and
+/// smoothing *across* that boundary would sweep the value through small
+/// positive readings that downstream consumers interpret as "hand at the
+/// lens" (the audio band's loudest rail). So the off↔on transitions snap —
+/// raw `<= 0` returns `0.0` immediately, and a track whose current value is
+/// `0.0` re-seeds from the first positive raw estimate — while steady
+/// positive readings smooth with the caller's `alpha` (the same
+/// [`DEPTH_EMA_TAU_S`] step as the Leap-z depth).
+fn ema_distance(current: f32, raw: f32, alpha: f32) -> f32 {
+    if raw <= 0.0 || current <= 0.0 {
+        raw.max(0.0)
+    } else {
+        alpha.mul_add(raw - current, current)
     }
 }
 
@@ -440,11 +476,11 @@ mod tests {
         );
     }
 
-    /// [`HandTracker::assign`] with a constant raw depth (the old fixed pin) and
-    /// a nominal 33 ms inter-frame dt — for tests exercising the id/chirality
-    /// logic where depth is irrelevant.
+    /// [`HandTracker::assign`] with a constant raw depth (the old fixed pin),
+    /// an unknown (0) physical distance, and a nominal 33 ms inter-frame dt —
+    /// for tests exercising the id/chirality logic where depth is irrelevant.
     fn assign_at(t: &mut HandTracker, chirality: Chirality, pos: Vec3) -> Assigned {
-        t.assign(chirality, pos, 120.0, Duration::from_millis(33))
+        t.assign(chirality, pos, 120.0, 0.0, Duration::from_millis(33))
     }
 
     #[test]
@@ -569,9 +605,16 @@ mod tests {
             Chirality::Right,
             Vec3::new(0.0, 200.0, 0.0),
             97.5,
+            487.5,
             Duration::from_millis(33),
         );
         assert!((a.depth_mm - 97.5).abs() < 1e-6, "depth {}", a.depth_mm);
+        // The physical distance seeds raw on first sighting too.
+        assert!(
+            (a.distance_mm - 487.5).abs() < 1e-6,
+            "distance {}",
+            a.distance_mm
+        );
     }
 
     #[test]
@@ -580,9 +623,21 @@ mod tests {
         // target, the smoothed depth is 1 − e⁻¹ ≈ 63.2 % of the way there.
         let mut t = HandTracker::default();
         let pos = Vec3::new(0.0, 200.0, 0.0);
-        t.assign(Chirality::Right, pos, 100.0, Duration::from_millis(33));
+        t.assign(
+            Chirality::Right,
+            pos,
+            100.0,
+            500.0,
+            Duration::from_millis(33),
+        );
         t.end_frame();
-        let stepped = t.assign(Chirality::Right, pos, 300.0, Duration::from_secs_f32(0.4));
+        let stepped = t.assign(
+            Chirality::Right,
+            pos,
+            300.0,
+            1500.0,
+            Duration::from_secs_f32(0.4),
+        );
         // 100 + (1 − e⁻¹) · (300 − 100) ≈ 226.4 mm.
         let want = 200.0f32.mul_add(1.0 - (-1.0f32).exp(), 100.0);
         assert!(
@@ -590,9 +645,23 @@ mod tests {
             "depth {} (want ≈ {want})",
             stepped.depth_mm
         );
+        // The physical distance smooths with the SAME τ: one dt = τ step from
+        // 500 toward 1500 lands ≈ 63.2 % of the way (≈ 1132 mm).
+        let want_dist = 1000.0f32.mul_add(1.0 - (-1.0f32).exp(), 500.0);
+        assert!(
+            (stepped.distance_mm - want_dist).abs() < 1.0,
+            "distance {} (want ≈ {want_dist})",
+            stepped.distance_mm
+        );
         // And it keeps converging on subsequent steps (monotonic toward 300).
         t.end_frame();
-        let again = t.assign(Chirality::Right, pos, 300.0, Duration::from_secs_f32(0.4));
+        let again = t.assign(
+            Chirality::Right,
+            pos,
+            300.0,
+            1500.0,
+            Duration::from_secs_f32(0.4),
+        );
         assert!(
             again.depth_mm > stepped.depth_mm && again.depth_mm < 300.0,
             "depth {} should keep approaching 300",
@@ -611,6 +680,7 @@ mod tests {
             Chirality::Right,
             Vec3::new(0.0, 200.0, 40.0),
             40.0,
+            350.0,
             Duration::from_millis(33),
         );
         t.end_frame();
@@ -618,9 +688,45 @@ mod tests {
             Chirality::Right,
             Vec3::new(0.0, 200.0, 350.0),
             350.0,
+            1000.0,
             Duration::from_millis(33),
         );
         assert_eq!(a.id, b.id, "a raw z jump must not break identity");
+    }
+
+    #[test]
+    fn distance_ema_snaps_across_the_estimator_off_boundary() {
+        // 0.0 is the "estimator off / unknown" sentinel, not a distance.
+        // Smoothing across the boundary would sweep through small positive
+        // values that read as "hand at the lens" (loudest audio rail), so
+        // both transitions snap.
+        let mut t = HandTracker::default();
+        let pos = Vec3::new(0.0, 200.0, 0.0);
+        t.assign(
+            Chirality::Right,
+            pos,
+            100.0,
+            800.0,
+            Duration::from_millis(33),
+        );
+        t.end_frame();
+        // Estimator turned off mid-track (k slider → 0): snap to 0 at once.
+        let off = t.assign(Chirality::Right, pos, 120.0, 0.0, Duration::from_millis(33));
+        assert!(
+            off.distance_mm.abs() < f32::EPSILON,
+            "off must snap, not decay through near-zero: {}",
+            off.distance_mm
+        );
+        t.end_frame();
+        // Turned back on: re-seed from the first positive raw, no ease-in from 0.
+        let on = t.assign(
+            Chirality::Right,
+            pos,
+            100.0,
+            750.0,
+            Duration::from_millis(33),
+        );
+        assert!((on.distance_mm - 750.0).abs() < 1e-6, "{}", on.distance_mm);
     }
 
     #[test]

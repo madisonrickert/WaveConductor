@@ -573,6 +573,10 @@ fn build_frame_from_tracking(tracking: leaprs::TrackingEventRef<'_>) -> HandTrac
             pinch_strength,
             grab_strength,
             landmarks,
+            // Leap has no camera-distance concept (hands hover centimetres
+            // above the device); 0.0 = unknown, and consumers (the audio
+            // distance band) fall back to their Leap-z behaviour.
+            camera_distance_mm: 0.0,
         });
     }
 

@@ -347,6 +347,7 @@ mod tests {
             pinch_strength: 0.0,
             grab_strength: 0.0,
             landmarks: [Vec3::new(palm_x, 0.0, 0.0); LANDMARK_COUNT],
+            camera_distance_mm: 0.0,
         }
     }
 

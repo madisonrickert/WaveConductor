@@ -91,6 +91,9 @@ pub fn synthetic_open_hand() -> Hand {
         // tests + the one-off `handrings` capture, not by the always-on fixture.
         grab_strength: 0.0,
         landmarks,
+        // Test fixture: no camera, so the physical distance is unknown (0.0)
+        // and distance-aware consumers use their Leap-z fallback.
+        camera_distance_mm: 0.0,
     }
 }
 
