@@ -37,12 +37,6 @@ const LINE_BACKGROUND_PATH: &str = "assets/sketches/line/line_background.ogg";
 
 fn main() {
     init_tracing();
-    // Hold the OS display-sleep assertion for the whole process: a gallery
-    // install idles into attract mode with no mouse/keyboard input for hours,
-    // and without this macOS dims the panel ~1 minute in (observed as "the
-    // screen dims during attract mode") and eventually sleeps it. The handle
-    // releases the assertion on drop, i.e. at process exit.
-    let _keep_display_awake = inhibit_display_sleep();
     let mut app = App::new();
     app
         // v4 Line renders against a black background; Bevy defaults to gray.
@@ -97,6 +91,12 @@ fn main() {
     // module docs for the full signal flow.
     #[cfg(feature = "hand-tracking-gestures")]
     app.add_systems(Update, hand_providers::apply_provider_choice);
+
+    // OS display-sleep inhibitor, driven by the persisted "Keep display
+    // awake" setting (default on). NonSend: the keepawake handle wraps
+    // platform power APIs with no Send guarantee.
+    app.insert_non_send_resource(DisplayKeepAwake::default());
+    app.add_systems(Update, apply_display_keepawake);
 
     // Debug-only: `WC_DEBUG_DISABLE_BLOOM` zeroes the main camera bloom for
     // render-stage isolation. Compiled out of release (relies on
@@ -273,32 +273,56 @@ fn apply_startup_sketch_override(
     }
 }
 
-/// Ask the OS to keep the display awake (and undimmed) while the app runs.
+/// Holder for the OS display-sleep assertion. `None` = no assertion held
+/// (setting off, or acquisition failed). NonSend resource: the platform
+/// handle has no `Send` guarantee.
+#[derive(Default)]
+struct DisplayKeepAwake(Option<keepawake::KeepAwake>);
+
+/// Reconcile the OS display-sleep assertion with the persisted
+/// "Keep display awake" setting (`ScreensaverSettings::keep_display_awake`,
+/// default on): acquire when enabled, drop (releasing the assertion) when
+/// disabled. A gallery install idles into attract mode for hours with no
+/// input; without the assertion the OS dims and eventually sleeps the panel.
 ///
-/// `keepawake` maps to `IOPMAssertionCreateWithName` on macOS,
-/// `SetThreadExecutionState` on Windows, and the D-Bus inhibitor portals on
-/// Linux — covering both the dev laptop and the deployment NUC. Failure is
-/// non-fatal: the app still runs, the operator just has to lengthen the OS
-/// display-sleep timeout by hand, so we log and continue rather than unwrap.
-fn inhibit_display_sleep() -> Option<keepawake::KeepAwake> {
-    match keepawake::Builder::default()
-        .display(true)
-        .reason("Interactive art installation; attract mode must stay visible")
-        .app_name("WaveConductor")
-        .app_reverse_domain("dev.waveconductor.app")
-        .create()
-    {
-        Ok(handle) => {
-            tracing::info!("display-sleep inhibitor active (kiosk display stays awake)");
-            Some(handle)
+/// Steady-state cost is one bool compare. Acquisition failure is non-fatal —
+/// the app runs, the operator lengthens the OS display-sleep timeout by hand
+/// — and is retried only when the setting is toggled (the `Option` stays
+/// `None`, but we only log on transitions, keyed off the setting flip).
+fn apply_display_keepawake(
+    settings: Res<'_, wc_core::lifecycle::screensaver::ScreensaverSettings>,
+    mut holder: NonSendMut<'_, DisplayKeepAwake>,
+    mut last_wanted: Local<'_, Option<bool>>,
+) {
+    let wanted = settings.keep_display_awake;
+    if *last_wanted == Some(wanted) {
+        return;
+    }
+    *last_wanted = Some(wanted);
+    if wanted {
+        // `keepawake` maps to IOPMAssertionCreateWithName on macOS,
+        // SetThreadExecutionState on Windows, and the D-Bus inhibitor portals
+        // on Linux — covering both the dev laptop and the deployment NUC.
+        match keepawake::Builder::default()
+            .display(true)
+            .reason("Interactive art installation; attract mode must stay visible")
+            .app_name("WaveConductor")
+            .app_reverse_domain("dev.waveconductor.app")
+            .create()
+        {
+            Ok(handle) => {
+                holder.0 = Some(handle);
+                tracing::info!("display-sleep inhibitor active (kiosk display stays awake)");
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "could not inhibit display sleep; the OS may dim the display while idle"
+                );
+            }
         }
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "could not inhibit display sleep; the OS may dim the display during attract mode"
-            );
-            None
-        }
+    } else if holder.0.take().is_some() {
+        tracing::info!("display-sleep inhibitor released (OS power management back in charge)");
     }
 }
 

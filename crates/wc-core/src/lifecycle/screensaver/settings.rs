@@ -55,12 +55,33 @@ pub struct ScreensaverSettings {
     )]
     #[serde(default = "default_screensaver_fps")]
     pub screensaver_fps: f32,
+
+    /// Hold an OS display-sleep assertion while the app runs, so an
+    /// unattended kiosk never has its panel dimmed or slept by the OS
+    /// (macOS `IOPMAssertion` / Windows `SetThreadExecutionState` / Linux
+    /// D-Bus inhibitor). Default on — a gallery install idles into attract
+    /// mode for hours with no input. Turn off for laptop dev sessions where
+    /// normal power management is preferable.
+    #[setting(
+        default = true,
+        ty = Boolean,
+        section = "Attract Mode",
+        category = User,
+        label = "Keep display awake"
+    )]
+    #[serde(default = "default_keep_display_awake")]
+    pub keep_display_awake: bool,
 }
 
 /// Serde fallback so a config saved before `screensaver_fps` existed still
 /// loads at the documented default.
 fn default_screensaver_fps() -> f32 {
     20.0
+}
+
+/// Serde fallback: kiosk-first default, the display stays awake.
+fn default_keep_display_awake() -> bool {
+    true
 }
 
 #[cfg(test)]
