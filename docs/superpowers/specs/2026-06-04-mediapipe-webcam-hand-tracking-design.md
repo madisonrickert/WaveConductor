@@ -707,16 +707,17 @@ is `Connected`; on open failure it reports `Errored` and exits). After the
 first `Connected`, transient mid-session errors never demote: the provider
 keeps its honest `Errored` LED.
 
-`WAVECONDUCTOR_HAND_PROVIDER` was first demoted to a dev/deployment pin, then
-(2026-06-10, once the dropdown proved out on hardware) stripped of the
-real-provider values entirely: `auto` / `leap` / `mediapipe` / `off` no longer
-parse, and the setting is the sole selector for real backends. The env var
-survives only for the `mock` / `synthetic` test fixtures the visual-capture
-harness depends on (`cargo xtask capture` sets it per scenario); an installed
-fixture is pinned for the session so a persisted real-provider choice cannot
-grab the camera mid-capture. Any other value warns and defers to the setting.
-This also retires the "dropdown has no pinned-state UI cue" follow-up — there
-is no user-reachable pin anymore.
+`WAVECONDUCTOR_HAND_PROVIDER` semantics settled (2026-06-10, third
+iteration, operator decision): it is a **launch default, not a pin**. All six
+values (`auto` / `leap` / `mediapipe` / `off` / `mock` / `synthetic`) select
+what is installed at startup; the "Tracking provider" dropdown stays fully
+live and replaces the env-launched provider on its first change. (History:
+originally a session pin; briefly stripped to fixtures-only when the dropdown
+landed; restored as a non-pinning launch default per "it sets the launch mode
+but we can always change it in the settings during runtime".) The dropdown
+shows the persisted choice, which may differ from the env-launched provider
+until first touched. Any other value warns and defers to the setting. The
+"dropdown has no pinned-state UI cue" follow-up stays retired — nothing pins.
 
 The `hand-tracking-mediapipe` feature is now in the binary's `default`
 feature set — this supersedes the "not in `default` (opt in explicitly)" note

@@ -14,11 +14,11 @@ use wc_core_macros::SketchSettings;
 /// name, and the panel has no per-variant label mapping), so they are
 /// chosen to read well in a dropdown.
 ///
-/// This setting is the *only* selector for the real backends. The
-/// `WAVECONDUCTOR_HAND_PROVIDER` env var survives solely for the
-/// `mock` / `synthetic` test fixtures (capture harness / headless runs) —
-/// developer scaffolding, not user choices, so they do not appear here;
-/// a fixture, when installed, is pinned for the session.
+/// The `WAVECONDUCTOR_HAND_PROVIDER` env var, when set, selects the
+/// provider installed at *launch* (launch scripts, capture harness); this
+/// setting takes over on its first change — there is no session pin. The
+/// env-only `mock` / `synthetic` test fixtures are developer scaffolding,
+/// not user choices, so they do not appear here.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum HandProviderChoice {
     /// Probe for the best available backend: Leap first, then the webcam
@@ -49,9 +49,8 @@ pub struct HandTrackingSettings {
     /// Which tracking backend to run (`Auto` probes Leap → `MediaPipe`
     /// webcam → silent mock). Applies live: switching tears down the old
     /// provider (joining its worker / releasing the camera or device) and
-    /// starts the new one, no restart. Ignored only when a
-    /// `WAVECONDUCTOR_HAND_PROVIDER` mock/synthetic test fixture is
-    /// installed (capture harness).
+    /// starts the new one, no restart — including over a provider launched
+    /// via the `WAVECONDUCTOR_HAND_PROVIDER` env default.
     #[setting(
         default = HandProviderChoice::Auto,
         ty = Enum,

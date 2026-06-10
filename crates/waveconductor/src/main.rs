@@ -274,7 +274,7 @@ fn apply_startup_sketch_override(
 }
 
 /// Holder for the OS display-sleep assertion. `None` = no assertion held
-/// (setting off, or acquisition failed). NonSend resource: the platform
+/// (setting off, or acquisition failed). `NonSend` resource: the platform
 /// handle has no `Send` guarantee.
 #[derive(Default)]
 struct DisplayKeepAwake(Option<keepawake::KeepAwake>);
