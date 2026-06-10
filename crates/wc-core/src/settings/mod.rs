@@ -27,19 +27,19 @@ pub mod autosave;
 pub mod def;
 pub mod event;
 pub mod hand_tracking;
+pub mod input_capture;
 pub mod panel_dev;
 pub mod persistence;
-pub mod pointer_capture;
 pub mod registry;
 pub mod trait_def;
 
 mod panel_user;
 
-pub use def::{NumberRange, SettingDef, SettingKind, SettingsCategory};
+pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
-pub use hand_tracking::HandTrackingSettings;
+pub use hand_tracking::{HandProviderChoice, HandTrackingSettings};
+pub use input_capture::{EguiKeyboardCaptured, EguiPointerCaptured};
 pub use panel_dev::DevPanelVisible;
-pub use pointer_capture::EguiPointerCaptured;
 pub use registry::{RegisterSketchSettingsExt, SettingsRegistry};
 pub use trait_def::SketchSettings;
 
@@ -58,6 +58,7 @@ impl Plugin for SettingsPlugin {
             .init_resource::<DevPanelVisible>()
             .init_resource::<autosave::AutosaveState>()
             .init_resource::<EguiPointerCaptured>()
+            .init_resource::<EguiKeyboardCaptured>()
             // `dismiss_on_click_outside` (panel_user.rs) requires these two
             // resources as hard params and runs whenever SettingsPlugin is
             // loaded — even in MinimalPlugins test harnesses that don't include
@@ -74,8 +75,12 @@ impl Plugin for SettingsPlugin {
             .add_systems(
                 Update,
                 (
-                    pointer_capture::update_egui_pointer_capture,
-                    panel_dev::handle_dev_panel_toggle,
+                    input_capture::update_egui_input_capture,
+                    // Shift+D must not toggle the panel while a panel text
+                    // field has keyboard focus (a capital D would otherwise
+                    // both type AND dismiss the panel being typed into).
+                    panel_dev::handle_dev_panel_toggle
+                        .run_if(input_capture::egui_not_capturing_keyboard),
                     registry::emit_restart_events,
                     autosave::detect_changes,
                     autosave::tick,

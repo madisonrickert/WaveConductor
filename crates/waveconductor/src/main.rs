@@ -13,6 +13,8 @@ use wc_core::audio::background::BackgroundSampleAsset;
 use wc_core::CorePlugin;
 use wc_sketches::SketchesPlugin;
 
+mod hand_providers;
+
 /// Relative path to the Line sketch's background sample, resolved against
 /// the cwd the binary was launched in. `cargo run -p waveconductor` runs
 /// In debug builds we resolve against `CARGO_MANIFEST_DIR` (the binary
@@ -78,10 +80,17 @@ fn main() {
             Startup,
             (
                 spawn_camera,
-                install_hand_tracking_providers,
+                hand_providers::install_hand_tracking_providers,
                 apply_startup_sketch_override,
             ),
         );
+
+    // Live "Tracking provider" switch: applies dropdown changes to the
+    // running provider registry without a restart, and resolves Auto's
+    // asynchronous MediaPipe camera verdict. See the `hand_providers`
+    // module docs for the full signal flow.
+    #[cfg(feature = "hand-tracking-gestures")]
+    app.add_systems(Update, hand_providers::apply_provider_choice);
 
     // Debug-only: `WC_DEBUG_DISABLE_BLOOM` zeroes the main camera bloom for
     // render-stage isolation. Compiled out of release (relies on
@@ -224,123 +233,6 @@ fn apply_debug_bloom_toggle(
             bloom.intensity = 0.0;
         }
     }
-}
-
-/// Construct and insert the [`wc_core::input::provider::ProviderRegistry`]
-/// resource based on env-var preference plus auto-fallback semantics:
-///
-/// - `WAVECONDUCTOR_HAND_PROVIDER=leap`: try Leap, error if it fails.
-/// - `WAVECONDUCTOR_HAND_PROVIDER=mock`: register only the (silent) mock.
-/// - `WAVECONDUCTOR_HAND_PROVIDER=synthetic`: register a mock that emits a
-///   stationary synthetic open hand, for testing hand visuals without
-///   hardware.
-/// - `WAVECONDUCTOR_HAND_PROVIDER=auto` (default): try Leap, fall back to
-///   mock on Err.
-/// - Any other value: log warning, treat as `auto`.
-///
-/// Runs as a `Startup` system so that `Res<HandTrackingSettings>` is
-/// available (settings persistence loads in `Startup` before any user-added
-/// system). The persisted `leap_background` value is forwarded to
-/// `LeaprsProvider` on construction so the first connection comes up with the
-/// correct policy state.
-///
-/// Note: [`wc_core::input::provider::ProviderRegistry::register`] auto-starts
-/// each provider it receives. We check `status().service` after registration
-/// to detect startup failure (`LeaprsProvider` sets
-/// [`wc_core::input::state::ServiceConnection::Errored`] on create/open
-/// failure).
-#[cfg(feature = "hand-tracking-gestures")]
-fn install_hand_tracking_providers(
-    mut commands: Commands<'_, '_>,
-    settings: Res<'_, wc_core::settings::HandTrackingSettings>,
-) {
-    use wc_core::input::provider::{ProviderId, ProviderRegistry, ProviderRole};
-    use wc_core::input::providers::leap_native::LeaprsProvider;
-    use wc_core::input::providers::mock::MockProvider;
-    use wc_core::input::state::ServiceConnection;
-
-    let pref = std::env::var("WAVECONDUCTOR_HAND_PROVIDER")
-        .ok()
-        .map_or_else(|| "auto".to_string(), |s| s.to_lowercase());
-
-    let mut registry = ProviderRegistry::default();
-
-    let try_leap = |registry: &mut ProviderRegistry, leap_background: bool| -> bool {
-        let mut leap = LeaprsProvider::default();
-        leap.request_background = leap_background;
-        registry.register(ProviderId::Leap, ProviderRole::Primary, Box::new(leap));
-        let started = registry.provider(ProviderId::Leap).is_some_and(|r| {
-            !matches!(
-                r.inner.status().service,
-                ServiceConnection::Errored | ServiceConnection::NotStarted
-            )
-        });
-        if started {
-            tracing::info!("hand-tracking: LeaprsProvider started");
-        } else {
-            tracing::warn!("hand-tracking: LeaprsProvider failed to start");
-        }
-        started
-    };
-
-    let install_mock = |registry: &mut ProviderRegistry| {
-        registry.register(
-            ProviderId::Mock,
-            ProviderRole::Simulator,
-            Box::new(MockProvider::default()),
-        );
-        tracing::info!("hand-tracking: MockProvider installed");
-    };
-
-    match pref.as_str() {
-        "mock" => {
-            install_mock(&mut registry);
-        }
-        "synthetic" => {
-            // A stationary synthetic open hand, for exercising hand-driven
-            // visuals (bone mesh, attractor, future gesture sketches) with no
-            // Leap hardware attached. Distinct from `mock` (which is silent).
-            registry.register(
-                ProviderId::Mock,
-                ProviderRole::Simulator,
-                Box::new(MockProvider::synthetic_hand()),
-            );
-            tracing::info!("hand-tracking: synthetic MockProvider installed (open-hand fixture)");
-        }
-        "leap" => {
-            if !try_leap(&mut registry, settings.leap_background) {
-                tracing::error!(
-                    "hand-tracking: env forced 'leap' but provider failed to start; \
-                     no provider will be registered, mouse and touch input still work"
-                );
-            }
-        }
-        "auto" => {
-            if !try_leap(&mut registry, settings.leap_background) {
-                tracing::info!("hand-tracking: falling back to MockProvider");
-                install_mock(&mut registry);
-            }
-        }
-        other => {
-            tracing::warn!(
-                value = %other,
-                "hand-tracking: unknown WAVECONDUCTOR_HAND_PROVIDER value; defaulting to auto"
-            );
-            if !try_leap(&mut registry, settings.leap_background) {
-                install_mock(&mut registry);
-            }
-        }
-    }
-
-    commands.insert_resource(registry);
-}
-
-/// No-op stub when hand-tracking-gestures is compiled out.
-///
-/// Mouse and touch input still work without any hand-tracking provider.
-#[cfg(not(feature = "hand-tracking-gestures"))]
-fn install_hand_tracking_providers() {
-    tracing::info!("hand-tracking: feature disabled at compile time; no providers");
 }
 
 /// Apply the optional `WAVECONDUCTOR_START_SKETCH` override: when set to a

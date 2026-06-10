@@ -22,6 +22,9 @@
 //!
 //!     #[setting(default = [1.0_f32, 1.0, 1.0, 1.0], category = User, ty = Color)]
 //!     pub line_color: [f32; 4],
+//!
+//!     #[setting(default = Quality::High, ty = Enum, category = User)]
+//!     pub quality: Quality,
 //! }
 //! ```
 //!
@@ -33,11 +36,29 @@
 //! | `label`            | string    | the field name                   |
 //! | `section`          | string    | `""` (no section header)         |
 //! | `category`         | `User` \| `Dev` | `Dev`                       |
-//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `FilePath` | `Number` |
+//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `FilePath` \| `Enum` | `Number` |
 //! | `min`, `max`, `step` | numeric expr | none (only meaningful on `Number`) |
 //! | `extensions`       | `["ext", ...]` | none (only meaningful on `FilePath`) |
 //! | `filter_label`     | string    | `"File"` (only meaningful on `FilePath`) |
 //! | `requires_restart` | flag      | absent                           |
+//!
+//! ## `ty = Enum`
+//!
+//! The field's type must be a `Reflect`-derived enum with **unit variants
+//! only** (no tuple or struct payloads). No variant list appears in the
+//! attribute: the expansion calls `wc_core::settings::enum_variant_names`,
+//! which reads the names from the enum's `bevy_reflect::TypeInfo`, so the
+//! `SettingKind::Enum { variants }` metadata always matches the enum
+//! definition. A proc macro cannot inspect the field type's definition, so
+//! the unit-variants-only rule is enforced at runtime instead of compile
+//! time: `enum_variant_names` fires a `debug_assert!` the first time
+//! `settings_def()` runs (settings registration). Variant names double as
+//! the persisted values — serde serializes unit variants as their name
+//! string, so avoid `#[serde(rename...)]` on enum-setting types (the panel
+//! writes back through reflection, which always uses the Rust identifiers).
+//! The variant names are also the panel's display strings: there is no
+//! per-variant label mapping yet, so pick variant identifiers that read well
+//! in a dropdown.
 
 #![allow(
     clippy::expect_used,
@@ -86,10 +107,17 @@ enum Kind {
     Color,
     Text,
     FilePath,
+    /// Unit-variant enum rendered as a `ComboBox`. Variant names are derived
+    /// from the field type's reflection info at runtime, not listed in the
+    /// attribute — see the module docs (`## ty = Enum`).
+    Enum,
 }
 
 struct FieldInfo {
     ident: Ident,
+    /// The field's declared type. Needed by `Kind::Enum` emission, which
+    /// turbofishes it into `enum_variant_names::<#ty>()`.
+    ty: syn::Type,
     default: Option<Expr>,
     label: Option<String>,
     /// Section group name. `None` serialises to `""` (no header).
@@ -154,6 +182,7 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
 
         let mut info = FieldInfo {
             ident,
+            ty: field.ty.clone(),
             default: None,
             label: None,
             section: None,
@@ -215,9 +244,10 @@ fn parse_setting_attr(
             "Color" => Kind::Color,
             "Text" => Kind::Text,
             "FilePath" => Kind::FilePath,
+            "Enum" => Kind::Enum,
             other => {
                 return Err(meta.error(format!(
-                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, or `FilePath`)"
+                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `FilePath`, or `Enum`)"
                 )))
             }
         };
@@ -340,6 +370,19 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
                     ::wc_core::settings::SettingKind::FilePath {
                         filter_label: #filter_label,
                         extensions: &[ #( #exts, )* ],
+                    }
+                }
+            }
+            Kind::Enum => {
+                // Variant names come from the field type's reflection info at
+                // runtime — `enum_variant_names` returns the `&'static` slice
+                // baked into the enum's `TypeInfo`, and debug-asserts the
+                // unit-variants-only contract (a proc macro cannot see the
+                // enum definition, so this cannot be a compile error).
+                let field_ty = &f.ty;
+                quote! {
+                    ::wc_core::settings::SettingKind::Enum {
+                        variants: ::wc_core::settings::enum_variant_names::<#field_ty>(),
                     }
                 }
             }

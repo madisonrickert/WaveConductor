@@ -18,6 +18,17 @@ default = []
 # in the native LeapC FFI dependency. The waveconductor binary turns this on;
 # tests can opt in selectively.
 hand-tracking-gestures = ["dep:leaprs"]
+# In-process MediaPipe webcam hand-tracking provider. Additive and independent
+# of `hand-tracking-gestures` (which brings in leaprs). Uses ONNX Runtime (`ort`)
+# with CoreML acceleration on macOS; `ort` downloads a prebuilt C++ ONNX Runtime
+# binary at build time (`download-binaries`) under the CDLA-Permissive-2.0 license
+# (already allowed in deny.toml). The base feature is the inference + two-stage
+# glue (CI-testable headless against vendored models); the real webcam capture is
+# the `-camera` sub-feature below so the base build never needs camera platform
+# libraries.
+hand-tracking-mediapipe = ["dep:ort", "dep:image"]
+# Adds the production webcam `FrameSource` (nokhwa) on top of the base feature.
+hand-tracking-mediapipe-camera = ["hand-tracking-mediapipe", "dep:nokhwa"]
 # Enables real OS temperature sensing for the screensaver's `ThermalState`
 # signal. On Linux this is a ZERO-DEPENDENCY `std::fs` reader of the kernel
 # `hwmon`/`thermal_zone` sysfs interface (see `lifecycle::thermal::platform::
@@ -56,6 +67,13 @@ dirs.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
 leaprs = { workspace = true, optional = true }
+# MediaPipe webcam provider deps (optional; gated by `hand-tracking-mediapipe`
+# / `-camera`). ort = ONNX Runtime inference (CoreML EP on macOS); image = frame
+# decode/resize; nokhwa = webcam capture (camera sub-feature only). ort wraps
+# the C++ ONNX Runtime, so it sits under the non-wasm target.
+ort = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+nokhwa = { workspace = true, optional = true }
 # Linux temperature sensing (the `native::SysfsThermalSensor` reader) needs NO
 # dependency — it reads the kernel `hwmon`/`thermal_zone` sysfs files with
 # `std::fs`. We surveyed `sysinfo` (pulls ~30 crates for file reads we can do

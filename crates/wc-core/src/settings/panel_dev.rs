@@ -9,9 +9,16 @@
 //! ## Task 19: v4 chrome
 //!
 //! The `egui::Window` is replaced by `egui::Area` + [`crate::ui::backdrop_blur_frame`]
-//! for the translucent frosted-glass look. A `ScrollArea` wraps the world
-//! inspector so it remains usable on shorter displays. Shift+D is the only
-//! toggle — there is no click-outside dismiss for this developer tool.
+//! for the translucent frosted-glass look. A single `ScrollArea` wraps the whole
+//! panel body — diagnostics, tuning, and the world inspector — with each section
+//! in a collapsible header, so nothing falls off the bottom on shorter displays.
+//! Shift+D is the only toggle — there is no click-outside dismiss for this
+//! developer tool. While a panel field has keyboard focus, Shift+D is
+//! suppressed like every other app hotkey (the
+//! [`crate::settings::input_capture::egui_not_capturing_keyboard`] gate, so a
+//! capital D types into the field instead of dismissing the panel under it);
+//! press Esc or click off the field first, allowing one frame of lag for the
+//! focus mirror to catch up.
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::ActionState;
@@ -60,8 +67,9 @@ fn dev_panel_visible(visible: Res<'_, DevPanelVisible>) -> bool {
 ///
 /// Uses `egui::Area` for fixed top-left positioning (below where the Home
 /// button sits) and wraps content in [`backdrop_blur_frame`] for the
-/// translucent frosted-glass look. A `ScrollArea` wraps the world inspector
-/// so it remains usable when the inspector content exceeds the window height.
+/// translucent frosted-glass look. A single `ScrollArea` wraps the whole panel
+/// body and each section sits in a collapsible header, so the panel stays
+/// on-screen when its content exceeds the window height.
 ///
 /// Only runs when [`DevPanelVisible`] is `true` (gated by the
 /// `dev_panel_visible` run condition in [`add_systems`]).
@@ -105,11 +113,28 @@ fn draw_dev_panel(world: &mut World) {
         .get_resource::<crate::input::provider::ProviderRegistry>()
         .map(|r| (r.primary_id(), r.primary_status(), r.primary_diagnostics()));
 
+    // Live grab/pinch readout (drives the tuning calibration hint) and a working
+    // copy of the tunable settings — snapshotted before the egui closure borrows
+    // `world`. Slider edits land in `tuning` and are committed back after `show`.
+    let hand_readout: Option<(usize, f32, f32)> = world
+        .get_resource::<crate::input::state::HandTrackingState>()
+        .map(|s| {
+            let first = s.iter().next();
+            (
+                s.active_hand_count(),
+                first.map_or(0.0, |h| h.grab_strength),
+                first.map_or(0.0, |h| h.pinch_strength),
+            )
+        });
+    let mut tuning: Option<crate::settings::HandTrackingSettings> = world
+        .get_resource::<crate::settings::HandTrackingSettings>()
+        .cloned();
+
     bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
         .order(bevy_egui::egui::Order::Foreground)
         .fixed_pos(bevy_egui::egui::pos2(16.0, 60.0))
         .show(&ctx, |ui| {
-            ui.set_max_width(480.0);
+            ui.set_max_width(DEV_PANEL_MAX_WIDTH);
             ui.set_max_height((window_height - 100.0).max(200.0));
             backdrop_blur_frame(
                 ui,
@@ -127,25 +152,138 @@ fn draw_dev_panel(world: &mut World) {
                     );
                     ui.separator();
 
-                    // Hand Tracking section — curated diagnostics from the multi-axis
-                    // ProviderStatus + ProviderDiagnostics. Falls back silently if the
-                    // resource doesn't exist (e.g., feature off, or pre-install state).
-                    //
-                    // Snapshot into locals before the closure so `world` is fully
-                    // released by the time `ui_for_world` takes its `&mut World` borrow.
-                    if let Some((primary_id, status, diag)) = &registry_snapshot {
-                        draw_hand_tracking_section(ui, *primary_id, status, diag);
-                        ui.separator();
-                    }
-
+                    // One outer scroll area wraps every section so none can fall
+                    // off the bottom of the screen — the curated diagnostics grid
+                    // grew long enough to overflow on shorter displays. Sections
+                    // are collapsible so the long grid can be folded away, and the
+                    // world inspector no longer needs its own (nested) scroll.
+                    // `auto_shrink([false, true])`: keep a stable width, but be only
+                    // as tall as the content up to `max_height`, then scroll.
                     bevy_egui::egui::ScrollArea::vertical()
-                        .max_height((window_height - 200.0).max(100.0))
+                        .auto_shrink([false, true])
+                        .max_height((window_height - 140.0).max(120.0))
                         .show(ui, |ui| {
-                            bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+                            // Hand Tracking section — curated diagnostics from the
+                            // multi-axis ProviderStatus + ProviderDiagnostics.
+                            // Snapshotted into locals before the closure so `world`
+                            // is free for `ui_for_world`'s `&mut World` borrow below.
+                            if let Some((primary_id, status, diag)) = &registry_snapshot {
+                                bevy_egui::egui::CollapsingHeader::new("Hand tracking")
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        draw_hand_tracking_section(ui, *primary_id, status, diag);
+                                    });
+                            }
+
+                            // Live MediaPipe feel tuning — readout + sliders bound to
+                            // the persisted settings (edits committed after the closure).
+                            if let Some(t) = tuning.as_mut() {
+                                bevy_egui::egui::CollapsingHeader::new("Hand tuning (MediaPipe)")
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        draw_hand_tuning_controls(ui, &style, t, hand_readout);
+                                    });
+                            }
+
+                            bevy_egui::egui::CollapsingHeader::new("World inspector")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
+                                });
                         });
                 },
             );
         });
+
+    // Commit slider edits back to the resource, but only when a value actually
+    // moved — so `Changed<HandTrackingSettings>` (autosave + the apply-to-provider
+    // system) fires on real edits, not every frame the panel is open.
+    if let Some(edited) = tuning {
+        if let Some(mut res) = world.get_resource_mut::<crate::settings::HandTrackingSettings>() {
+            if *res != edited {
+                *res = edited;
+            }
+        }
+    }
+}
+
+/// Renders the live `MediaPipe` hand-tuning controls inside the dev panel: a
+/// grab/pinch readout (so the operator can see the open-hand grab *floor*) plus
+/// sliders bound to the persisted [`crate::settings::HandTrackingSettings`]
+/// tunables. The caller commits edits back to the resource; the
+/// `apply_mediapipe_tuning_settings` system forwards them to the live provider,
+/// so feel changes apply with no restart.
+fn draw_hand_tuning_controls(
+    ui: &mut bevy_egui::egui::Ui,
+    style: &OverlayStyle,
+    settings: &mut crate::settings::HandTrackingSettings,
+    readout: Option<(usize, f32, f32)>,
+) {
+    use bevy_egui::egui;
+
+    if let Some((count, grab, pinch)) = readout {
+        ui.label(format!(
+            "Live:  {count} hand(s)  ·  grab {grab:.2}  ·  pinch {pinch:.2}"
+        ));
+        // Calibration now reads the PRE-deadzone signal directly ("Grab raw
+        // (‰)" in the Hand tracking grid), so there is no need to zero the
+        // deadzone first — the raw readout is unaffected by the slider.
+        hint_label(
+            ui,
+            style,
+            "Open-hand calibration: hold your hand open and relaxed, read the rest \
+             floor from \"Grab raw (‰)\" above, then set the deadzone just above it \
+             (slider value = ‰ ÷ 1000, e.g. raw 60‰ → deadzone 0.07).",
+        );
+        ui.add_space(2.0);
+    }
+    ui.add(
+        egui::Slider::new(&mut settings.grab_rest_deadzone, 0.0..=0.6).text("Grab rest deadzone"),
+    );
+    // Size-estimated depth calibration. The "0 = off" in the label keeps the
+    // escape hatch discoverable mid-set: dragging to 0 disables the estimator
+    // and restores the fixed 120 mm depth pin (grab-only attractor control).
+    ui.add(
+        egui::Slider::new(&mut settings.depth_calibration_k, 0.0..=1.5)
+            .text("Depth calibration k (0 = off)"),
+    );
+    ui.add(
+        egui::Slider::new(&mut settings.smoothing_min_cutoff, 0.1..=20.0)
+            .text("Smoothing min cutoff (Hz)"),
+    );
+    ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));
+}
+
+/// Fixed maximum width of the dev panel's `Area`, applied via
+/// `ui.set_max_width` in [`draw_dev_panel`]. [`HINT_WRAP_WIDTH`] is derived
+/// from this — change them together by changing only this one.
+const DEV_PANEL_MAX_WIDTH: f32 = 480.0;
+
+/// Fixed wrap width for multi-line hint labels in the dev panel.
+///
+/// Derived from [`DEV_PANEL_MAX_WIDTH`] minus the frame padding (2 × 20 px)
+/// and a 40 px scrollbar allowance, so this width is always available. The
+/// width must be a constant: a default-wrapped label re-measures against
+/// `ui.available_width()` every frame, and inside the panel's `ScrollArea`
+/// that width shifts slightly as live values (diagnostics, inspector floats)
+/// change the content width — so the wrap points oscillate and the hint text
+/// visibly flickers between layouts. Wrapping inside a fixed-width scope
+/// makes the layout identical every frame.
+const HINT_WRAP_WIDTH: f32 = DEV_PANEL_MAX_WIDTH - 80.0;
+
+/// Draw a small dim multi-line hint at a fixed wrap width (see
+/// [`HINT_WRAP_WIDTH`] for why the width must not track the live
+/// `available_width`). Use this for every multi-line hint added to the dev
+/// panel so none of them reflow-flicker.
+fn hint_label(ui: &mut bevy_egui::egui::Ui, style: &OverlayStyle, text: &str) {
+    ui.scope(|ui| {
+        ui.set_max_width(HINT_WRAP_WIDTH);
+        ui.label(
+            bevy_egui::egui::RichText::new(text)
+                .size(10.0)
+                .color(style.text_color_dim),
+        );
+    });
 }
 
 /// Renders the curated "HAND TRACKING" diagnostic grid inside the dev panel.
@@ -165,9 +303,6 @@ fn draw_hand_tracking_section(
     diag: &crate::input::state::ProviderDiagnostics,
 ) {
     use crate::input::state::{DevicePresence, ServiceConnection, TrackingFlow};
-
-    ui.label(bevy_egui::egui::RichText::new("HAND TRACKING").size(13.0));
-    ui.add_space(4.0);
 
     bevy_egui::egui::Grid::new("hand_tracking_diag")
         .num_columns(2)
@@ -258,7 +393,33 @@ fn draw_hand_tracking_section(
                 ui.label(err);
                 ui.end_row();
             }
+
+            for metric in &diag.metrics {
+                draw_provider_metric_row(ui, metric);
+            }
         });
+}
+
+/// Render one provider-specific diagnostic metric row.
+fn draw_provider_metric_row(
+    ui: &mut bevy_egui::egui::Ui,
+    metric: &crate::input::state::ProviderMetric,
+) {
+    use crate::input::state::ProviderMetricValue;
+
+    ui.label(metric.label);
+    match metric.value {
+        ProviderMetricValue::Duration(value) => {
+            ui.label(format!("{} ms", value.as_millis()));
+        }
+        ProviderMetricValue::Count(value) => {
+            ui.label(value.to_string());
+        }
+        ProviderMetricValue::Text(value) => {
+            ui.label(value);
+        }
+    }
+    ui.end_row();
 }
 
 #[cfg(test)]

@@ -25,6 +25,12 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
     "MPL-2.0",
+    # CDLA-Permissive-2.0 (Community Data License Agreement, Permissive 2.0): the
+    # upstream license of webpki-roots / webpki-root-certs (Rustls's Mozilla
+    # root-cert bundle), pulled transitively by the `ort` inference backend.
+    # Permissive / attribution-only with no copyleft, so it cannot impose terms on
+    # the rest of the codebase.
+    "CDLA-Permissive-2.0",
     # Font licenses for egui's default bundled fonts (epaint_default_fonts).
     # Both are FSF-free; OFL is OSI-approved. We don't redistribute the fonts
     # standalone — they ship as data inside the binary, which both licenses permit.

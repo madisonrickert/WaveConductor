@@ -28,6 +28,62 @@ pub enum SettingKind {
         /// Empty means no filter (and the label is ignored).
         extensions: &'static [&'static str],
     },
+    /// A unit-variant Rust enum. Rendered as an `egui::ComboBox` listing each
+    /// variant by name. The derive macro fills `variants` from the field
+    /// type's [`bevy::reflect::TypeInfo`] (see [`enum_variant_names`]), so the
+    /// list never drifts from the enum definition. Enums with payload
+    /// variants (tuple or struct) are **not** supported — see the
+    /// [`enum_variant_names`] docs.
+    Enum {
+        /// Variant names in declaration order, as reported by reflection.
+        /// These are the Rust identifiers (e.g., `"MediaPipe"`), which also
+        /// match serde's default unit-variant serialization, so the same
+        /// string appears in the persisted TOML.
+        variants: &'static [&'static str],
+    },
+}
+
+/// Returns the variant names of a reflected enum type, in declaration order.
+///
+/// Used by the `#[derive(SketchSettings)]` expansion for `ty = Enum` fields,
+/// so the variant list shown in the settings panel is derived from the enum
+/// definition itself rather than repeated as literals in the attribute.
+///
+/// ## Unit variants only
+///
+/// Enum settings must consist solely of unit variants (no tuple or struct
+/// payloads): the `ComboBox` writes a selection back through reflection as a
+/// payload-less [`bevy::reflect::DynamicEnum`], which cannot construct a
+/// payload variant. A proc macro cannot see the enum's definition (only the
+/// field's type name), so this cannot be a compile error; instead this
+/// function fails loudly in debug builds — the `debug_assert!`s below fire
+/// the first time `settings_def()` runs (i.e., at settings registration) when
+/// `T` is not an enum or has a non-unit variant. In release builds the names
+/// are still returned and selecting an unsupported variant is rejected at
+/// write-back time (logged, value unchanged).
+#[must_use]
+pub fn enum_variant_names<T: bevy::reflect::Typed>() -> &'static [&'static str] {
+    use bevy::reflect::{TypeInfo, VariantInfo};
+    match T::type_info() {
+        TypeInfo::Enum(info) => {
+            debug_assert!(
+                info.iter().all(|v| matches!(v, VariantInfo::Unit(_))),
+                "`ty = Enum` setting on `{}`: only unit variants are supported \
+                 (a ComboBox selection cannot construct a payload variant)",
+                core::any::type_name::<T>(),
+            );
+            info.variant_names()
+        }
+        other => {
+            debug_assert!(
+                false,
+                "`ty = Enum` setting requires an enum field, got `{}` ({:?} kind)",
+                core::any::type_name::<T>(),
+                other.kind(),
+            );
+            &[]
+        }
+    }
 }
 
 /// Numeric range constraints. All bounds are stored as `f64` for uniform
@@ -72,4 +128,45 @@ pub struct SettingDef {
     /// If true, changing this field fires `SketchRestart` so the sketch can
     /// rebuild any resources it baked from the value (e.g., particle counts).
     pub requires_restart: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::reflect::Reflect;
+
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    enum Mode {
+        First,
+        Second,
+        Third,
+    }
+
+    #[test]
+    fn enum_variant_names_lists_unit_variants_in_order() {
+        assert_eq!(enum_variant_names::<Mode>(), &["First", "Second", "Third"]);
+    }
+
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    enum WithPayload {
+        Plain,
+        Carrying(u32),
+    }
+
+    /// The unit-variants-only contract fails loudly in debug builds; see the
+    /// `enum_variant_names` docs for why it cannot be a compile error.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "only unit variants are supported")]
+    fn enum_variant_names_rejects_payload_variants_in_debug() {
+        let _ = enum_variant_names::<WithPayload>();
+    }
+
+    /// Same loud-failure contract when the field is not an enum at all.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "requires an enum field")]
+    fn enum_variant_names_rejects_non_enum_types_in_debug() {
+        let _ = enum_variant_names::<bool>();
+    }
 }

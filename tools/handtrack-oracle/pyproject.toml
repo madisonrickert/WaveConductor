@@ -1,0 +1,14 @@
+[project]
+name = "handtrack-oracle"
+version = "0.0.0"
+description = "Dev-only oracle + model surgery for the MediaPipe webcam hand-tracking provider. Not shipped."
+requires-python = ">=3.10"
+# Pinned for reproducibility of the spike. Install ad-hoc via `uv run --with ...`
+# (see README); this file documents the intended set.
+dependencies = [
+    "onnx>=1.16",
+    "onnxruntime>=1.20",
+    "numpy>=1.26",
+    "pillow>=10",
+    "opencv-python-headless>=4.10",
+]

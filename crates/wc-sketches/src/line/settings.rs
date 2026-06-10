@@ -49,6 +49,32 @@
 //!   a sustained press. Dev-only knob.
 //! - **`synth_evolution_release_s`** — how slowly the pad texture fades after
 //!   release. Dev-only knob.
+//! - **`synth_grab_gamma`** — exponent on grab strength in the hand→volume
+//!   drive ([`crate::line::leap_attractors::HandAudioDrive`]). Dev-only knob.
+//! - **`synth_distance_falloff`** — exponent on the hand-depth attenuation in
+//!   the hand→volume drive. Dev-only knob.
+//!
+//! ## Synth timing chain (for tuners)
+//!
+//! Three smoothing stages sit between a gesture and the speaker; each timing
+//! is owned by exactly one place:
+//!
+//! 1. **Hand drive** ([`crate::line::leap_attractors::HandAudioDrive`]) —
+//!    instant on rise; on fall, exponential with
+//!    `τ = max(synth_release_ms / 1000, 0.67 s)`
+//!    ([`crate::line::leap_attractors::hand_drive_release_tau_s`]). Not
+//!    separately tunable: it follows `synth_release_ms` so it can never clip
+//!    stage 2's tail.
+//! 2. **Upness envelope** (`ParticleStats::grouped_upness`) — the musical
+//!    attack/release pair: `synth_attack_ms` owns how fast a press speaks,
+//!    `synth_release_ms` owns the tail length.
+//! 3. **Synth follow** — a fixed 16 ms `follow(0.016)` inside the
+//!    `LineSynth` DSP graph; anti-zipper smoothing only, never tune timing
+//!    there.
+//!
+//! To change press snappiness, adjust `synth_attack_ms`; to change tail
+//! length, `synth_release_ms` (the drive's τ tracks it automatically). The
+//! drive's gamma/falloff knobs shape *loudness*, not timing.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -171,6 +197,37 @@ pub struct LineSettings {
     #[setting(default = 6.0_f32, min = 1.0_f32, max = 15.0_f32, step = 0.5_f32, category = Dev)]
     #[serde(default = "default_synth_evolution_release_s")]
     pub synth_evolution_release_s: f32,
+
+    /// Exponent on grab strength in the hand→volume drive
+    /// ([`crate::line::leap_attractors::HandAudioDrive`]). `1.0` = linear
+    /// (half-closed fist ≈ half drive); `> 1.0` demands a more deliberate
+    /// fist before the synth opens up; `< 1.0` makes light grabs louder.
+    /// Dev-only knob.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.2_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Grab→volume curve",
+        category = Dev
+    )]
+    #[serde(default = "default_synth_grab_gamma")]
+    pub synth_grab_gamma: f32,
+
+    /// Exponent on the normalised hand-depth attenuation in the hand→volume
+    /// drive. `1.0` = linear fade from nearest (40 mm, loudest) to farthest
+    /// (350 mm, silent); `> 1.0` makes loudness drop off faster as the hand
+    /// retreats from the sensor. Dev-only knob.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.2_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Distance falloff",
+        category = Dev
+    )]
+    #[serde(default = "default_synth_distance_falloff")]
+    pub synth_distance_falloff: f32,
 }
 
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
@@ -206,6 +263,14 @@ fn default_synth_evolution_attack_s() -> f32 {
 
 fn default_synth_evolution_release_s() -> f32 {
     6.0
+}
+
+fn default_synth_grab_gamma() -> f32 {
+    1.0
+}
+
+fn default_synth_distance_falloff() -> f32 {
+    1.0
 }
 
 #[cfg(test)]
