@@ -60,7 +60,13 @@ impl Plugin for LifecyclePlugin {
             .add_systems(
                 Update,
                 (
-                    nav::handle_navigation_actions,
+                    // Hotkeys must not fire while an egui text field has
+                    // keyboard focus (typing "2" into a dev-panel field would
+                    // otherwise switch sketches). The condition fails open
+                    // when the capture resource is absent (harnesses without
+                    // SettingsPlugin/EguiPlugin keep their hotkeys).
+                    nav::handle_navigation_actions
+                        .run_if(crate::settings::input_capture::egui_not_capturing_keyboard),
                     idle::reset_on_interaction,
                     idle::advance_activity,
                     reload::drive_reload_state,
