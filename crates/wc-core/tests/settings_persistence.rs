@@ -21,7 +21,7 @@ use wc_core::settings::{
 };
 
 mod common;
-use common::TestSketchSettings;
+use common::{TestBlendMode, TestSketchSettings};
 
 /// Set `CONFIG_DIR_ENV` to `dir` for the duration of the closure.
 ///
@@ -71,10 +71,65 @@ fn save_then_load_round_trips() {
         original.enable_tint = false;
         original.tint_color = [0.1, 0.2, 0.3, 0.4];
         original.dev_label = String::from("custom");
+        original.blend_mode = TestBlendMode::Multiply;
 
         persistence::save(&original);
         let loaded = persistence::load::<TestSketchSettings>();
         assert_eq!(loaded, original);
+    });
+}
+
+#[test]
+fn enum_field_absent_from_file_falls_back_to_default() {
+    use std::fs;
+
+    with_temp_dir(|_dir| {
+        // A file written before `blend_mode` existed: section present, enum
+        // field missing. `#[serde(default = ...)]` fills it in without
+        // discarding the rest of the section.
+        let path = persistence::settings_path();
+        fs::create_dir_all(path.parent().expect("has parent")).expect("mkdirs");
+        fs::write(
+            &path,
+            "[test]\nwidget_count = 7\ntempo_hz = 0.5\nenable_tint = true\n\
+             tint_color = [1.0, 1.0, 1.0, 1.0]\ndev_label = \"kept\"\n",
+        )
+        .expect("seed");
+
+        let loaded = persistence::load::<TestSketchSettings>();
+        assert_eq!(loaded.blend_mode, TestBlendMode::Normal);
+        assert_eq!(loaded.widget_count, 7, "sibling fields must survive");
+        assert_eq!(loaded.dev_label, "kept", "sibling fields must survive");
+    });
+}
+
+#[test]
+fn unknown_enum_variant_defaults_section_but_not_other_sections() {
+    use std::fs;
+
+    with_temp_dir(|_dir| {
+        // An unknown variant string is a schema error for the `[test]`
+        // section, so that one section falls back to defaults — the existing
+        // per-section resilience (see `load_returns_default_when_section_
+        // schema_mismatches`). Other sections in the same file are untouched.
+        let path = persistence::settings_path();
+        fs::create_dir_all(path.parent().expect("has parent")).expect("mkdirs");
+        fs::write(
+            &path,
+            "[test]\nblend_mode = \"NotAVariant\"\n\n[unrelated]\nfoo = 42\n",
+        )
+        .expect("seed");
+
+        let loaded = persistence::load::<TestSketchSettings>();
+        assert_eq!(loaded, TestSketchSettings::default());
+
+        // Saving after the failed load must not clobber the other section.
+        persistence::save(&loaded);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("[unrelated]"),
+            "[unrelated] section dropped: {text}"
+        );
     });
 }
 

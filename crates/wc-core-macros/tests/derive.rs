@@ -18,6 +18,16 @@ use serde::{Deserialize, Serialize};
 use wc_core::settings::{SettingKind, SettingsCategory, SketchSettings};
 use wc_core_macros::SketchSettings;
 
+/// Unit-variant enum exercising `ty = Enum`. Variant names are surfaced to
+/// the settings panel via `bevy_reflect` enum info, so no list is repeated
+/// in the `#[setting(...)]` attribute.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+enum Quality {
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
 #[settings(storage_key = "derive_test")]
@@ -32,6 +42,8 @@ struct Fixture {
     color: [f32; 4],
     #[setting(default = String::from("hi"), ty = Text, label = "Greeting", category = Dev)]
     greeting: String,
+    #[setting(default = Quality::Medium, ty = Enum, category = User)]
+    quality: Quality,
 }
 
 #[test]
@@ -42,6 +54,7 @@ fn default_impl_uses_field_defaults() {
     assert!(!f.flag);
     assert_eq!(f.color, [0.5, 0.5, 0.5, 1.0]);
     assert_eq!(f.greeting, "hi");
+    assert_eq!(f.quality, Quality::Medium);
 }
 
 #[test]
@@ -53,7 +66,10 @@ fn storage_key_matches_attribute() {
 fn settings_def_lists_every_field_in_order() {
     let defs = Fixture::settings_def();
     let names: Vec<&str> = defs.iter().map(|d| d.field_name).collect();
-    assert_eq!(names, ["count", "smoothing", "flag", "color", "greeting"]);
+    assert_eq!(
+        names,
+        ["count", "smoothing", "flag", "color", "greeting", "quality"]
+    );
 }
 
 #[test]
@@ -101,4 +117,14 @@ fn kind_attribute_overrides_default_number_kind() {
     assert!(matches!(defs[2].kind, SettingKind::Boolean));
     assert!(matches!(defs[3].kind, SettingKind::Color));
     assert!(matches!(defs[4].kind, SettingKind::Text));
+}
+
+#[test]
+fn enum_kind_carries_variant_names_from_reflect() {
+    let defs = Fixture::settings_def();
+    let SettingKind::Enum { variants } = &defs[5].kind else {
+        panic!("expected Enum kind for quality");
+    };
+    // Variant names come from `bevy_reflect` enum info, in declaration order.
+    assert_eq!(*variants, ["Low", "Medium", "High"]);
 }

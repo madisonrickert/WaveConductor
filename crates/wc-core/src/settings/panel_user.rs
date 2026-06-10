@@ -348,6 +348,7 @@ fn render_widget_value(
         } => {
             render_file_path(field, filter_label, extensions, ui);
         }
+        SettingKind::Enum { variants } => render_enum(field, def.field_name, variants, ui),
     }
 }
 
@@ -434,6 +435,78 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
         ui.text_edit_singleline(v);
     } else {
         ui.label("(expected String)");
+    }
+}
+
+/// Render the enum widget (`ComboBox`) for a field. No label — Grid column 1
+/// already holds it.
+///
+/// `variants` is the `&'static` name list from [`SettingKind::Enum`] (derived
+/// from the enum's reflection info by the macro), so the current variant is
+/// matched against it without allocating. Selection writes back through
+/// [`set_enum_variant`], which goes through the same reflected field handle as
+/// every other widget — Bevy change detection, autosave, and restart diffing
+/// all fire identically.
+///
+/// `field_name` salts the `ComboBox` id so two enum settings in one panel don't
+/// share popup state.
+fn render_enum(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    field_name: &'static str,
+    variants: &[&'static str],
+    ui: &mut egui::Ui,
+) {
+    use bevy::reflect::ReflectRef;
+
+    // Resolve the current variant to its entry in the static `variants` list
+    // so the ComboBox works on `&'static str` (no per-frame String clones).
+    let current: Option<&'static str> = match field.reflect_ref() {
+        ReflectRef::Enum(enum_ref) => variants
+            .iter()
+            .copied()
+            .find(|v| *v == enum_ref.variant_name()),
+        _ => None,
+    };
+    let Some(current) = current else {
+        // Either the field is not an enum (macro misuse — already
+        // debug_assert-ed in `enum_variant_names`) or the live variant is
+        // missing from the metadata list (unreachable when the list comes
+        // from the same enum's reflection info).
+        ui.label("(expected unit-variant enum)");
+        return;
+    };
+
+    let mut selected = current;
+    egui::ComboBox::from_id_salt(("wc-setting-enum", field_name))
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for &variant in variants {
+                ui.selectable_value(&mut selected, variant, variant);
+            }
+        });
+    if selected != current {
+        set_enum_variant(field, selected);
+    }
+}
+
+/// Write `variant` (a unit-variant name) into a reflected enum field.
+///
+/// Applies a payload-less [`bevy::reflect::DynamicEnum`], which is exactly
+/// the variant-switch operation `Reflect`-derived enums support for unit
+/// variants. Returns `true` on success. Failure (a payload variant or a name
+/// the enum doesn't have) leaves the field unchanged and logs a warning —
+/// the loud debug-build failure for such misuse already lives in
+/// [`super::def::enum_variant_names`].
+fn set_enum_variant(field: &mut dyn bevy::reflect::PartialReflect, variant: &str) -> bool {
+    use bevy::reflect::{DynamicEnum, DynamicVariant};
+
+    let dynamic = DynamicEnum::new(variant, DynamicVariant::Unit);
+    match field.try_apply(&dynamic) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(?err, variant, "enum setting write-back failed");
+            false
+        }
     }
 }
 
@@ -569,5 +642,51 @@ mod tests {
             }
             _ => panic!("expected FilePath kind"),
         }
+    }
+
+    /// Unit-variant fixture for the enum write-back tests.
+    #[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq)]
+    enum Palette {
+        Warm,
+        Cool,
+        Mono,
+    }
+
+    #[test]
+    fn set_enum_variant_switches_unit_variant() {
+        let mut value = Palette::Warm;
+        let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
+        assert!(set_enum_variant(field, "Mono"));
+        assert_eq!(value, Palette::Mono);
+    }
+
+    #[test]
+    fn set_enum_variant_rejects_unknown_name_and_leaves_value() {
+        let mut value = Palette::Cool;
+        let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
+        assert!(!set_enum_variant(field, "Sepia"));
+        assert_eq!(value, Palette::Cool, "failed write-back must not mutate");
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion — panic on wrong variant is intentional"
+    )]
+    fn enum_kind_dispatches() {
+        let def = SettingDef {
+            field_name: "palette",
+            label: "Palette",
+            section: "",
+            category: SettingsCategory::User,
+            kind: SettingKind::Enum {
+                variants: &["Warm", "Cool", "Mono"],
+            },
+            requires_restart: false,
+        };
+        let SettingKind::Enum { variants } = def.kind else {
+            panic!("expected Enum kind");
+        };
+        assert_eq!(variants, &["Warm", "Cool", "Mono"]);
     }
 }

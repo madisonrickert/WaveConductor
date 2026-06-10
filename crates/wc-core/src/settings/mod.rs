@@ -35,7 +35,7 @@ pub mod trait_def;
 
 mod panel_user;
 
-pub use def::{NumberRange, SettingDef, SettingKind, SettingsCategory};
+pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
 pub use hand_tracking::HandTrackingSettings;
 pub use input_capture::{EguiKeyboardCaptured, EguiPointerCaptured};

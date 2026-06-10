@@ -23,6 +23,16 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use wc_core_macros::SketchSettings;
 
+/// Unit-variant enum backing the `ty = Enum` setting on
+/// [`TestSketchSettings`]. Serde serializes unit variants as their name
+/// string, so the persisted TOML reads `blend_mode = "Add"`.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestBlendMode {
+    Normal,
+    Add,
+    Multiply,
+}
+
 #[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
 #[settings(storage_key = "test")]
@@ -37,4 +47,16 @@ pub struct TestSketchSettings {
     pub tint_color: [f32; 4],
     #[setting(default = String::from("default"), ty = Text, category = Dev)]
     pub dev_label: String,
+    // `#[serde(default = ...)]` mirrors the production pattern
+    // (hand_tracking.rs): a settings file written before this field existed
+    // still deserializes, with the field falling back to the same value
+    // `TestSketchSettings::default()` uses.
+    #[setting(default = TestBlendMode::Normal, ty = Enum, category = User)]
+    #[serde(default = "default_blend_mode")]
+    pub blend_mode: TestBlendMode,
+}
+
+/// Serde fallback so configs saved before `blend_mode` existed still load.
+fn default_blend_mode() -> TestBlendMode {
+    TestBlendMode::Normal
 }
