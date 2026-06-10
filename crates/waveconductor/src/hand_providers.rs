@@ -30,9 +30,11 @@
 //! Env override semantics (dev/deployment pin): when
 //! `WAVECONDUCTOR_HAND_PROVIDER` is set to `auto`, `leap`, `mediapipe`,
 //! `off`, `mock`, or `synthetic`, it wins over the persisted setting for the
-//! whole session and the live switch system disables itself. `mock` and
-//! `synthetic` are deliberately env-only (test fixtures, not user choices).
-//! An unrecognized value warns and defers to the setting.
+//! whole session: dropdown changes have no effect (the dropdown itself stays
+//! interactive, with no UI cue yet — see [`HandProviderControl`]), though
+//! Auto's camera-verdict watch still resolves. `mock` and `synthetic` are
+//! deliberately env-only (test fixtures, not user choices). An unrecognized
+//! value warns and defers to the setting.
 
 #[cfg(feature = "hand-tracking-gestures")]
 use bevy::prelude::*;
@@ -50,11 +52,18 @@ use wc_core::settings::{HandProviderChoice, HandTrackingSettings};
 ///
 /// Inserted by [`install_hand_tracking_providers`] alongside the registry;
 /// read/written by [`apply_provider_choice`] every frame.
+///
+/// Known follow-up: when env-pinned, the settings dropdown stays fully
+/// interactive with no UI cue that its changes have no effect — the panel
+/// has no grayed-out / "pinned by env" affordance yet.
 #[cfg(feature = "hand-tracking-gestures")]
 #[derive(Resource)]
 pub struct HandProviderControl {
     /// `true` when `WAVECONDUCTOR_HAND_PROVIDER` pinned the provider at
-    /// startup — the dropdown is ignored for the whole session.
+    /// startup — dropdown changes have no effect for the whole session
+    /// (the switch arm of [`apply_provider_choice`] early-outs; the camera
+    /// watch still resolves). The dropdown itself stays interactive — see
+    /// the struct docs.
     env_pinned: bool,
     /// The choice the registry currently reflects; compared against the
     /// setting each frame to detect a dropdown change.
@@ -161,8 +170,9 @@ pub fn install_hand_tracking_providers(
     commands.insert_resource(registry);
     commands.insert_resource(HandProviderControl {
         env_pinned,
-        // When env-pinned this value is never consulted (the system below
-        // early-outs), so the setting's current value is a fine placeholder.
+        // When env-pinned this value is never consulted (the switch arm of
+        // apply_provider_choice early-outs; only the camera watch runs), so
+        // the setting's current value is a fine placeholder.
         last_applied: settings.provider,
         watch,
     });
@@ -197,12 +207,11 @@ pub fn apply_provider_choice(
 ) {
     use wc_core::input::provider::ProviderId;
 
-    if control.env_pinned {
-        return;
-    }
-
-    // Resolve Auto's optimistic MediaPipe start. Runs before the
-    // change-check so the verdict lands even when the dropdown is untouched.
+    // Resolve Auto's optimistic MediaPipe start FIRST — before the env-pin
+    // early-out and the change-check. Watch resolution is choice-independent
+    // book-keeping for a registry that is already installed: an env-pinned
+    // `WAVECONDUCTOR_HAND_PROVIDER=auto` session needs its camera verdict
+    // (and mock fallback) exactly as much as a dropdown-driven one.
     if control.watch == AutoMediaPipeWatch::Pending {
         match registry.provider(ProviderId::MediaPipe) {
             Some(slot) => {
@@ -219,6 +228,11 @@ pub fn apply_provider_choice(
             // left to watch.
             None => control.watch = AutoMediaPipeWatch::Idle,
         }
+    }
+
+    // Only the dropdown-driven switch below is disabled by the env pin.
+    if control.env_pinned {
+        return;
     }
 
     let choice = settings.provider;
@@ -260,6 +274,12 @@ fn build_for_choice(choice: HandProviderChoice, settings: &HandTrackingSettings)
 /// Note: [`ProviderRegistry::register`] auto-starts the provider. We check
 /// `status().service` after registration to detect startup failure
 /// (`LeaprsProvider` reports `Errored` on create/open failure).
+///
+/// Per the installer contract on
+/// [`wc_core::input::selection::ProviderInstallers`], a failed provider is
+/// left registered: the explicit `Leap` choice keeps the corpse visible in
+/// the dev panel, and the selection policy's `Auto` arm does the
+/// failed-candidate cleanup itself before falling through.
 #[cfg(feature = "hand-tracking-gestures")]
 fn try_leap(registry: &mut ProviderRegistry, leap_background: bool) -> bool {
     use wc_core::input::provider::{ProviderId, ProviderRole};
@@ -279,10 +299,6 @@ fn try_leap(registry: &mut ProviderRegistry, leap_background: bool) -> bool {
         tracing::info!("hand-tracking: LeaprsProvider started");
     } else {
         tracing::warn!("hand-tracking: LeaprsProvider failed to start");
-        // A dead Leap Primary must not linger and shadow whatever the
-        // selection policy installs next (its corpse would win
-        // `primary_status()` over a healthy mock).
-        registry.remove(ProviderId::Leap);
     }
     started
 }
@@ -409,5 +425,168 @@ mod tests {
     fn env_override_rejects_unknown_values() {
         assert_eq!(parse_env_override("webcam"), None);
         assert_eq!(parse_env_override(""), None);
+    }
+
+    // ── apply_provider_choice (headless Bevy app) ───────────────────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use wc_core::input::provider::{HandTrackingProvider, ProviderId, ProviderRole};
+    use wc_core::input::state::{
+        HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
+        ServiceConnection,
+    };
+
+    /// Test provider with a scripted service state and a `stop()` counter.
+    struct ServiceStub {
+        service: ServiceConnection,
+        stops: Arc<AtomicUsize>,
+    }
+
+    impl HandTrackingProvider for ServiceStub {
+        fn start(&mut self) -> Result<(), HandTrackingError> {
+            Ok(())
+        }
+
+        fn stop(&mut self) {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn poll(&mut self, _now: Duration, _out: &mut Messages<HandTrackingFrame>) {}
+
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus {
+                service: self.service,
+                ..ProviderStatus::default()
+            }
+        }
+
+        fn diagnostics(&self) -> ProviderDiagnostics {
+            ProviderDiagnostics::default()
+        }
+    }
+
+    /// Minimal headless app running only [`apply_provider_choice`], with a
+    /// scripted provider under `id` and the given control state.
+    fn test_app(
+        id: ProviderId,
+        service: ServiceConnection,
+        control: HandProviderControl,
+    ) -> (App, Arc<AtomicUsize>) {
+        let stops = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register(
+            id,
+            ProviderRole::Primary,
+            Box::new(ServiceStub {
+                service,
+                stops: Arc::clone(&stops),
+            }),
+        );
+        let mut app = App::new();
+        app.insert_resource(HandTrackingSettings::default());
+        app.insert_resource(registry);
+        app.insert_resource(control);
+        app.add_systems(Update, apply_provider_choice);
+        (app, stops)
+    }
+
+    /// Regression for the env-pin/watch ordering bug: an env-pinned `auto`
+    /// session (`WAVECONDUCTOR_HAND_PROVIDER=auto`, no Leap, camera open
+    /// failed) must still resolve its `MediaPipe` watch and fall back to the
+    /// mock — watch resolution runs BEFORE the env-pin early-out, which only
+    /// disables the dropdown-driven switch.
+    #[test]
+    fn watch_resolves_and_falls_back_even_when_env_pinned() {
+        let (mut app, stops) = test_app(
+            ProviderId::MediaPipe,
+            ServiceConnection::Errored,
+            HandProviderControl {
+                env_pinned: true,
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Pending,
+            },
+        );
+        app.update();
+
+        let registry = app.world().resource::<ProviderRegistry>();
+        assert!(
+            registry.provider(ProviderId::MediaPipe).is_none(),
+            "camera-failed MediaPipe must be demoted despite the env pin"
+        );
+        assert!(
+            registry.provider(ProviderId::Mock).is_some(),
+            "mock fallback must be installed despite the env pin"
+        );
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            1,
+            "demotion stops the provider"
+        );
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().watch,
+            AutoMediaPipeWatch::Idle
+        );
+
+        // The pin still blocks the dropdown: flipping the setting must not
+        // rebuild the registry.
+        app.world_mut()
+            .resource_mut::<HandTrackingSettings>()
+            .provider = HandProviderChoice::Off;
+        app.update();
+        let registry = app.world().resource::<ProviderRegistry>();
+        assert!(
+            registry.provider(ProviderId::Mock).is_some(),
+            "env pin must keep ignoring dropdown changes"
+        );
+    }
+
+    /// An unrelated settings-field change (e.g. a tuning slider) must NOT
+    /// rebuild the registry — the switch keys on the `provider` enum compare,
+    /// not on settings change detection.
+    #[test]
+    fn unrelated_settings_change_does_not_rebuild_registry() {
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            HandProviderControl {
+                env_pinned: false,
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+            },
+        );
+        // `provider` already matches last_applied (both Auto).
+        app.update();
+        app.world_mut()
+            .resource_mut::<HandTrackingSettings>()
+            .grab_rest_deadzone = 0.3;
+        app.update();
+        app.update();
+
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            0,
+            "tuning-only change must not tear providers down"
+        );
+        assert!(app
+            .world()
+            .resource::<ProviderRegistry>()
+            .provider(ProviderId::Leap)
+            .is_some());
+
+        // Sanity check the inverse: an actual provider change does rebuild.
+        // Off is used because it constructs no real hardware providers.
+        app.world_mut()
+            .resource_mut::<HandTrackingSettings>()
+            .provider = HandProviderChoice::Off;
+        app.update();
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            1,
+            "switch stops the old provider"
+        );
+        assert_eq!(app.world().resource::<ProviderRegistry>().iter().count(), 0);
     }
 }

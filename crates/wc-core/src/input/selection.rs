@@ -31,11 +31,26 @@ use crate::settings::hand_tracking::HandProviderChoice;
 ///   thread, so a camera-open failure surfaces only later through
 ///   `status()` (see [`AutoMediaPipeWatch`]).
 /// - `mock` — installs the silent mock simulator; cannot fail.
+///
+/// **Failure-visibility contract:** an installer must *leave* a provider
+/// that failed to start registered — never remove it itself. The explicit
+/// `Leap` / `MediaPipe` choices keep the dead provider visible (its
+/// `Errored` status is the honest signal in the dev panel), and
+/// [`build_registry`]'s `Auto` arm performs the cleanup *itself* before
+/// falling through to the next candidate. That cleanup keys on
+/// [`ProviderId::Leap`] / [`ProviderId::MediaPipe`], so installers must
+/// register under those ids.
 pub struct ProviderInstallers<'a> {
-    /// Try to install + start the Leap provider; `true` = started.
+    /// Try to install + start the Leap provider; `true` = started. Must
+    /// register under [`ProviderId::Leap`] and must leave a failed provider
+    /// registered: the `Auto` arm of [`build_registry`] depends on doing
+    /// the failure cleanup itself (see the struct docs), and the explicit
+    /// `Leap` choice keeps the corpse visible.
     pub leap: &'a mut dyn FnMut(&mut ProviderRegistry) -> bool,
     /// Try to install + start the `MediaPipe` provider; `None` = feature
     /// not compiled in, `Some(started)` otherwise (optimistic — see above).
+    /// Same leave-it-registered contract as `leap`, under
+    /// [`ProviderId::MediaPipe`].
     pub mediapipe: &'a mut dyn FnMut(&mut ProviderRegistry) -> Option<bool>,
     /// Install the silent mock simulator (always succeeds).
     pub mock: &'a mut dyn FnMut(&mut ProviderRegistry),
@@ -57,21 +72,20 @@ pub struct BuiltRegistry {
 /// Policy per choice:
 ///
 /// - **Off** — empty registry; mouse and touch input still work.
-/// - **Leap** — Leap only; on failure, error-log and register nothing
-///   (the status LED and dev panel stay honest about the dead provider's
-///   absence; no silent mock masking a missing device).
-/// - **`MediaPipe`** — `MediaPipe` only; same no-fallback contract. A
-///   provider that registered but failed to start stays registered so the
-///   dev panel shows its `Errored` status (the operator asked for this
-///   backend; surface its failure, don't mask it).
-/// - **Auto** — probe order Leap → `MediaPipe` → silent mock. `MediaPipe`'s
-///   start is optimistic (camera opens async on the worker thread), so when
-///   Auto lands on it the returned watch is
-///   [`AutoMediaPipeWatch::Pending`] and the caller must poll
-///   [`auto_mediapipe_camera_failed`] to demote to the mock if the webcam
-///   never opens. If `MediaPipe` fails synchronously at registration (e.g.
-///   models missing), the dead provider is removed so a `Primary` corpse
-///   does not shadow the mock's status in `primary_status()`.
+/// - **Leap** / **`MediaPipe`** — that backend only, no silent fallback,
+///   and one shared failure philosophy: a provider that registered but
+///   failed to start *stays registered* so the dev panel shows its
+///   `Errored` status. The operator asked for this backend; surface its
+///   failure, don't mask it behind a healthy-looking mock.
+/// - **Auto** — probe order Leap → `MediaPipe` → silent mock. Unlike the
+///   explicit choices, Auto *removes* each failed candidate before falling
+///   through: a dead `Primary` corpse would shadow the mock in
+///   [`ProviderRegistry::primary_status`], and "auto" means "give me
+///   whatever works", not "show me what broke". `MediaPipe`'s start is
+///   optimistic (camera opens async on the worker thread), so when Auto
+///   lands on it the returned watch is [`AutoMediaPipeWatch::Pending`] and
+///   the caller must poll [`auto_mediapipe_camera_failed`] to demote to
+///   the mock if the webcam never opens.
 pub fn build_registry(
     choice: HandProviderChoice,
     installers: &mut ProviderInstallers<'_>,
@@ -86,7 +100,8 @@ pub fn build_registry(
             if !(installers.leap)(&mut registry) {
                 tracing::error!(
                     "hand-tracking: 'Leap' selected but the provider failed to start; \
-                     no provider registered, mouse and touch input still work"
+                     its status stays visible in the dev panel, mouse and touch \
+                     input still work"
                 );
             }
         }
@@ -96,8 +111,8 @@ pub fn build_registry(
             }
             Some(false) => {
                 tracing::warn!(
-                    "hand-tracking: MediaPipeProvider failed to start; \
-                     mouse and touch input still work"
+                    "hand-tracking: MediaPipeProvider failed to start; its status \
+                     stays visible in the dev panel, mouse and touch input still work"
                 );
             }
             None => {
@@ -109,6 +124,11 @@ pub fn build_registry(
         },
         HandProviderChoice::Auto => {
             if !(installers.leap)(&mut registry) {
+                // Failed-candidate cleanup is Auto's job (see the installer
+                // contract on `ProviderInstallers`): the installer left the
+                // dead Leap registered, and its Primary corpse must not
+                // shadow the next candidate / mock in `primary_status()`.
+                registry.remove(ProviderId::Leap);
                 match (installers.mediapipe)(&mut registry) {
                     Some(true) => {
                         tracing::info!(
@@ -117,9 +137,9 @@ pub fn build_registry(
                         watch = AutoMediaPipeWatch::Pending;
                     }
                     Some(false) => {
-                        // Synchronous start failure (e.g. models missing): a dead
-                        // Primary would shadow the mock in `primary_status()`, so
-                        // remove it before falling back.
+                        // Synchronous start failure (e.g. models missing):
+                        // same Auto cleanup obligation as the Leap candidate
+                        // above.
                         registry.remove(ProviderId::MediaPipe);
                         tracing::info!("hand-tracking: auto → falling back to MockProvider");
                         (installers.mock)(&mut registry);
@@ -171,6 +191,9 @@ pub fn auto_mediapipe_camera_failed(
     if *watch != AutoMediaPipeWatch::Pending {
         return false;
     }
+    // Exhaustive on purpose: a new `ServiceConnection` variant must make a
+    // deliberate decision here rather than silently falling into a
+    // keep-waiting catch-all.
     match service {
         // First Connected = camera opened; the watch is done for good.
         ServiceConnection::Connected => {
@@ -183,9 +206,16 @@ pub fn auto_mediapipe_camera_failed(
             *watch = AutoMediaPipeWatch::Idle;
             true
         }
-        // Still handshaking (Connecting / NotStarted edge states): keep
-        // watching.
-        _ => false,
+        // Keep watching. NotStarted / Connecting = still handshaking.
+        // ServiceMissing / Disconnected are never emitted by the MediaPipe
+        // worker before its verdict (its first message is Connected or
+        // Errored; ServiceMissing is Leap-specific, Disconnected implies a
+        // prior Connected) — if one ever shows up mid-watch, keep watching:
+        // the verdict contract is strictly Connected-or-Errored.
+        ServiceConnection::NotStarted
+        | ServiceConnection::Connecting
+        | ServiceConnection::ServiceMissing
+        | ServiceConnection::Disconnected => false,
     }
 }
 
@@ -230,9 +260,11 @@ mod tests {
             let built = {
                 let mut leap = |registry: &mut ProviderRegistry| {
                     leap_calls += 1;
-                    if leap_started {
-                        install_as(registry, ProviderId::Leap, ProviderRole::Primary);
-                    }
+                    // Installer contract: register and leave the provider in
+                    // place even on failure (mirrors the binary, where
+                    // `register` always inserts). Failure cleanup is
+                    // `build_registry`'s job on the Auto path.
+                    install_as(registry, ProviderId::Leap, ProviderRole::Primary);
                     leap_started
                 };
                 let mut mediapipe_fn = |registry: &mut ProviderRegistry| {
@@ -281,13 +313,13 @@ mod tests {
     }
 
     #[test]
-    fn leap_choice_tries_only_leap_no_fallback_on_failure() {
+    fn leap_choice_keeps_failed_provider_visible_no_fallback() {
         let mut script = Script::new(false, Some(true));
         let built = script.run(HandProviderChoice::Leap);
-        assert!(
-            ids(&built.registry).is_empty(),
-            "no mock masking a dead Leap"
-        );
+        // Same philosophy as explicit MediaPipe: the dead provider stays
+        // registered so the dev panel shows its Errored status, and no
+        // silent mock masks the failure.
+        assert_eq!(ids(&built.registry), [ProviderId::Leap]);
         assert_eq!(
             (script.leap_calls, script.mediapipe_calls, script.mock_calls),
             (1, 0, 0)
@@ -329,9 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_falls_through_leap_to_mediapipe_and_watches() {
+    fn auto_removes_failed_leap_candidate_then_mediapipe_and_watches() {
         let mut script = Script::new(false, Some(true));
         let built = script.run(HandProviderChoice::Auto);
+        // Unlike the explicit Leap choice, Auto removes the failed Leap
+        // candidate before falling through — no Primary corpse shadowing
+        // the next candidate in primary_status().
         assert_eq!(ids(&built.registry), [ProviderId::MediaPipe]);
         assert_eq!(script.mock_calls, 0);
         assert_eq!(
@@ -345,7 +380,8 @@ mod tests {
     fn auto_removes_sync_failed_mediapipe_and_falls_back_to_mock() {
         let mut script = Script::new(false, Some(false));
         let built = script.run(HandProviderChoice::Auto);
-        // The dead Primary must not shadow the mock in primary_status().
+        // Both failed candidates (Leap, then MediaPipe) are removed; the
+        // mock must be the sole survivor so primary_status() reads it.
         assert_eq!(ids(&built.registry), [ProviderId::Mock]);
         assert_eq!(script.mock_calls, 1);
         assert_eq!(built.watch, AutoMediaPipeWatch::Idle);
@@ -355,6 +391,7 @@ mod tests {
     fn auto_falls_back_to_mock_when_mediapipe_feature_absent() {
         let mut script = Script::new(false, None);
         let built = script.run(HandProviderChoice::Auto);
+        // The failed Leap candidate is removed here too.
         assert_eq!(ids(&built.registry), [ProviderId::Mock]);
         assert_eq!(built.watch, AutoMediaPipeWatch::Idle);
     }

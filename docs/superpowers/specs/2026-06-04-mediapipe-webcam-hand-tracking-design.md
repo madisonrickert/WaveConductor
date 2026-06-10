@@ -709,7 +709,11 @@ keeps its honest `Errored` LED.
 
 `WAVECONDUCTOR_HAND_PROVIDER` is demoted to a dev/deployment pin: when set
 (`auto` | `leap` | `mediapipe` | `off` | `mock` | `synthetic`) it wins over
-the setting for the whole session and the live switch system disables itself.
+the setting for the whole session: dropdown changes have no effect, though
+Auto's camera-verdict watch still resolves (so an env-pinned `auto` session
+falls back to the mock on camera failure exactly like a dropdown-driven one).
+The dropdown itself stays interactive with no UI cue that it is pinned — a
+known follow-up.
 `mock` / `synthetic` remain env-only test fixtures (not in the user-facing
 enum). An unrecognized value now warns and defers to the setting (previously:
 treated as `auto`).
