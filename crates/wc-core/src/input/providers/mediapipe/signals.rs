@@ -379,8 +379,17 @@ impl HandTracker {
 /// `0.0` re-seeds from the first positive raw estimate — while steady
 /// positive readings smooth with the caller's `alpha` (the same
 /// [`DEPTH_EMA_TAU_S`] step as the Leap-z depth).
+/// (The conditions are written `!(x > 0.0)` rather than `x <= 0.0` so a NaN
+/// — e.g. a degenerate world-landmark segment upstream — routes through the
+/// snap branch, where `raw.max(0.0)` maps it to the 0.0 sentinel, instead of
+/// entering the EMA and poisoning the track's distance for its lifetime.)
+#[allow(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "the negation is the point: `!(x > 0.0)` is true for NaN where `x <= 0.0` is not, \
+              routing NaN through the sentinel-snap branch instead of poisoning the EMA"
+)]
 fn ema_distance(current: f32, raw: f32, alpha: f32) -> f32 {
-    if raw <= 0.0 || current <= 0.0 {
+    if !(raw > 0.0) || !(current > 0.0) {
         raw.max(0.0)
     } else {
         alpha.mul_add(raw - current, current)
@@ -727,6 +736,59 @@ mod tests {
             Duration::from_millis(33),
         );
         assert!((on.distance_mm - 750.0).abs() < 1e-6, "{}", on.distance_mm);
+    }
+
+    #[test]
+    fn nan_raw_distance_snaps_to_unknown_and_recovers() {
+        // A NaN raw distance (degenerate world landmarks upstream) must route
+        // through the snap branch to the 0.0 sentinel — entering the EMA would
+        // poison the track's distance for its remaining lifetime.
+        let mut t = HandTracker::default();
+        let pos = Vec3::new(0.0, 200.0, 0.0);
+        t.assign(
+            Chirality::Right,
+            pos,
+            100.0,
+            800.0,
+            Duration::from_millis(33),
+        );
+        t.end_frame();
+        let bad = t.assign(
+            Chirality::Right,
+            pos,
+            100.0,
+            f32::NAN,
+            Duration::from_millis(33),
+        );
+        assert!(
+            bad.distance_mm.abs() < f32::EPSILON,
+            "NaN must snap to the unknown sentinel, got {}",
+            bad.distance_mm
+        );
+        t.end_frame();
+        // And the track recovers on the next good estimate (re-seed).
+        let ok = t.assign(
+            Chirality::Right,
+            pos,
+            100.0,
+            600.0,
+            Duration::from_millis(33),
+        );
+        assert!((ok.distance_mm - 600.0).abs() < 1e-6, "{}", ok.distance_mm);
+        // A NaN on a FRESH track seeds the sentinel too (max(0.0) maps NaN→0).
+        let mut t2 = HandTracker::default();
+        let fresh = t2.assign(
+            Chirality::Right,
+            Vec3::new(150.0, 200.0, 0.0),
+            100.0,
+            f32::NAN,
+            Duration::from_millis(33),
+        );
+        assert!(
+            fresh.distance_mm.abs() < f32::EPSILON,
+            "{}",
+            fresh.distance_mm
+        );
     }
 
     #[test]

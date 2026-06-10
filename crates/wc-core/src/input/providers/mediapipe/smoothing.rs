@@ -236,7 +236,9 @@ impl HandFilters {
                 .clamp(0.0, 1.0),
             grab_strength,
             landmarks,
-            // id, chirality, and palm_velocity carry through unchanged.
+            // id, chirality, palm_velocity, and camera_distance_mm carry
+            // through unchanged (the distance is already EMA-smoothed by the
+            // tracker; a second One-Euro pass would add nothing but lag).
             ..target.clone()
         }
     }

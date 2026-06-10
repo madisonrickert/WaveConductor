@@ -220,8 +220,11 @@ pub struct LineSettings {
     pub synth_grab_gamma: f32,
 
     /// Exponent on the normalised hand-depth attenuation in the hand→volume
-    /// drive. `1.0` = linear fade from nearest (40 mm, loudest) to farthest
-    /// (350 mm, silent); `> 1.0` makes loudness drop off faster as the hand
+    /// drive — applied to whichever proximity band is active: the kiosk
+    /// distance band (`synth_full_volume_mm`..`synth_silence_mm`, when the
+    /// provider estimates a physical distance) or the legacy Leap-z band
+    /// (40 mm loudest .. 350 mm silent, otherwise). `1.0` = linear fade
+    /// across the band; `> 1.0` makes loudness drop off faster as the hand
     /// retreats from the sensor. Dev-only knob.
     #[setting(
         default = 1.0_f32,

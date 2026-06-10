@@ -186,8 +186,22 @@ pub fn reset_on_interaction(
 /// From then on any interaction — mouse, touch, hand, the next keypress —
 /// wakes the sketch exactly as after a natural timeout.
 ///
+/// ## Egui keyboard capture
+///
+/// Unlike the other hotkey consumers this system is NOT gated on the
+/// `egui_not_capturing_keyboard` run condition — a `run_if` would freeze the
+/// `armed` `Local` for as long as a text field holds focus, and the stale
+/// arm would rewind the timer (popping the screensaver mid-typing) on the
+/// first uncaptured keyboard frame, minutes after the original chord.
+/// Instead the system always runs and treats "egui owns the keyboard" as a
+/// quiet keyboard: the chord can't arm, and an in-flight arm disarms
+/// immediately (the skip simply stops fighting `reset_on_interaction`; if a
+/// release event then wakes the screensaver, the operator is at the panel
+/// anyway).
+///
 /// Outside a sketch (Home), `advance_activity` has no `SketchActivity` state
-/// to drive, so the skip is a no-op there.
+/// to drive this frame, so the skip shows nothing there (the timer rewind
+/// itself is harmlessly overwritten by the next interaction).
 pub fn skip_to_screensaver(
     time: Res<'_, Time>,
     actions: Res<
@@ -195,14 +209,22 @@ pub fn skip_to_screensaver(
         leafwing_input_manager::prelude::ActionState<super::actions::WaveConductorAction>,
     >,
     keys: Res<'_, ButtonInput<KeyCode>>,
+    captured: Option<Res<'_, crate::settings::input_capture::EguiKeyboardCaptured>>,
     mut armed: Local<'_, bool>,
     mut timer: ResMut<'_, InteractionTimer>,
 ) {
-    let just_pressed = actions.just_pressed(&super::actions::WaveConductorAction::StartScreensaver);
+    // Fail-open like egui_not_capturing_keyboard: absent resource (harnesses
+    // without SettingsPlugin/EguiPlugin) = not capturing.
+    let capturing = captured.is_some_and(|c| c.0);
+    let just_pressed =
+        !capturing && actions.just_pressed(&super::actions::WaveConductorAction::StartScreensaver);
     // "Keyboard active" = any key still held, or released this frame: both
     // produce events reset_on_interaction has already counted this frame.
-    let keyboard_active =
-        keys.get_pressed().next().is_some() || keys.get_just_released().next().is_some();
+    // While egui captures the keyboard this reads as quiet, so an armed skip
+    // disarms instead of holding the screensaver against the operator's
+    // typing (see the module docs above).
+    let keyboard_active = !capturing
+        && (keys.get_pressed().next().is_some() || keys.get_just_released().next().is_some());
     let (next_armed, rewind) = skip_step(*armed, just_pressed, keyboard_active);
     if rewind {
         timer.rewind_past_screensaver(time.elapsed());

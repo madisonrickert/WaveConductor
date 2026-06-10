@@ -240,7 +240,9 @@ audited for the screensaver compute/thermal budget. Findings and changes:
   end-to-end in `tests/screensaver.rs`
   (`present_rate_throttles_in_screensaver_and_restores_prior_modes`).
 - **Cap named and derived.** The temperature-independent screensaver cap is now
-  the documented `SCREENSAVER_FPS = 30.0` const; the Cool-tier wait derives from
+  the operator setting `ScreensaverSettings::screensaver_fps` (default 15,
+  2026-06-10; originally a `SCREENSAVER_FPS = 30.0` const); the Cool-tier wait
+  derives from
   it (`1/30 s`). Arithmetic: against an uncapped/ProMotion 60–120 Hz display the
   cap cuts sustained render + particle compute + smear energy by ≥ 50% (the
   reactive loop gates the whole schedule, render world included). Warm/Hot tier

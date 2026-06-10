@@ -158,7 +158,8 @@ pub fn effective_tier(
 
 /// Guard rails on the persisted `screensaver_fps` setting: a hand-edited TOML
 /// outside the slider's 5–60 range is clamped here rather than producing a
-/// degenerate (zero/negative/absurd) present wait.
+/// degenerate (zero/negative/absurd/NaN) present wait — NaN would otherwise
+/// PANIC in `Duration::from_secs_f64` (TOML accepts `nan` as a float).
 const SCREENSAVER_FPS_MIN: f64 = 1.0;
 const SCREENSAVER_FPS_MAX: f64 = 240.0;
 
@@ -181,9 +182,20 @@ const SCREENSAVER_FPS_MAX: f64 = 240.0;
 /// *lowers* the present rate: a cap below 15 fps would otherwise make the
 /// Warm tier render *faster* than the cool screensaver.
 #[must_use]
+#[allow(
+    clippy::manual_clamp,
+    reason = "max().min() is deliberate: clamp() passes NaN through, and a NaN wait panics in \
+              Duration::from_secs_f64 — max/min sanitize a `screensaver_fps = nan` TOML to the rail"
+)]
 fn tier_present_wait(tier: ThermalTier, cap_fps: f32) -> Duration {
+    // .max().min() instead of .clamp(): clamp passes NaN through, and a NaN
+    // wait panics in Duration::from_secs_f64. f64::max/min return the other
+    // operand for NaN, so a `screensaver_fps = nan` TOML lands on the MIN
+    // rail instead of crashing the first throttled frame.
     let cap_wait = Duration::from_secs_f64(
-        1.0 / f64::from(cap_fps).clamp(SCREENSAVER_FPS_MIN, SCREENSAVER_FPS_MAX),
+        1.0 / f64::from(cap_fps)
+            .max(SCREENSAVER_FPS_MIN)
+            .min(SCREENSAVER_FPS_MAX),
     );
     match tier {
         ThermalTier::Cool => cap_wait,
@@ -431,6 +443,10 @@ mod tests {
         // And an absurdly high value clamps to the max instead of busy-waiting.
         let wait = tier_present_wait(ThermalTier::Cool, 100_000.0);
         assert_eq!(wait, Duration::from_secs_f64(1.0 / SCREENSAVER_FPS_MAX));
+        // NaN (TOML accepts `nan`) must not panic Duration::from_secs_f64;
+        // it lands on the MIN rail like the other degenerate values.
+        let wait = tier_present_wait(ThermalTier::Cool, f32::NAN);
+        assert_eq!(wait, Duration::from_secs_f64(1.0 / SCREENSAVER_FPS_MIN));
     }
 
     #[test]

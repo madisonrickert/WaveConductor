@@ -61,7 +61,8 @@ use self::sensor::ThermalReading;
 /// options (spec §10.4).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ThermalTier {
-    /// Full headroom: present at the screensaver's 30 fps cap.
+    /// Full headroom: present at the operator's screensaver FPS cap
+    /// (`ScreensaverSettings::screensaver_fps`, default 15).
     #[default]
     Cool,
     /// Warming: drop the present rate (≈15 fps), same choreography.

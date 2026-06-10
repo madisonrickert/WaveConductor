@@ -9,9 +9,9 @@
 //!   `Active`.
 //! - The framework does zero attract work outside `Screensaver` (no marker, fade
 //!   at 0).
-//! - The present-rate throttle engages on entry (a reactive wait at the 30 fps
-//!   cap) and the prior winit modes — focused *and* unfocused — are restored
-//!   exactly on exit.
+//! - The present-rate throttle engages on entry (a reactive wait at the
+//!   configured FPS cap, default 15) and the prior winit modes — focused *and*
+//!   unfocused — are restored exactly on exit.
 //!
 //! `MinimalPlugins` omits `WinitPlugin`, but `test_app` inserts a
 //! `WinitSettings` resource by hand, so the present-rate throttle systems
@@ -176,15 +176,20 @@ fn present_rate_throttles_in_screensaver_and_restores_prior_modes() {
     );
 
     // Entering the screensaver throttles the present rate: a reactive wait at
-    // or below the 30 fps screensaver cap (the default tier is Cool).
+    // or below the configured FPS cap (default 15; the default tier is Cool).
     enter_line_activity(&mut app, SketchActivity::Screensaver);
     let throttled = app.world().resource::<WinitSettings>();
+    let cap_wait = Duration::from_secs_f64(
+        1.0 / f64::from(
+            wc_core::lifecycle::screensaver::ScreensaverSettings::default().screensaver_fps,
+        ),
+    );
     assert!(
         matches!(
             throttled.focused_mode,
-            UpdateMode::Reactive { wait, .. } if wait >= Duration::from_millis(33)
+            UpdateMode::Reactive { wait, .. } if wait >= cap_wait
         ),
-        "screensaver must switch to a reactive wait capping presents at <= 30 fps, got {:?}",
+        "screensaver must switch to a reactive wait at or below the default FPS cap, got {:?}",
         throttled.focused_mode
     );
 

@@ -324,9 +324,10 @@ pub fn hand_audio_drive(
     let grab_term = grab.clamp(0.0, 1.0).powf(grab_gamma);
     let proximity = if camera_distance_mm > 0.0 {
         // Kiosk band on the physical distance. The band width is floored
-        // (HAND_DRIVE_MIN_BAND_MM) so inverted/equal rails in a hand-edited
-        // config degrade to a hard near/silent step instead of a division by
-        // zero or a backwards fade.
+        // (HAND_DRIVE_MIN_BAND_MM) so inverted/equal rails — reachable from
+        // the overlapping dev-panel sliders, not just a hand-edited config —
+        // degrade to a hard near/silent step instead of a division by zero
+        // or a backwards fade.
         let band = (silence_mm - full_volume_mm).max(HAND_DRIVE_MIN_BAND_MM);
         ((silence_mm - camera_distance_mm) / band).clamp(0.0, 1.0)
     } else {

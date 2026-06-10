@@ -71,10 +71,11 @@ impl Plugin for LifecyclePlugin {
                     // Shift+S screensaver skip: MUST sit between
                     // reset_on_interaction (whose keyboard marks it overrides
                     // while armed) and advance_activity (which consumes the
-                    // rewound timer the same frame). Same egui guard as the
-                    // other hotkey consumers.
-                    idle::skip_to_screensaver
-                        .run_if(crate::settings::input_capture::egui_not_capturing_keyboard),
+                    // rewound timer the same frame). Deliberately NOT behind
+                    // the egui run_if — it handles keyboard capture itself,
+                    // because a skipped frame would freeze its armed state
+                    // (see the system docs).
+                    idle::skip_to_screensaver,
                     idle::advance_activity,
                     reload::drive_reload_state,
                 )
