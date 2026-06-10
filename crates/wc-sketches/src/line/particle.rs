@@ -7,11 +7,11 @@
 use bytemuck::{Pod, Zeroable};
 
 /// Per-particle state. Position + velocity in 2D world-space (centered on
-/// origin), plus the original spawn position (for constrain-to-box reset) and
-/// the fade-in α.
+/// origin), plus the original spawn position (for constrain-to-box reset),
+/// the fade-in α, and the attract-mode lifetime/identity fields.
 ///
-/// 32-byte aligned (8 × f32, the trailing `_pad` brings the struct to a
-/// 16-byte multiple) — see the WGSL `struct Particle` in `simulate.wgsl` and
+/// 48 bytes (12 × f32, the trailing `_pad` brings the struct to a 16-byte
+/// multiple) — see the WGSL `struct Particle` in `simulate.wgsl` and
 /// `render.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -20,16 +20,32 @@ pub struct Particle {
     pub position: [f32; 2],
     /// X/Y velocity in world units per second.
     pub velocity: [f32; 2],
-    /// Spawn position; OOB particles teleport here.
+    /// Spawn position; OOB particles teleport here (and attract-mode lifetime
+    /// respawn returns here, so the field self-heals into the spawn image).
     pub original_xy: [f32; 2],
     /// Fade-in alpha, ramps 0 → 1 over `SimParams.fade_duration` seconds.
     pub alpha: f32,
+    /// Attract-mode age accumulator in seconds. Advances only while
+    /// `SimParams.attract_gate` is set; pinned to `0.0` during live (Active)
+    /// interaction so the lifetime mechanism is provably inert outside attract.
+    pub age: f32,
+    /// Attract-mode lifespan in seconds. CPU-seeded at spawn from a
+    /// deterministic per-index hash (uniform in ≈20–45 s — see
+    /// `systems::spawn::attract_lifespan`) so respawns stagger instead of
+    /// arriving in visible waves. Never written by the kernel.
+    pub lifespan: f32,
+    /// Deterministic per-index hash in `0..=1`, CPU-seeded at spawn (see
+    /// `systems::spawn::spawn_hash01`). The attract-mode fraction gate kills
+    /// particles with `spawn_hash >= attract_fraction` — hashing (rather than
+    /// comparing the raw index) makes the cull spatially uniform, since the
+    /// line layout assigns indices left-to-right across the window.
+    pub spawn_hash: f32,
     /// Padding to keep the struct multiple-of-16 aligned for WGSL storage rules.
     #[allow(
         clippy::pub_underscore_fields,
         reason = "GPU struct layout padding must be pub for bytemuck"
     )]
-    pub _pad: f32,
+    pub _pad: [f32; 2],
 }
 
 /// One gravitational attractor — position in world space + power (force scale).
@@ -90,15 +106,17 @@ pub struct SimParams {
     pub constrain_min: [f32; 2],
     /// Upper world-space bounds (`x_max`, `y_max`).
     pub constrain_max: [f32; 2],
-    /// Padding to bring the header to a 16-byte boundary before the array.
-    /// The header above totals 40 bytes (six 4-byte scalars plus two 8-byte
-    /// `vec2`s); we need 8 more to reach 48 (a multiple of 16) so the
-    /// `attractors` array begins aligned.
-    #[allow(
-        clippy::pub_underscore_fields,
-        reason = "GPU struct layout padding must be pub for bytemuck"
-    )]
-    pub _pad: [f32; 2],
+    /// Attract-mode gate: `1` while the screensaver drives the sim, `0` during
+    /// live (Active) interaction. Gates **both** attract-only mechanisms — the
+    /// per-particle lifetime respawn and the fraction kill — so live behavior
+    /// is bit-identical to the pre-attract kernel. Doubles as header padding:
+    /// these two fields bring the 40-byte scalar header to 48 (a multiple of
+    /// 16) so the `attractors` array begins aligned.
+    pub attract_gate: u32,
+    /// Survivor fraction `0..=1` for the attract-mode kill: particles whose
+    /// `Particle::spawn_hash >= attract_fraction` fade out and stay dead while
+    /// `attract_gate` is set. Ignored when the gate is `0`.
+    pub attract_fraction: f32,
     /// Attractor list. Entries `[0..attractor_count]` are live; the rest are
     /// zero-power and ignored.
     pub attractors: [Attractor; MAX_ATTRACTORS],

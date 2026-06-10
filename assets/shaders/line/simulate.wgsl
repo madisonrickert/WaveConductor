@@ -7,13 +7,25 @@
 // `power > 0`, applies dual drag (pulling when any attractor is active,
 // otherwise inertial), and integrates position. New particles fade in over
 // `fade_duration` seconds; out-of-bounds particles teleport home.
+//
+// Attract mode (params.attract_gate == 1, set only by the screensaver driver):
+// - Fraction kill: particles with spawn_hash >= attract_fraction fade out and
+//   stay dead (early-out below) so the attract field is sparser/calmer.
+// - Lifetime respawn: survivors age; past their CPU-seeded lifespan they
+//   teleport home (velocity 0, alpha 0 re-fade), so the field continuously
+//   self-heals back into the spawn image.
+// Both mechanisms are gated off when attract_gate == 0; live (Active)
+// behavior is unchanged (age is pinned to 0, nothing else differs).
 
 struct Particle {
     position: vec2<f32>,
     velocity: vec2<f32>,
     original_xy: vec2<f32>,
     alpha: f32,
-    _pad: f32,
+    age: f32,
+    lifespan: f32,
+    spawn_hash: f32,
+    _pad: vec2<f32>,
 };
 
 struct Attractor {
@@ -33,7 +45,8 @@ struct SimParams {
     fade_duration: f32,
     constrain_min: vec2<f32>,
     constrain_max: vec2<f32>,
-    _pad: vec2<f32>,
+    attract_gate: u32,
+    attract_fraction: f32,
     attractors: array<Attractor, MAX_ATTRACTORS>,
 };
 
@@ -48,6 +61,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     var p = particles[idx];
+
+    // --- Attract-mode fraction kill (early-out) ---------------------------
+    // Dead particles skip the force/drag/integration math entirely. The
+    // dispatch still covers the full buffer (so this fade-out runs, and so
+    // the survivors keep simulating at their original indices); the render
+    // shader collapses alpha-0 quads so dead particles also cost no fill.
+    // On wake (attract_gate -> 0) this branch stops taking and the normal
+    // fade-in below restores the dead particles over fade_duration seconds.
+    let attract = params.attract_gate != 0u;
+    if (attract && p.spawn_hash >= params.attract_fraction) {
+        if (p.alpha > 0.0 && params.fade_duration > 0.0) {
+            p.alpha = max(p.alpha - params.dt / params.fade_duration, 0.0);
+            particles[idx] = p;
+        }
+        return;
+    }
 
     // --- Accumulate force from active attractors -------------------------
     // v4's particleSystem.ts: forceX = power * G * size_scale * dx / distance.
@@ -90,6 +119,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         p.position = p.original_xy;
         p.velocity = vec2<f32>(0.0);
         p.alpha = 0.0; // re-fade-in
+    }
+
+    // --- Attract-mode lifetime respawn ------------------------------------
+    // Survivors age while attract is on; past their CPU-seeded lifespan they
+    // reset exactly like an OOB particle (home, still, alpha-0 re-fade), so
+    // the image continuously self-heals. Lifespans are per-particle hashed
+    // (~20-45 s) so respawns stagger rather than arriving in waves. During
+    // Active the age is pinned to 0, making the mechanism provably inert.
+    if (attract) {
+        p.age = p.age + params.dt;
+        if (p.lifespan > 0.0 && p.age >= p.lifespan) {
+            p.age = 0.0;
+            p.position = p.original_xy;
+            p.velocity = vec2<f32>(0.0);
+            p.alpha = 0.0; // re-fade-in
+        }
+    } else {
+        p.age = 0.0;
     }
 
     // --- Fade-in alpha ---------------------------------------------------

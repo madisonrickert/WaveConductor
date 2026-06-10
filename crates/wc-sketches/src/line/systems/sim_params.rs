@@ -77,6 +77,28 @@ impl WindowGeom {
     }
 }
 
+/// Attract-mode gate for the per-particle lifetime respawn + fraction kill in
+/// `simulate.wgsl`. Only the screensaver's attract writer enables it; the live
+/// writer passes [`AttractGate::OFF`] so Active behavior is provably
+/// unchanged (the kernel's gated branches never take).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AttractGate {
+    /// `true` only while the Line screensaver drives the sim.
+    pub enabled: bool,
+    /// Survivor fraction `0..=1`: particles whose spawn hash lands at or above
+    /// this fade out and stay dead while the gate is enabled. Ignored when
+    /// `enabled` is `false`.
+    pub fraction: f32,
+}
+
+impl AttractGate {
+    /// The live (Active-mode) gate: both attract mechanisms off.
+    pub const OFF: Self = Self {
+        enabled: false,
+        fraction: 1.0,
+    };
+}
+
 /// **Plan 11.8 Condition A1 (shared bake fn).** Build the full [`SimParams`] for a
 /// frame from a baked attractor array, the frame `dt`, and the window geometry.
 /// Both the live writer ([`update_sim_params`]) and the screensaver's
@@ -88,13 +110,15 @@ impl WindowGeom {
 /// multiplies each attractor's raw power by `gravity_constant` before filling
 /// the array, matching the mouse/hand attractor treatment); `attractor_count`
 /// is the number of live entries. `dt` is the (uncapped) per-frame delta — the
-/// 50 ms cap is applied here.
+/// 50 ms cap is applied here. `gate` switches the attract-only lifetime/
+/// fraction mechanisms (live writer: [`AttractGate::OFF`]).
 #[must_use]
 pub fn bake_sim_params(
     dt: f32,
     geom: WindowGeom,
     attractors: [Attractor; MAX_ATTRACTORS],
     attractor_count: u32,
+    gate: AttractGate,
 ) -> SimParams {
     // --- Drag baking (v4-parity, against the FIXED dt, not render dt) ----
     let pulling_drag_baked = V4_PULLING_DRAG_CONSTANT.powf(V4_FIXED_DT);
@@ -118,7 +142,8 @@ pub fn bake_sim_params(
         fade_duration: V4_FADE_DURATION,
         constrain_min: [-half_w, -half_h],
         constrain_max: [half_w, half_h],
-        _pad: [0.0; 2],
+        attract_gate: u32::from(gate.enabled),
+        attract_fraction: gate.fraction,
         attractors,
     }
 }
@@ -203,45 +228,31 @@ pub fn update_sim_params(
         slot += 1;
     }
 
-    // --- Drag baking ----------------------------------------------------
-    let pulling_drag_baked = V4_PULLING_DRAG_CONSTANT.powf(V4_FIXED_DT);
-    let inertial_drag_baked = V4_INERTIAL_DRAG_CONSTANT.powf(V4_FIXED_DT);
-
-    // --- Size scaling (matches v4 sizeScaledGravityConstant) ------------
-    let w = window.width();
-    let size_scale = (2.0_f32.powf(w / 836.0 - 1.0)).min(1.0);
-
-    // --- Constrain-to-box bounds (centered on origin, matching spawn) ---
-    let h = window.height();
-    let half_w = w * 0.5;
-    let half_h = h * 0.5;
-    let constrain_min = [-half_w, -half_h];
-    let constrain_max = [half_w, half_h];
-
-    sim.params = SimParams {
-        dt: time.delta_secs().min(0.05),
-        attractor_count,
-        pulling_drag_baked,
-        inertial_drag_baked,
-        size_scale,
-        fade_duration: 3.0, // v4 PARTICLE_SYSTEM_PARAMS.FADE_DURATION
-        constrain_min,
-        constrain_max,
-        _pad: [0.0; 2],
+    // --- Bake via the shared baker (Condition A1) -------------------------
+    // `AttractGate::OFF`: the attract-only lifetime respawn + fraction kill
+    // never run during live interaction.
+    let geom = WindowGeom::from_window(&window);
+    sim.params = bake_sim_params(
+        time.delta_secs(),
+        geom,
         attractors,
-    };
+        attractor_count,
+        AttractGate::OFF,
+    );
 
     // --- Gravity-smear post-process uniforms ---------------------------
     //
     // The post-process shader works in window-pixel space (matches v4's
     // `gl_FragCoord.xy` reference). Particles live in world space centred at
-    // the origin (+y up) — convert the mouse position back to window-pixel
-    // coords (top-left origin, +y down) for `iMouse`.
-    post.i_resolution = [w, h];
-    post.i_mouse = [
-        mouse.position[0] + w * 0.5,
-        h - (mouse.position[1] + h * 0.5),
-    ];
+    // the origin (+y up) — `bake_post_base` converts the mouse position back
+    // to window-pixel coords (top-left origin, +y down) for `iMouse`.
+    bake_post_base(
+        &mut post,
+        geom,
+        mouse.position,
+        time.elapsed_secs(),
+        settings.gamma,
+    );
     // Placeholder defaults for `i_mouse_factor` and `g_constant` — the
     // gated `Update` chain runs `audio_coupling::drive_audio_and_shader`
     // immediately after this system and overrides both fields with the
@@ -250,7 +261,43 @@ pub fn update_sim_params(
     // but writing sane defaults keeps the resource self-consistent if the
     // chain ever re-orders.
     post.i_mouse_factor = 1.0 / 15.0;
-    post.i_global_time = time.elapsed_secs();
     post.g_constant = 5000.0;
-    post.gamma = settings.gamma;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the shared baker must produce bit-identical shared fields for both writers"
+    )]
+    fn bake_sim_params_bakes_the_attract_gate() {
+        let geom = WindowGeom {
+            width: 1280.0,
+            height: 720.0,
+        };
+        let attractors = [Attractor::default(); MAX_ATTRACTORS];
+
+        // Live writer: gate off — both attract mechanisms disabled.
+        let live = bake_sim_params(0.016, geom, attractors, 0, AttractGate::OFF);
+        assert_eq!(live.attract_gate, 0, "live bake must leave the gate off");
+
+        // Attract writer: gate on, fraction passed through verbatim.
+        let gate = AttractGate {
+            enabled: true,
+            fraction: 0.6,
+        };
+        let attract = bake_sim_params(0.016, geom, attractors, 0, gate);
+        assert_eq!(attract.attract_gate, 1);
+        assert!((attract.attract_fraction - 0.6).abs() < 1e-6);
+
+        // Everything the two writers share is identical — the gate is the
+        // ONLY difference between live and attract baking (Condition A1).
+        assert!((live.pulling_drag_baked - attract.pulling_drag_baked).abs() < 1e-9);
+        assert!((live.size_scale - attract.size_scale).abs() < 1e-9);
+        assert_eq!(live.constrain_min, attract.constrain_min);
+        assert_eq!(live.constrain_max, attract.constrain_max);
+    }
 }

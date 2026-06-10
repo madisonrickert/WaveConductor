@@ -38,6 +38,53 @@ use crate::line::sim_cpu::LineCpuMirror;
 #[derive(Component)]
 pub struct LineRoot;
 
+/// Shortest attract-mode lifespan a particle can be seeded with, in seconds.
+pub const ATTRACT_LIFESPAN_MIN_SECS: f32 = 20.0;
+
+/// Longest attract-mode lifespan a particle can be seeded with, in seconds.
+pub const ATTRACT_LIFESPAN_MAX_SECS: f32 = 45.0;
+
+/// Salt XOR-ed into the index before hashing for [`attract_lifespan`], so the
+/// lifespan stream is decorrelated from the [`spawn_hash01`] stream (otherwise
+/// the fraction kill would preferentially cull one end of the lifespan range).
+const LIFESPAN_HASH_SALT: u32 = 0x9E37_79B9;
+
+/// Wang's 32-bit integer mix. Deterministic and stateless — the same index
+/// always hashes to the same value, on every platform, which is what makes the
+/// attract-mode lifespans and fraction kill capture-reproducible (no RNG).
+fn wang_hash(mut x: u32) -> u32 {
+    x = (x ^ 0x3D) ^ (x >> 16); // 0x3D = Wang's published constant 61
+    x = x.wrapping_mul(9);
+    x ^= x >> 4;
+    x = x.wrapping_mul(0x27d4_eb2d);
+    x ^ (x >> 15)
+}
+
+/// Map a hashed `u32` onto `0..=1`.
+fn hash_to_unit(h: u32) -> f32 {
+    h as f32 / u32::MAX as f32
+}
+
+/// Deterministic per-index hash in `0..=1`, seeded into
+/// [`Particle::spawn_hash`] at spawn. The attract-mode fraction gate kills
+/// particles with `spawn_hash >= attract_fraction`; hashing the index (rather
+/// than comparing the index itself) makes the cull spatially uniform, because
+/// the line layout assigns indices left-to-right across the window.
+#[must_use]
+pub fn spawn_hash01(index: u32) -> f32 {
+    hash_to_unit(wang_hash(index))
+}
+
+/// Deterministic attract-mode lifespan for particle `index`, uniform in
+/// [`ATTRACT_LIFESPAN_MIN_SECS`]..=[`ATTRACT_LIFESPAN_MAX_SECS`]. Seeded into
+/// [`Particle::lifespan`] at spawn. Per-particle staggering means the attract
+/// field self-heals continuously instead of respawning in visible waves.
+#[must_use]
+pub fn attract_lifespan(index: u32) -> f32 {
+    let unit = hash_to_unit(wang_hash(index ^ LIFESPAN_HASH_SALT));
+    ATTRACT_LIFESPAN_MIN_SECS + (ATTRACT_LIFESPAN_MAX_SECS - ATTRACT_LIFESPAN_MIN_SECS) * unit
+}
+
 /// `OnEnter(AppState::Line)`.
 ///
 /// Allocates the particle storage buffer, constructs a flat quad mesh
@@ -105,7 +152,10 @@ pub fn spawn_line(
                 velocity: [0.0, 0.0],
                 original_xy: [x, y],
                 alpha: 0.0,
-                _pad: 0.0,
+                age: 0.0,
+                lifespan: attract_lifespan(i),
+                spawn_hash: spawn_hash01(i),
+                _pad: [0.0; 2],
             });
         }
         v
@@ -115,7 +165,8 @@ pub fn spawn_line(
         let positions = sample_from_heatmap(path, w, win_h, count as usize);
         positions
             .into_iter()
-            .map(|win_pos| {
+            .enumerate()
+            .map(|(i, win_pos)| {
                 // Convert window-space (top-left origin, +y down) to centered
                 // world-space (+y up) — the coordinate system the rest of the
                 // sketch uses.
@@ -126,7 +177,10 @@ pub fn spawn_line(
                     velocity: [0.0, 0.0],
                     original_xy: [x, y],
                     alpha: 0.0,
-                    _pad: 0.0,
+                    age: 0.0,
+                    lifespan: attract_lifespan(i as u32),
+                    spawn_hash: spawn_hash01(i as u32),
+                    _pad: [0.0; 2],
                 }
             })
             .collect()
@@ -204,4 +258,88 @@ pub fn spawn_line(
     });
 
     tracing::info!(count, "spawned Line sketch");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attract_lifespan_is_deterministic_and_in_range() {
+        for i in 0..10_000_u32 {
+            let a = attract_lifespan(i);
+            let b = attract_lifespan(i);
+            assert!(a.to_bits() == b.to_bits(), "lifespan must be deterministic");
+            assert!(
+                (ATTRACT_LIFESPAN_MIN_SECS..=ATTRACT_LIFESPAN_MAX_SECS).contains(&a),
+                "lifespan {a} out of range at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn attract_lifespans_are_staggered() {
+        // The whole point of per-particle lifespans is to avoid synchronized
+        // respawn waves: over a typical buffer the seeded values must spread
+        // across (not cluster within) the range. Check the mean sits near the
+        // midpoint and both tails are reached.
+        let n = 10_000_u32;
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
+        let mut sum = 0.0_f64;
+        for i in 0..n {
+            let l = attract_lifespan(i);
+            min = min.min(l);
+            max = max.max(l);
+            sum += f64::from(l);
+        }
+        let mean = sum / f64::from(n);
+        let mid = f64::from(ATTRACT_LIFESPAN_MIN_SECS + ATTRACT_LIFESPAN_MAX_SECS) / 2.0;
+        assert!(
+            (mean - mid).abs() < 1.0,
+            "lifespan mean {mean} far from {mid}"
+        );
+        assert!(
+            min < ATTRACT_LIFESPAN_MIN_SECS + 2.0,
+            "low tail unreached: {min}"
+        );
+        assert!(
+            max > ATTRACT_LIFESPAN_MAX_SECS - 2.0,
+            "high tail unreached: {max}"
+        );
+    }
+
+    #[test]
+    fn spawn_hash_is_uniform_enough_for_the_fraction_gate() {
+        // The fraction gate keeps particles with spawn_hash < fraction; the
+        // hash must be roughly uniform so a 0.6 fraction keeps ~60% of the
+        // field, evenly across index (and therefore screen-x) order.
+        let n = 10_000_u32;
+        let fraction = 0.6_f32;
+        let mut kept = 0_u32;
+        // Also count survivors in the left and right index halves — the
+        // line layout maps index to screen-x, so a skewed hash would thin
+        // one side of the image more than the other.
+        let mut kept_left = 0_u32;
+        for i in 0..n {
+            let h = spawn_hash01(i);
+            assert!((0.0..=1.0).contains(&h), "hash {h} out of unit range");
+            if h < fraction {
+                kept += 1;
+                if i < n / 2 {
+                    kept_left += 1;
+                }
+            }
+        }
+        let kept_frac = f64::from(kept) / f64::from(n);
+        assert!(
+            (kept_frac - 0.6).abs() < 0.03,
+            "kept fraction {kept_frac} should be ~0.6"
+        );
+        let left_share = f64::from(kept_left) / f64::from(kept);
+        assert!(
+            (left_share - 0.5).abs() < 0.03,
+            "survivors should be index-uniform, left share = {left_share}"
+        );
+    }
 }

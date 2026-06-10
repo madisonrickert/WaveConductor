@@ -58,6 +58,16 @@ pub fn step_cpu_mirror(
 /// particle per frame from [`step_cpu_mirror`]; extracted for unit testing.
 /// Hot path — do not introduce branches or allocations.
 pub fn step_one(p: &mut Particle, params: &SimParams) {
+    // Attract-mode fraction kill (early-out), mirroring the WGSL kernel:
+    // dead particles only fade their alpha out; they skip all sim math.
+    let attract = params.attract_gate != 0;
+    if attract && p.spawn_hash >= params.attract_fraction {
+        if p.alpha > 0.0 && params.fade_duration > 0.0 {
+            p.alpha = (p.alpha - params.dt / params.fade_duration).max(0.0);
+        }
+        return;
+    }
+
     // Accumulate force. v4: constant-magnitude in unit direction toward attractor.
     let mut accel = [0.0_f32, 0.0];
     // `attractor_count` is u32 → usize is lossless on every supported target;
@@ -104,6 +114,21 @@ pub fn step_one(p: &mut Particle, params: &SimParams) {
         p.alpha = 0.0;
     }
 
+    // Attract-mode lifetime respawn (mirrors the WGSL kernel): survivors age
+    // while attract is on; past their CPU-seeded lifespan they reset exactly
+    // like an OOB particle. During Active the age is pinned to 0.
+    if attract {
+        p.age += params.dt;
+        if p.lifespan > 0.0 && p.age >= p.lifespan {
+            p.age = 0.0;
+            p.position = p.original_xy;
+            p.velocity = [0.0, 0.0];
+            p.alpha = 0.0;
+        }
+    } else {
+        p.age = 0.0;
+    }
+
     // Fade.
     if p.alpha < 1.0 && params.fade_duration > 0.0 {
         p.alpha = (p.alpha + params.dt / params.fade_duration).min(1.0);
@@ -124,7 +149,8 @@ mod tests {
             fade_duration: 3.0,
             constrain_min: [-100.0, -100.0],
             constrain_max: [100.0, 100.0],
-            _pad: [0.0; 2],
+            attract_gate: 0,
+            attract_fraction: 1.0,
             attractors: [Attractor::default(); MAX_ATTRACTORS],
         }
     }
@@ -137,7 +163,10 @@ mod tests {
             velocity: [10.0, 0.0],
             original_xy: [0.0, 0.0],
             alpha: 1.0,
-            _pad: 0.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            _pad: [0.0; 2],
         };
         step_one(&mut p, &params);
         // Inertial drag = 0.5, applied to velocity before integration.
@@ -158,7 +187,10 @@ mod tests {
             velocity: [0.0, 0.0],
             original_xy: [0.0, 0.0],
             alpha: 1.0,
-            _pad: 0.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            _pad: [0.0; 2],
         };
         step_one(&mut p, &params);
         // Attractor at (100, 0), particle at (0, 0) → purely x-aligned pull.
@@ -192,7 +224,10 @@ mod tests {
             velocity: [10.0, 0.0],
             original_xy: [-5.0, 2.5],
             alpha: 1.0,
-            _pad: 0.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            _pad: [0.0; 2],
         };
         step_one(&mut p, &params);
         assert_eq!(p.position, [-5.0, 2.5]);
@@ -216,10 +251,104 @@ mod tests {
             velocity: [0.0, 0.0],
             original_xy: [0.0, 0.0],
             alpha: 0.0,
-            _pad: 0.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            _pad: [0.0; 2],
         };
         step_one(&mut p, &params);
         let expected = params.dt / params.fade_duration;
         assert!((p.alpha - expected).abs() < 1e-6, "got {}", p.alpha);
+    }
+
+    /// A live-mode particle, for the attract-gate tests below.
+    fn live_particle() -> Particle {
+        Particle {
+            position: [3.0, 4.0],
+            velocity: [1.0, -2.0],
+            original_xy: [-5.0, 2.5],
+            alpha: 1.0,
+            age: 0.0,
+            lifespan: 30.0,
+            spawn_hash: 0.9,
+            _pad: [0.0; 2],
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the dead branch must not touch position/velocity at all; exact equality is the check"
+    )]
+    fn attract_fraction_kills_high_hash_particles() {
+        let mut params = zero_attractor_params();
+        params.attract_gate = 1;
+        params.attract_fraction = 0.6;
+        let mut p = live_particle(); // spawn_hash 0.9 >= 0.6 -> dead
+        step_one(&mut p, &params);
+        // Dead particles fade out and freeze: no force, drag, or integration.
+        assert!((p.alpha - (1.0 - params.dt / params.fade_duration)).abs() < 1e-6);
+        assert_eq!(p.position, [3.0, 4.0], "dead particle must not move");
+        assert_eq!(p.velocity, [1.0, -2.0], "dead particle keeps its velocity");
+        // The fade-out bottoms at exactly 0 and stays there.
+        p.alpha = 0.0;
+        step_one(&mut p, &params);
+        assert_eq!(p.alpha, 0.0);
+    }
+
+    #[test]
+    fn attract_fraction_spares_low_hash_particles() {
+        let mut params = zero_attractor_params();
+        params.attract_gate = 1;
+        params.attract_fraction = 0.6;
+        let mut p = live_particle();
+        p.spawn_hash = 0.3; // < 0.6 -> survivor
+        step_one(&mut p, &params);
+        // Survivors run the normal sim: inertial drag halves the velocity.
+        assert!((p.velocity[0] - 0.5).abs() < 1e-5, "got {}", p.velocity[0]);
+        assert!((p.age - params.dt).abs() < 1e-6, "survivor must age");
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "lifetime respawn writes exact-bit values; bit-for-bit equality is the correct check"
+    )]
+    fn attract_lifetime_respawns_at_lifespan() {
+        let mut params = zero_attractor_params();
+        params.attract_gate = 1;
+        params.attract_fraction = 1.0; // everyone survives the fraction gate
+        let mut p = live_particle();
+        p.age = p.lifespan - params.dt * 0.5; // next tick crosses the lifespan
+        step_one(&mut p, &params);
+        // Reset exactly like an OOB particle: home, still, alpha-0 re-fade
+        // (one fade tick applies in the same step, matching the kernel order).
+        assert_eq!(p.position, [-5.0, 2.5]);
+        assert_eq!(p.velocity, [0.0, 0.0]);
+        assert_eq!(p.age, 0.0);
+        assert!((p.alpha - params.dt / params.fade_duration).abs() < 1e-6);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "Active-mode inertness must be exact, not approximate"
+    )]
+    fn attract_gate_off_is_inert() {
+        // With the gate off (live interaction), a particle with a hash above
+        // any fraction and an age beyond its lifespan still steps exactly like
+        // the pre-attract kernel: no kill, no respawn, age pinned to zero.
+        let params = zero_attractor_params(); // attract_gate = 0
+        let mut gated = live_particle();
+        gated.spawn_hash = 0.99;
+        gated.age = 100.0; // way past lifespan; must be ignored and zeroed
+        let mut baseline = gated;
+        baseline.age = 0.0;
+        step_one(&mut gated, &params);
+        step_one(&mut baseline, &params);
+        assert_eq!(gated.position, baseline.position);
+        assert_eq!(gated.velocity, baseline.velocity);
+        assert_eq!(gated.alpha, baseline.alpha);
+        assert_eq!(gated.age, 0.0, "Active mode pins age to zero");
     }
 }

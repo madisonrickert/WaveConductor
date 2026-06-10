@@ -38,6 +38,8 @@
 //! - **`spawn_template`** — optional PNG path whose luminance × alpha weights
 //!   the particle spawn density (empty = horizontal-line layout). Shown as a
 //!   Browse… file picker in the user panel (Plan 11 Phase C).
+//! - **`attract_particle_fraction`** — fraction of particles kept alive during
+//!   attract mode; the rest fade out and stay dead until wake. Dev-only knob.
 //! - **`synth_volume_scale`** — master output gain trim for the synth voice.
 //!   1.0 = unchanged. Lower values reduce kiosk loudness without touching
 //!   system volume.
@@ -145,6 +147,22 @@ pub struct LineSettings {
     )]
     #[serde(default)]
     pub spawn_template: String,
+
+    /// Fraction of particles that stay alive during attract mode (screensaver).
+    /// The rest fade out over the fade duration and stay dead until wake, when
+    /// the normal alpha ramp fades them back in. Survivors are chosen by a
+    /// deterministic per-index hash so the thinning is spatially uniform.
+    /// `1.0` = the full field (mechanism visually off). Dev-only knob.
+    #[setting(
+        default = 0.6_f32,
+        min = 0.2_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Attract particle fraction",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_particle_fraction")]
+    pub attract_particle_fraction: f32,
 
     /// Master output gain trim for the synth voice. `1.0` = unchanged.
     /// Applied as a final multiplier on the `volume` audio param so kiosk
@@ -289,6 +307,10 @@ fn default_gamma() -> f32 {
     1.0
 }
 
+fn default_attract_particle_fraction() -> f32 {
+    0.6
+}
+
 fn default_synth_volume_scale() -> f32 {
     1.0
 }
@@ -355,5 +377,9 @@ mod tests {
             "gravity_constant not preserved"
         );
         assert!((parsed.gamma - 1.0).abs() < 1e-6, "gamma not default");
+        assert!(
+            (parsed.attract_particle_fraction - 0.6).abs() < 1e-6,
+            "attract_particle_fraction not default"
+        );
     }
 }

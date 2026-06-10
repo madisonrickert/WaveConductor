@@ -57,7 +57,7 @@ use crate::line::compute::LineSimParams;
 use crate::line::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
-use crate::line::systems::sim_params::{bake_post_base, bake_sim_params, WindowGeom};
+use crate::line::systems::sim_params::{bake_post_base, bake_sim_params, AttractGate, WindowGeom};
 
 /// Plugin wiring the Line attract driver.
 pub struct LineScreensaverPlugin;
@@ -91,8 +91,17 @@ fn drive_line_attract(
     let frame = choreography::attract_frame(time.elapsed_secs(), bounds);
 
     // --- Bake the sim params via the shared baker (Condition A1). ---------
+    // The attract gate turns on the kernel's attract-only mechanisms: the
+    // fraction kill (a sparser, calmer field — survivors chosen by per-index
+    // spawn hash so the thinning is spatially uniform) and the per-particle
+    // lifetime respawn (the field continuously self-heals back into the spawn
+    // image on staggered ~20-45 s lifespans).
     let (attractors, count) = build_attractor_array(&frame, settings.gravity_constant);
-    sim.params = bake_sim_params(time.delta_secs(), geom, attractors, count);
+    let gate = AttractGate {
+        enabled: true,
+        fraction: settings.attract_particle_fraction,
+    };
+    sim.params = bake_sim_params(time.delta_secs(), geom, attractors, count, gate);
 
     // --- Gravity-smear uniforms: shared base + pulse-scaled g_constant. ---
     bake_post_base(

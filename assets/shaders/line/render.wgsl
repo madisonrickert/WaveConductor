@@ -12,7 +12,10 @@ struct Particle {
     velocity: vec2<f32>,
     original_xy: vec2<f32>,
     alpha: f32,
-    _pad: f32,
+    age: f32,
+    lifespan: f32,
+    spawn_hash: f32,
+    _pad: vec2<f32>,
 };
 
 @group(2) @binding(0) var<storage, read> particles: array<Particle>;
@@ -65,7 +68,13 @@ fn vertex(
 
     let p = particles[particle_index];
     let c = quad_corner(corner_index);
-    let world_pos = vec4<f32>(p.position + c.pos, 0.0, 1.0);
+    // Alpha-0 particles (attract-mode fraction kills, fresh respawns before
+    // their first fade tick) contribute nothing through the alpha blend
+    // (src_alpha = 0 leaves dst untouched), so collapse their quad to a point:
+    // the rasterizer culls the zero-area triangles and the dead particles
+    // cost no fragment work instead of ~13x13 px of no-op blending each.
+    let live = f32(p.alpha > 0.0);
+    let world_pos = vec4<f32>(p.position + c.pos * live, 0.0, 1.0);
 
     var out: VertexOutput;
     out.clip_position = view.clip_from_world * world_pos;
