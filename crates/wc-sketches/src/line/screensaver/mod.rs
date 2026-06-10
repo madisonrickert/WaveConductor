@@ -118,10 +118,14 @@ fn drive_line_attract(
 ///
 /// Each sample's power is baked with `gravity_constant` exactly as the live
 /// mouse/hand writers do (A1 parity). Zero-power samples are skipped so they
-/// don't consume uniform slots (with the ambient floor active all
-/// `PULSE_COUNT` walkers normally pack). `slot` (usize) and the returned count
-/// (u32) advance in lockstep, both capped at `MAX_ATTRACTORS`, avoiding a
-/// numeric `as` cast in the loop (workspace `as_conversions` lint).
+/// don't consume uniform slots — in the settled field that is *all* of them
+/// (zero attractors packed, putting the kernel in inertial drag); only
+/// walkers inside their pulse window pack. If a nonzero ambient floor were
+/// ever restored, every walker would pack every frame — see
+/// [`choreography::AMBIENT_POWER`] for why it must not be. `slot` (usize)
+/// and the returned count (u32) advance in lockstep, both capped at
+/// `MAX_ATTRACTORS`, avoiding a numeric `as` cast in the loop (workspace
+/// `as_conversions` lint).
 #[must_use]
 fn build_attractor_array(
     frame: &choreography::AttractFrame,

@@ -23,9 +23,11 @@
 //! Design intent (operator art direction): a mostly undisturbed field with
 //! small pulses of attraction moving around, creating minor perturbances and
 //! a little motion — explicitly **not** a vortex. The walker periods are
-//! mutually incommensurate and phase-staggered so pulses almost never sync:
-//! over a 30-minute sweep the instantaneous total raw power never exceeds
-//! ~0.7 (a rare two-pulse overlap; cf. the old phantom-hand grab's 15.7) and
+//! mutually incommensurate and phase-staggered so pulses rarely sync. The
+//! schedule recurs every 12,502 s (lcm of the periods); across one full
+//! recurrence the instantaneous total raw power is bounded by the analytic
+//! worst case `PULSE_COUNT · PULSE_PEAK_POWER = 1.05` and measures ~1.03 at
+//! its single triple near-coincidence (vs the old phantom-hand grab's 15.7);
 //! some pulse is active only ~16 % of the time.
 
 /// World-space attractor sample: position + raw power, ready to bake into a
@@ -302,7 +304,11 @@ mod tests {
 
     #[test]
     fn deterministic_same_t_same_frame() {
-        // Same t → identical frame, bit-for-bit (capture reproducibility).
+        // Same t → identical frame, bit-for-bit *within a process/platform*
+        // (capture reproducibility on one machine). Cross-machine equality is
+        // NOT pinned: sin() lowers to platform libm, whose last-ulp results
+        // differ across OS/architecture — which is also why capture baselines
+        // are tolerance-diffed rather than compared exactly.
         for i in 0..40 {
             #[allow(
                 clippy::cast_precision_loss,
@@ -316,27 +322,61 @@ mod tests {
 
     #[test]
     fn total_power_stays_far_below_old_grab() {
-        // Sweep 10 minutes at 50 ms. The staggered incommensurate schedule
-        // permits at most a rare two-pulse overlap: total raw power must stay
-        // under 1.0 — an order of magnitude below a single old phantom hand
-        // (7.0), let alone the old grab total (2·7.0 + dreamers ≈ 15.7).
+        // Sweep one FULL schedule recurrence at 50 ms. The pulse periods
+        // (14 / 19 / 23.5 s = 28 / 38 / 47 half-seconds) realign exactly
+        // every lcm(28, 38, 47) / 2 = 12,502 s, so this sweep covers every
+        // pulse concurrency the schedule can ever produce — a shorter sweep
+        // would be an empirical claim about a sliver of the cycle.
+        //
+        // Analytic worst case: all PULSE_COUNT pulses cresting simultaneously
+        // = PULSE_COUNT · PULSE_PEAK_POWER = 1.05. The recurrence does
+        // contain one triple NEAR-coincidence (t ≈ 12,282.7 s, all three
+        // envelopes ≈ 0.98, measured total ≈ 1.03), so the honest ceiling is
+        // the analytic bound, not "two pulses". Aesthetic judgment: even
+        // that rare 1.05-bounded spike is ~15× below the old grab total
+        // (2·7.0 + dreamers ≈ 15.7) and reads as a slightly firmer nudge,
+        // not a vortex.
+        const RECURRENCE_SECS: f32 = 12_502.0;
+        const STEP_SECS: f32 = 0.05;
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::as_conversions,
+            reason = "test bound arithmetic"
+        )]
+        let analytic_bound = PULSE_COUNT as f32 * PULSE_PEAK_POWER;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::as_conversions,
+            reason = "test iteration count"
+        )]
+        let steps = (RECURRENCE_SECS / STEP_SECS) as u32; // 250,040 samples
         let mut max_total = 0.0_f32;
-        for i in 0..12_000 {
+        for i in 0..=steps {
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::as_conversions,
                 reason = "test loop counter"
             )]
-            let t = i as f32 * 0.05;
+            let t = i as f32 * STEP_SECS;
             let f = attract_frame(t, bounds());
             let total: f32 = f.pulses.iter().map(|p| p.power).sum();
             max_total = max_total.max(total);
         }
         assert!(
-            max_total < 1.0,
-            "instantaneous total power must stay gentle, got {max_total}"
+            max_total <= analytic_bound + 1e-3,
+            "total power must stay within the analytic bound \
+             (PULSE_COUNT × PULSE_PEAK_POWER = {analytic_bound}), got {max_total}"
         );
-        assert!(max_total < OLD_HAND_PEAK_POWER * 0.15);
+        // The triple near-coincidence is real: the sweep must actually find
+        // it (> 1.0), proving the recurrence coverage isn't vacuous.
+        assert!(
+            max_total > 1.0,
+            "full-recurrence sweep should hit the known triple \
+             near-coincidence (~1.03), got {max_total}"
+        );
+        // And the ceiling is still nowhere near the old phantom-hand grab.
+        assert!(max_total < OLD_HAND_PEAK_POWER * 0.2);
     }
 
     #[test]
