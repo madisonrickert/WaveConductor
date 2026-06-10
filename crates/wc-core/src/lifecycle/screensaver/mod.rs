@@ -12,11 +12,12 @@
 //!   layers) cross-fade against.
 //! - Per-tier **present-rate throttling** via `bevy::winit::WinitSettings`
 //!   (`UpdateMode::Reactive { wait }`) — the thermal lever that actually lowers
-//!   the unattended idle frame rate. Capped at `SCREENSAVER_FPS` (30 fps)
-//!   regardless of temperature (the Cool tier), with Warm ≈ 15 fps and Hot ≈ 3
-//!   fps below it. The reactive loop drives the whole schedule, so the cap also
-//!   halves the particle compute dispatch and smear post pass against an
-//!   uncapped display. The prior winit modes are snapshotted on entry
+//!   the unattended idle frame rate. Capped at the operator's "Screensaver FPS
+//!   cap" setting (default 15 fps) regardless of temperature (the Cool tier),
+//!   with Warm ≈ 15 fps and Hot ≈ 3 fps floored at that cap so heat only ever
+//!   lowers the rate. The reactive loop drives the whole schedule, so the cap
+//!   also throttles the particle compute dispatch and smear post pass against
+//!   an uncapped display. The prior winit modes are snapshotted on entry
 //!   (`SavedPresentMode`) and restored *exactly* on any exit. No new
 //!   dependency; built into `bevy_winit`. Only `Screensaver` throttles — the
 //!   pre-screensaver `Idle` window stays at full rate (the sketch is still
@@ -155,36 +156,39 @@ pub fn effective_tier(
     thermal.tier
 }
 
-/// Present-rate cap (frames per second) while the screensaver is showing,
-/// regardless of temperature — the Cool-tier wait is derived from it.
-///
-/// Why 30: the reactive winit loop drives the *whole* schedule, so every
-/// skipped present also skips that frame's particle compute dispatch and smear
-/// post pass. Against an uncapped/ProMotion display (60–120 Hz) the cap cuts
-/// sustained render + compute energy by ≥ 50%, and it composes with the 4 Hz
-/// idle inference throttle already applied on the `MediaPipe` worker
-/// (`IDLE_INFERENCE_HZ`, commit b3d6589a). The attract choreography is gentle
-/// and slow (pulses ~1.2 s, paths spanning minutes) and is a pure function of
-/// wall-clock time, so it reads correctly at 30 fps.
-const SCREENSAVER_FPS: f64 = 30.0;
+/// Guard rails on the persisted `screensaver_fps` setting: a hand-edited TOML
+/// outside the slider's 5–60 range is clamped here rather than producing a
+/// degenerate (zero/negative/absurd) present wait.
+const SCREENSAVER_FPS_MIN: f64 = 1.0;
+const SCREENSAVER_FPS_MAX: f64 = 240.0;
 
 /// Target present interval (frame-to-frame wait) per tier while in the
-/// screensaver. Larger wait = lower fps = less heat. These are the present-rate
-/// half of the thermal ladder; the particle-count / dispatch half lives in each
-/// sketch's attract driver (Seam 3 for Line).
+/// screensaver, capped by the operator's "Screensaver FPS cap" setting
+/// (`cap_fps`, see [`settings::ScreensaverSettings::screensaver_fps`];
+/// default 15). Larger wait = lower fps = less heat. These are the
+/// present-rate half of the thermal ladder; the particle-count / dispatch
+/// half lives in each sketch's attract driver (Seam 3 for Line).
 ///
-/// - Cool = [`SCREENSAVER_FPS`] (30 fps, ~33 ms): rich attract while there is
-///   headroom — this is the temperature-independent screensaver cap.
+/// - Cool = the cap exactly: rich attract while there is headroom — this is
+///   the temperature-independent screensaver rate.
 /// - Warm ≈ 15 fps (66 ms): noticeably calmer, still animated.
-/// - Hot ≈ 3 fps (333 ms): "resting ember" present rate. The ~10× present-rate
-///   drop alone is the cooldown ("Low-Rate Ember", spec §10.1) — there is no
-///   dispatch freeze; that remains a deferred, soak-gated escalation.
+/// - Hot ≈ 3 fps (333 ms): "resting ember" present rate. The ~10× drop from
+///   an uncapped rate alone is the cooldown ("Low-Rate Ember", spec §10.1) —
+///   there is no dispatch freeze; that remains a deferred, soak-gated
+///   escalation.
+///
+/// Warm and Hot floor at the Cool wait (`.max(cap_wait)`) so heat only ever
+/// *lowers* the present rate: a cap below 15 fps would otherwise make the
+/// Warm tier render *faster* than the cool screensaver.
 #[must_use]
-fn tier_present_wait(tier: ThermalTier) -> Duration {
+fn tier_present_wait(tier: ThermalTier, cap_fps: f32) -> Duration {
+    let cap_wait = Duration::from_secs_f64(
+        1.0 / f64::from(cap_fps).clamp(SCREENSAVER_FPS_MIN, SCREENSAVER_FPS_MAX),
+    );
     match tier {
-        ThermalTier::Cool => Duration::from_secs_f64(1.0 / SCREENSAVER_FPS),
-        ThermalTier::Warm => Duration::from_millis(66),
-        ThermalTier::Hot => Duration::from_millis(333),
+        ThermalTier::Cool => cap_wait,
+        ThermalTier::Warm => Duration::from_millis(66).max(cap_wait),
+        ThermalTier::Hot => Duration::from_millis(333).max(cap_wait),
     }
 }
 
@@ -244,10 +248,10 @@ fn save_present_mode(mut commands: Commands<'_, '_>, winit: Res<'_, WinitSetting
 /// `Update` in the `Main` schedule, so the `Active` flip and the
 /// `OnExit(Screensaver)` restore land in tick N+1's `StateTransition`, a
 /// second full wait later. The throttle therefore adds ≤ 2 reactive ticks:
-/// ~66 ms at the 30 fps cap, ≈ 366 ms total against the ~300 ms worst-case
-/// wake documented on the inference throttle. At hotter tiers the two ticks
-/// scale with the wait — ≤ 666 ms at Hot, ≈ 0.97 s total worst case, an
-/// accepted trade in a thermal emergency.
+/// ~133 ms at the default 15 fps cap (~66 ms at a 30 fps cap), ≈ 433 ms total
+/// against the ~300 ms worst-case wake documented on the inference throttle.
+/// At hotter tiers the two ticks scale with the wait — ≤ 666 ms at Hot,
+/// ≈ 0.97 s total worst case, an accepted trade in a thermal emergency.
 ///
 /// Only writes `WinitSettings` when the desired mode changes (avoids churning a
 /// resource every frame).
@@ -263,6 +267,7 @@ fn save_present_mode(mut commands: Commands<'_, '_>, winit: Res<'_, WinitSetting
 fn apply_present_rate(
     thermal: Res<'_, ThermalState>,
     time: Res<'_, Time>,
+    settings: Res<'_, settings::ScreensaverSettings>,
     duty: Option<Res<'_, crate::input::idle_pause::LeapIdlePause>>,
     #[cfg(debug_assertions)] toggles: Option<Res<'_, DebugToggles>>,
     #[cfg(debug_assertions)] capture: Option<Res<'_, crate::capture::config::CaptureConfig>>,
@@ -283,7 +288,7 @@ fn apply_present_rate(
     // `requested_wake` shrinks every tick, so `desired` differs each frame and
     // `WinitSettings` is rewritten per frame (opt-in path only; harmless churn).
     let duty_wake = duty.as_deref().map(|d| d.requested_wake(time.elapsed()));
-    let wait = effective_wait(tier_present_wait(tier), duty_wake);
+    let wait = effective_wait(tier_present_wait(tier, settings.screensaver_fps), duty_wake);
     let desired = UpdateMode::Reactive {
         wait,
         react_to_device_events: true,
@@ -376,17 +381,56 @@ mod tests {
     #[test]
     fn cool_tier_wait_enforces_the_screensaver_fps_cap() {
         // The temperature-independent screensaver cap: even at full thermal
-        // headroom (Cool), presents never exceed SCREENSAVER_FPS.
+        // headroom (Cool), presents never exceed the configured cap — here
+        // the setting's default.
+        let cap = settings::ScreensaverSettings::default().screensaver_fps;
         assert_eq!(
-            tier_present_wait(ThermalTier::Cool),
-            Duration::from_secs_f64(1.0 / SCREENSAVER_FPS)
+            tier_present_wait(ThermalTier::Cool, cap),
+            Duration::from_secs_f64(1.0 / f64::from(cap))
         );
     }
 
     #[test]
-    fn present_wait_increases_with_heat() {
-        assert!(tier_present_wait(ThermalTier::Cool) < tier_present_wait(ThermalTier::Warm));
-        assert!(tier_present_wait(ThermalTier::Warm) < tier_present_wait(ThermalTier::Hot));
+    fn present_wait_never_decreases_with_heat() {
+        // At a generous cap (30 fps) the tier ladder is strictly increasing…
+        assert!(
+            tier_present_wait(ThermalTier::Cool, 30.0) < tier_present_wait(ThermalTier::Warm, 30.0)
+        );
+        assert!(
+            tier_present_wait(ThermalTier::Warm, 30.0) < tier_present_wait(ThermalTier::Hot, 30.0)
+        );
+        // …and at the default 15 fps cap, Warm's nominal ~15 fps floors at the
+        // cap (equal wait) instead of presenting FASTER than the cool tier.
+        let cap = settings::ScreensaverSettings::default().screensaver_fps;
+        assert!(
+            tier_present_wait(ThermalTier::Cool, cap) <= tier_present_wait(ThermalTier::Warm, cap)
+        );
+        assert!(
+            tier_present_wait(ThermalTier::Warm, cap) <= tier_present_wait(ThermalTier::Hot, cap)
+        );
+        // An extreme low cap (5 fps, 200 ms) outwaits Warm's 66 ms everywhere
+        // except Hot's 333 ms.
+        assert_eq!(
+            tier_present_wait(ThermalTier::Warm, 5.0),
+            Duration::from_secs_f64(1.0 / 5.0)
+        );
+        assert_eq!(
+            tier_present_wait(ThermalTier::Hot, 5.0),
+            Duration::from_millis(333)
+        );
+    }
+
+    #[test]
+    fn degenerate_persisted_fps_is_clamped_not_divided_by() {
+        // A hand-edited TOML with fps = 0 (or negative) must not produce an
+        // infinite/zero wait — it clamps to the guard-rail minimum.
+        let wait = tier_present_wait(ThermalTier::Cool, 0.0);
+        assert_eq!(wait, Duration::from_secs_f64(1.0 / SCREENSAVER_FPS_MIN));
+        let wait = tier_present_wait(ThermalTier::Cool, -10.0);
+        assert_eq!(wait, Duration::from_secs_f64(1.0 / SCREENSAVER_FPS_MIN));
+        // And an absurdly high value clamps to the max instead of busy-waiting.
+        let wait = tier_present_wait(ThermalTier::Cool, 100_000.0);
+        assert_eq!(wait, Duration::from_secs_f64(1.0 / SCREENSAVER_FPS_MAX));
     }
 
     #[test]

@@ -55,6 +55,34 @@ pub struct ScreensaverSettings {
     )]
     #[serde(default)]
     pub caption_subline: String,
+
+    /// Present-rate cap (frames per second) while the screensaver is showing,
+    /// regardless of temperature — the Cool-tier wait is derived from it, and
+    /// the hotter tiers' waits floor at it so heat only ever lowers the rate
+    /// further. The reactive winit loop drives the whole schedule, so every
+    /// skipped present also skips that frame's particle compute dispatch and
+    /// smear post pass — the primary attract-mode thermal lever. The attract
+    /// choreography is a pure function of wall-clock time (pulses ~1.2 s,
+    /// paths spanning minutes), so it reads correctly even at low rates.
+    /// Default 15: visually adequate for the gentle wandering-pulse look and
+    /// roughly half the present/compute energy of the previous fixed 30.
+    #[setting(
+        default = 15.0_f32,
+        min = 5.0,
+        max = 60.0,
+        step = 1.0,
+        section = "Attract Mode",
+        category = User,
+        label = "Screensaver FPS cap"
+    )]
+    #[serde(default = "default_screensaver_fps")]
+    pub screensaver_fps: f32,
+}
+
+/// Serde fallback so a config saved before `screensaver_fps` existed still
+/// loads at the documented default.
+fn default_screensaver_fps() -> f32 {
+    15.0
 }
 
 impl ScreensaverSettings {
@@ -83,12 +111,12 @@ mod tests {
     fn has_caption_detects_either_line() {
         let headline_only = ScreensaverSettings {
             caption_headline: "Wave your hands".to_string(),
-            caption_subline: String::new(),
+            ..ScreensaverSettings::default()
         };
         assert!(headline_only.has_caption());
         let subline_only = ScreensaverSettings {
-            caption_headline: String::new(),
             caption_subline: "over the head".to_string(),
+            ..ScreensaverSettings::default()
         };
         assert!(subline_only.has_caption());
     }
@@ -98,6 +126,7 @@ mod tests {
         let s = ScreensaverSettings {
             caption_headline: "   ".to_string(),
             caption_subline: "\t".to_string(),
+            ..ScreensaverSettings::default()
         };
         assert!(!s.has_caption(), "whitespace-only copy must not render");
     }
@@ -111,12 +140,16 @@ mod tests {
     #[test]
     #[allow(
         clippy::expect_used,
-        reason = "test-only: panic on bad TOML is the intended failure mode"
+        clippy::float_cmp,
+        reason = "test-only: panic on bad TOML is the intended failure mode; \
+                  the serde default is an exact literal"
     )]
     fn missing_field_preserves_sibling() {
         let legacy = r#"caption_headline = "hi""#;
         let parsed: ScreensaverSettings = toml::from_str(legacy).expect("legacy TOML must parse");
         assert_eq!(parsed.caption_headline, "hi");
         assert!(parsed.caption_subline.is_empty());
+        // A config saved before the FPS cap existed lands on the default.
+        assert_eq!(parsed.screensaver_fps, 15.0);
     }
 }
