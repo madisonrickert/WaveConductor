@@ -30,9 +30,8 @@ hand-tracking-gestures = [
 # In-process MediaPipe webcam hand-tracking. Pulls the camera sub-feature (the
 # real binary needs a real webcam) and the sketch hand-consumers. Additive to
 # `hand-tracking-gestures`, and in `default`: the deployment binary ships both
-# backends and the runtime "Tracking provider" setting (or the
-# WAVECONDUCTOR_HAND_PROVIDER env pin) decides which one runs — see
-# `src/hand_providers.rs`. The ort/CoreML inference backend is unconditional —
+# backends and the runtime "Tracking provider" setting decides which one runs
+# — see `src/hand_providers.rs`. The ort/CoreML inference backend is unconditional —
 # it is part of `wc-core/hand-tracking-mediapipe`.
 hand-tracking-mediapipe = [
     "wc-core/hand-tracking-mediapipe-camera",

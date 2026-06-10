@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! Startup: install_hand_tracking_providers
-//!   env WAVECONDUCTOR_HAND_PROVIDER?  ──set──▶ pinned for the session
+//!   env WAVECONDUCTOR_HAND_PROVIDER=mock|synthetic? ──▶ test fixture, pinned
 //!   else HandTrackingSettings::provider ──▶ selection::build_registry
 //!                                              │ (installer closures below)
 //!                                              ▼
@@ -27,14 +27,14 @@
 //!     (worker joined, camera/device released), then build_registry again
 //! ```
 //!
-//! Env override semantics (dev/deployment pin): when
-//! `WAVECONDUCTOR_HAND_PROVIDER` is set to `auto`, `leap`, `mediapipe`,
-//! `off`, `mock`, or `synthetic`, it wins over the persisted setting for the
-//! whole session: dropdown changes have no effect (the dropdown itself stays
-//! interactive, with no UI cue yet — see [`HandProviderControl`]), though
-//! Auto's camera-verdict watch still resolves. `mock` and `synthetic` are
-//! deliberately env-only (test fixtures, not user choices). An unrecognized
-//! value warns and defers to the setting.
+//! Env semantics: `WAVECONDUCTOR_HAND_PROVIDER` accepts only the two
+//! **test fixtures** — `mock` (silent) and `synthetic` (sweeping open hand) —
+//! used by the visual-capture harness (`cargo xtask capture`) and headless
+//! runs; a fixture is pinned for the whole session so a persisted real
+//! provider choice can't grab the camera mid-capture. The real providers are
+//! chosen exclusively through the "Tracking provider" setting (the former
+//! `auto`/`leap`/`mediapipe`/`off` env pin is gone); any other value warns
+//! and defers to the setting.
 
 #[cfg(feature = "hand-tracking-gestures")]
 use bevy::prelude::*;
@@ -52,18 +52,14 @@ use wc_core::settings::{HandProviderChoice, HandTrackingSettings};
 ///
 /// Inserted by [`install_hand_tracking_providers`] alongside the registry;
 /// read/written by [`apply_provider_choice`] every frame.
-///
-/// Known follow-up: when env-pinned, the settings dropdown stays fully
-/// interactive with no UI cue that its changes have no effect — the panel
-/// has no grayed-out / "pinned by env" affordance yet.
 #[cfg(feature = "hand-tracking-gestures")]
 #[derive(Resource)]
 pub struct HandProviderControl {
-    /// `true` when `WAVECONDUCTOR_HAND_PROVIDER` pinned the provider at
-    /// startup — dropdown changes have no effect for the whole session
-    /// (the switch arm of [`apply_provider_choice`] early-outs; the camera
-    /// watch still resolves). The dropdown itself stays interactive — see
-    /// the struct docs.
+    /// `true` when `WAVECONDUCTOR_HAND_PROVIDER` installed a `mock` /
+    /// `synthetic` test fixture at startup — dropdown changes have no effect
+    /// for the whole session (the switch arm of [`apply_provider_choice`]
+    /// early-outs; the camera watch still resolves), so a capture run can't
+    /// have its fixture torn down by a persisted real-provider choice.
     env_pinned: bool,
     /// The choice the registry currently reflects; compared against the
     /// setting each frame to detect a dropdown change.
@@ -73,12 +69,11 @@ pub struct HandProviderControl {
     watch: AutoMediaPipeWatch,
 }
 
-/// What `WAVECONDUCTOR_HAND_PROVIDER` resolved to.
+/// What `WAVECONDUCTOR_HAND_PROVIDER` resolved to: one of the two env-only
+/// test fixtures (real providers are dropdown-only; see module docs).
 #[cfg(feature = "hand-tracking-gestures")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvOverride {
-    /// One of the user-facing choices (`auto`/`leap`/`mediapipe`/`off`).
-    Choice(HandProviderChoice),
     /// Silent scripted mock (env-only test fixture).
     Mock,
     /// Mock that emits a synthetic sweeping hand (env-only test fixture).
@@ -87,14 +82,12 @@ enum EnvOverride {
 
 /// Parse a raw `WAVECONDUCTOR_HAND_PROVIDER` value (case-insensitive).
 /// `None` = unset or unrecognized (the caller logs the warning so this stays
-/// pure and testable).
+/// pure and testable). Only the test fixtures parse; the retired real-provider
+/// pins (`auto`/`leap`/`mediapipe`/`off`) fall through to `None` so stale
+/// launch scripts get the warning instead of a silent pin.
 #[cfg(feature = "hand-tracking-gestures")]
 fn parse_env_override(raw: &str) -> Option<EnvOverride> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "auto" => Some(EnvOverride::Choice(HandProviderChoice::Auto)),
-        "leap" => Some(EnvOverride::Choice(HandProviderChoice::Leap)),
-        "mediapipe" => Some(EnvOverride::Choice(HandProviderChoice::MediaPipe)),
-        "off" => Some(EnvOverride::Choice(HandProviderChoice::Off)),
         "mock" => Some(EnvOverride::Mock),
         "synthetic" => Some(EnvOverride::Synthetic),
         _ => None,
@@ -104,7 +97,7 @@ fn parse_env_override(raw: &str) -> Option<EnvOverride> {
 /// Construct and insert the [`ProviderRegistry`] (plus the
 /// [`HandProviderControl`] book-keeping) from the persisted
 /// `HandTrackingSettings::provider` choice, unless
-/// `WAVECONDUCTOR_HAND_PROVIDER` pins one for the session (see module docs).
+/// `WAVECONDUCTOR_HAND_PROVIDER` installs a test fixture (see module docs).
 ///
 /// Runs as a `Startup` system so `Res<HandTrackingSettings>` is available
 /// (settings persistence loads before any user-added system). The persisted
@@ -124,8 +117,8 @@ pub fn install_hand_tracking_providers(
         if parsed.is_none() {
             tracing::warn!(
                 value = %raw,
-                "hand-tracking: unknown WAVECONDUCTOR_HAND_PROVIDER value; \
-                 using the Tracking provider setting"
+                "hand-tracking: WAVECONDUCTOR_HAND_PROVIDER only selects the mock/synthetic \
+                 test fixtures now; using the Tracking provider setting"
             );
         }
         parsed
@@ -133,8 +126,8 @@ pub fn install_hand_tracking_providers(
     let env_pinned = env.is_some();
     if env_pinned {
         tracing::info!(
-            "hand-tracking: WAVECONDUCTOR_HAND_PROVIDER is set; it pins the provider \
-             for this session and the Tracking provider setting is ignored"
+            "hand-tracking: WAVECONDUCTOR_HAND_PROVIDER test fixture installed; it is \
+             pinned for this session and the Tracking provider setting is ignored"
         );
     }
 
@@ -156,10 +149,6 @@ pub fn install_hand_tracking_providers(
             );
             tracing::info!("hand-tracking: synthetic MockProvider installed (open-hand fixture)");
             (registry, AutoMediaPipeWatch::Idle)
-        }
-        Some(EnvOverride::Choice(choice)) => {
-            let built = build_for_choice(choice, &settings);
-            (built.registry, built.watch)
         }
         None => {
             let built = build_for_choice(settings.provider, &settings);
@@ -397,32 +386,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_override_parses_all_documented_values_case_insensitively() {
+    fn env_override_parses_the_test_fixtures_case_insensitively() {
+        assert_eq!(parse_env_override("Mock"), Some(EnvOverride::Mock));
+        assert_eq!(parse_env_override(" mock "), Some(EnvOverride::Mock));
         assert_eq!(
-            parse_env_override("Auto"),
-            Some(EnvOverride::Choice(HandProviderChoice::Auto))
-        );
-        assert_eq!(
-            parse_env_override("LEAP"),
-            Some(EnvOverride::Choice(HandProviderChoice::Leap))
-        );
-        assert_eq!(
-            parse_env_override("mediapipe"),
-            Some(EnvOverride::Choice(HandProviderChoice::MediaPipe))
-        );
-        assert_eq!(
-            parse_env_override(" off "),
-            Some(EnvOverride::Choice(HandProviderChoice::Off))
-        );
-        assert_eq!(parse_env_override("mock"), Some(EnvOverride::Mock));
-        assert_eq!(
-            parse_env_override("synthetic"),
+            parse_env_override("SYNTHETIC"),
             Some(EnvOverride::Synthetic)
         );
     }
 
     #[test]
-    fn env_override_rejects_unknown_values() {
+    fn env_override_rejects_everything_else_including_retired_pins() {
+        // The real-provider pins were removed when the "Tracking provider"
+        // dropdown became the sole selector — a stale launch script must get
+        // the warning + setting fallback, not a silent pin.
+        for retired in ["auto", "leap", "mediapipe", "off"] {
+            assert_eq!(parse_env_override(retired), None, "{retired}");
+        }
         assert_eq!(parse_env_override("webcam"), None);
         assert_eq!(parse_env_override(""), None);
     }
@@ -493,11 +473,13 @@ mod tests {
         (app, stops)
     }
 
-    /// Regression for the env-pin/watch ordering bug: an env-pinned `auto`
-    /// session (`WAVECONDUCTOR_HAND_PROVIDER=auto`, no Leap, camera open
-    /// failed) must still resolve its `MediaPipe` watch and fall back to the
-    /// mock — watch resolution runs BEFORE the env-pin early-out, which only
-    /// disables the dropdown-driven switch.
+    /// Pins the env-pin/watch ordering invariant: watch resolution runs
+    /// BEFORE the pin early-out, which only disables the dropdown-driven
+    /// switch. (Historically reachable via the retired
+    /// `WAVECONDUCTOR_HAND_PROVIDER=auto` pin; today the fixtures install
+    /// with an `Idle` watch, so this is a unit-level guard on
+    /// `apply_provider_choice` itself rather than a reachable startup state —
+    /// kept so a future pin variant can't silently regress the ordering.)
     #[test]
     fn watch_resolves_and_falls_back_even_when_env_pinned() {
         let (mut app, stops) = test_app(

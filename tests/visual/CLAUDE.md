@@ -83,7 +83,7 @@ Schema:
 ```toml
 [scenarios.<name>]
 sketch   = "line"          # -> WAVECONDUCTOR_START_SKETCH (line|flame|dots|cymatics|waves)
-provider = "synthetic"     # -> WAVECONDUCTOR_HAND_PROVIDER (synthetic|mock|leap|auto)
+provider = "synthetic"     # -> WAVECONDUCTOR_HAND_PROVIDER (synthetic|mock — the env var only selects test fixtures)
 config   = "clean"         # "clean" = fresh temp config dir; any other value is a path pinned via WAVECONDUCTOR_CONFIG_DIR
 frames   = [30, 60, 120]   # sim-frame indices to capture (frame 0 = first fully-loaded, settled frame)
 dt       = 0.016666667     # optional fixed timestep in seconds (default 1/60 in the app)

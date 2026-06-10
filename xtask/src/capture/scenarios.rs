@@ -32,7 +32,9 @@ impl Scenarios {
 pub struct Scenario {
     /// Sketch name -> `WAVECONDUCTOR_START_SKETCH`.
     pub sketch: String,
-    /// Hand provider -> `WAVECONDUCTOR_HAND_PROVIDER` (`synthetic`, `mock`, ...).
+    /// Hand provider -> `WAVECONDUCTOR_HAND_PROVIDER` (`synthetic` or `mock`;
+    /// the env var only selects test fixtures — real providers are
+    /// dropdown-only).
     pub provider: String,
     /// `"clean"` (fresh temp config dir) or a path pinned via
     /// `WAVECONDUCTOR_CONFIG_DIR`.
