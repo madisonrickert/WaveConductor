@@ -102,13 +102,18 @@ fn drive_line_attract(
         time.elapsed_secs(),
         settings.gamma,
     );
-    // The smear swells with pulse activity: a faint baseline glow over the
-    // settled field (0.10 — gentled from the old design's 0.35 so the particle
-    // picture, not the trail echo, dominates at rest), rising to 0.35 at a
-    // pulse crest (vs the old 1.0 grab; capture-tuned — 0.60 still blanketed
-    // the frame in concentric rings). Scaled into the smear shader's expected
-    // magnitude range (matches the live coupling's ~15000 ceiling).
-    post.g_constant = (0.10 + 0.25 * frame.activity) * 15_000.0;
+    // The smear breathes EXACTLY like the live sketch at rest: the same
+    // 5-second triangle wave the audio coupling drives, with `frame.activity`
+    // standing in for `grouped_upness` (both 0 in a settled field). An earlier
+    // design pinned a flat 0.10x15000 baseline here, which sat at the dim end
+    // of the live breathing range (peaks 0.5x15000) — the whole window
+    // visibly dimmed at attract entry (operator report 2026-06-10; measured
+    // ~15-20% mean-brightness drop via capture, exaggerated to the eye by
+    // AgX's shoulder). Matching the live formula removes the brightness step
+    // at the Active -> Screensaver boundary by construction.
+    post.g_constant = crate::line::audio_coupling::triangle_wave_approx(time.elapsed_secs() / 5.0)
+        * (frame.activity + 0.5)
+        * 15_000.0;
     // Soften the per-step pull as activity rises, mirroring the live coupling.
     post.i_mouse_factor = (1.0 / 15.0) / (frame.activity + 1.0);
 }

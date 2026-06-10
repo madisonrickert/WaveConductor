@@ -235,7 +235,12 @@ fn push_audio(sender: &mut AudioCommandSender, command: AudioCommand) {
 /// Three harmonics give a smooth, audible triangle without the high-order
 /// ringing of an exact triangle wave — perceptually identical for a 5-second
 /// visual modulation. The `8/π²` prefactor normalises peak amplitude to ±1.
-fn triangle_wave_approx(t: f32) -> f32 {
+///
+/// `pub(crate)`: the Line attract driver
+/// ([`crate::line::screensaver::drive_line_attract`]) drives its smear with
+/// the same wave so the attract-mode glow matches the live rest state
+/// exactly (no brightness step at the Active → Screensaver boundary).
+pub(crate) fn triangle_wave_approx(t: f32) -> f32 {
     use std::f32::consts::PI;
     // 8/π² ≈ 0.8106 — Fourier prefactor for the normalised triangle series.
     (8.0 / (PI * PI)) * (t.sin() - (1.0 / 9.0) * (3.0 * t).sin() + (1.0 / 25.0) * (5.0 * t).sin())
