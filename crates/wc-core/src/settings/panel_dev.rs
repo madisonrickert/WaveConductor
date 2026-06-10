@@ -228,14 +228,12 @@ fn draw_hand_tuning_controls(
         // Calibration now reads the PRE-deadzone signal directly ("Grab raw
         // (‰)" in the Hand tracking grid), so there is no need to zero the
         // deadzone first — the raw readout is unaffected by the slider.
-        ui.label(
-            egui::RichText::new(
-                "Open-hand calibration: hold your hand open and relaxed, read the rest \
-                 floor from \"Grab raw (‰)\" above, then set the deadzone just above it \
-                 (slider value = ‰ ÷ 1000, e.g. raw 60‰ → deadzone 0.07).",
-            )
-            .size(10.0)
-            .color(style.text_color_dim),
+        hint_label(
+            ui,
+            style,
+            "Open-hand calibration: hold your hand open and relaxed, read the rest \
+             floor from \"Grab raw (‰)\" above, then set the deadzone just above it \
+             (slider value = ‰ ÷ 1000, e.g. raw 60‰ → deadzone 0.07).",
         );
         ui.add_space(2.0);
     }
@@ -254,6 +252,33 @@ fn draw_hand_tuning_controls(
             .text("Smoothing min cutoff (Hz)"),
     );
     ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));
+}
+
+/// Fixed wrap width for multi-line hint labels in the dev panel.
+///
+/// The panel's `Area` pins `max_width` to 480 px; subtract the frame padding
+/// (2 × 20 px) and a scrollbar allowance and 400 px is always available. The
+/// width must be a constant: a default-wrapped label re-measures against
+/// `ui.available_width()` every frame, and inside the panel's `ScrollArea`
+/// that width shifts slightly as live values (diagnostics, inspector floats)
+/// change the content width — so the wrap points oscillate and the hint text
+/// visibly flickers between layouts. Wrapping inside a fixed-width scope
+/// makes the layout identical every frame.
+const HINT_WRAP_WIDTH: f32 = 400.0;
+
+/// Draw a small dim multi-line hint at a fixed wrap width (see
+/// [`HINT_WRAP_WIDTH`] for why the width must not track the live
+/// `available_width`). Use this for every multi-line hint added to the dev
+/// panel so none of them reflow-flicker.
+fn hint_label(ui: &mut bevy_egui::egui::Ui, style: &OverlayStyle, text: &str) {
+    ui.scope(|ui| {
+        ui.set_max_width(HINT_WRAP_WIDTH);
+        ui.label(
+            bevy_egui::egui::RichText::new(text)
+                .size(10.0)
+                .color(style.text_color_dim),
+        );
+    });
 }
 
 /// Renders the curated "HAND TRACKING" diagnostic grid inside the dev panel.
