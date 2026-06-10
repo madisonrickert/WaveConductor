@@ -21,9 +21,14 @@
 //!      — entropy-driven filter cutoff; less entropy → higher cutoff.
 //!    - `noise_freq = 2000.0 * normalized_variance_length` — spreading the
 //!      cloud raises the noise modulator frequency.
-//!    - `volume = max(0, grouped_upness - 0.05) * 5` — synth speaks only when
-//!      particles are tightly clustered *and* moving (the v4 "gathering" cue).
-//!      The `-0.05` threshold creates a silence floor under low-action states.
+//!    - `volume = max(0, grouped_upness - 0.05) × 5 × hand_drive ×
+//!      synth_volume_scale` — synth speaks only when particles are tightly
+//!      clustered *and* moving (the v4 "gathering" cue). The `-0.05` threshold
+//!      creates a silence floor under low-action states. `hand_drive`
+//!      ([`super::leap_attractors::HandAudioDrive`]) scales loudness
+//!      continuously with grab strength and hand distance (1.0 for
+//!      mouse-driven interaction); `synth_volume_scale` stays the final
+//!      master fader. See `line_synth_volume` below.
 //!
 //! 2. **Shader uniforms** — overwrites two fields on [`super::post_process::LinePostParams`]
 //!    (which the [`super::systems::sim_params::update_sim_params`] system also
@@ -49,6 +54,7 @@ use bevy::prelude::*;
 use wc_core::audio::command::AudioCommand;
 use wc_core::audio::ring::AudioCommandSender;
 
+use super::leap_attractors::HandAudioDrive;
 use super::particle_stats::ParticleStats;
 use super::post_process::LinePostParams;
 
@@ -77,6 +83,10 @@ pub fn drive_audio_and_shader(
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     mut post: ResMut<'_, LinePostParams>,
     settings: Res<'_, super::settings::LineSettings>,
+    // Continuous hand-loudness drive, maintained by
+    // `super::leap_attractors::update_hand_audio_drive` (1.0 when interaction
+    // is mouse-driven). Initialised by `LineLeapAttractorsPlugin`.
+    hand_drive: Res<'_, HandAudioDrive>,
     // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
     // only in debug builds). Placed last so the release signature is unchanged.
     #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
@@ -143,10 +153,13 @@ pub fn drive_audio_and_shader(
             &mut audio_cmd,
             AudioCommand::SetLineParam {
                 key: "volume",
-                // Threshold + scale: silent below 0.05, scaled ×5 above.
-                // Then multiplied by the user-configurable volume trim from
-                // `LineSettings::synth_volume_scale` (default 1.0).
-                value: (stats.grouped_upness - 0.05).max(0.0) * 5.0 * settings.synth_volume_scale,
+                // grouped_upness envelope × hand drive × master fader —
+                // see `line_synth_volume` for the per-term breakdown.
+                value: line_synth_volume(
+                    stats.grouped_upness,
+                    hand_drive.0,
+                    settings.synth_volume_scale,
+                ),
             },
         );
         // **Pad evolution envelope** — drives the slow modulator-depth growth
@@ -178,6 +191,25 @@ pub fn drive_audio_and_shader(
     // `i_mouse_factor` softens the mouse-pull contribution as upness rises:
     // 1/15 baseline, halved as groupedUpness approaches 1.
     post.i_mouse_factor = (1.0 / 15.0) / (stats.grouped_upness + 1.0);
+}
+
+/// Synth `volume` param for one frame.
+///
+/// Term by term:
+/// - `(grouped_upness − 0.05).max(0)` — the particle-field envelope with a
+///   silence floor: below 0.05 of upness the synth is fully silent (the v4
+///   low-action gate).
+/// - `× 5.0` — v4's gain constant mapping the envelope's 0–2.5 swing onto the
+///   synth's expected 0–12.25 volume range.
+/// - `× hand_drive` — continuous grab-strength × hand-distance loudness from
+///   [`HandAudioDrive`] (1.0 for mouse-driven interaction, so click audio is
+///   unchanged). Applied *before* the master fader so the fader's meaning is
+///   stable regardless of input device.
+/// - `× volume_scale` — `LineSettings::synth_volume_scale`, the
+///   user-configurable master fader (default 1.0), deliberately the last
+///   multiplier.
+pub(crate) fn line_synth_volume(grouped_upness: f32, hand_drive: f32, volume_scale: f32) -> f32 {
+    (grouped_upness - 0.05).max(0.0) * 5.0 * hand_drive * volume_scale
 }
 
 /// Push an [`AudioCommand`] onto the ring, logging at `warn` if the ring is
@@ -214,6 +246,38 @@ fn triangle_wave_approx(t: f32) -> f32 {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synth_volume_scales_linearly_with_hand_drive() {
+        let full = line_synth_volume(2.5, 1.0, 1.0);
+        let half = line_synth_volume(2.5, 0.5, 1.0);
+        let zero = line_synth_volume(2.5, 0.0, 1.0);
+        assert!(full > 0.0);
+        assert_eq!(half, full * 0.5, "half drive must halve the volume");
+        assert_eq!(zero, 0.0, "zero drive must silence the synth");
+    }
+
+    #[test]
+    fn synth_volume_drive_one_matches_legacy_formula() {
+        // hand_drive = 1.0 (mouse-driven / default) must reproduce the
+        // pre-drive formula exactly: (g − 0.05).max(0) × 5 × scale.
+        let g = 1.4;
+        assert_eq!(
+            line_synth_volume(g, 1.0, 1.0),
+            (g - 0.05_f32).max(0.0) * 5.0
+        );
+        // Silence floor still applies below 0.05 upness.
+        assert_eq!(line_synth_volume(0.04, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn synth_volume_master_fader_is_final_multiplier() {
+        // volume_scale trims the already-drive-scaled value, so the fader's
+        // meaning is independent of input device.
+        let unscaled = line_synth_volume(2.0, 0.7, 1.0);
+        let scaled = line_synth_volume(2.0, 0.7, 0.25);
+        assert_eq!(scaled, unscaled * 0.25);
+    }
 
     #[test]
     fn triangle_wave_zero_at_origin() {
