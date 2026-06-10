@@ -48,6 +48,8 @@ wc-core = { workspace = true, features = ["thermal-sensor"] }
 wc-sketches = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Display-sleep inhibitor for the kiosk: see the workspace Cargo.toml comment.
+keepawake = { workspace = true }
 # Optional: pulled in when the `hand-tracking-gestures` feature is active.
 # Waveconductor is native-only so no wasm target table needed here.
 leaprs = { workspace = true, optional = true }

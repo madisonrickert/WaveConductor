@@ -6,10 +6,10 @@
 //! - The [`in_screensaver`] run-condition (parallel to
 //!   [`crate::sketch::sketch_active`]) so a sketch gates its attract systems on
 //!   "this sketch is up AND the screensaver is showing".
-//! - The core [`settings::ScreensaverSettings`] resource (operator caption).
-//! - The instruction-caption [`overlay`] (renders only when copy is set — D6).
-//! - The [`fade::ScreensaverFade`] envelope the overlay (and future attract
-//!   layers) cross-fade against.
+//! - The core [`settings::ScreensaverSettings`] resource (the FPS cap; the
+//!   former operator caption was cut 2026-06-10 — see the settings module).
+//! - The [`fade::ScreensaverFade`] envelope attract layers can cross-fade
+//!   against.
 //! - Per-tier **present-rate throttling** via `bevy::winit::WinitSettings`
 //!   (`UpdateMode::Reactive { wait }`) — the thermal lever that actually lowers
 //!   the unattended idle frame rate. Capped at the operator's "Screensaver FPS
@@ -36,7 +36,7 @@
 //!
 //! ## What lives here vs. in the sketch
 //!
-//! The framework owns the *lifecycle* (enter/exit, fade, caption, present rate,
+//! The framework owns the *lifecycle* (enter/exit, fade, present rate,
 //! tier signal). Each sketch owns its *content* — its attract choreography runs
 //! as systems gated on `in_screensaver(AppState::That)` (Seam 3 for Line). A
 //! sketch that registers no performer is **not** a black screen: because the
@@ -46,7 +46,6 @@
 //! deferred (spec §6); the framework already supports them via [`in_screensaver`].
 
 pub mod fade;
-pub mod overlay;
 pub mod run_condition;
 pub mod settings;
 
@@ -54,7 +53,6 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};
-use bevy_egui::EguiPrimaryContextPass;
 
 #[cfg(debug_assertions)]
 use crate::debug::DebugToggles;
@@ -77,14 +75,13 @@ pub struct ScreensaverPlugin;
 
 impl Plugin for ScreensaverPlugin {
     fn build(&self, app: &mut App) {
-        // Operator caption settings (persisted, User panel).
+        // Attract-mode settings (persisted, User panel).
         app.register_sketch_settings::<settings::ScreensaverSettings>();
 
-        // Fade envelope + caption overlay.
+        // Fade envelope (consumed by attract layers that want a smooth
+        // appear/disappear; the caption overlay that used to read it is gone).
         app.init_resource::<fade::ScreensaverFade>();
         app.add_systems(Update, fade::drive_screensaver_fade);
-        // egui caption overlay — inert in headless harnesses without EguiPlugin.
-        app.add_systems(EguiPrimaryContextPass, overlay::draw_caption_overlay);
 
         // Enter/exit lifecycle.
         app.add_systems(OnEnter(SketchActivity::Screensaver), show);

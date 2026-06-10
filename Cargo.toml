@@ -66,6 +66,12 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Kiosk display-sleep inhibitor (macOS IOPMAssertion / Windows
+# SetThreadExecutionState / Linux D-Bus): gallery installs idle into attract
+# mode with no input for hours, and without an assertion the OS dims and then
+# sleeps the display ~1 minute in (observed 2026-06-10 as "screen dimming
+# during attract mode"). MIT.
+keepawake = "0.6"
 # Audio (Plan 4): cross-platform I/O, DSP graph, FFT, lock-free rings.
 cpal = "0.16"
 fundsp = { version = "0.21", default-features = false }

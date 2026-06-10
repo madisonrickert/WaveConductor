@@ -16,8 +16,7 @@
 //! `MinimalPlugins` omits `WinitPlugin`, but `test_app` inserts a
 //! `WinitSettings` resource by hand, so the present-rate throttle systems
 //! (snapshot, throttle, restore) run **live** against it here — there is simply
-//! no window presenting. `EguiPlugin` is likewise omitted, so the caption
-//! overlay is inert (it early-returns without an egui context). These
+//! no window presenting. `EguiPlugin` is likewise omitted. These
 //! complement the unit tests colocated in the framework modules.
 
 use bevy::prelude::*;

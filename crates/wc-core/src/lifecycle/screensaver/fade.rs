@@ -1,10 +1,11 @@
 //! Screensaver fade envelope (Plan 11.8, Seam 2).
 //!
 //! A single 0..1 value that ramps toward `1.0` while the screensaver is active
-//! and back toward `0.0` when it is not. The caption overlay (and any future
-//! attract layer that wants to appear/disappear gracefully) multiplies its
-//! opacity by this value so the transition into and out of attract mode is a
-//! smooth fade rather than a snap.
+//! and back toward `0.0` when it is not. An attract layer that wants to
+//! appear/disappear gracefully multiplies its opacity by this value so the
+//! transition into and out of attract mode is a smooth fade rather than a
+//! snap. (The instruction-caption overlay that originally consumed it was cut
+//! 2026-06-10; the envelope stays for the attract-mode color/visual layers.)
 //!
 //! Kept deliberately tiny and framework-level (not Line-specific): the Line
 //! attract driver runs its own per-pulse choreography; this is only the
@@ -17,13 +18,13 @@ use bevy::prelude::*;
 use crate::lifecycle::state::SketchActivity;
 
 /// How long the fade takes to travel the full 0↔1 range, in seconds. Slow
-/// enough to read as a deliberate dissolve, fast enough that an operator
-/// glancing over sees the caption promptly.
+/// enough to read as a deliberate dissolve, fast enough that the attract
+/// content arrives promptly.
 const FADE_DURATION_SECS: f32 = 1.5;
 
 /// Coarse attract-mode opacity envelope. `0.0` = fully hidden (not in attract),
 /// `1.0` = fully shown. Ramps linearly between the two as the screensaver state
-/// toggles. Read by the caption overlay; available to future attract layers.
+/// toggles. Available to attract layers.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct ScreensaverFade {
     /// Current envelope value in `0..=1`.

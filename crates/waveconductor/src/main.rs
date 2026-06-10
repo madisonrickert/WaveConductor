@@ -37,6 +37,12 @@ const LINE_BACKGROUND_PATH: &str = "assets/sketches/line/line_background.ogg";
 
 fn main() {
     init_tracing();
+    // Hold the OS display-sleep assertion for the whole process: a gallery
+    // install idles into attract mode with no mouse/keyboard input for hours,
+    // and without this macOS dims the panel ~1 minute in (observed as "the
+    // screen dims during attract mode") and eventually sleeps it. The handle
+    // releases the assertion on drop, i.e. at process exit.
+    let _keep_display_awake = inhibit_display_sleep();
     let mut app = App::new();
     app
         // v4 Line renders against a black background; Bevy defaults to gray.
@@ -263,6 +269,35 @@ fn apply_startup_sketch_override(
                 value = %name,
                 "WAVECONDUCTOR_START_SKETCH: unknown sketch name; starting at Home"
             );
+        }
+    }
+}
+
+/// Ask the OS to keep the display awake (and undimmed) while the app runs.
+///
+/// `keepawake` maps to `IOPMAssertionCreateWithName` on macOS,
+/// `SetThreadExecutionState` on Windows, and the D-Bus inhibitor portals on
+/// Linux — covering both the dev laptop and the deployment NUC. Failure is
+/// non-fatal: the app still runs, the operator just has to lengthen the OS
+/// display-sleep timeout by hand, so we log and continue rather than unwrap.
+fn inhibit_display_sleep() -> Option<keepawake::KeepAwake> {
+    match keepawake::Builder::default()
+        .display(true)
+        .reason("Interactive art installation; attract mode must stay visible")
+        .app_name("WaveConductor")
+        .app_reverse_domain("dev.waveconductor.app")
+        .create()
+    {
+        Ok(handle) => {
+            tracing::info!("display-sleep inhibitor active (kiosk display stays awake)");
+            Some(handle)
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "could not inhibit display sleep; the OS may dim the display during attract mode"
+            );
+            None
         }
     }
 }
