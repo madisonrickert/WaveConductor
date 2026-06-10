@@ -371,15 +371,17 @@ fn refill_metrics(d: &mut ProviderDiagnostics, worker_diag: &MediaPipeWorkerDiag
         "Inference interval",
         worker_diag.inference_interval,
     ));
-    // Which rate cap governs the worker right now: the idle throttle
-    // (Idle/Screensaver, 4 Hz) or the configured full rate. Static strings —
-    // no per-poll allocation.
+    // Whether the idle throttle was requested (app is Idle/Screensaver) or
+    // off (Active or Home). Static strings — no per-poll allocation.
+    // The effective inference period is always visible via "Inference interval"
+    // above, which stays honest when max_hz is already slower than
+    // IDLE_INFERENCE_HZ (the configured rate is authoritative in that case).
     d.metrics.push(ProviderMetric::text(
-        "Inference cap",
+        "Idle throttle",
         if worker_diag.idle_throttled {
-            "idle (4 Hz)"
+            "requested"
         } else {
-            "full rate"
+            "off"
         },
     ));
     d.metrics
@@ -702,15 +704,21 @@ mod tests {
     }
 
     #[test]
-    fn idle_metric_label_matches_the_idle_hz_constant() {
-        // The dev panel's "Inference cap" metric hardcodes the rate in a
-        // static string ("idle (4 Hz)") because ProviderMetric::text takes
-        // &'static str (no per-poll allocation). Pin the constant so a retune
-        // updates the label too.
+    fn idle_metric_label_is_hz_independent() {
+        // The dev panel's "Idle throttle" metric uses "requested"/"off"
+        // (static strings, no per-poll allocation) rather than embedding the
+        // Hz value. This keeps the label honest when max_hz is already slower
+        // than IDLE_INFERENCE_HZ — the configured rate is authoritative then,
+        // so showing a Hz would be misleading. The actual inference period is
+        // always visible via the "Inference interval" metric.
+        //
+        // Pin IDLE_INFERENCE_HZ here anyway: it drives the wake-latency
+        // contract documented in worker.rs; a retune requires updating both
+        // the constant's doc and the AGENTS.md comment.
         assert_eq!(
             worker::IDLE_INFERENCE_HZ,
             4,
-            "IDLE_INFERENCE_HZ changed: update the static 'idle (4 Hz)' label in poll()"
+            "IDLE_INFERENCE_HZ changed: update the wake-latency contract doc in worker.rs"
         );
     }
 

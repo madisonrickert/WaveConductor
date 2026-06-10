@@ -84,8 +84,13 @@ pub struct MediaPipeWorkerDiagnostics {
     pub inference_interval: Duration,
     /// Cumulative count of pipeline (inference) errors since worker start.
     pub pipeline_errors: u64,
-    /// Whether the idle throttle ([`IDLE_INFERENCE_HZ`]) governed this frame's
-    /// rate cap. Surfaced as the dev panel's "Inference cap" metric.
+    /// Whether the idle throttle ([`IDLE_INFERENCE_HZ`]) was *requested* for
+    /// this frame (app is in `Idle`/`Screensaver`). Surfaced as the dev
+    /// panel's "Idle throttle" metric ("requested" / "off"). When `true`, the
+    /// effective cap is `max(configured max_hz interval, IDLE_INFERENCE_HZ
+    /// interval)` — if `max_hz` is already slower than [`IDLE_INFERENCE_HZ`],
+    /// the configured rate stays authoritative; the actual inference period is
+    /// always visible via [`Self::inference_interval`].
     pub idle_throttled: bool,
 }
 
@@ -430,6 +435,7 @@ fn no_camera_status() -> ProviderStatus {
 mod tests {
     use super::super::capture::MockFrameSource;
     use super::super::inference::{HandInference, InferenceError, Tensor};
+    use super::super::pipeline::fixtures as pipeline_fixtures;
     use super::super::pipeline::PipelineConfig;
     use super::*;
     use crate::input::state::{PrimaryState, TrackingFlow};
@@ -498,66 +504,18 @@ mod tests {
         cell
     }
 
-    /// A pipeline whose mocks emit ONE confident hand on every processed frame
-    /// (mirrors `pipeline::tests::counting_pipeline`: one hot central palm
-    /// anchor → a 0.2×0.2 detection; landmark stage returns well-spread image
-    /// landmarks with high presence). Used to pin the wake contract: a
-    /// throttled frame that sees a hand must still emit a hand-bearing
-    /// `WorkerMsg::Hands`.
+    /// A pipeline whose mocks emit ONE confident hand on every processed frame.
+    /// Uses the shared [`super::pipeline::fixtures`] for the palm and landmark
+    /// mock outputs: one hot central palm anchor → a 0.2×0.2 detection; the
+    /// landmark stage returns well-spread image landmarks with presence 0.98.
+    /// Used to pin the wake contract: a throttled frame that sees a hand must
+    /// still emit a hand-bearing `WorkerMsg::Hands`.
     fn hand_pipeline() -> Pipeline {
-        // Palm: one hot stride-8 central anchor; every other anchor drops.
-        let mut scores = vec![-100.0f32; 2016];
-        let hot_anchor = (12 * 24 + 12) * 2;
-        scores[hot_anchor] = 100.0;
-        let mut boxes = vec![0.0f32; 2016 * 18];
-        let hot_box = hot_anchor * 18;
-        boxes[hot_box + 2] = 192.0 * 0.2;
-        boxes[hot_box + 3] = 192.0 * 0.2;
-        boxes[hot_box + 5] = 192.0 * 0.1;
-        boxes[hot_box + 9] = -192.0 * 0.1;
         let palm = StaticInference {
-            outputs: vec![
-                Tensor {
-                    data: boxes,
-                    shape: vec![1, 2016, 18],
-                },
-                Tensor {
-                    data: scores,
-                    shape: vec![1, 2016, 1],
-                },
-            ],
+            outputs: pipeline_fixtures::hot_anchor_palm_outputs(),
         };
-        // Landmark: spread, centre-of-crop image landmarks (well inside the
-        // content rect and over the spread gates) with presence 0.98.
-        let mut lms = vec![112.0f32; 63];
-        let mut set = |i: usize, x: f32, y: f32| {
-            lms[i * 3] = x;
-            lms[i * 3 + 1] = y;
-        };
-        set(0, 112.0, 160.0); // wrist
-        set(9, 112.0, 90.0); // middle MCP
-        set(5, 85.0, 110.0); // index MCP
-        set(17, 140.0, 110.0); // pinky MCP
-        set(12, 112.0, 50.0); // middle tip
         let landmark = StaticInference {
-            outputs: vec![
-                Tensor {
-                    data: lms,
-                    shape: vec![1, 63],
-                },
-                Tensor {
-                    data: vec![0.98], // presence: confidently a hand
-                    shape: vec![1, 1],
-                },
-                Tensor {
-                    data: vec![0.9], // handedness: Right
-                    shape: vec![1, 1],
-                },
-                Tensor {
-                    data: super::super::pipeline::fixtures::open_world_tensor(),
-                    shape: vec![1, 63],
-                },
-            ],
+            outputs: pipeline_fixtures::confident_spread_landmark_outputs(),
         };
         Pipeline::new(
             Box::new(palm),

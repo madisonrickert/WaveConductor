@@ -82,6 +82,13 @@ pub trait FrameSource {
     /// skipping the MJPEG/YUYV→RGB decode, which is the dominant per-frame CPU
     /// cost of a dropped frame and therefore most of the throttle's thermal win.
     ///
+    /// **Implementation contract:** an implementation must consume the same
+    /// frame from the underlying sequence that [`Self::next_frame`] would have
+    /// consumed next (sequencing parity) — a discard never skips or reorders
+    /// relative to a processing call. A scripted source (e.g.
+    /// [`MockFrameSource`]) advances its cursor exactly as `next_frame` would;
+    /// a real camera discards the head of its capture queue.
+    ///
     /// # Errors
     /// Returns [`CaptureError`] if the camera is unavailable or a read fails.
     fn discard_frame(&mut self) -> Result<bool, CaptureError>;

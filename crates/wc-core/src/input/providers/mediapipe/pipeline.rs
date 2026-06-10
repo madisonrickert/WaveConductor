@@ -1241,7 +1241,7 @@ fn pick_landmark_outputs(out: &[Tensor]) -> Result<LandmarkOutputs<'_>, Inferenc
 }
 
 /// Test fixtures shared between this module's tests and the worker's
-/// ([`super::worker`]): plausible WORLD-landmark mock data.
+/// ([`super::worker`]): plausible mock data for the palm and landmark stages.
 ///
 /// Gesture signals derive from the landmark model's world output, and
 /// [`super::signals::hand_scale`] divides by the wrist→middle-MCP distance — a
@@ -1252,6 +1252,7 @@ fn pick_landmark_outputs(out: &[Tensor]) -> Result<LandmarkOutputs<'_>, Inferenc
 pub(crate) mod fixtures {
     use bevy::math::Vec3;
 
+    use super::super::inference::Tensor;
     use crate::input::hand::{LandmarkIndex, LANDMARK_COUNT};
 
     /// An open right hand in the landmark model's WORLD space: metric metres,
@@ -1306,6 +1307,87 @@ pub(crate) mod fixtures {
     /// [`open_world_hand`] as ready-to-mock `[1, 63]` tensor data.
     pub(crate) fn open_world_tensor() -> Vec<f32> {
         world_tensor(&open_world_hand())
+    }
+
+    /// A plausibly spread mock hand in landmark-crop pixels: wrist + key
+    /// MCPs + middle tip separated so all trackability gates pass. Centre-of-
+    /// crop placement keeps the mock away from frame edges, so tests that
+    /// expect a healthy hand are not inadvertently exercising the
+    /// edge-invalidation path.
+    ///
+    /// Shared between [`super::tests::counting_pipeline_with_config`]
+    /// (default `lms` argument) and the worker's
+    /// [`super::super::worker`] test fixture.
+    pub(crate) fn spread_image_landmarks() -> Vec<f32> {
+        let mut lms = vec![112.0f32; 63];
+        let mut set = |i: usize, x: f32, y: f32| {
+            lms[i * 3] = x;
+            lms[i * 3 + 1] = y;
+        };
+        set(0, 112.0, 160.0); // wrist
+        set(9, 112.0, 90.0); // middle MCP
+        set(5, 85.0, 110.0); // index MCP
+        set(17, 140.0, 110.0); // pinky MCP
+        set(12, 112.0, 50.0); // middle tip
+        lms
+    }
+
+    /// Palm mock outputs: one hot central stride-8 anchor producing a 0.2×0.2
+    /// detection at the frame centre; all other 2015 anchors score −100 and
+    /// drop. Returns the two tensors `[boxes [1,2016,18], scores [1,2016,1]]`
+    /// in the order the pipeline's `pick_palm_outputs` selects them by shape.
+    ///
+    /// Shared between [`super::tests::counting_pipeline_with_config`] and the
+    /// worker's [`super::super::worker`] test fixture.
+    pub(crate) fn hot_anchor_palm_outputs() -> Vec<Tensor> {
+        let mut scores = vec![-100.0f32; 2016];
+        let hot_anchor = (12 * 24 + 12) * 2; // central stride-8 cell, first anchor
+        scores[hot_anchor] = 100.0;
+        let mut boxes = vec![0.0f32; 2016 * 18];
+        let hot_box = hot_anchor * 18;
+        boxes[hot_box + 2] = 192.0 * 0.2;
+        boxes[hot_box + 3] = 192.0 * 0.2;
+        boxes[hot_box + 5] = 192.0 * 0.1;
+        boxes[hot_box + 9] = -192.0 * 0.1;
+        vec![
+            Tensor {
+                data: boxes,
+                shape: vec![1, 2016, 18],
+            },
+            Tensor {
+                data: scores,
+                shape: vec![1, 2016, 1],
+            },
+        ]
+    }
+
+    /// Landmark mock outputs for one confident spread right hand:
+    /// [`spread_image_landmarks`] image landmarks, presence = 0.98,
+    /// handedness = 0.9 (Right), and [`open_world_tensor`] world landmarks.
+    /// Returns four tensors in declared model output order (image, presence,
+    /// handedness, world), matching what `pick_landmark_outputs` expects.
+    ///
+    /// Shared between [`super::tests::counting_pipeline`] and the worker's
+    /// [`super::super::worker`] test fixture.
+    pub(crate) fn confident_spread_landmark_outputs() -> Vec<Tensor> {
+        vec![
+            Tensor {
+                data: spread_image_landmarks(),
+                shape: vec![1, 63],
+            },
+            Tensor {
+                data: vec![0.98], // presence: confidently a hand
+                shape: vec![1, 1],
+            },
+            Tensor {
+                data: vec![0.9], // handedness: Right
+                shape: vec![1, 1],
+            },
+            Tensor {
+                data: open_world_tensor(),
+                shape: vec![1, 63],
+            },
+        ]
     }
 }
 
@@ -1537,18 +1619,10 @@ mod tests {
 
     /// A plausibly spread mock hand (wrist + MCPs + middle tip placed apart) in
     /// landmark-crop pixels, for tests that need the geometry gates to pass.
+    /// Delegates to [`fixtures::spread_image_landmarks`] so the worker tests
+    /// share the same construction.
     fn spread_landmarks() -> Vec<f32> {
-        let mut lms = vec![112.0f32; 63];
-        let mut set = |i: usize, x: f32, y: f32| {
-            lms[i * 3] = x;
-            lms[i * 3 + 1] = y;
-        };
-        set(0, 112.0, 160.0); // wrist
-        set(9, 112.0, 90.0); // middle MCP
-        set(5, 85.0, 110.0); // index MCP
-        set(17, 140.0, 110.0); // pinky MCP
-        set(12, 112.0, 50.0); // middle tip
-        lms
+        fixtures::spread_image_landmarks()
     }
 
     /// Image landmarks for an OPEN hand tilted toward the camera: perspective
@@ -1670,28 +1744,11 @@ mod tests {
         use std::sync::atomic::AtomicU32;
         use std::sync::Arc;
 
-        // Palm: one central stride-8 anchor hot → one 0.2×0.2 detection; all
-        // other anchors drop. Keep the mock away from frame edges so tests that
-        // expect a healthy hand are not exercising the edge-invalidation path.
-        let mut scores = vec![-100.0f32; 2016];
-        let hot_anchor = (12 * 24 + 12) * 2;
-        scores[hot_anchor] = 100.0;
-        let mut boxes = vec![0.0f32; 2016 * 18];
-        let hot_box = hot_anchor * 18;
-        boxes[hot_box + 2] = 192.0 * 0.2;
-        boxes[hot_box + 3] = 192.0 * 0.2;
-        boxes[hot_box + 5] = 192.0 * 0.1;
-        boxes[hot_box + 9] = -192.0 * 0.1;
-        let palm_out = vec![
-            Tensor {
-                data: boxes,
-                shape: vec![1, 2016, 18],
-            },
-            Tensor {
-                data: scores,
-                shape: vec![1, 2016, 1],
-            },
-        ];
+        // Palm: shared hot-anchor fixture — one central stride-8 anchor yields
+        // a 0.2×0.2 detection; all other anchors drop, keeping the mock away
+        // from frame edges so tests that expect a healthy hand do not
+        // inadvertently exercise the edge-invalidation path.
+        let palm_out = fixtures::hot_anchor_palm_outputs();
 
         // Declared landmark-model output order: image landmarks, presence,
         // handedness, world landmarks. Selection is index-based, so the mock
