@@ -29,7 +29,7 @@ use crate::input::projection::{LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, LEAP_Y_MIN_MM
 /// grab.
 ///
 /// The live path derives depth from apparent hand size instead (see
-/// [`estimate_depth_mm`]); this constant is the **escape hatch**: setting the
+/// [`estimate_depth`]); this constant is the **escape hatch**: setting the
 /// calibration gain `k <= 0` (dev-panel slider "Depth calibration k") disables
 /// the estimator and pins `z` here, restoring the fixed-depth behaviour where
 /// the power term is a *constant* and grab alone drives attractor strength.
@@ -61,9 +61,13 @@ pub const MEDIAPIPE_DEPTH_PROXY_MM: f32 = 120.0;
 /// **Calibration procedure** (hardware, dev panel): stand at a tape-measured
 /// 0.5 m from the camera with an open, steady hand and tune the
 /// "Depth calibration k" slider until the "Est. distance (mm)" diagnostic reads
-/// ≈ 500 mm. Cross-checks: at rest distance the Line attractor power should
-/// match the previous build's ~10× feel; pushing toward the camera should
-/// strengthen it smoothly without latching; beyond ~1 m it should fade to 1×.
+/// ≈ 500 mm. The diagnostic is the **physical** distance estimate
+/// ([`DepthEstimate::distance_mm`], unclamped) — NOT the Leap z the attractor
+/// sees, which is remapped and clamped to `[40, 350]` mm and could therefore
+/// never reach a tape-measured reading. Cross-checks: at rest distance the
+/// Line attractor power should match the previous build's ~10× feel; pushing
+/// toward the camera should strengthen it smoothly without latching; beyond
+/// ~1 m it should fade to 1×.
 pub const DEFAULT_DEPTH_CALIBRATION_K: f32 = 0.8;
 
 /// Near rail of the depth remap: estimated camera distances at/under `0.35 m`
@@ -131,25 +135,48 @@ pub fn distance_m_to_leap_z_mm(distance_m: f32) -> f32 {
         .clamp(DEPTH_NEAR_LEAP_MM, DEPTH_FAR_LEAP_MM)
 }
 
-/// Size-estimated hand depth in the Leap z convention (mm), or the fixed
-/// [`MEDIAPIPE_DEPTH_PROXY_MM`] pin when the estimator is disabled.
+/// A size-estimated hand depth in both of its useful forms: the Leap-remapped
+/// z consumers see and the physical distance estimate it was derived from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthEstimate {
+    /// Depth in the Leap z convention (mm), clamped to
+    /// [`DEPTH_NEAR_LEAP_MM`]..[`DEPTH_FAR_LEAP_MM`] — what the
+    /// pipeline emits as palm z (after per-track smoothing) and what Line's
+    /// power model consumes. The fixed [`MEDIAPIPE_DEPTH_PROXY_MM`] pin when
+    /// the estimator is disabled (`k <= 0`).
+    pub leap_z_mm: f32,
+    /// Physical estimated camera distance (mm): the raw similar-triangles
+    /// output `distance_m × 1000`, **before** the Leap remap/clamp. This is
+    /// the dev panel's "Est. distance (mm)" calibration readout — comparable
+    /// against a tape measure, unlike [`Self::leap_z_mm`]. `0.0` when the
+    /// estimator is disabled (`k <= 0`): the pin is a convention, not a
+    /// physical estimate.
+    pub distance_mm: f32,
+}
+
+/// Size-estimated hand depth — Leap z plus the physical distance — or the
+/// fixed [`MEDIAPIPE_DEPTH_PROXY_MM`] pin when the estimator is disabled.
 ///
 /// Measures the wrist → middle-MCP reference segment in both landmark spaces —
 /// metric metres in `world`, square-normalized xy in `img_square_norm` — and
 /// runs it through [`size_estimated_distance_m`] + [`distance_m_to_leap_z_mm`].
 ///
-/// `k <= 0` is the **escape hatch**: it returns the pin exactly, reproducing
-/// the pre-estimator behaviour (see [`MEDIAPIPE_DEPTH_PROXY_MM`]). The raw
-/// estimate is noisy frame-to-frame; the pipeline smooths it per track
+/// `k <= 0` is the **escape hatch**: it returns the pin exactly (with a zero
+/// physical distance), reproducing the pre-estimator behaviour (see
+/// [`MEDIAPIPE_DEPTH_PROXY_MM`]). The raw estimate is noisy frame-to-frame;
+/// the pipeline smooths the Leap z per track
 /// ([`super::signals::HandTracker::assign`]'s depth EMA) before emitting.
 #[must_use]
-pub fn estimate_depth_mm(
+pub fn estimate_depth(
     world: &[Vec3; LANDMARK_COUNT],
     img_square_norm: &[Vec3; LANDMARK_COUNT],
     k: f32,
-) -> f32 {
+) -> DepthEstimate {
     if k <= 0.0 {
-        return MEDIAPIPE_DEPTH_PROXY_MM;
+        return DepthEstimate {
+            leap_z_mm: MEDIAPIPE_DEPTH_PROXY_MM,
+            distance_mm: 0.0,
+        };
     }
     let wrist = LandmarkIndex::Wrist.as_index();
     let middle_mcp = LandmarkIndex::MiddleMcp.as_index();
@@ -161,7 +188,13 @@ pub fn estimate_depth_mm(
     let image_size_norm = img_square_norm[wrist]
         .truncate()
         .distance(img_square_norm[middle_mcp].truncate());
-    distance_m_to_leap_z_mm(size_estimated_distance_m(world_size_m, image_size_norm, k))
+    let distance_m = size_estimated_distance_m(world_size_m, image_size_norm, k);
+    DepthEstimate {
+        leap_z_mm: distance_m_to_leap_z_mm(distance_m),
+        // m → mm. Unclamped by design: a reading past the far rail (hand
+        // farther than 1 m) must still display its true tape-measure value.
+        distance_mm: distance_m * 1000.0,
+    }
 }
 
 /// Map a content-normalized `MediaPipe` image point into the Leap-device-mm
@@ -303,15 +336,55 @@ mod tests {
         // EXACTLY (instant rollback knob during a live set).
         let (world, img) = depth_fixture(0.09, 0.15);
         assert!(
-            (estimate_depth_mm(&world, &img, 0.0) - MEDIAPIPE_DEPTH_PROXY_MM).abs() < f32::EPSILON
+            (estimate_depth(&world, &img, 0.0).leap_z_mm - MEDIAPIPE_DEPTH_PROXY_MM).abs()
+                < f32::EPSILON
         );
         assert!(
-            (estimate_depth_mm(&world, &img, -0.5) - MEDIAPIPE_DEPTH_PROXY_MM).abs() < f32::EPSILON
+            (estimate_depth(&world, &img, -0.5).leap_z_mm - MEDIAPIPE_DEPTH_PROXY_MM).abs()
+                < f32::EPSILON
         );
         // And a positive k uses the wrist→middle-MCP segments:
         // 0.8 · 0.09 / 0.15 = 0.48 m → (0.48 − 0.35)/0.65 · 310 + 40 = 102 mm.
-        let z = estimate_depth_mm(&world, &img, 0.8);
+        let z = estimate_depth(&world, &img, 0.8).leap_z_mm;
         assert!((z - 102.0).abs() < 0.5, "z {z} mm");
+    }
+
+    #[test]
+    fn estimate_depth_carries_physical_distance_alongside_leap_z() {
+        // The two halves of the estimate diverge by design: leap z is the
+        // remapped/clamped consumer value, distance_mm the unclamped physical
+        // readout the dev panel shows for tape-measure calibration.
+        let (world, img) = depth_fixture(0.09, 0.15);
+        let est = estimate_depth(&world, &img, 0.8);
+        // 0.8 · 0.09 / 0.15 = 0.48 m → 480 mm physical …
+        assert!(
+            (est.distance_mm - 480.0).abs() < 0.5,
+            "distance {} mm",
+            est.distance_mm
+        );
+        // … remapped to (0.48 − 0.35)/0.65 · 310 + 40 = 102 mm Leap z.
+        assert!(
+            (est.leap_z_mm - 102.0).abs() < 0.5,
+            "leap z {} mm",
+            est.leap_z_mm
+        );
+
+        // Beyond the far rail: leap z clamps at 350 but the physical readout
+        // keeps tracking the true distance (a tape at 1.44 m must read 1440).
+        let (world, img) = depth_fixture(0.09, 0.05);
+        let far = estimate_depth(&world, &img, 0.8);
+        assert!((far.leap_z_mm - 350.0).abs() < 1e-3, "{}", far.leap_z_mm);
+        assert!(
+            (far.distance_mm - 1440.0).abs() < 0.5,
+            "distance {} mm",
+            far.distance_mm
+        );
+
+        // Estimator off: the pin is a convention, not a physical estimate —
+        // the distance half reads exactly 0 (the dev panel's "off" semantics).
+        let off = estimate_depth(&world, &img, 0.0);
+        assert!((off.leap_z_mm - MEDIAPIPE_DEPTH_PROXY_MM).abs() < f32::EPSILON);
+        assert!(off.distance_mm.abs() < f32::EPSILON, "{}", off.distance_mm);
     }
 
     #[test]

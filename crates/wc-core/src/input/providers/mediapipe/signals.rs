@@ -240,7 +240,7 @@ impl HandTracker {
     /// depth.
     ///
     /// `raw_depth_mm` is this frame's unsmoothed size-estimated depth (Leap z
-    /// mm, [`super::coords::estimate_depth_mm`]); the track EMA-smooths it
+    /// mm, [`super::coords::estimate_depth`]); the track EMA-smooths it
     /// (τ = [`DEPTH_EMA_TAU_S`], hence `dt`, the time since the previous
     /// processed frame) and stores the smoothed value as its position's z.
     /// `pos.z` itself is ignored — the gate is xy-only and the stored z is the

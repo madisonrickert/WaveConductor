@@ -446,11 +446,13 @@ impl HandTrackingProvider for MediaPipeProvider {
                     d.metrics
                         .push(ProviderMetric::count("Tracks after", p.tracks_after));
                     d.metrics.push(ProviderMetric::count("Hands", p.hands));
-                    // Smoothed size-estimated depth of the focal hand — the
+                    // Physical size-estimated distance of the focal hand — the
                     // tape-measure calibration readout for depth_calibration_k
-                    // (0 when no hand; 120 when the estimator is off).
-                    d.metrics
-                        .push(ProviderMetric::count("Est. distance (mm)", p.est_depth_mm));
+                    // (0 when no hand or when the estimator is off, k <= 0).
+                    d.metrics.push(ProviderMetric::count(
+                        "Est. distance (mm)",
+                        p.est_distance_mm,
+                    ));
                     d.metrics
                         .push(ProviderMetric::count("Track churn", p.track_churn));
                     d.metrics.push(ProviderMetric::count(

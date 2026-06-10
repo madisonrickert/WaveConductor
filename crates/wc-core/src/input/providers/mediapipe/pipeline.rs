@@ -39,7 +39,7 @@
 //!    coordinates never reach the public [`Hand`] and are never mapped to
 //!    xy positions — though the metric wrist→middle-MCP segment, paired with
 //!    its square-norm image projection, feeds the size-estimated depth that
-//!    becomes palm z ([`super::coords::estimate_depth_mm`]).
+//!    becomes palm z ([`super::coords::estimate_depth`]).
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -52,7 +52,7 @@ use smallvec::SmallVec;
 
 use super::anchors::{generate_palm_anchors, Anchor, PalmAnchorOptions};
 use super::capture::Frame;
-use super::coords::{estimate_depth_mm, image_norm_to_leap_mm, DEFAULT_DEPTH_CALIBRATION_K};
+use super::coords::{estimate_depth, image_norm_to_leap_mm, DEFAULT_DEPTH_CALIBRATION_K};
 use super::inference::{HandInference, InferenceError, Tensor};
 use super::landmark::{project_landmarks, roi_from_landmarks, roi_from_palm, RoiRect};
 use super::palm::{
@@ -152,7 +152,7 @@ pub struct PipelineConfig {
     pub grab_rest_deadzone: f32,
     /// Calibration gain `k` for the size-estimated hand depth (the camera
     /// focal length in square-side units — see
-    /// [`super::coords::estimate_depth_mm`]). `<= 0` disables the estimator and
+    /// [`super::coords::estimate_depth`]). `<= 0` disables the estimator and
     /// pins depth to [`MEDIAPIPE_DEPTH_PROXY_MM`] (the live-set rollback knob).
     /// Live-tunable from the dev panel
     /// (`HandTrackingSettings::depth_calibration_k`); refreshed each frame from
@@ -275,12 +275,16 @@ pub struct PipelineDiagnostics {
     /// Flat for a stable hand; climbs under acquire/lose flicker. See
     /// [`super::signals::HandTracker::churn`].
     pub track_churn: u64,
-    /// Smoothed size-estimated depth (mm, Leap z, rounded) of the first
-    /// emitted hand this frame — the "Est. distance (mm)" dev-panel metric for
-    /// calibrating `depth_calibration_k` against a tape measure. `0` when no
-    /// hand; reads the [`MEDIAPIPE_DEPTH_PROXY_MM`] pin when the estimator is
-    /// disabled (`k <= 0`).
-    pub est_depth_mm: u64,
+    /// Physical size-estimated camera distance (mm, rounded) of the first
+    /// emitted (focal) hand this frame — the "Est. distance (mm)" dev-panel
+    /// metric for calibrating `depth_calibration_k` against a tape measure.
+    /// This is the raw similar-triangles estimate (`distance_m × 1000`,
+    /// unsmoothed, **before** the Leap-z remap), so at a tape-measured 0.5 m it
+    /// reads ≈ 500 once `k` is calibrated. It is NOT the Leap z the attractor
+    /// sees (that value is clamped to `[40, 350]` and lives in
+    /// `Hand::palm_position.z`). `0` when there is no hand this frame or the
+    /// estimator is disabled (`k <= 0` — no physical estimate under the pin).
+    pub est_distance_mm: u64,
 }
 
 /// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
@@ -477,22 +481,26 @@ impl Pipeline {
         let mut next: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
         for roi in to_run {
             let stage_start = Instant::now();
-            if let Some((hand, next_roi)) = self.landmark_for(&square, roi, content, dt)? {
+            if let Some(tracked) = self.landmark_for(&square, roi, content, dt)? {
                 // `landmark_for` already refreshed this hand's signals-level
                 // track (`HandTracker::assign`), so a hand dropped by the ROI
                 // check below keeps its track id for one extra frame — id
                 // continuity on reacquire is deliberate; `track_churn` counts
                 // the drop one frame late.
-                if roi_trackable(&next_roi, content) {
+                if roi_trackable(&tracked.next_roi, content) {
                     if hands.is_empty() {
-                        // First (focal) hand: surface its smoothed depth for the
-                        // dev panel's "Est. distance (mm)" calibration metric.
-                        // z is finite and clamped to [40, 350], so rounding via
-                        // floor(z + 0.5) is exact and in-range.
-                        diagnostics.est_depth_mm = u64::from(floor_u32(hand.palm_position.z + 0.5));
+                        // First (focal) hand: surface its PHYSICAL estimated
+                        // distance for the dev panel's "Est. distance (mm)"
+                        // calibration metric (0 when the estimator is off).
+                        // The value is finite and non-negative; floor(x + 0.5)
+                        // rounds, and the f32→u32 cast inside `floor_u32`
+                        // saturates on a degenerate (collapsed-segment) huge
+                        // estimate rather than wrapping.
+                        diagnostics.est_distance_mm =
+                            u64::from(floor_u32(tracked.est_distance_mm + 0.5));
                     }
-                    hands.push(hand);
-                    next.push(next_roi);
+                    hands.push(tracked.hand);
+                    next.push(tracked.next_roi);
                 }
             }
             diagnostics.landmark = diagnostics.landmark.saturating_add(stage_start.elapsed());
@@ -547,16 +555,17 @@ impl Pipeline {
         Ok(self.palm_dets.iter().map(roi_from_palm).collect())
     }
 
-    /// Run the landmark stage for one ROI. Returns the tracked hand and the ROI
-    /// to use for it next frame (derived from its landmarks), or `None` if the
-    /// model's presence score is below threshold (no hand in this ROI).
+    /// Run the landmark stage for one ROI. Returns the tracked hand, the ROI
+    /// to use for it next frame (derived from its landmarks), and the per-hand
+    /// diagnostic values, or `None` if the model's presence score is below
+    /// threshold (no hand in this ROI).
     fn landmark_for(
         &mut self,
         square: &RgbImage,
         roi: RoiRect,
         content: ContentRect,
         dt: Duration,
-    ) -> Result<Option<(Hand, RoiRect)>, InferenceError> {
+    ) -> Result<Option<TrackedHand>, InferenceError> {
         // Warp the ROI into the reused crop buffer, then into the reused input
         // tensor — no per-ROI image/tensor allocation.
         warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
@@ -630,8 +639,8 @@ impl Pipeline {
         // rollback knob). The raw estimate is noisy, so the tracker EMA-smooths
         // it per track inside `assign`; the smoothed value lands in
         // `palm_pos.z` below, AFTER identity assignment.
-        let raw_depth_mm =
-            estimate_depth_mm(&world, &img_landmarks, self.config.depth_calibration_k);
+        let depth = estimate_depth(&world, &img_landmarks, self.config.depth_calibration_k);
+        let raw_depth_mm = depth.leap_z_mm;
         // Position-based id with a hysteresis-held chirality, so a spurious
         // per-frame handedness flip neither churns the id nor flickers
         // downstream. The gate inside `assign` compares xy only (palm_pos.z is
@@ -652,8 +661,8 @@ impl Pipeline {
         // Next frame tracks from these landmarks, skipping palm detection.
         let next_roi = roi_from_landmarks(&img_landmarks);
 
-        Ok(Some((
-            Hand {
+        Ok(Some(TrackedHand {
+            hand: Hand {
                 id: assigned.id,
                 chirality: assigned.chirality,
                 palm_position: palm_pos,
@@ -677,8 +686,24 @@ impl Pipeline {
                 landmarks,
             },
             next_roi,
-        )))
+            est_distance_mm: depth.distance_mm,
+        }))
     }
+}
+
+/// One ROI's landmark-stage outcome: the hand to emit, the ROI to track it
+/// from next frame, and the per-hand values [`Pipeline::process`] surfaces in
+/// [`PipelineDiagnostics`] for the focal hand. Stack-only (no heap fields
+/// beyond [`Hand`]'s fixed arrays) — fine on the per-frame path.
+struct TrackedHand {
+    /// The hand as emitted downstream (post-deadzone grab, smoothed depth z).
+    hand: Hand,
+    /// Landmark-derived ROI to track this hand from next frame.
+    next_roi: RoiRect,
+    /// Physical size-estimated camera distance (mm, raw/unsmoothed); `0.0`
+    /// when the estimator is disabled (`k <= 0`). See
+    /// [`super::coords::DepthEstimate::distance_mm`].
+    est_distance_mm: f32,
 }
 
 // --- detect-then-track association ---------------------------------------
@@ -2108,6 +2133,93 @@ mod tests {
             "palm z = {} (want the {MEDIAPIPE_DEPTH_PROXY_MM} fallback pin)",
             hands[0].palm_position.z
         );
+    }
+
+    // --- "Est. distance (mm)" diagnostic (hardware-session calibration fix) --
+
+    /// The dev-panel calibration metric must report the PHYSICAL estimated
+    /// camera distance (mm) — `distance_m × 1000`, the pre-remap output of the
+    /// size estimator — not the Leap-remapped z. The remapped z is clamped to
+    /// `[40, 350]`, so under the old field the documented procedure ("tune k
+    /// until the readout ≈ a tape-measured 500 mm") was unsatisfiable and k
+    /// drifted to the slider max chasing it.
+    #[test]
+    fn est_distance_diagnostic_reports_physical_distance_not_leap_z() {
+        let (mut pipe, _palm, _lm) = counting_pipeline();
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1);
+        let h = &hands[0];
+
+        // Reconstruct the segment the estimator measured, exactly as
+        // `palm_z_is_the_size_estimated_depth_when_k_positive` does: world side
+        // from the mock's world fixture, image side by inverting the mm mapping
+        // on the emitted wrist/middle-MCP landmarks.
+        let world = fixtures::open_world_hand();
+        let world_size = world[LandmarkIndex::Wrist.as_index()]
+            .distance(world[LandmarkIndex::MiddleMcp.as_index()]);
+        let image_size = mm_to_square_norm_xy(h.landmarks[LandmarkIndex::Wrist.as_index()])
+            .distance(mm_to_square_norm_xy(
+                h.landmarks[LandmarkIndex::MiddleMcp.as_index()],
+            ));
+        let distance_m = size_estimated_distance_m(
+            world_size,
+            image_size,
+            PipelineConfig::default().depth_calibration_k,
+        );
+        let want_mm = distance_m * 1000.0;
+        let leap_z = distance_m_to_leap_z_mm(distance_m);
+        // Non-vacuous: for this fixture the physical distance and the remapped
+        // Leap z must differ, or the assertion below could not tell them apart.
+        assert!(
+            (want_mm - leap_z).abs() > 1.0,
+            "fixture is vacuous: physical {want_mm} mm ≈ leap z {leap_z} mm"
+        );
+        let want = u64::from(floor_u32(want_mm + 0.5));
+        let got = pipe.diagnostics().est_distance_mm;
+        assert!(
+            got.abs_diff(want) <= 1,
+            "diagnostic {got} mm (want physical ≈ {want} mm, NOT leap z {leap_z:.0} mm)"
+        );
+    }
+
+    /// `k <= 0` disables the estimator: there is no physical estimate under the
+    /// fixed pin, so the metric reads `0` (the label semantics for off/no-hand).
+    #[test]
+    fn est_distance_diagnostic_is_zero_when_estimator_off() {
+        let config = PipelineConfig {
+            depth_calibration_k: 0.0,
+            ..PipelineConfig::default()
+        };
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_config(
+            spread_landmarks(),
+            fixtures::open_world_tensor(),
+            0.98,
+            0.9,
+            config,
+        );
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1, "the hand is still tracked under the pin");
+        assert_eq!(
+            pipe.diagnostics().est_distance_mm,
+            0,
+            "estimator off → no physical estimate → 0"
+        );
+    }
+
+    /// No hand this frame → no focal-hand distance → `0`.
+    #[test]
+    fn est_distance_diagnostic_is_zero_when_no_hand() {
+        // Presence below threshold: the ROI is rejected, no hand is emitted.
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_outputs(spread_landmarks(), 0.3, 0.9);
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert!(hands.is_empty());
+        assert_eq!(pipe.diagnostics().est_distance_mm, 0);
     }
 
     #[test]

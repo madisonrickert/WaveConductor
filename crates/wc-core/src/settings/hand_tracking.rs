@@ -47,9 +47,11 @@ pub struct HandTrackingSettings {
     /// depth — the camera focal length in square-side units (≈ `0.82` for a
     /// typical 63° HFOV webcam). `0` disables the estimator entirely (fixed
     /// 120 mm depth, grab-only attractor control — the instant rollback during
-    /// a live set). Calibrate against a tape measure: stand at 0.5 m with an
-    /// open hand and tune until the dev panel's "Est. distance (mm)" reads
-    /// ≈ 500. Default must match
+    /// a live set; the diagnostic reads `0`). Calibrate against a tape
+    /// measure: stand at 0.5 m with an open hand and tune until the dev
+    /// panel's "Est. distance (mm)" reads ≈ 500. That diagnostic is the
+    /// **physical** distance estimate, not the Leap z the attractor sees
+    /// (which is remapped and clamped to `[40, 350]` mm). Default must match
     /// `mediapipe::coords::DEFAULT_DEPTH_CALIBRATION_K` (`0.8`).
     #[setting(
         default = 0.8_f32,
