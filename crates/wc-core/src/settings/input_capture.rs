@@ -35,11 +35,19 @@
 //!
 //! `bevy_egui` populates `EguiWantsInput` in `PostUpdate` (via
 //! `EguiPostUpdateSet::ProcessOutput::write_egui_wants_input_system`), so a
-//! mirror read in the next frame's `Update` carries a one-frame lag against
-//! the on-screen UI. That lag is invisible in practice: for the pointer, the
-//! panel doesn't move between frames and the cursor must already be over it
-//! before the user can click; for the keyboard, focus is acquired by a click
-//! (or tab) at least a frame before any character is typed into the field.
+//! mirror read in `Update` carries at least a one-frame lag against the
+//! on-screen UI. Only the settings-internal consumer
+//! (`handle_dev_panel_toggle`) is chained after [`update_egui_input_capture`]
+//! and sees a deterministic one-frame lag; the lifecycle (nav) and audio
+//! (volume) consumers have no ordering against the mirror system, so within
+//! a frame they may read the previous frame's mirror — their effective lag
+//! is nondeterministically one OR two frames. That ambiguity is accepted
+//! rather than cross-plugin-ordered away: focus is acquired by a click (or
+//! tab) well over two frames before any character is typed into a field, and
+//! on focus release the worst case is hotkeys staying suppressed for one
+//! extra ~16 ms frame. (The pointer mirror has the same property; the panel
+//! doesn't move between frames and the cursor must already be over it before
+//! the user can click.)
 //!
 //! ## What consumers do with it
 //!

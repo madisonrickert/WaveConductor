@@ -456,9 +456,6 @@ impl HandTrackingProvider for MediaPipeProvider {
                     // Raw (pre-deadzone) vs deadzoned grab of the focal hand,
                     // permille. Shows the rest deadzone subtracting and lets
                     // the operator read the true relaxed-hand rest floor.
-                    // (These two land the metric count exactly at the
-                    // SmallVec's 16-slot inline capacity — a 17th metric would
-                    // spill this push to the heap on every diagnostics frame.)
                     d.metrics
                         .push(ProviderMetric::count("Grab raw (‰)", p.grab_raw_permille));
                     d.metrics
@@ -469,6 +466,17 @@ impl HandTrackingProvider for MediaPipeProvider {
                         "Pipeline errors",
                         worker_diag.pipeline_errors,
                     ));
+                    // Invariant: the per-poll metrics refill must stay within
+                    // the SmallVec's inline capacity (20) — a spill here would
+                    // heap-allocate on every diagnostics frame. Adding a
+                    // metric that trips this assert means raising the
+                    // capacity in `ProviderDiagnostics::metrics`, not
+                    // accepting the spill.
+                    debug_assert!(
+                        !d.metrics.spilled(),
+                        "ProviderDiagnostics::metrics spilled inline capacity ({} metrics)",
+                        d.metrics.len()
+                    );
                 }
             }
         }

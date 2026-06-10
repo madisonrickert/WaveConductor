@@ -381,8 +381,11 @@ pub struct ProviderDiagnostics {
     pub last_error: Option<String>,
     /// Provider-specific numeric/text metrics for the dev panel. Labels are
     /// static so providers can update these without allocating strings in hot
-    /// paths.
-    pub metrics: SmallVec<[ProviderMetric; 16]>,
+    /// paths. The inline capacity (20) carries headroom over the densest
+    /// current producer (`MediaPipe`, 16 metrics) so a few additions never
+    /// silently spill the per-poll refill to the heap; that producer
+    /// `debug_assert!`s `!metrics.spilled()` after its push block.
+    pub metrics: SmallVec<[ProviderMetric; 20]>,
 }
 
 /// One provider-specific diagnostic metric.

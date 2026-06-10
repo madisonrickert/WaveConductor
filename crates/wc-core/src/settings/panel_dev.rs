@@ -13,7 +13,12 @@
 //! panel body — diagnostics, tuning, and the world inspector — with each section
 //! in a collapsible header, so nothing falls off the bottom on shorter displays.
 //! Shift+D is the only toggle — there is no click-outside dismiss for this
-//! developer tool.
+//! developer tool. While a panel field has keyboard focus, Shift+D is
+//! suppressed like every other app hotkey (the
+//! [`crate::settings::input_capture::egui_not_capturing_keyboard`] gate, so a
+//! capital D types into the field instead of dismissing the panel under it);
+//! press Esc or click off the field first, allowing one frame of lag for the
+//! focus mirror to catch up.
 
 use bevy::prelude::*;
 use leafwing_input_manager::prelude::ActionState;
@@ -220,10 +225,14 @@ fn draw_hand_tuning_controls(
         ui.label(format!(
             "Live:  {count} hand(s)  ·  grab {grab:.2}  ·  pinch {pinch:.2}"
         ));
+        // Calibration now reads the PRE-deadzone signal directly ("Grab raw
+        // (‰)" in the Hand tracking grid), so there is no need to zero the
+        // deadzone first — the raw readout is unaffected by the slider.
         ui.label(
             egui::RichText::new(
-                "Open-hand calibration: set deadzone to 0, hold your hand open, read the \
-                 grab floor above, then raise the deadzone just past it.",
+                "Open-hand calibration: hold your hand open and relaxed, read the rest \
+                 floor from \"Grab raw (‰)\" above, then set the deadzone just above it \
+                 (slider value = ‰ ÷ 1000, e.g. raw 60‰ → deadzone 0.07).",
             )
             .size(10.0)
             .color(style.text_color_dim),
