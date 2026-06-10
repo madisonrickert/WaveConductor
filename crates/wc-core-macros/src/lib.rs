@@ -56,6 +56,9 @@
 //! the persisted values — serde serializes unit variants as their name
 //! string, so avoid `#[serde(rename...)]` on enum-setting types (the panel
 //! writes back through reflection, which always uses the Rust identifiers).
+//! The variant names are also the panel's display strings: there is no
+//! per-variant label mapping yet, so pick variant identifiers that read well
+//! in a dropdown.
 
 #![allow(
     clippy::expect_used,

@@ -257,7 +257,7 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
         return;
     };
     // Deref `Mut<dyn Reflect>` to get `&mut dyn Reflect`.
-    render_user_fields_via_reflect(&mut *reflect_mut, defs.as_ref(), ui);
+    render_user_fields_via_reflect(&mut *reflect_mut, defs.as_ref(), storage_key, ui);
 }
 
 /// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
@@ -271,9 +271,15 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
 /// Each section uses its own `egui::Grid` with two columns so labels are
 /// left-aligned in column 1 and input widgets fill column 2. This is the
 /// idiomatic egui form-layout pattern.
+///
+/// `storage_key` salts every egui id created below (Grids, `ComboBox`es) so
+/// that two settings structs using the same section or field names don't
+/// collide in egui's id-to-state map (colliding Grids share column widths;
+/// colliding `ComboBox`es share popup open/close state).
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
+    storage_key: &'static str,
     ui: &mut egui::Ui,
 ) {
     let ReflectMut::Struct(struct_mut) = reflect.reflect_mut() else {
@@ -304,7 +310,10 @@ fn render_user_fields_via_reflect(
             ui.add_space(4.0);
         }
 
-        egui::Grid::new(format!("settings_form_{section_name}"))
+        // Tuple id salt (no per-frame `format!` allocation) including the
+        // settings struct's storage key — two structs may both use e.g. a
+        // "Hand Tracking" section name without sharing Grid layout state.
+        egui::Grid::new(("settings_form", storage_key, section_name))
             .num_columns(2)
             .spacing(egui::vec2(12.0, 8.0))
             .show(ui, |ui| {
@@ -318,7 +327,7 @@ fn render_user_fields_via_reflect(
                     // Column 1: label, left-aligned by default in egui Grid.
                     ui.label(def.label);
                     // Column 2: widget fills remaining width automatically.
-                    render_widget_value(field, def, ui);
+                    render_widget_value(field, def, storage_key, ui);
                     ui.end_row();
                 }
             });
@@ -332,9 +341,13 @@ fn render_user_fields_via_reflect(
 /// no `ui.horizontal` wrapper. The Grid handles label/widget alignment.
 ///
 /// `field` is `&mut dyn PartialReflect` as returned by [`Struct::field_mut`].
+///
+/// `storage_key` is the owning settings struct's storage key, threaded through
+/// to widgets that need a unique egui id (currently [`render_enum`]).
 fn render_widget_value(
     field: &mut dyn bevy::reflect::PartialReflect,
     def: &SettingDef,
+    storage_key: &'static str,
     ui: &mut egui::Ui,
 ) {
     match &def.kind {
@@ -348,7 +361,9 @@ fn render_widget_value(
         } => {
             render_file_path(field, filter_label, extensions, ui);
         }
-        SettingKind::Enum { variants } => render_enum(field, def.field_name, variants, ui),
+        SettingKind::Enum { variants } => {
+            render_enum(field, storage_key, def.field_name, variants, ui);
+        }
     }
 }
 
@@ -448,10 +463,12 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
 /// every other widget — Bevy change detection, autosave, and restart diffing
 /// all fire identically.
 ///
-/// `field_name` salts the `ComboBox` id so two enum settings in one panel don't
-/// share popup state.
+/// `(storage_key, field_name)` salts the `ComboBox` id so two enum settings in
+/// one panel don't share popup state — field name alone is not enough, since
+/// two settings structs may each declare a same-named enum field.
 fn render_enum(
     field: &mut dyn bevy::reflect::PartialReflect,
+    storage_key: &'static str,
     field_name: &'static str,
     variants: &[&'static str],
     ui: &mut egui::Ui,
@@ -477,7 +494,7 @@ fn render_enum(
     };
 
     let mut selected = current;
-    egui::ComboBox::from_id_salt(("wc-setting-enum", field_name))
+    egui::ComboBox::from_id_salt(("wc-setting-enum", storage_key, field_name))
         .selected_text(selected)
         .show_ui(ui, |ui| {
             for &variant in variants {
@@ -485,7 +502,7 @@ fn render_enum(
             }
         });
     if selected != current {
-        set_enum_variant(field, selected);
+        set_enum_variant(field, field_name, selected);
     }
 }
 
@@ -494,17 +511,21 @@ fn render_enum(
 /// Applies a payload-less [`bevy::reflect::DynamicEnum`], which is exactly
 /// the variant-switch operation `Reflect`-derived enums support for unit
 /// variants. Returns `true` on success. Failure (a payload variant or a name
-/// the enum doesn't have) leaves the field unchanged and logs a warning —
-/// the loud debug-build failure for such misuse already lives in
-/// [`super::def::enum_variant_names`].
-fn set_enum_variant(field: &mut dyn bevy::reflect::PartialReflect, variant: &str) -> bool {
+/// the enum doesn't have) leaves the field unchanged and logs a warning that
+/// names the offending field — the loud debug-build failure for such misuse
+/// already lives in [`super::def::enum_variant_names`].
+fn set_enum_variant(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    field_name: &str,
+    variant: &str,
+) -> bool {
     use bevy::reflect::{DynamicEnum, DynamicVariant};
 
     let dynamic = DynamicEnum::new(variant, DynamicVariant::Unit);
     match field.try_apply(&dynamic) {
         Ok(()) => true,
         Err(err) => {
-            tracing::warn!(?err, variant, "enum setting write-back failed");
+            tracing::warn!(?err, field_name, variant, "enum setting write-back failed");
             false
         }
     }
@@ -656,7 +677,7 @@ mod tests {
     fn set_enum_variant_switches_unit_variant() {
         let mut value = Palette::Warm;
         let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
-        assert!(set_enum_variant(field, "Mono"));
+        assert!(set_enum_variant(field, "palette", "Mono"));
         assert_eq!(value, Palette::Mono);
     }
 
@@ -664,29 +685,31 @@ mod tests {
     fn set_enum_variant_rejects_unknown_name_and_leaves_value() {
         let mut value = Palette::Cool;
         let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
-        assert!(!set_enum_variant(field, "Sepia"));
+        assert!(!set_enum_variant(field, "palette", "Sepia"));
         assert_eq!(value, Palette::Cool, "failed write-back must not mutate");
     }
 
+    /// Pins the contract the `ComboBox` relies on: every name in the
+    /// reflection-derived variant list (what the macro bakes into
+    /// `SettingKind::Enum { variants }`) is applicable through
+    /// `set_enum_variant`. If the metadata list and the write-back path ever
+    /// disagree about an enum's definition, a dropdown selection would
+    /// silently no-op; this catches that drift.
+    ///
+    /// (Replaces a former `enum_kind_dispatches` test that only matched a
+    /// locally-constructed `SettingDef` against itself.)
     #[test]
-    #[allow(
-        clippy::panic,
-        reason = "test assertion — panic on wrong variant is intentional"
-    )]
-    fn enum_kind_dispatches() {
-        let def = SettingDef {
-            field_name: "palette",
-            label: "Palette",
-            section: "",
-            category: SettingsCategory::User,
-            kind: SettingKind::Enum {
-                variants: &["Warm", "Cool", "Mono"],
-            },
-            requires_restart: false,
-        };
-        let SettingKind::Enum { variants } = def.kind else {
-            panic!("expected Enum kind");
-        };
+    fn every_listed_variant_is_writable() {
+        let variants = super::super::def::enum_variant_names::<Palette>();
         assert_eq!(variants, &["Warm", "Cool", "Mono"]);
+        let mut value = Palette::Warm;
+        for &name in variants {
+            let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
+            assert!(
+                set_enum_variant(field, "palette", name),
+                "variant `{name}` from the metadata list failed to apply"
+            );
+        }
+        assert_eq!(value, Palette::Mono, "last applied variant should stick");
     }
 }

@@ -128,3 +128,37 @@ fn enum_kind_carries_variant_names_from_reflect() {
     // Variant names come from `bevy_reflect` enum info, in declaration order.
     assert_eq!(*variants, ["Low", "Medium", "High"]);
 }
+
+/// Second unit-variant enum for the two-enum-fields fixture below.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+enum Theme {
+    Dark,
+    Light,
+}
+
+/// Two `ty = Enum` fields of different enum types in one struct: each
+/// `SettingKind::Enum` must carry its own field type's variant list (the
+/// expansion turbofishes the *field's* type into `enum_variant_names`, not
+/// a struct-wide one).
+#[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Resource, Default)]
+#[settings(storage_key = "derive_test_two_enums")]
+struct TwoEnumFixture {
+    #[setting(default = Quality::Low, ty = Enum, category = User)]
+    quality: Quality,
+    #[setting(default = Theme::Dark, ty = Enum, category = User)]
+    theme: Theme,
+}
+
+#[test]
+fn two_enum_fields_carry_independent_variant_lists() {
+    let defs = TwoEnumFixture::settings_def();
+    let SettingKind::Enum { variants: quality } = &defs[0].kind else {
+        panic!("expected Enum kind for quality");
+    };
+    let SettingKind::Enum { variants: theme } = &defs[1].kind else {
+        panic!("expected Enum kind for theme");
+    };
+    assert_eq!(*quality, ["Low", "Medium", "High"]);
+    assert_eq!(*theme, ["Dark", "Light"]);
+}
