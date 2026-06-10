@@ -37,7 +37,7 @@ mod panel_user;
 
 pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
-pub use hand_tracking::HandTrackingSettings;
+pub use hand_tracking::{HandProviderChoice, HandTrackingSettings};
 pub use input_capture::{EguiKeyboardCaptured, EguiPointerCaptured};
 pub use panel_dev::DevPanelVisible;
 pub use registry::{RegisterSketchSettingsExt, SettingsRegistry};

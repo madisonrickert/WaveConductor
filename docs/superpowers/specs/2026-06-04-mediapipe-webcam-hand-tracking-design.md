@@ -683,3 +683,38 @@ The hot path is free of per-iteration allocations. Decode, NMS, and resize use
 reusable scratch buffers (pre-allocated at init, cleared with `vec.clear()` to
 preserve capacity). Sort uses `sort_unstable`; the no-op re-sort on the tracking
 path was deleted. Worker and pipeline loops are allocation-free by construction.
+
+### 8. Runtime provider selector (2026-06-10)
+
+Provider selection is now a persisted user setting
+(`HandTrackingSettings::provider`, a `HandProviderChoice` enum: `Auto` /
+`Leap` / `MediaPipe` / `Off`) rendered as a dropdown in the user settings
+panel (Settings → Hand Tracking → "Tracking provider") and switchable live:
+the registry is torn down (each provider `stop()`ed synchronously, so the
+camera/device is released before the successor starts) and rebuilt without a
+restart. The choice → fallback policy lives in `wc_core::input::selection`
+(unit-tested with mock providers); the concrete constructors stay in the
+binary (`crates/waveconductor/src/hand_providers.rs`) and are injected as
+closures.
+
+`Auto` now probes Leap → MediaPipe → silent mock (MediaPipe was previously
+env-only). Because MediaPipe's camera opens asynchronously on the worker
+thread, Auto registers it optimistically and a startup watcher
+(`AutoMediaPipeWatch`) demotes to the mock iff the provider reports `Errored`
+before its first `Connected` — which the worker protocol guarantees means
+"the camera never opened" (the worker's first message after a successful open
+is `Connected`; on open failure it reports `Errored` and exits). After the
+first `Connected`, transient mid-session errors never demote: the provider
+keeps its honest `Errored` LED.
+
+`WAVECONDUCTOR_HAND_PROVIDER` is demoted to a dev/deployment pin: when set
+(`auto` | `leap` | `mediapipe` | `off` | `mock` | `synthetic`) it wins over
+the setting for the whole session and the live switch system disables itself.
+`mock` / `synthetic` remain env-only test fixtures (not in the user-facing
+enum). An unrecognized value now warns and defers to the setting (previously:
+treated as `auto`).
+
+The `hand-tracking-mediapipe` feature is now in the binary's `default`
+feature set — this supersedes the "not in `default` (opt in explicitly)" note
+in the feature-flags section above. Both backends ship in the deployment
+binary; the runtime selector decides which one runs.

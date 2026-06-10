@@ -53,6 +53,7 @@ pub mod pointer;
 pub mod projection;
 pub mod provider;
 pub mod providers;
+pub mod selection;
 pub mod state;
 pub mod synthetic;
 pub mod systems;

@@ -112,7 +112,7 @@ pub trait HandTrackingProvider: Send + Sync + 'static {
 /// and clean lifecycle (each provider can independently start/stop).
 ///
 /// The binary populates this resource at startup via auto-selection
-/// (see `crates/waveconductor/src/main.rs::install_hand_tracking_providers`).
+/// (see `crates/waveconductor/src/hand_providers.rs`).
 /// Tests construct their own registry directly.
 #[derive(Resource, Default)]
 pub struct ProviderRegistry {
@@ -141,6 +141,35 @@ impl ProviderRegistry {
             return;
         }
         self.providers.push(RegisteredProvider { id, role, inner });
+    }
+
+    /// Remove a provider, stopping it first. Returns the removed slot, or
+    /// `None` when the ID is not registered.
+    ///
+    /// [`Self::register`] auto-starts but nothing else in the registry
+    /// auto-stops: dropping a provider does release its resources eventually
+    /// (e.g. the `MediaPipe` worker handle joins in `Drop`), but the explicit
+    /// `stop()` here makes teardown synchronous — by the time `remove`
+    /// returns, a `MediaPipe` worker has been joined (camera released) and a
+    /// Leap connection dropped, so a replacement provider registered next can
+    /// immediately re-acquire the hardware.
+    pub fn remove(&mut self, id: ProviderId) -> Option<RegisteredProvider> {
+        let idx = self.providers.iter().position(|p| p.id == id)?;
+        let mut slot = self.providers.remove(idx);
+        slot.inner.stop();
+        tracing::info!(provider = id.label(), "provider stopped and removed");
+        Some(slot)
+    }
+
+    /// Stop and remove every provider, in registration order.
+    ///
+    /// Used by the live provider switch: the old registry must be fully torn
+    /// down (workers joined, camera/device released — see [`Self::remove`])
+    /// *before* the replacement providers start.
+    pub fn shutdown_all(&mut self) {
+        while let Some(id) = self.providers.first().map(|p| p.id) {
+            self.remove(id);
+        }
     }
 
     /// Iterate over registered providers.
@@ -204,5 +233,88 @@ impl ProviderRegistry {
                     .find(|p| p.role == ProviderRole::Simulator)
             })
             .map(|p| p.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// Provider that records `stop()` calls, for registry lifecycle tests.
+    struct StopSpy {
+        stops: Arc<AtomicUsize>,
+    }
+
+    impl HandTrackingProvider for StopSpy {
+        fn start(&mut self) -> Result<(), HandTrackingError> {
+            Ok(())
+        }
+
+        fn stop(&mut self) {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn poll(&mut self, _now: Duration, _out: &mut Messages<HandTrackingFrame>) {}
+
+        fn status(&self) -> crate::input::state::ProviderStatus {
+            crate::input::state::ProviderStatus::default()
+        }
+
+        fn diagnostics(&self) -> crate::input::state::ProviderDiagnostics {
+            crate::input::state::ProviderDiagnostics::default()
+        }
+    }
+
+    fn spy(
+        registry: &mut ProviderRegistry,
+        id: ProviderId,
+        role: ProviderRole,
+    ) -> Arc<AtomicUsize> {
+        let stops = Arc::new(AtomicUsize::new(0));
+        registry.register(
+            id,
+            role,
+            Box::new(StopSpy {
+                stops: Arc::clone(&stops),
+            }),
+        );
+        stops
+    }
+
+    #[test]
+    fn remove_stops_the_provider_and_takes_it_out() {
+        let mut registry = ProviderRegistry::default();
+        let stops = spy(&mut registry, ProviderId::Mock, ProviderRole::Simulator);
+
+        let removed = registry.remove(ProviderId::Mock);
+        assert!(removed.is_some());
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "remove() must call stop()");
+        assert!(registry.provider(ProviderId::Mock).is_none());
+    }
+
+    #[test]
+    fn remove_unknown_id_is_none_and_touches_nothing() {
+        let mut registry = ProviderRegistry::default();
+        let stops = spy(&mut registry, ProviderId::Mock, ProviderRole::Simulator);
+
+        assert!(registry.remove(ProviderId::Leap).is_none());
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+        assert!(registry.provider(ProviderId::Mock).is_some());
+    }
+
+    #[test]
+    fn shutdown_all_stops_every_provider_and_empties_the_registry() {
+        let mut registry = ProviderRegistry::default();
+        let a = spy(&mut registry, ProviderId::Leap, ProviderRole::Primary);
+        let b = spy(&mut registry, ProviderId::Mock, ProviderRole::Simulator);
+
+        registry.shutdown_all();
+        assert_eq!(a.load(Ordering::SeqCst), 1);
+        assert_eq!(b.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.iter().count(), 0);
+        assert!(registry.primary_id().is_none());
     }
 }

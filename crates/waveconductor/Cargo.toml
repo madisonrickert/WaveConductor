@@ -18,7 +18,7 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-default = ["hand-tracking-gestures"]
+default = ["hand-tracking-gestures", "hand-tracking-mediapipe"]
 # Propagates to wc-core and wc-sketches; always on for the waveconductor binary.
 # Declared here so that examples (e.g. leap_smoke) can gate on this feature name
 # without triggering `unexpected_cfg` warnings.
@@ -29,8 +29,11 @@ hand-tracking-gestures = [
 ]
 # In-process MediaPipe webcam hand-tracking. Pulls the camera sub-feature (the
 # real binary needs a real webcam) and the sketch hand-consumers. Additive to
-# `hand-tracking-gestures`; not in `default` (opt in explicitly). The ort/CoreML
-# inference backend is unconditional — it is part of `wc-core/hand-tracking-mediapipe`.
+# `hand-tracking-gestures`, and in `default`: the deployment binary ships both
+# backends and the runtime "Tracking provider" setting (or the
+# WAVECONDUCTOR_HAND_PROVIDER env pin) decides which one runs — see
+# `src/hand_providers.rs`. The ort/CoreML inference backend is unconditional —
+# it is part of `wc-core/hand-tracking-mediapipe`.
 hand-tracking-mediapipe = [
     "wc-core/hand-tracking-mediapipe-camera",
     "wc-sketches/hand-tracking-gestures",
