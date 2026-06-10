@@ -24,17 +24,22 @@ DISABLE_BLOOM = "1"
 # ── Line screensaver / attract mode ─────────────────────────────────────────
 # Forces the app into SketchActivity::Screensaver at startup (FORCE_SCREENSAVER)
 # so the attract visual is captured deterministically. provider = "mock" (silent,
-# no synthetic hand): the motion comes from the sketch's own "Wandering Pulses"
-# choreography (three slow Lissajous walkers, each pulsing 1.2 s of gentle
-# attraction once per 14 / 19 / 23.5 s), not a tracked hand. Frame indices are
-# chosen against that schedule (dt = 1/60; walker 0's first pulse spans
-# t = 4.0–5.2 s, walker 1's spans t = 8.1–9.3 s):
-#   180 (t= 3.0) settled field, post fade-in, no pulse — the "picture" at rest
-#   258 (t= 4.3) pulse onset (walker 0 envelope = 0.5, rising)
-#   276 (t= 4.6) pulse peak (walker 0 envelope = 1.0)
-#   294 (t= 4.9) pulse decay (walker 0 envelope = 0.5, falling)
-#   522 (t= 8.7) second pulse peak (walker 1, different screen region)
-#   810 (t=13.5) settled again between pulses
+# no synthetic hand): the motion comes from the sketch's own "Wandering Pulses +
+# Meteors" choreography (three slow Lissajous walkers pulsing 1.2 s of gentle
+# attraction once per 14 / 19 / 23.5 s, plus two meteor lanes crossing the frame
+# for 4 s once per 29 / 43 s on per-cycle hashed trajectories), not a tracked
+# hand. Frame indices are chosen against that schedule (dt = 1/60; walker 0's
+# first pulse spans t = 4.0–5.2 s, meteor lane 0's first crossing spans
+# t = 7.5–11.5 s, lane 1's spans t = 20.0–24.0 s; attract-mode lifetime respawns
+# begin at t = 20 s, the shortest seeded lifespan):
+#   180 (t= 3.0)  settled field, post fade-in — the fraction-thinned "picture"
+#   276 (t= 4.6)  pulse peak (walker 0 envelope = 1.0)
+#   495 (t= 8.25) meteor ramp-in (lane 0, u=0.19) overlapping walker 1's pulse
+#   570 (t= 9.5)  meteor plateau mid-crossing — comet wake + trailing smear glow
+#   666 (t=11.1)  meteor ramp-out (u=0.9), wake releasing
+#   780 (t=13.0)  settled again post-crossing, field healing home
+#  1320 (t=22.0)  meteor lane 1 plateau + first lifetime respawns fading back in
+#  1770 (t=29.5)  quiet late frame: respawn self-heal visibly rebuilding the line
 #
 # ONE scenario, not three-per-tier: under the "Low-Rate Ember" Hot model the
 # thermal tier changes only the present *rate* (winit UpdateMode wait), which the
@@ -48,7 +53,7 @@ DISABLE_BLOOM = "1"
 sketch = "line"
 provider = "mock"
 config = "clean"
-frames = [180, 258, 276, 294, 522, 810]
+frames = [180, 276, 495, 570, 666, 780, 1320, 1770]
 dt = 0.016666667
 
 [scenarios.line-screensaver.debug]

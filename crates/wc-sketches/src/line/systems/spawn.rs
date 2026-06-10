@@ -25,6 +25,7 @@ use bevy::render::storage::ShaderStorageBuffer;
 use bytemuck::cast_slice;
 
 use crate::line::compute::LineSimParams;
+use crate::line::hash::{hash_to_unit, wang_hash};
 use crate::line::heatmap::sample_from_heatmap;
 use crate::line::material::LineMaterial;
 use crate::line::particle::{Particle, SimParams};
@@ -48,22 +49,6 @@ pub const ATTRACT_LIFESPAN_MAX_SECS: f32 = 45.0;
 /// lifespan stream is decorrelated from the [`spawn_hash01`] stream (otherwise
 /// the fraction kill would preferentially cull one end of the lifespan range).
 const LIFESPAN_HASH_SALT: u32 = 0x9E37_79B9;
-
-/// Wang's 32-bit integer mix. Deterministic and stateless — the same index
-/// always hashes to the same value, on every platform, which is what makes the
-/// attract-mode lifespans and fraction kill capture-reproducible (no RNG).
-fn wang_hash(mut x: u32) -> u32 {
-    x = (x ^ 0x3D) ^ (x >> 16); // 0x3D = Wang's published constant 61
-    x = x.wrapping_mul(9);
-    x ^= x >> 4;
-    x = x.wrapping_mul(0x27d4_eb2d);
-    x ^ (x >> 15)
-}
-
-/// Map a hashed `u32` onto `0..=1`.
-fn hash_to_unit(h: u32) -> f32 {
-    h as f32 / u32::MAX as f32
-}
 
 /// Deterministic per-index hash in `0..=1`, seeded into
 /// [`Particle::spawn_hash`] at spawn. The attract-mode fraction gate kills

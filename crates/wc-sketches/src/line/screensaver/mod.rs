@@ -11,9 +11,10 @@
 //! 1. **`LineSimParams.params`** — the normal `update_sim_params` writer is
 //!    gated on `Active` and does not run here, so this is the param *producer*
 //!    during attract. It builds the attractor array from
-//!    [`choreography::attract_frame`] (the "Wandering Pulses" composition:
-//!    three slow Lissajous walkers, each briefly swelling to a gentle
-//!    attraction pulse) and bakes it via the shared
+//!    [`choreography::attract_frame`] (the "Wandering Pulses + Meteors"
+//!    composition: three slow Lissajous walkers, each briefly swelling to a
+//!    gentle attraction pulse, plus two meteor lanes whose invisible
+//!    attractors cross the frame dragging comet wakes) and bakes it via the shared
 //!    [`crate::line::systems::sim_params::bake_sim_params`] (Condition A1 — one
 //!    baker, two writers, cannot drift).
 //! 2. **`LinePostParams`** — `i_resolution` / `i_mouse` / `i_global_time` /
@@ -127,19 +128,21 @@ fn drive_line_attract(
     post.i_mouse_factor = (1.0 / 15.0) / (frame.activity + 1.0);
 }
 
-/// Pack the choreography frame's attractors into the GPU `[Attractor; N]` array,
-/// returning `(array, live_count)`.
+/// Pack the choreography frame's attractors (pulses, then meteors) into the
+/// GPU `[Attractor; N]` array, returning `(array, live_count)`.
 ///
 /// Each sample's power is baked with `gravity_constant` exactly as the live
 /// mouse/hand writers do (A1 parity). Zero-power samples are skipped so they
 /// don't consume uniform slots — in the settled field that is *all* of them
 /// (zero attractors packed, putting the kernel in inertial drag); only
-/// walkers inside their pulse window pack. If a nonzero ambient floor were
-/// ever restored, every walker would pack every frame — see
-/// [`choreography::AMBIENT_POWER`] for why it must not be. `slot` (usize)
-/// and the returned count (u32) advance in lockstep, both capped at
-/// `MAX_ATTRACTORS`, avoiding a numeric `as` cast in the loop (workspace
-/// `as_conversions` lint).
+/// walkers inside their pulse window and meteors mid-crossing pack. The
+/// worst case is `PULSE_COUNT + METEOR_COUNT = 5` concurrent samples, within
+/// `MAX_ATTRACTORS` (8); the cap below guards the invariant if either count
+/// grows. If a nonzero ambient floor were ever restored, every walker would
+/// pack every frame — see [`choreography::AMBIENT_POWER`] for why it must
+/// not be. `slot` (usize) and the returned count (u32) advance in lockstep,
+/// both capped at `MAX_ATTRACTORS`, avoiding a numeric `as` cast in the loop
+/// (workspace `as_conversions` lint).
 #[must_use]
 fn build_attractor_array(
     frame: &choreography::AttractFrame,
@@ -147,7 +150,7 @@ fn build_attractor_array(
 ) -> ([Attractor; MAX_ATTRACTORS], u32) {
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
     let mut slot = 0_usize;
-    for sample in frame.pulses {
+    for sample in frame.pulses.iter().chain(frame.meteors.iter()) {
         if slot >= MAX_ATTRACTORS || sample.power <= 0.0 {
             continue;
         }
@@ -182,6 +185,16 @@ mod tests {
         assert!(
             (crest_arr[0].power - choreography::PULSE_PEAK_POWER * 280.0).abs() < 1.0,
             "cresting walker bakes peak power × gravity_constant"
+        );
+
+        // Meteor plateau (lane 0's first crossing midpoint, t = 10.25, no
+        // pulse active): the meteor packs exactly like a pulse does.
+        let pass = choreography::attract_frame(10.25, bounds);
+        let (pass_arr, pass_count) = build_attractor_array(&pass, 280.0);
+        assert_eq!(pass_count, 1, "only the crossing meteor packs");
+        assert!(
+            (pass_arr[0].power - choreography::METEOR_PEAK_POWER * 280.0).abs() < 1.0,
+            "crossing meteor bakes peak power × gravity_constant"
         );
     }
 }

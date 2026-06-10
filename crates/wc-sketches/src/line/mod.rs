@@ -38,6 +38,7 @@ pub mod bone_composite;
 pub mod bone_wireframe;
 pub mod compute;
 pub mod hand_mesh;
+pub mod hash;
 pub mod heatmap;
 pub mod leap_attractors;
 pub mod material;
