@@ -246,12 +246,19 @@ audited for the screensaver compute/thermal budget. Findings and changes:
   reactive loop gates the whole schedule, render world included). Warm/Hot tier
   waits compose *below* the cap, unchanged.
 - **Hand-wake chain documented (MediaPipe).** Camera frames are not winit
-  events; wake is polled: 4 Hz idle inference emits a hand-bearing frame →
-  `poll_all_providers` (PreUpdate) on the next reactive tick →
-  `reset_on_interaction` → `Active` → snapshot restored. At the 30 fps cap the
-  33 ms tick is well inside the 250 ms inference cadence, adding ≤ 33 ms to the
-  documented ~300 ms worst-case wake; Hot adds ≤ 333 ms (≈ 0.6 s worst case,
-  accepted in a thermal emergency).
+  events; wake is polled, and nothing wakes the loop early, so each step costs
+  a full reactive tick: 4 Hz idle inference emits a hand-bearing frame → tick
+  N's `poll_all_providers` (PreUpdate) drains it and `reset_on_interaction` /
+  `advance_activity` write `NextState` in tick N's Update — but
+  `StateTransition` runs *before* Update in the `Main` schedule, so the
+  `Active` flip and the snapshot restore land in tick N+1's `StateTransition`,
+  a second full wait later. The throttle therefore adds ≤ 2 reactive ticks:
+  ~66 ms at the 30 fps cap (≈ 366 ms total against the documented ~300 ms
+  worst-case wake); Hot adds ≤ 666 ms (≈ 0.97 s worst case, accepted in a
+  thermal emergency). During the screensaver the *unfocused* mode is set to the
+  same reactive mode — intentionally more device-event-responsive than the
+  `game()` unfocused baseline (`react_to_device_events: true` vs `false`) so a
+  passer-by can wake an unfocused window.
 - **No additional smear/compute gating.** At 30 fps the dispatch + smear already
   run at half rate via the present gate; a true dispatch freeze remains the
   deferred warm-up-then-freeze escalation (§10.1), still soak-gated.

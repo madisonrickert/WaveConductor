@@ -176,8 +176,9 @@ const SCREENSAVER_FPS: f64 = 30.0;
 /// - Cool = [`SCREENSAVER_FPS`] (30 fps, ~33 ms): rich attract while there is
 ///   headroom — this is the temperature-independent screensaver cap.
 /// - Warm ≈ 15 fps (66 ms): noticeably calmer, still animated.
-/// - Hot ≈ 3 fps (333 ms): "resting ember" present rate; combined with the
-///   frozen compute dispatch this is genuine cooldown.
+/// - Hot ≈ 3 fps (333 ms): "resting ember" present rate. The ~10× present-rate
+///   drop alone is the cooldown ("Low-Rate Ember", spec §10.1) — there is no
+///   dispatch freeze; that remains a deferred, soak-gated escalation.
 #[must_use]
 fn tier_present_wait(tier: ThermalTier) -> Duration {
     match tier {
@@ -228,20 +229,25 @@ fn save_present_mode(mut commands: Commands<'_, '_>, winit: Res<'_, WinitSetting
 /// update-mode whose `wait` matches the effective tier, throttling the present
 /// rate. Mouse / keyboard / touch interaction wakes the loop instantly
 /// (`react_to_*` all true), so a visitor at the controls resumes at full rate
-/// without perceptible lag.
+/// without perceptible lag. The *unfocused* mode gets the same reactive mode —
+/// deliberately more device-event-responsive than the `game()` baseline's
+/// unfocused `reactive_low_power` (`react_to_device_events: true` vs `false`),
+/// so a passer-by can wake an unfocused window too.
 ///
 /// **Hand-wake chain (webcam / MediaPipe):** camera frames are *not* winit
-/// events, so a hand wakes the install through the polled path instead: the
+/// events, so a hand wakes the install through the polled path instead — and
+/// nothing wakes the loop early, so each step costs a full reactive tick. The
 /// inference worker (already capped at 4 Hz in Idle/Screensaver, commit
-/// b3d6589a) emits a hand-bearing frame → `poll_all_providers` (`PreUpdate`)
-/// drains it on the next reactive tick → `reset_on_interaction` sees the
-/// `HandTrackingFrame` message → activity returns to `Active` →
-/// `OnExit(Screensaver)` restores the saved present mode. At the 30 fps cap the
-/// loop ticks every ~33 ms, far inside the 250 ms idle inference cadence, so
-/// the throttle adds ≤ 33 ms to the ~300 ms worst-case wake documented on the
-/// inference throttle. At hotter tiers the tick interval (66 / 333 ms) adds
-/// proportionally — worst case ≈ 0.6 s at Hot, an accepted trade in a thermal
-/// emergency.
+/// b3d6589a) emits a hand-bearing frame → tick N's `poll_all_providers`
+/// (`PreUpdate`) drains it and `reset_on_interaction` / `advance_activity`
+/// write `NextState` in tick N's `Update` — but `StateTransition` runs *before*
+/// `Update` in the `Main` schedule, so the `Active` flip and the
+/// `OnExit(Screensaver)` restore land in tick N+1's `StateTransition`, a
+/// second full wait later. The throttle therefore adds ≤ 2 reactive ticks:
+/// ~66 ms at the 30 fps cap, ≈ 366 ms total against the ~300 ms worst-case
+/// wake documented on the inference throttle. At hotter tiers the two ticks
+/// scale with the wait — ≤ 666 ms at Hot, ≈ 0.97 s total worst case, an
+/// accepted trade in a thermal emergency.
 ///
 /// Only writes `WinitSettings` when the desired mode changes (avoids churning a
 /// resource every frame).
@@ -251,7 +257,7 @@ fn save_present_mode(mut commands: Commands<'_, '_>, winit: Res<'_, WinitSetting
 /// `wait` of hundreds of ms per frame (the Hot tier) would let the per-frame
 /// wall-clock blow past the launcher's 90 s timeout. So when a `CaptureConfig`
 /// is present this system is a no-op, leaving winit in `Continuous` — the
-/// captured visual (particle state, dispatch freeze) is unaffected; only the
+/// captured visual (particle state, choreography) is unaffected; only the
 /// *present cadence* (which capture doesn't measure) is skipped. Debug-only
 /// guard; compiled out of release.
 fn apply_present_rate(
@@ -273,6 +279,9 @@ fn apply_present_rate(
     #[cfg(not(debug_assertions))]
     let tier = effective_tier(&thermal);
 
+    // Known follow-up (pre-existing): during a Leap duty-cycle Paused countdown,
+    // `requested_wake` shrinks every tick, so `desired` differs each frame and
+    // `WinitSettings` is rewritten per frame (opt-in path only; harmless churn).
     let duty_wake = duty.as_deref().map(|d| d.requested_wake(time.elapsed()));
     let wait = effective_wait(tier_present_wait(tier), duty_wake);
     let desired = UpdateMode::Reactive {
@@ -322,8 +331,9 @@ fn restore_present_rate(
 /// `advance_activity` writes `NextState<SketchActivity>` every frame from the
 /// idle timer. Under the capture clock almost no virtual time elapses, so it
 /// targets `Active` each frame; a force that *also* wrote `NextState` would fight
-/// it and flap show↔hide every frame (which un-freezes the Hot ember and can
-/// stall the capture's frame-advance — observed as a 90 s timeout). Instead this
+/// it and flap show↔hide every frame (which churns the throttle apply/restore
+/// writes and can stall the capture's frame-advance — observed as a 90 s
+/// timeout). Instead this
 /// collapses both idle thresholds to zero, so `advance_activity` *itself* targets
 /// `Screensaver` from the first frame and stays there: a single writer, no race.
 /// Registered to run `before` `advance_activity` so the zeroed thresholds take

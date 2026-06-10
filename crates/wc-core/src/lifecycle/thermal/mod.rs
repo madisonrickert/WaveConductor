@@ -7,8 +7,9 @@
 //! [`ThermalTier::Warm`], [`ThermalTier::Hot`]. The screensaver reads this tier
 //! to ratchet its rendering richness down only when the hardware is actually
 //! getting hot, keeping the attract visual rich while there is headroom and
-//! shedding heat (smaller compute dispatch, lower present rate, frozen "ember")
-//! when there is not. The whole rationale of the v5 rewrite is unattended
+//! shedding heat (a hard-dropped present rate, down to the ≈3 fps "resting
+//! ember" at Hot — spec §10.1's "Low-Rate Ember") when there is not. The whole
+//! rationale of the v5 rewrite is unattended
 //! multi-day thermal stability; this is the signal that drives it.
 //!
 //! ## Data flow
@@ -54,16 +55,19 @@ use self::sensor::ThermalReading;
 /// Coarse thermal headroom classification consumed by the screensaver.
 ///
 /// Ordered coolest → hottest so `tier as u8` and `PartialOrd` both reflect
-/// "hotter" as "greater". The screensaver maps each tier to a particle budget,
-/// present rate, and (at [`Self::Hot`]) a frozen compute dispatch.
+/// "hotter" as "greater". The screensaver maps each tier to a present rate —
+/// the only thermal lever shipped (spec §10.1's "Low-Rate Ember"); per-tier
+/// particle budgets and a Hot dispatch freeze remain deferred, soak-gated
+/// options (spec §10.4).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ThermalTier {
-    /// Full headroom: render the full attract budget at full present rate.
+    /// Full headroom: present at the screensaver's 30 fps cap.
     #[default]
     Cool,
-    /// Warming: reduce particle count + present rate, same choreography.
+    /// Warming: drop the present rate (≈15 fps), same choreography.
     Warm,
-    /// Hot: stop the compute dispatch (frozen "ember"), drop present rate hard.
+    /// Hot: drop the present rate hard (≈3 fps "resting ember"); no dispatch
+    /// freeze — that remains a deferred escalation (spec §10.1).
     Hot,
 }
 
