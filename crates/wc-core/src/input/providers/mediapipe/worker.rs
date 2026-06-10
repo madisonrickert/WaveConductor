@@ -7,6 +7,12 @@
 //! on the main thread without blocking or allocating — mirroring how the Leap
 //! provider keeps device I/O off the render path.
 //!
+//! Two rate caps share one mechanism (drop over-budget frames undecoded):
+//! the configured `max_hz` always applies, and while the app sits in
+//! `Idle`/`Screensaver` the shared [`MediaPipeLiveTuning`] idle-throttle flag
+//! lowers the cap to [`IDLE_INFERENCE_HZ`] to shed sustained CPU/thermal load
+//! (see the constant's wake-latency contract).
+//!
 //! Foundation module: wired into the provider in [`super::MediaPipeProvider`];
 //! exercised by a mock-source plumbing test.
 #![allow(dead_code)]
@@ -21,7 +27,7 @@ use smallvec::SmallVec;
 
 use super::capture::{CaptureError, Frame, FrameSource};
 use super::pipeline::Pipeline;
-use super::pipeline::PipelineDiagnostics;
+use super::pipeline::{MediaPipeLiveTuning, PipelineDiagnostics};
 use crate::input::hand::Hand;
 use crate::input::state::{
     DeviceHealth, DevicePresence, ProviderStatus, ServiceConnection, TrackingFlow, MAX_HANDS,
@@ -78,6 +84,9 @@ pub struct MediaPipeWorkerDiagnostics {
     pub inference_interval: Duration,
     /// Cumulative count of pipeline (inference) errors since worker start.
     pub pipeline_errors: u64,
+    /// Whether the idle throttle ([`IDLE_INFERENCE_HZ`]) governed this frame's
+    /// rate cap. Surfaced as the dev panel's "Inference cap" metric.
+    pub idle_throttled: bool,
 }
 
 /// Handle to a running worker; dropping or [`Self::stop`] joins the thread.
@@ -102,14 +111,30 @@ impl Drop for WorkerHandle {
     }
 }
 
+/// Inference cap (Hz) applied while [`MediaPipeLiveTuning::idle_throttle`] is
+/// set, i.e. the sketch is in `Idle`/`Screensaver` with no audience present.
+///
+/// Wake-latency contract: 4 Hz means a worst-case wake of one throttle period
+/// (250 ms) plus one full pipeline run (tens of ms) ≈ **300 ms** before the
+/// first hand-bearing frame reaches `lifecycle::idle::reset_on_interaction`
+/// (which wakes only on hand-*bearing* frames — empty frames never reset the
+/// idle timer) and flips the app back to `Active`/full rate. Against the 30 s
+/// idle threshold that entry latency is imperceptible, while the sustained
+/// load drop (30 Hz → 4 Hz of capture-decode + palm inference) is the bulk of
+/// the multi-hour idle thermal win.
+pub const IDLE_INFERENCE_HZ: u32 = 4;
+
 /// Spawn the worker thread. It runs until [`WorkerHandle::stop`] (or the handle
 /// drops), capturing + processing frames at up to `max_hz` and pushing results
-/// to `producer`.
+/// to `producer`. `tuning` is the provider's shared lock-free cell; the loop
+/// re-reads its idle-throttle flag every iteration and drops to
+/// [`IDLE_INFERENCE_HZ`] while it is set.
 #[must_use]
 pub fn spawn_worker(
     make_source: SourceFactory,
     pipeline: Pipeline,
     max_hz: u32,
+    tuning: Arc<MediaPipeLiveTuning>,
     mut producer: Producer<WorkerMsg>,
 ) -> WorkerHandle {
     let stop = Arc::new(AtomicBool::new(false));
@@ -133,6 +158,7 @@ pub fn spawn_worker(
                 source,
                 pipeline,
                 min_inference_interval,
+                &tuning,
                 producer,
             );
         })
@@ -142,15 +168,18 @@ pub fn spawn_worker(
 }
 
 /// The worker's capture→process→publish loop, run on the worker thread until
-/// `stop` is set. Split out of [`spawn_worker`] so each stays readable. Captures
-/// the freshest frame, drops over-budget frames before inference (thermal cap,
-/// newest frame wins), runs the pipeline, and publishes hands, status, and
-/// diagnostics (including the rare error path) over the ring.
+/// `stop` is set. Split out of [`spawn_worker`] so each stays readable.
+/// Decides the frame budget *first* (re-reading the idle-throttle flag every
+/// iteration), drains over-budget frames undecoded via
+/// [`FrameSource::discard_frame`] (thermal cap, newest frame wins), captures +
+/// decodes only budgeted frames, runs the pipeline, and publishes hands,
+/// status, and diagnostics (including the rare error path) over the ring.
 fn run_worker_loop(
     stop: &AtomicBool,
     mut source: Box<dyn FrameSource>,
     mut pipeline: Pipeline,
     min_inference_interval: Option<Duration>,
+    tuning: &MediaPipeLiveTuning,
     mut producer: Producer<WorkerMsg>,
 ) {
     let start = Instant::now();
@@ -158,41 +187,43 @@ fn run_worker_loop(
     let mut last_inference = None;
     let mut dropped_frames = 0_u64;
     let mut pipeline_errors = 0_u64;
-    // Report the negotiated capture format once, up front.
-    if let Some(label) = source.format_label().map(str::to_owned) {
-        push_msg(
-            &mut producer,
-            WorkerMsg::CameraFormat(label),
-            &mut dropped_frames,
-        );
-    }
-    push_msg(
-        &mut producer,
-        WorkerMsg::Status(streaming_status(Duration::ZERO, 0)),
-        &mut dropped_frames,
-    );
+    // Computed once: the idle cap can only ever *lower* the rate (a configured
+    // active cap slower than IDLE_INFERENCE_HZ stays authoritative).
+    let idle_inference_interval = idle_capped_interval(min_inference_interval);
+    announce_source(source.as_ref(), &mut producer, &mut dropped_frames);
 
     while !stop.load(Ordering::Relaxed) {
         let loop_start = Instant::now();
+        // Re-read the idle flag every iteration: the Bevy-side mirror system
+        // flips it on Idle/Screensaver transitions and the very next frame
+        // budget honors the new rate (lock-free, Relaxed — a one-iteration
+        // stale read is harmless).
+        let idle_throttled = tuning.idle_throttle();
+        let min_interval = if idle_throttled {
+            idle_inference_interval
+        } else {
+            min_inference_interval
+        };
+        // Budget decision BEFORE capture: an over-budget frame is drained
+        // undecoded (discard_frame), so a throttled worker never pays the
+        // MJPEG/YUYV→RGB decode — the dominant per-dropped-frame CPU cost and
+        // most of the idle throttle's thermal win — while the drain itself
+        // keeps the camera stream fresh (newest frame wins; sleeping instead
+        // would let the buffer fill with stale frames, see spawn_worker).
+        if !should_process_frame(last_inference, loop_start, min_interval) {
+            drop_over_budget_frame(source.as_mut(), &mut producer, &mut dropped_frames);
+            // Fast mocks and some non-blocking camera sources can return
+            // frames immediately; after dropping one, back off briefly so
+            // the cap doesn't busy-spin a core.
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+
         let next = source.next_frame(&mut frame);
-        // Time from loop top to the frame being decoded in `frame`.
+        // Time from the budget decision to the frame being decoded in `frame`.
         let capture_decode = loop_start.elapsed();
         match next {
             Ok(true) => {
-                if !should_process_frame(last_inference, loop_start, min_inference_interval) {
-                    dropped_frames = dropped_frames.saturating_add(1);
-                    push_msg(
-                        &mut producer,
-                        WorkerMsg::Status(streaming_status(Duration::ZERO, dropped_frames)),
-                        &mut dropped_frames,
-                    );
-                    // Fast mocks and some non-blocking camera sources can return
-                    // frames immediately; after dropping one, back off briefly so
-                    // the cap doesn't busy-spin a core.
-                    std::thread::sleep(IDLE_POLL);
-                    continue;
-                }
-
                 // A budgeted frame is in hand: process it immediately. No retained
                 // frame ages while we wait for the next budget window; all
                 // over-budget frames have already been dropped.
@@ -208,6 +239,7 @@ fn run_worker_loop(
                             capture_decode,
                             dt,
                             pipeline_errors,
+                            idle_throttled,
                         );
                         push_msg(
                             &mut producer,
@@ -245,6 +277,7 @@ fn run_worker_loop(
                             capture_decode,
                             dt,
                             pipeline_errors,
+                            idle_throttled,
                         );
                         push_msg(
                             &mut producer,
@@ -267,9 +300,65 @@ fn run_worker_loop(
     }
 }
 
+/// One-time start-of-loop announcements: the negotiated capture format (when
+/// the source knows one) and the initial healthy streaming status.
+fn announce_source(
+    source: &dyn FrameSource,
+    producer: &mut Producer<WorkerMsg>,
+    dropped_frames: &mut u64,
+) {
+    if let Some(label) = source.format_label().map(str::to_owned) {
+        push_msg(producer, WorkerMsg::CameraFormat(label), dropped_frames);
+    }
+    push_msg(
+        producer,
+        WorkerMsg::Status(streaming_status(Duration::ZERO, 0)),
+        dropped_frames,
+    );
+}
+
+/// Drain one over-budget frame **undecoded** ([`FrameSource::discard_frame`])
+/// and report the drop. Called when the rate cap (configured `max_hz` or the
+/// idle throttle) rejects the current budget window: the drain keeps the
+/// camera stream fresh (newest frame wins) while skipping the decode — the
+/// dominant per-dropped-frame CPU cost.
+fn drop_over_budget_frame(
+    source: &mut dyn FrameSource,
+    producer: &mut Producer<WorkerMsg>,
+    dropped_frames: &mut u64,
+) {
+    match source.discard_frame() {
+        Ok(true) => {
+            *dropped_frames = dropped_frames.saturating_add(1);
+            push_msg(
+                producer,
+                WorkerMsg::Status(streaming_status(Duration::ZERO, *dropped_frames)),
+                dropped_frames,
+            );
+        }
+        // No frame was waiting: nothing to drop (the caller backs off).
+        Ok(false) => {}
+        Err(_) => {
+            let _ = producer.push(WorkerMsg::Status(no_camera_status()));
+        }
+    }
+}
+
 /// Minimum interval between inference runs for a requested max rate.
 fn inference_interval(max_hz: u32) -> Option<Duration> {
     (max_hz > 0).then(|| Duration::from_secs_f64(1.0 / f64::from(max_hz)))
+}
+
+/// Minimum inference interval while the idle throttle is engaged.
+///
+/// `max(active interval, idle interval)`: the [`IDLE_INFERENCE_HZ`] cap may
+/// only *slow* inference. With an uncapped active rate (`max_hz == 0` →
+/// `active == None`) the idle interval applies alone; a configured active cap
+/// already slower than the idle rate stays authoritative.
+fn idle_capped_interval(active: Option<Duration>) -> Option<Duration> {
+    // IDLE_INFERENCE_HZ is a non-zero constant, so this is always Some; the
+    // Option shape is kept to compose with `should_process_frame`.
+    inference_interval(IDLE_INFERENCE_HZ).map(|idle| active.map_or(idle, |active| active.max(idle)))
 }
 
 /// Whether a freshly captured frame is allowed to run inference now.
@@ -292,6 +381,7 @@ fn worker_diag(
     capture_decode: Duration,
     inference_interval: Duration,
     pipeline_errors: u64,
+    idle_throttled: bool,
 ) -> MediaPipeWorkerDiagnostics {
     MediaPipeWorkerDiagnostics {
         pipeline: pipeline.diagnostics(),
@@ -299,6 +389,7 @@ fn worker_diag(
         capture_decode,
         inference_interval,
         pipeline_errors,
+        idle_throttled,
     }
 }
 
@@ -396,12 +487,91 @@ mod tests {
         })
     }
 
+    /// A shared tuning cell with the idle-throttle flag pre-set.
+    fn tuning(idle: bool) -> Arc<MediaPipeLiveTuning> {
+        let cfg = PipelineConfig::default();
+        let cell = Arc::new(MediaPipeLiveTuning::new(
+            cfg.grab_rest_deadzone,
+            cfg.depth_calibration_k,
+        ));
+        cell.set_idle_throttle(idle);
+        cell
+    }
+
+    /// A pipeline whose mocks emit ONE confident hand on every processed frame
+    /// (mirrors `pipeline::tests::counting_pipeline`: one hot central palm
+    /// anchor → a 0.2×0.2 detection; landmark stage returns well-spread image
+    /// landmarks with high presence). Used to pin the wake contract: a
+    /// throttled frame that sees a hand must still emit a hand-bearing
+    /// `WorkerMsg::Hands`.
+    fn hand_pipeline() -> Pipeline {
+        // Palm: one hot stride-8 central anchor; every other anchor drops.
+        let mut scores = vec![-100.0f32; 2016];
+        let hot_anchor = (12 * 24 + 12) * 2;
+        scores[hot_anchor] = 100.0;
+        let mut boxes = vec![0.0f32; 2016 * 18];
+        let hot_box = hot_anchor * 18;
+        boxes[hot_box + 2] = 192.0 * 0.2;
+        boxes[hot_box + 3] = 192.0 * 0.2;
+        boxes[hot_box + 5] = 192.0 * 0.1;
+        boxes[hot_box + 9] = -192.0 * 0.1;
+        let palm = StaticInference {
+            outputs: vec![
+                Tensor {
+                    data: boxes,
+                    shape: vec![1, 2016, 18],
+                },
+                Tensor {
+                    data: scores,
+                    shape: vec![1, 2016, 1],
+                },
+            ],
+        };
+        // Landmark: spread, centre-of-crop image landmarks (well inside the
+        // content rect and over the spread gates) with presence 0.98.
+        let mut lms = vec![112.0f32; 63];
+        let mut set = |i: usize, x: f32, y: f32| {
+            lms[i * 3] = x;
+            lms[i * 3 + 1] = y;
+        };
+        set(0, 112.0, 160.0); // wrist
+        set(9, 112.0, 90.0); // middle MCP
+        set(5, 85.0, 110.0); // index MCP
+        set(17, 140.0, 110.0); // pinky MCP
+        set(12, 112.0, 50.0); // middle tip
+        let landmark = StaticInference {
+            outputs: vec![
+                Tensor {
+                    data: lms,
+                    shape: vec![1, 63],
+                },
+                Tensor {
+                    data: vec![0.98], // presence: confidently a hand
+                    shape: vec![1, 1],
+                },
+                Tensor {
+                    data: vec![0.9], // handedness: Right
+                    shape: vec![1, 1],
+                },
+                Tensor {
+                    data: super::super::pipeline::fixtures::open_world_tensor(),
+                    shape: vec![1, 63],
+                },
+            ],
+        };
+        Pipeline::new(
+            Box::new(palm),
+            Box::new(landmark),
+            PipelineConfig::default(),
+        )
+    }
+
     #[test]
     fn worker_publishes_status_and_frames_for_a_mock_source() {
         let pipeline = empty_pipeline();
         let make_source = looping_solid_source();
         let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
-        let mut handle = spawn_worker(make_source, pipeline, 30, producer);
+        let mut handle = spawn_worker(make_source, pipeline, 30, tuning(false), producer);
 
         // Spin briefly until we see a healthy streaming status.
         let mut saw_streaming = false;
@@ -427,7 +597,7 @@ mod tests {
         let pipeline = empty_pipeline();
         let make_source = looping_solid_source();
         let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
-        let mut handle = spawn_worker(make_source, pipeline, 1, producer);
+        let mut handle = spawn_worker(make_source, pipeline, 1, tuning(false), producer);
 
         let deadline = Instant::now() + Duration::from_millis(120);
         let mut hand_messages = 0_u64;
@@ -466,6 +636,149 @@ mod tests {
         );
     }
 
+    /// Drain `consumer` until `deadline`, counting hand messages and the
+    /// highest dropped-frame count reported in streaming statuses.
+    fn drain_until(consumer: &mut rtrb::Consumer<WorkerMsg>, deadline: Instant) -> (u64, u64) {
+        let mut hand_messages = 0_u64;
+        let mut max_dropped = 0_u64;
+        while Instant::now() < deadline {
+            while let Ok(msg) = consumer.pop() {
+                match msg {
+                    WorkerMsg::Hands { .. } => {
+                        hand_messages = hand_messages.saturating_add(1);
+                    }
+                    WorkerMsg::Status(status) => {
+                        if let TrackingFlow::Streaming {
+                            dropped_since_start,
+                            ..
+                        } = status.streaming
+                        {
+                            max_dropped = max_dropped.max(dropped_since_start);
+                        }
+                    }
+                    WorkerMsg::Diagnostics(_)
+                    | WorkerMsg::Error(_)
+                    | WorkerMsg::CameraFormat(_) => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (hand_messages, max_dropped)
+    }
+
+    #[test]
+    fn idle_capped_interval_only_ever_slows_inference() {
+        // 4 Hz ↔ 250 ms period.
+        let idle_period = Duration::from_millis(250);
+        // Typical: 30 Hz active cap (~33 ms) → the idle period wins.
+        assert_eq!(
+            idle_capped_interval(inference_interval(30)),
+            Some(idle_period)
+        );
+        // Active cap already slower than idle (1 Hz) → it stays authoritative.
+        assert_eq!(
+            idle_capped_interval(inference_interval(1)),
+            Some(Duration::from_secs(1))
+        );
+        // Uncapped active rate (max_hz = 0) → idle period applies alone.
+        assert_eq!(idle_capped_interval(None), Some(idle_period));
+    }
+
+    #[test]
+    fn idle_throttle_caps_inference_at_idle_hz() {
+        // With the idle flag set, a 30 Hz active cap must behave like the 4 Hz
+        // idle cap: the 250 ms idle period fits only the first (immediate)
+        // inference inside a 120 ms window; everything else is dropped.
+        let pipeline = empty_pipeline();
+        let make_source = looping_solid_source();
+        let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
+        let mut handle = spawn_worker(make_source, pipeline, 30, tuning(true), producer);
+
+        let (hand_messages, max_dropped) =
+            drain_until(&mut consumer, Instant::now() + Duration::from_millis(120));
+        handle.stop();
+
+        assert!(
+            hand_messages <= 1,
+            "idle throttle processed {hand_messages} inference frames in 120 ms \
+             (expected at most the immediate first frame at {IDLE_INFERENCE_HZ} Hz)"
+        );
+        assert!(
+            max_dropped > 0,
+            "idle-throttled over-budget frames were not reported as dropped"
+        );
+    }
+
+    #[test]
+    fn clearing_idle_throttle_restores_full_rate_live() {
+        // The flag is re-read every loop iteration: clearing it mid-run (what
+        // the activity-mirror system does on wake) must restore the 30 Hz cap
+        // without a worker restart.
+        let pipeline = empty_pipeline();
+        let make_source = looping_solid_source();
+        let cell = tuning(true);
+        let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
+        let mut handle = spawn_worker(make_source, pipeline, 30, Arc::clone(&cell), producer);
+
+        // Wait for the first (throttled) inference frame so the worker is
+        // demonstrably up before un-throttling.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_first = false;
+        while Instant::now() < deadline && !saw_first {
+            while let Ok(msg) = consumer.pop() {
+                if matches!(msg, WorkerMsg::Hands { .. }) {
+                    saw_first = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(saw_first, "worker never produced its first frame");
+
+        cell.set_idle_throttle(false);
+        let (hand_messages, _) =
+            drain_until(&mut consumer, Instant::now() + Duration::from_millis(300));
+        handle.stop();
+
+        // Still throttled, 300 ms would fit at most 2 frames (4 Hz period);
+        // at the restored 30 Hz cap ~9 arrive. ≥ 3 separates the two cleanly
+        // even under scheduler jitter.
+        assert!(
+            hand_messages >= 3,
+            "after clearing the idle flag only {hand_messages} frames arrived in 300 ms \
+             (full rate not restored)"
+        );
+    }
+
+    #[test]
+    fn throttled_inference_still_emits_hand_bearing_frames() {
+        // Wake contract: `lifecycle::idle::reset_on_interaction` wakes ONLY on
+        // a hand-bearing tracking frame, so a throttled frame that sees a palm
+        // must run the full pipeline and emit its hand — the idle throttle
+        // lowers the inference *rate*, never the per-frame behavior.
+        let pipeline = hand_pipeline();
+        let make_source = looping_solid_source();
+        let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
+        let mut handle = spawn_worker(make_source, pipeline, 30, tuning(true), producer);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_hand = false;
+        while Instant::now() < deadline && !saw_hand {
+            while let Ok(msg) = consumer.pop() {
+                if let WorkerMsg::Hands { hands, .. } = msg {
+                    if !hands.is_empty() {
+                        saw_hand = true;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        handle.stop();
+        assert!(
+            saw_hand,
+            "throttled worker never emitted a hand-bearing frame; wake-from-idle would be broken"
+        );
+    }
+
     /// Inference backend that always fails, so `Pipeline::process` returns `Err`.
     struct FailingInference;
 
@@ -484,7 +797,7 @@ mod tests {
         );
         let make_source = looping_solid_source();
         let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
-        let mut handle = spawn_worker(make_source, pipeline, 30, producer);
+        let mut handle = spawn_worker(make_source, pipeline, 30, tuning(false), producer);
 
         let deadline = Instant::now() + Duration::from_millis(120);
         let mut saw_error = false;

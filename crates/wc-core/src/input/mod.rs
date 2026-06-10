@@ -169,11 +169,20 @@ impl Plugin for HandTrackingPlugin {
         }
 
         // Propagate runtime hand-tuning changes (grab deadzone, smoothing) to the
-        // live MediaPipe provider. Separate feature from the Leap gestures block.
+        // live MediaPipe provider, and mirror SketchActivity into its idle
+        // inference throttle (Idle/Screensaver → 4 Hz cap; an unconditional
+        // per-frame atomic store, so a provider rebuilt by the runtime selector
+        // picks the current activity state up on the next frame). The mirror
+        // reads the State<SketchActivity> applied last frame — one frame of
+        // lag, absorbed by the throttle's documented one-frame wake race.
+        // Separate feature from the Leap gestures block.
         #[cfg(feature = "hand-tracking-mediapipe")]
         app.add_systems(
             PreUpdate,
-            self::providers::mediapipe::apply_mediapipe_tuning_settings
+            (
+                self::providers::mediapipe::apply_mediapipe_tuning_settings,
+                self::providers::mediapipe::apply_mediapipe_idle_throttle,
+            )
                 .after(systems::poll_all_providers)
                 .in_set(InputSystems),
         );

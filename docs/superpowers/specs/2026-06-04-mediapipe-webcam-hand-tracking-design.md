@@ -718,3 +718,30 @@ The `hand-tracking-mediapipe` feature is now in the binary's `default`
 feature set — this supersedes the "not in `default` (opt in explicitly)" note
 in the feature-flags section above. Both backends ship in the deployment
 binary; the runtime selector decides which one runs.
+
+### 9. Idle inference throttle (2026-06-10)
+
+While `SketchActivity` is `Idle` or `Screensaver` (no audience interacting),
+the worker caps inference at **4 Hz** (`worker::IDLE_INFERENCE_HZ`) instead of
+the configured 30 Hz, shedding sustained CPU/decode/inference load for the
+multi-hour thermal target. The flag rides in the existing lock-free
+`MediaPipeLiveTuning` cell; a per-frame Bevy mirror system
+(`apply_mediapipe_idle_throttle`) stores the current activity unconditionally
+(one Relaxed atomic store), which makes runtime provider rebuilds correct by
+construction. No separate palm-only mode was built: the pipeline is already
+palm-detection-only when no hands are in view, so the throttle only lowers the
+*rate*.
+
+Wake contract: a palm appearing on a throttled frame runs the full pipeline on
+that same frame and emits a hand-bearing frame, which
+`lifecycle::idle::reset_on_interaction` treats as interaction (empty frames
+never reset the timer) → `Active` → un-throttle. Worst case ≈ one idle period
+(250 ms) + one inference ≈ **300 ms**, imperceptible against the 30 s idle
+threshold. An inherent one-frame race (the worker may process one more
+throttled frame after wake) is harmless.
+
+The rate cap now drops over-budget frames **before decode**:
+`FrameSource::discard_frame` drains the camera (keeping the newest-frame-wins
+freshness invariant) without the MJPEG/YUYV→RGB conversion, so dropped frames
+cost only the raw fetch. The dev panel surfaces the active cap as the
+"Inference cap" metric (`full rate` / `idle (4 Hz)`).

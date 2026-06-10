@@ -14,7 +14,11 @@
 //! spawns a [`worker`] thread that runs the [`pipeline::Pipeline`] at a capped
 //! rate and pushes completed [`crate::input::hand::Hand`] frames onto a
 //! lock-free `rtrb` ring. `poll` non-blockingly drains that ring on the Bevy
-//! main thread.
+//! main thread. While the sketch sits in `Idle`/`Screensaver`,
+//! [`apply_mediapipe_idle_throttle`] lowers the cap to
+//! [`worker::IDLE_INFERENCE_HZ`] (4 Hz) to shed sustained thermal load;
+//! a hand on a throttled frame still emits and wakes the app (~300 ms worst
+//! case — see the constant's docs).
 //!
 //! See the design spec
 //! `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`.
@@ -31,7 +35,9 @@ use self::capture::{CaptureError, FrameSource};
 use self::inference::HandInference;
 use self::pipeline::{MediaPipeLiveTuning, Pipeline, PipelineConfig};
 use self::smoothing::{HandSmoother, DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
-use self::worker::{spawn_worker, SourceFactory, WorkerHandle, WorkerMsg};
+use self::worker::{
+    spawn_worker, MediaPipeWorkerDiagnostics, SourceFactory, WorkerHandle, WorkerMsg,
+};
 use crate::input::hand::Hand;
 use crate::input::provider::{HandTrackingProvider, ProviderId};
 use crate::input::state::{
@@ -199,6 +205,20 @@ impl MediaPipeProvider {
         self.live_tuning.set_depth_k(k);
     }
 
+    /// Live-set the idle inference throttle (shared with the running worker:
+    /// `true` caps inference at [`worker::IDLE_INFERENCE_HZ`]). Mirrors the
+    /// `SketchActivity` state — see [`apply_mediapipe_idle_throttle`]. Cheap
+    /// and lock-free (one Relaxed atomic store); safe to call every frame.
+    pub fn set_idle_throttle(&self, idle: bool) {
+        self.live_tuning.set_idle_throttle(idle);
+    }
+
+    /// Whether the idle inference throttle is currently requested.
+    #[must_use]
+    pub fn idle_throttle(&self) -> bool {
+        self.live_tuning.idle_throttle()
+    }
+
     /// Live-retune the render-rate smoothing (applies to tracked hands and to
     /// banks created later, without resetting any hand's filter state).
     pub fn set_smoothing_params(&mut self, min_cutoff: f32, beta: f32) {
@@ -279,6 +299,132 @@ pub fn apply_mediapipe_tuning_settings(
     }
 }
 
+/// Whether the given sketch activity should throttle `MediaPipe` inference.
+///
+/// `Idle` and `Screensaver` (no audience interacting) → throttled; `Active` →
+/// full rate. `None` is the `SketchActivity` sub-state being absent (the app
+/// is on the Home screen, not in a sketch): full rate, because the idle
+/// machinery — and therefore the hand-bearing-frame wake path — only runs
+/// inside sketch states, so throttling there could never be undone by a hand.
+#[must_use]
+fn idle_throttle_for_activity(activity: Option<&crate::lifecycle::state::SketchActivity>) -> bool {
+    use crate::lifecycle::state::SketchActivity;
+    matches!(
+        activity,
+        Some(SketchActivity::Idle | SketchActivity::Screensaver)
+    )
+}
+
+/// Mirror [`SketchActivity`](crate::lifecycle::state::SketchActivity) into the
+/// running `MediaPipe` provider's idle-throttle flag.
+///
+/// `Idle`/`Screensaver` → the worker caps inference at
+/// [`worker::IDLE_INFERENCE_HZ`]; `Active` (or Home, where the sub-state is
+/// absent) → full rate. The store is **unconditional every frame** rather than
+/// change-gated: it is one Relaxed atomic store behind a registry downcast (no
+/// allocation, no lock), and the unconditional write makes provider rebuilds
+/// correct by construction — a registry rebuilt mid-Idle (provider dropdown
+/// switch) starts un-throttled and picks up the true activity state on the
+/// very next frame, with no rebuild-detection plumbing.
+///
+/// Wake sequencing: a hand seen on a throttled frame still emits a
+/// hand-bearing frame (the throttle lowers rate, not behavior), which resets
+/// the idle timer (`lifecycle::idle::reset_on_interaction`), flips the state
+/// to `Active`, and this mirror un-throttles. There is an inherent one-frame
+/// race — the worker may process one more frame at the idle interval before
+/// the cleared flag lands — which is harmless: it only delays the *second*
+/// post-wake inference by at most one idle period.
+pub fn apply_mediapipe_idle_throttle(
+    activity: Option<Res<'_, State<crate::lifecycle::state::SketchActivity>>>,
+    mut registry: ResMut<'_, crate::input::provider::ProviderRegistry>,
+) {
+    let throttled = idle_throttle_for_activity(activity.as_ref().map(|state| state.get()));
+    for slot in registry.iter_mut() {
+        if slot.id != crate::input::provider::ProviderId::MediaPipe {
+            continue;
+        }
+        if let Some(mp) = slot
+            .inner
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<MediaPipeProvider>())
+        {
+            mp.set_idle_throttle(throttled);
+        }
+    }
+}
+
+/// Refill the dev-panel metrics list from one worker diagnostics snapshot.
+/// Extracted from `poll` so the per-frame drain stays one screen long; called
+/// at most once per poll, under the (main-thread-only) diagnostics lock.
+fn refill_metrics(d: &mut ProviderDiagnostics, worker_diag: &MediaPipeWorkerDiagnostics) {
+    d.metrics.clear();
+    let p = worker_diag.pipeline;
+    d.metrics
+        .push(ProviderMetric::text("Backend", "ort/CoreML"));
+    d.metrics
+        .push(ProviderMetric::duration("Pipeline total", p.total));
+    d.metrics.push(ProviderMetric::duration(
+        "Capture+decode",
+        worker_diag.capture_decode,
+    ));
+    d.metrics.push(ProviderMetric::duration(
+        "Inference interval",
+        worker_diag.inference_interval,
+    ));
+    // Which rate cap governs the worker right now: the idle throttle
+    // (Idle/Screensaver, 4 Hz) or the configured full rate. Static strings —
+    // no per-poll allocation.
+    d.metrics.push(ProviderMetric::text(
+        "Inference cap",
+        if worker_diag.idle_throttled {
+            "idle (4 Hz)"
+        } else {
+            "full rate"
+        },
+    ));
+    d.metrics
+        .push(ProviderMetric::duration("Preprocess", p.preprocess));
+    d.metrics.push(ProviderMetric::duration("Palm", p.palm));
+    d.metrics
+        .push(ProviderMetric::duration("Landmark", p.landmark));
+    d.metrics
+        .push(ProviderMetric::text("Palm reason", p.palm_reason.label()));
+    d.metrics
+        .push(ProviderMetric::count("Tracks before", p.tracks_before));
+    d.metrics
+        .push(ProviderMetric::count("Tracks after", p.tracks_after));
+    d.metrics.push(ProviderMetric::count("Hands", p.hands));
+    // Physical size-estimated distance of the focal hand — the tape-measure
+    // calibration readout for depth_calibration_k (0 when no hand or when the
+    // estimator is off, k <= 0).
+    d.metrics.push(ProviderMetric::count(
+        "Est. distance (mm)",
+        p.est_distance_mm,
+    ));
+    // Raw (pre-deadzone) vs deadzoned grab of the focal hand, permille. Shows
+    // the rest deadzone subtracting and lets the operator read the true
+    // relaxed-hand rest floor.
+    d.metrics
+        .push(ProviderMetric::count("Grab raw (‰)", p.grab_raw_permille));
+    d.metrics
+        .push(ProviderMetric::count("Grab (‰)", p.grab_permille));
+    d.metrics
+        .push(ProviderMetric::count("Track churn", p.track_churn));
+    d.metrics.push(ProviderMetric::count(
+        "Pipeline errors",
+        worker_diag.pipeline_errors,
+    ));
+    // Invariant: the per-poll metrics refill must stay within the SmallVec's
+    // inline capacity (20) — a spill here would heap-allocate on every
+    // diagnostics frame. Adding a metric that trips this assert means raising
+    // the capacity in `ProviderDiagnostics::metrics`, not accepting the spill.
+    debug_assert!(
+        !d.metrics.spilled(),
+        "ProviderDiagnostics::metrics spilled inline capacity ({} metrics)",
+        d.metrics.len()
+    );
+}
+
 /// Open a real webcam source on the calling (worker) thread, or error. Runs
 /// inside the worker so `!Send` camera backends never cross threads.
 fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, CaptureError> {
@@ -333,10 +479,13 @@ impl HandTrackingProvider for MediaPipeProvider {
             None => Box::new(move || open_camera_source(camera_index)),
         };
         let (producer, consumer) = rtrb::RingBuffer::new(256);
+        // The worker reads the shared tuning cell's idle-throttle flag each
+        // loop iteration (Idle/Screensaver → IDLE_INFERENCE_HZ cap).
         let handle = spawn_worker(
             make_source,
             pipeline,
             self.config.max_inference_hz,
+            Arc::clone(&self.live_tuning),
             producer,
         );
         if let Ok(rt) = self.runtime.get_mut() {
@@ -420,63 +569,7 @@ impl HandTrackingProvider for MediaPipeProvider {
                 }
                 if let Some(worker_diag) = new_diagnostics {
                     d.dropped_frames = worker_diag.dropped_frames;
-                    d.metrics.clear();
-                    let p = worker_diag.pipeline;
-                    d.metrics
-                        .push(ProviderMetric::text("Backend", "ort/CoreML"));
-                    d.metrics
-                        .push(ProviderMetric::duration("Pipeline total", p.total));
-                    d.metrics.push(ProviderMetric::duration(
-                        "Capture+decode",
-                        worker_diag.capture_decode,
-                    ));
-                    d.metrics.push(ProviderMetric::duration(
-                        "Inference interval",
-                        worker_diag.inference_interval,
-                    ));
-                    d.metrics
-                        .push(ProviderMetric::duration("Preprocess", p.preprocess));
-                    d.metrics.push(ProviderMetric::duration("Palm", p.palm));
-                    d.metrics
-                        .push(ProviderMetric::duration("Landmark", p.landmark));
-                    d.metrics
-                        .push(ProviderMetric::text("Palm reason", p.palm_reason.label()));
-                    d.metrics
-                        .push(ProviderMetric::count("Tracks before", p.tracks_before));
-                    d.metrics
-                        .push(ProviderMetric::count("Tracks after", p.tracks_after));
-                    d.metrics.push(ProviderMetric::count("Hands", p.hands));
-                    // Physical size-estimated distance of the focal hand — the
-                    // tape-measure calibration readout for depth_calibration_k
-                    // (0 when no hand or when the estimator is off, k <= 0).
-                    d.metrics.push(ProviderMetric::count(
-                        "Est. distance (mm)",
-                        p.est_distance_mm,
-                    ));
-                    // Raw (pre-deadzone) vs deadzoned grab of the focal hand,
-                    // permille. Shows the rest deadzone subtracting and lets
-                    // the operator read the true relaxed-hand rest floor.
-                    d.metrics
-                        .push(ProviderMetric::count("Grab raw (‰)", p.grab_raw_permille));
-                    d.metrics
-                        .push(ProviderMetric::count("Grab (‰)", p.grab_permille));
-                    d.metrics
-                        .push(ProviderMetric::count("Track churn", p.track_churn));
-                    d.metrics.push(ProviderMetric::count(
-                        "Pipeline errors",
-                        worker_diag.pipeline_errors,
-                    ));
-                    // Invariant: the per-poll metrics refill must stay within
-                    // the SmallVec's inline capacity (20) — a spill here would
-                    // heap-allocate on every diagnostics frame. Adding a
-                    // metric that trips this assert means raising the
-                    // capacity in `ProviderDiagnostics::metrics`, not
-                    // accepting the spill.
-                    debug_assert!(
-                        !d.metrics.spilled(),
-                        "ProviderDiagnostics::metrics spilled inline capacity ({} metrics)",
-                        d.metrics.len()
-                    );
+                    refill_metrics(&mut d, &worker_diag);
                 }
             }
         }
@@ -579,6 +672,46 @@ mod tests {
         provider.stop();
         assert!(streaming, "provider never reached Streaming");
         assert_eq!(provider.status().primary(), PrimaryState::NotStarted); // after stop
+    }
+
+    #[test]
+    fn idle_throttle_for_activity_throttles_only_unattended_states() {
+        use crate::lifecycle::state::SketchActivity;
+        // Active audience → full rate.
+        assert!(!idle_throttle_for_activity(Some(&SketchActivity::Active)));
+        // Idle and Screensaver → throttled.
+        assert!(idle_throttle_for_activity(Some(&SketchActivity::Idle)));
+        assert!(idle_throttle_for_activity(Some(
+            &SketchActivity::Screensaver
+        )));
+        // Sub-state absent (Home screen): no idle machinery runs there, so a
+        // hand could never un-throttle — must stay at full rate.
+        assert!(!idle_throttle_for_activity(None));
+    }
+
+    #[test]
+    fn provider_setter_round_trips_idle_throttle() {
+        // The mirror system drives exactly this setter; a fresh provider must
+        // start un-throttled (the mirror corrects it within one frame).
+        let p = MediaPipeProvider::new(MediaPipeConfig::default());
+        assert!(!p.idle_throttle(), "fresh provider starts at full rate");
+        p.set_idle_throttle(true);
+        assert!(p.idle_throttle());
+        p.set_idle_throttle(false);
+        assert!(!p.idle_throttle());
+    }
+
+    #[test]
+    fn idle_metric_label_matches_the_idle_hz_constant() {
+        // The dev panel's "Inference cap" metric hardcodes the rate in a
+        // static string ("idle (4 Hz)") because ProviderMetric::text takes
+        // &'static str (no per-poll allocation). Pin the constant so a retune
+        // updates the label too.
+        assert_eq!(
+            worker::IDLE_INFERENCE_HZ,
+            4,
+            "IDLE_INFERENCE_HZ changed: update the static 'idle (4 Hz)' label in poll()"
+        );
     }
 
     #[test]

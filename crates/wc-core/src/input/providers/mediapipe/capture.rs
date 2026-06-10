@@ -73,6 +73,19 @@ pub trait FrameSource {
     /// Returns [`CaptureError`] if the camera is unavailable or a read fails.
     fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError>;
 
+    /// Fetch and discard the next frame **without decoding** it, returning
+    /// `Ok(true)` if a frame was consumed, `Ok(false)` if none was available.
+    ///
+    /// The worker calls this for over-budget frames (the inference rate cap and
+    /// the Idle/Screensaver throttle): draining keeps the camera stream fresh —
+    /// newest frame wins, no stale-buffer build-up while throttled — while
+    /// skipping the MJPEG/YUYV→RGB decode, which is the dominant per-frame CPU
+    /// cost of a dropped frame and therefore most of the throttle's thermal win.
+    ///
+    /// # Errors
+    /// Returns [`CaptureError`] if the camera is unavailable or a read fails.
+    fn discard_frame(&mut self) -> Result<bool, CaptureError>;
+
     /// A short human-readable label for the active capture format (e.g.
     /// `"640x480 YUYV @30"`), or `None` for sources with no meaningful format
     /// (mocks). Surfaced in provider diagnostics so the dev panel shows what the
@@ -141,6 +154,20 @@ impl FrameSource for MockFrameSource {
         out.fit_to(frame.width, frame.height);
         out.rgb.copy_from_slice(&frame.rgb);
         Ok(true)
+    }
+
+    fn discard_frame(&mut self) -> Result<bool, CaptureError> {
+        // Mirror next_frame's sequencing (consume one queued frame, then loop
+        // or run dry) so a throttled worker drains a scripted source exactly
+        // like a real camera — minus the copy.
+        if self.next < self.frames.len() {
+            self.next += 1;
+            Ok(true)
+        } else if self.loop_last {
+            Ok(!self.frames.is_empty())
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -316,6 +343,20 @@ impl FrameSource for NokhwaFrameSource {
         }
         Ok(true)
     }
+
+    fn discard_frame(&mut self) -> Result<bool, CaptureError> {
+        // Pull (and drop) the newest buffer so the stream never serves a
+        // throttled worker ever-staler frames, but skip the decode/convert
+        // above. Residual dependency-forced cost: nokhwa's `frame()` still
+        // copies the raw bytes into a `Buffer` it owns (a per-call heap
+        // allocation inside nokhwa we cannot avoid without forking its API) —
+        // small next to the skipped JPEG decode / YUV conversion; revisit only
+        // if idle-soak profiling flags it.
+        self.camera
+            .frame()
+            .map_err(|e| CaptureError::Read(e.to_string()))?;
+        Ok(true)
+    }
 }
 
 /// Convert packed YUYV (YUY2: `Y0 U Y1 V` per 2 pixels) to RGB8 in `out`.
@@ -409,6 +450,34 @@ mod tests {
         // Same dimensions next frame → no reallocation.
         src.next_frame(&mut out).expect("second frame");
         assert_eq!(out.rgb.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn discard_frame_consumes_the_sequence_like_next_frame() {
+        // The worker's over-budget path drains via discard_frame; it must
+        // advance a scripted source exactly like next_frame so throttled runs
+        // see the same frame ordering a real camera would deliver.
+        let mut a = Frame::default();
+        a.fit_to(1, 1);
+        a.rgb.copy_from_slice(&[1, 2, 3]);
+        let mut b = Frame::default();
+        b.fit_to(1, 1);
+        b.rgb.copy_from_slice(&[4, 5, 6]);
+
+        // Non-looping: discard eats frame 0; next_frame then sees frame 1.
+        let mut src = MockFrameSource::new(vec![a.clone(), b]);
+        assert!(src.discard_frame().expect("discard frame 0"));
+        let mut out = Frame::default();
+        assert!(src.next_frame(&mut out).expect("frame 1"));
+        assert_eq!(&out.rgb[0..3], &[4, 5, 6]);
+        // Exhausted, not looping → both paths report no frame.
+        assert!(!src.discard_frame().expect("exhausted discard"));
+        assert!(!src.next_frame(&mut out).expect("exhausted next"));
+
+        // Looping: discard keeps reporting the repeated last frame.
+        let mut looped = MockFrameSource::looping(vec![a]);
+        assert!(looped.discard_frame().expect("first"));
+        assert!(looped.discard_frame().expect("looped"));
     }
 
     #[test]

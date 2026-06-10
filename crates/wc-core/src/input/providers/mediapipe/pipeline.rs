@@ -42,7 +42,7 @@
 //!    becomes palm z ([`super::coords::estimate_depth`]).
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -186,21 +186,34 @@ impl Default for PipelineConfig {
 /// [`Pipeline::process`]. All accesses use `Ordering::Relaxed`: the fields are
 /// independent scalars with no cross-field happens-before requirement, and a
 /// one-frame-stale read is harmless (the next frame picks the value up).
+///
+/// Besides the pipeline tunables, the cell also carries the **idle-throttle
+/// flag** read by the worker *loop* (not the pipeline): while set, the worker
+/// caps inference at [`super::worker::IDLE_INFERENCE_HZ`] instead of the
+/// configured full rate. It rides in this cell because the cell is exactly the
+/// existing lock-free app→worker channel.
 #[derive(Debug)]
 pub struct MediaPipeLiveTuning {
     /// [`PipelineConfig::grab_rest_deadzone`] as `f32` bits.
     grab_deadzone: AtomicU32,
     /// [`PipelineConfig::depth_calibration_k`] as `f32` bits.
     depth_k: AtomicU32,
+    /// Whether the app is in Idle/Screensaver — worker drops to the idle
+    /// inference rate. Starts `false` (full rate): a freshly built provider is
+    /// un-throttled until the per-frame mirror system stores the current
+    /// activity state (at most one frame later).
+    idle_throttle: AtomicBool,
 }
 
 impl MediaPipeLiveTuning {
-    /// Build a tuning cell seeded with the given values.
+    /// Build a tuning cell seeded with the given values. The idle-throttle
+    /// flag starts cleared (full inference rate).
     #[must_use]
     pub fn new(grab_deadzone: f32, depth_k: f32) -> Self {
         Self {
             grab_deadzone: AtomicU32::new(grab_deadzone.to_bits()),
             depth_k: AtomicU32::new(depth_k.to_bits()),
+            idle_throttle: AtomicBool::new(false),
         }
     }
 
@@ -225,6 +238,19 @@ impl MediaPipeLiveTuning {
     #[must_use]
     pub fn depth_k(&self) -> f32 {
         f32::from_bits(self.depth_k.load(Ordering::Relaxed))
+    }
+
+    /// Live-set the idle-throttle flag (`true` = Idle/Screensaver, cap
+    /// inference at the idle rate). A Relaxed store, cheap enough to call
+    /// unconditionally every frame from the activity-mirror system.
+    pub fn set_idle_throttle(&self, idle: bool) {
+        self.idle_throttle.store(idle, Ordering::Relaxed);
+    }
+
+    /// Whether the idle inference throttle is currently requested.
+    #[must_use]
+    pub fn idle_throttle(&self) -> bool {
+        self.idle_throttle.load(Ordering::Relaxed)
     }
 }
 
@@ -2471,6 +2497,20 @@ mod tests {
             "deadzoned grab {}",
             h1[0].grab_strength
         );
+    }
+
+    #[test]
+    fn live_tuning_idle_throttle_defaults_off_and_toggles() {
+        // Untouched-behavior guard for the idle inference throttle: a freshly
+        // built cell must read un-throttled (full rate) — a provider rebuilt
+        // mid-Idle is corrected by the per-frame mirror system, not by the
+        // constructor — and the flag must round-trip through the atomics.
+        let cell = MediaPipeLiveTuning::new(0.05, PipelineConfig::default().depth_calibration_k);
+        assert!(!cell.idle_throttle(), "new tuning cells start un-throttled");
+        cell.set_idle_throttle(true);
+        assert!(cell.idle_throttle());
+        cell.set_idle_throttle(false);
+        assert!(!cell.idle_throttle());
     }
 
     #[test]
