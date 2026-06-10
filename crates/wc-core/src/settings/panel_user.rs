@@ -40,6 +40,7 @@ use smallvec::SmallVec;
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
+use crate::input::state::ServiceConnection;
 use crate::lifecycle::state::AppState;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::{LastSettingsPanelRect, SettingsPanelVisible};
@@ -105,6 +106,14 @@ fn draw_user_panel(world: &mut World) {
     let style = *world.resource::<OverlayStyle>();
     let opacity_mul = world.resource::<UiOpacity>().current;
 
+    // Snapshot the hand-tracking provider's lifecycle state for the status
+    // row under the "Tracking provider" dropdown (Task: surface the ~1-2 s
+    // MediaPipe model-load/camera-open window instead of looking dead).
+    // Taken before the egui closure borrows `world`, mirroring the dev
+    // panel's registry snapshot; fails soft to `None` (no row) when the
+    // registry resource is absent (tests, `Off` with an empty registry).
+    let provider_status = provider_status_snapshot(world);
+
     // Read window width for top-right positioning; fall back to 1280.
     let window_width = {
         let mut q =
@@ -156,7 +165,7 @@ fn draw_user_panel(world: &mut World) {
                     );
                     ui.separator();
                     for key in &keys {
-                        render_section_by_key(world, ui, key);
+                        render_section_by_key(world, ui, key, provider_status);
                     }
                 },
             );
@@ -211,7 +220,16 @@ fn dismiss_on_click_outside(
 /// `User`-category fields. Walks the `TypeRegistry` to find the registered
 /// settings type whose `STORAGE_KEY` matches; uses reflection to
 /// read/write fields without static type knowledge.
-fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'static str) {
+///
+/// `provider_status` is the pre-snapshotted hand-tracking provider state,
+/// threaded through to the status row under the "Tracking provider"
+/// dropdown (see [`render_provider_status_row`]).
+fn render_section_by_key(
+    world: &mut World,
+    ui: &mut egui::Ui,
+    storage_key: &'static str,
+    provider_status: Option<ProviderStatusLine>,
+) {
     // Snapshot the entry's defs as an Arc handle so the registry resource
     // stays unborrowed while we re-enter `world` for reflection. Cloning an
     // `Arc<[SettingDef]>` is a refcount bump, not a Vec copy.
@@ -257,7 +275,13 @@ fn render_section_by_key(world: &mut World, ui: &mut egui::Ui, storage_key: &'st
         return;
     };
     // Deref `Mut<dyn Reflect>` to get `&mut dyn Reflect`.
-    render_user_fields_via_reflect(&mut *reflect_mut, defs.as_ref(), storage_key, ui);
+    render_user_fields_via_reflect(
+        &mut *reflect_mut,
+        defs.as_ref(),
+        storage_key,
+        provider_status,
+        ui,
+    );
 }
 
 /// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
@@ -280,6 +304,7 @@ fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
     storage_key: &'static str,
+    provider_status: Option<ProviderStatusLine>,
     ui: &mut egui::Ui,
 ) {
     let ReflectMut::Struct(struct_mut) = reflect.reflect_mut() else {
@@ -329,8 +354,103 @@ fn render_user_fields_via_reflect(
                     // Column 2: widget fills remaining width automatically.
                     render_widget_value(field, def, storage_key, ui);
                     ui.end_row();
+
+                    // Status row directly under the "Tracking provider"
+                    // dropdown: the MediaPipe backend loads its models and
+                    // opens the camera asynchronously (~1-2 s with no
+                    // tracking), so show a spinner while it starts and a red
+                    // note when it failed. No row while healthy.
+                    if storage_key == ProviderStatusLine::STORAGE_KEY
+                        && def.field_name == ProviderStatusLine::FIELD_NAME
+                    {
+                        if let Some(line) = provider_status {
+                            ui.label(""); // column 1: keep the grid aligned
+                            render_provider_status_row(ui, line);
+                            ui.end_row();
+                        }
+                    }
                 }
             });
+    }
+}
+
+/// What the status row under the "Tracking provider" dropdown should show,
+/// derived from the primary provider's [`ServiceConnection`] axis by
+/// [`provider_status_line`] (the dropdown's *selected* enum value is not
+/// consulted: the row reports the provider actually installed, which is what
+/// the operator is waiting on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderStatusLine {
+    /// Provider is between `start()` and its first verdict (`MediaPipe`:
+    /// model load + camera open on the worker; Leap: service handshake).
+    /// Rendered as a spinner + "starting…".
+    Starting,
+    /// Provider is errored / unreachable. Rendered as a short red note
+    /// pointing at the dev panel, which has the full multi-axis status.
+    Failed,
+}
+
+impl ProviderStatusLine {
+    /// Storage key of the settings struct owning the provider dropdown
+    /// ([`crate::settings::HandTrackingSettings`]).
+    const STORAGE_KEY: &'static str =
+        <crate::settings::HandTrackingSettings as super::SketchSettings>::STORAGE_KEY;
+    /// Field name of the provider dropdown within that struct.
+    const FIELD_NAME: &'static str = "provider";
+}
+
+/// Snapshot the primary hand-tracking provider's state as a status-row
+/// verdict. `None` (no row) when the registry resource is absent, when it is
+/// empty (provider `Off`), or when the provider is healthy.
+fn provider_status_snapshot(world: &World) -> Option<ProviderStatusLine> {
+    let registry = world.get_resource::<crate::input::provider::ProviderRegistry>()?;
+    // An empty registry (`Off`) has no provider to wait on — `primary_id()`
+    // is `None` and `primary_status()` would report a default `NotStarted`,
+    // which must NOT render as an eternal spinner.
+    registry.primary_id()?;
+    provider_status_line(registry.primary_status().service)
+}
+
+/// Map a provider's [`ServiceConnection`] to the status row to display.
+///
+/// - `NotStarted` / `Connecting` → [`ProviderStatusLine::Starting`]: the
+///   verdict is pending (`MediaPipe` reports `Connecting` from `start()`
+///   until its worker has loaded the ort models and opened the camera).
+/// - `Errored` / `ServiceMissing` / `Disconnected` →
+///   [`ProviderStatusLine::Failed`]: all three mean "you will not get
+///   tracking without intervention" — honest red beats a stuck spinner.
+/// - `Connected` → `None`: tracking works; the panel stays quiet.
+fn provider_status_line(service: ServiceConnection) -> Option<ProviderStatusLine> {
+    match service {
+        ServiceConnection::NotStarted | ServiceConnection::Connecting => {
+            Some(ProviderStatusLine::Starting)
+        }
+        ServiceConnection::Errored
+        | ServiceConnection::ServiceMissing
+        | ServiceConnection::Disconnected => Some(ProviderStatusLine::Failed),
+        ServiceConnection::Connected => None,
+    }
+}
+
+/// Render the widget half (Grid column 2) of the provider status row.
+///
+/// Cheap and allocation-free: static strings only, one small spinner while
+/// starting (egui spinners self-animate; the egui pass runs every frame).
+fn render_provider_status_row(ui: &mut egui::Ui, line: ProviderStatusLine) {
+    match line {
+        ProviderStatusLine::Starting => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.weak("starting…");
+            });
+        }
+        ProviderStatusLine::Failed => {
+            ui.label(
+                egui::RichText::new("failed: see dev panel (Shift+D)")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(0xE5, 0x6E, 0x6E)),
+            );
+        }
     }
 }
 
@@ -663,6 +783,49 @@ mod tests {
             }
             _ => panic!("expected FilePath kind"),
         }
+    }
+
+    /// The status row keys on `HandTrackingSettings`'s actual storage key and
+    /// the `provider` field's actual name; if either is renamed without
+    /// updating [`ProviderStatusLine`], the row silently stops rendering.
+    #[test]
+    fn provider_status_row_keys_match_the_settings_struct() {
+        use crate::settings::SketchSettings;
+        assert_eq!(ProviderStatusLine::STORAGE_KEY, "hand_tracking");
+        assert!(
+            crate::settings::HandTrackingSettings::settings_def()
+                .iter()
+                .any(|d| d.field_name == ProviderStatusLine::FIELD_NAME),
+            "HandTrackingSettings has no `{}` field — update ProviderStatusLine::FIELD_NAME",
+            ProviderStatusLine::FIELD_NAME
+        );
+    }
+
+    /// Pre-verdict states spin, dead states warn, healthy shows nothing.
+    #[test]
+    fn provider_status_line_maps_every_service_state() {
+        use ProviderStatusLine::{Failed, Starting};
+        for (service, expected) in [
+            (ServiceConnection::NotStarted, Some(Starting)),
+            (ServiceConnection::Connecting, Some(Starting)),
+            (ServiceConnection::Errored, Some(Failed)),
+            (ServiceConnection::ServiceMissing, Some(Failed)),
+            (ServiceConnection::Disconnected, Some(Failed)),
+            (ServiceConnection::Connected, None),
+        ] {
+            assert_eq!(provider_status_line(service), expected, "{service:?}");
+        }
+    }
+
+    /// An empty registry (provider `Off`) must render no status row — its
+    /// default `NotStarted` primary status would otherwise read as an
+    /// eternal "starting…" spinner.
+    #[test]
+    fn provider_status_snapshot_is_none_for_empty_or_absent_registry() {
+        let mut world = World::new();
+        assert_eq!(provider_status_snapshot(&world), None, "absent registry");
+        world.insert_resource(crate::input::provider::ProviderRegistry::default());
+        assert_eq!(provider_status_snapshot(&world), None, "empty registry");
     }
 
     /// Unit-variant fixture for the enum write-back tests.
