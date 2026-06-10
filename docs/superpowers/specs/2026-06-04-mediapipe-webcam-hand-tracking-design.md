@@ -748,4 +748,4 @@ The rate cap now drops over-budget frames **before decode**:
 `FrameSource::discard_frame` drains the camera (keeping the newest-frame-wins
 freshness invariant) without the MJPEG/YUYV→RGB conversion, so dropped frames
 cost only the raw fetch. The dev panel surfaces the active cap as the
-"Inference cap" metric (`full rate` / `idle (4 Hz)`).
+"Idle throttle" metric (`requested` / `off`; the "Inference interval" metric carries the effective cadence).
