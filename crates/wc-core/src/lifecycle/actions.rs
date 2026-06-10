@@ -35,6 +35,12 @@ pub enum WaveConductorAction {
     ToggleDevPanel,
     /// Toggle fullscreen (`F11`). Handled by the lifecycle plugin.
     ToggleFullscreen,
+    /// Skip the idle wait and show the screensaver now (`Shift+S`).
+    /// Operator/testing convenience: rewinds the idle timer past both
+    /// thresholds instead of waiting out the ~60 s; any later interaction
+    /// wakes the sketch exactly as it does after a natural timeout. See
+    /// [`crate::lifecycle::idle::skip_to_screensaver`].
+    StartScreensaver,
 }
 
 /// Build the default `InputMap<WaveConductorAction>` matching v4's hotkey table.
@@ -71,6 +77,10 @@ pub fn default_input_map() -> InputMap<WaveConductorAction> {
         A::ToggleDevPanel,
         ButtonlikeChord::modified(ModifierKey::Shift, KeyCode::KeyD),
     );
+    map.insert(
+        A::StartScreensaver,
+        ButtonlikeChord::modified(ModifierKey::Shift, KeyCode::KeyS),
+    );
 
     map
 }
@@ -95,6 +105,7 @@ mod tests {
             WaveConductorAction::ToggleVolume,
             WaveConductorAction::ToggleDevPanel,
             WaveConductorAction::ToggleFullscreen,
+            WaveConductorAction::StartScreensaver,
         ] {
             assert!(
                 map.get_buttonlike(&action).is_some(),

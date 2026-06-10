@@ -62,6 +62,14 @@ impl InteractionTimer {
     pub fn last_interaction(&self) -> Duration {
         self.last_interaction
     }
+
+    /// Rewind the timer as if both idle thresholds had already elapsed, so
+    /// [`advance_activity`] targets `Screensaver` on its next run. The
+    /// `Shift+S` skip ([`skip_to_screensaver`]) calls this every armed frame.
+    pub fn rewind_past_screensaver(&mut self, now: Duration) {
+        self.last_interaction =
+            now.saturating_sub(self.idle_threshold + self.screensaver_threshold);
+    }
 }
 
 /// Function pointer type for idle vetoes. Receives a read-only `World` reference;
@@ -161,6 +169,61 @@ pub fn reset_on_interaction(
     }
 }
 
+/// `Shift+S` screensaver skip: while the chord is in flight, rewind the
+/// [`InteractionTimer`] past both thresholds so [`advance_activity`] enters
+/// `Screensaver` immediately instead of waiting out the ~60 s idle timer.
+///
+/// ## Why it stays armed until the keyboard is quiet
+///
+/// [`reset_on_interaction`] treats *every* keyboard event as interaction —
+/// including the key-up events of this very chord (`S` up, then `Shift` up,
+/// possibly frames apart). A one-shot rewind on `just_pressed` would be
+/// cancelled by those releases and the screensaver would flash and wake.
+/// Instead the skip **arms** on `just_pressed` and keeps re-rewinding (after
+/// `reset_on_interaction`, before `advance_activity` — see the lifecycle
+/// plugin's chain) every frame the keyboard is still active (any key held or
+/// released this frame), disarming only once the keyboard has gone quiet.
+/// From then on any interaction — mouse, touch, hand, the next keypress —
+/// wakes the sketch exactly as after a natural timeout.
+///
+/// Outside a sketch (Home), `advance_activity` has no `SketchActivity` state
+/// to drive, so the skip is a no-op there.
+pub fn skip_to_screensaver(
+    time: Res<'_, Time>,
+    actions: Res<
+        '_,
+        leafwing_input_manager::prelude::ActionState<super::actions::WaveConductorAction>,
+    >,
+    keys: Res<'_, ButtonInput<KeyCode>>,
+    mut armed: Local<'_, bool>,
+    mut timer: ResMut<'_, InteractionTimer>,
+) {
+    let just_pressed = actions.just_pressed(&super::actions::WaveConductorAction::StartScreensaver);
+    // "Keyboard active" = any key still held, or released this frame: both
+    // produce events reset_on_interaction has already counted this frame.
+    let keyboard_active =
+        keys.get_pressed().next().is_some() || keys.get_just_released().next().is_some();
+    let (next_armed, rewind) = skip_step(*armed, just_pressed, keyboard_active);
+    if rewind {
+        timer.rewind_past_screensaver(time.elapsed());
+    }
+    if *armed && !next_armed {
+        tracing::info!("screensaver: skip hotkey released; normal wake behavior resumes");
+    }
+    *armed = next_armed;
+}
+
+/// Pure per-frame decision for [`skip_to_screensaver`]: `(new_armed, rewind)`.
+///
+/// Arms on the chord press; stays armed (and keeps rewinding, swallowing the
+/// chord's own key-up interactions) while the keyboard is active; disarms on
+/// the first quiet frame without a rewind (nothing marked the timer that
+/// frame, so the previous rewind stands).
+fn skip_step(armed: bool, just_pressed: bool, keyboard_active: bool) -> (bool, bool) {
+    let next = just_pressed || (armed && keyboard_active);
+    (next, next)
+}
+
 /// Reads [`InteractionTimer`] and transitions [`SketchActivity`] when the
 /// configured thresholds are crossed, unless a registered [`IdleVetoFn`]
 /// in [`IdleVetoes`] keeps the sketch `Active`.
@@ -224,5 +287,39 @@ mod tests {
         let timer = InteractionTimer::default();
         assert_eq!(timer.idle_threshold, Duration::from_secs(30));
         assert_eq!(timer.screensaver_threshold, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn rewind_past_screensaver_crosses_both_thresholds() {
+        let mut timer = InteractionTimer::default();
+        let now = Duration::from_secs(100);
+        timer.mark(now); // freshly interacted…
+        timer.rewind_past_screensaver(now); // …then skipped
+        assert!(
+            timer.idle_for(now) >= timer.idle_threshold + timer.screensaver_threshold,
+            "rewind must put the timer past Idle + Screensaver"
+        );
+        // Early in a session (now < thresholds) it saturates instead of
+        // underflowing, still reading as maximally idle.
+        let mut early = InteractionTimer::default();
+        early.mark(Duration::from_secs(5));
+        early.rewind_past_screensaver(Duration::from_secs(10));
+        assert_eq!(early.last_interaction(), Duration::ZERO);
+    }
+
+    #[test]
+    fn skip_step_arms_holds_through_chord_release_and_disarms_when_quiet() {
+        // Frame 1: chord just pressed (keys held) → arm + rewind.
+        assert_eq!(skip_step(false, true, true), (true, true));
+        // Frames while Shift is still held after S released → keep rewinding,
+        // swallowing the key-up marks reset_on_interaction just made.
+        assert_eq!(skip_step(true, false, true), (true, true));
+        // First quiet frame (no keys held, none released) → disarm, no rewind
+        // needed (nothing marked the timer this frame).
+        assert_eq!(skip_step(true, false, false), (false, false));
+        // Disarmed + quiet → inert.
+        assert_eq!(skip_step(false, false, false), (false, false));
+        // Disarmed but other keys active (normal typing) → must NOT rewind.
+        assert_eq!(skip_step(false, false, true), (false, false));
     }
 }
