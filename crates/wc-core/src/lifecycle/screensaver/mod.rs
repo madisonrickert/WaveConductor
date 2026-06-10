@@ -12,8 +12,15 @@
 //!   layers) cross-fade against.
 //! - Per-tier **present-rate throttling** via `bevy::winit::WinitSettings`
 //!   (`UpdateMode::Reactive { wait }`) — the thermal lever that actually lowers
-//!   the unattended idle frame rate (Cool ≈ 24–30 fps, Warm lower, Hot ≈ 2–5
-//!   fps). No new dependency; built into `bevy_winit`.
+//!   the unattended idle frame rate. Capped at `SCREENSAVER_FPS` (30 fps)
+//!   regardless of temperature (the Cool tier), with Warm ≈ 15 fps and Hot ≈ 3
+//!   fps below it. The reactive loop drives the whole schedule, so the cap also
+//!   halves the particle compute dispatch and smear post pass against an
+//!   uncapped display. The prior winit modes are snapshotted on entry
+//!   (`SavedPresentMode`) and restored *exactly* on any exit. No new
+//!   dependency; built into `bevy_winit`. Only `Screensaver` throttles — the
+//!   pre-screensaver `Idle` window stays at full rate (the sketch is still
+//!   fully visible then).
 //! - The capture overrides (`WC_DEBUG_FORCE_SCREENSAVER`, `WC_DEBUG_FORCE_TIER`)
 //!   so the visual harness can land in attract mode at a chosen tier
 //!   deterministically.
@@ -89,9 +96,10 @@ impl Plugin for ScreensaverPlugin {
     }
 }
 
-/// Register the per-tier present-rate throttle: apply while the screensaver is
-/// showing, restore continuous updates on exit.
+/// Register the per-tier present-rate throttle: snapshot the prior winit modes
+/// and start throttling on entry, restore the snapshot on exit.
 fn register_present_rate_systems(app: &mut App) {
+    app.add_systems(OnEnter(SketchActivity::Screensaver), save_present_mode);
     app.add_systems(
         Update,
         apply_present_rate.run_if(resource_exists::<ScreensaverActive>),
@@ -147,19 +155,33 @@ pub fn effective_tier(
     thermal.tier
 }
 
+/// Present-rate cap (frames per second) while the screensaver is showing,
+/// regardless of temperature — the Cool-tier wait is derived from it.
+///
+/// Why 30: the reactive winit loop drives the *whole* schedule, so every
+/// skipped present also skips that frame's particle compute dispatch and smear
+/// post pass. Against an uncapped/ProMotion display (60–120 Hz) the cap cuts
+/// sustained render + compute energy by ≥ 50%, and it composes with the 4 Hz
+/// idle inference throttle already applied on the `MediaPipe` worker
+/// (`IDLE_INFERENCE_HZ`, commit b3d6589a). The attract choreography is gentle
+/// and slow (pulses ~1.2 s, paths spanning minutes) and is a pure function of
+/// wall-clock time, so it reads correctly at 30 fps.
+const SCREENSAVER_FPS: f64 = 30.0;
+
 /// Target present interval (frame-to-frame wait) per tier while in the
 /// screensaver. Larger wait = lower fps = less heat. These are the present-rate
 /// half of the thermal ladder; the particle-count / dispatch half lives in each
 /// sketch's attract driver (Seam 3 for Line).
 ///
-/// - Cool ≈ 30 fps (33 ms): rich attract while there is headroom.
+/// - Cool = [`SCREENSAVER_FPS`] (30 fps, ~33 ms): rich attract while there is
+///   headroom — this is the temperature-independent screensaver cap.
 /// - Warm ≈ 15 fps (66 ms): noticeably calmer, still animated.
 /// - Hot ≈ 3 fps (333 ms): "resting ember" present rate; combined with the
 ///   frozen compute dispatch this is genuine cooldown.
 #[must_use]
 fn tier_present_wait(tier: ThermalTier) -> Duration {
     match tier {
-        ThermalTier::Cool => Duration::from_millis(33),
+        ThermalTier::Cool => Duration::from_secs_f64(1.0 / SCREENSAVER_FPS),
         ThermalTier::Warm => Duration::from_millis(66),
         ThermalTier::Hot => Duration::from_millis(333),
     }
@@ -177,10 +199,49 @@ fn effective_wait(tier_wait: Duration, duty_wake: Option<Duration>) -> Duration 
     }
 }
 
+/// The `WinitSettings` modes in effect *before* the screensaver throttled them,
+/// snapshotted on `OnEnter(Screensaver)` and written back on exit. Stored as a
+/// resource (not assumed to be `Continuous`) so the restore is exact whatever
+/// baseline the app was configured with — e.g. the `WinitSettings::default()`
+/// (= `game()`) baseline keeps a `reactive_low_power` *unfocused* mode that a
+/// hard-coded `Continuous` restore would clobber into an uncapped burn.
+#[derive(Resource, Debug, Clone)]
+struct SavedPresentMode {
+    /// `WinitSettings::focused_mode` at screensaver entry.
+    focused: UpdateMode,
+    /// `WinitSettings::unfocused_mode` at screensaver entry.
+    unfocused: UpdateMode,
+}
+
+/// `OnEnter(Screensaver)` — snapshot the current winit update modes into
+/// [`SavedPresentMode`] before [`apply_present_rate`] (Update, gated on
+/// [`ScreensaverActive`]) first overwrites them, so [`restore_present_rate`]
+/// can put back exactly what was there.
+fn save_present_mode(mut commands: Commands<'_, '_>, winit: Res<'_, WinitSettings>) {
+    commands.insert_resource(SavedPresentMode {
+        focused: winit.focused_mode,
+        unfocused: winit.unfocused_mode,
+    });
+}
+
 /// While the screensaver is showing, set `WinitSettings` to a reactive
 /// update-mode whose `wait` matches the effective tier, throttling the present
-/// rate. Interaction still wakes the loop instantly (`react_to_*` all true), so
-/// a passer-by waving a hand resumes at full rate without perceptible lag.
+/// rate. Mouse / keyboard / touch interaction wakes the loop instantly
+/// (`react_to_*` all true), so a visitor at the controls resumes at full rate
+/// without perceptible lag.
+///
+/// **Hand-wake chain (webcam / MediaPipe):** camera frames are *not* winit
+/// events, so a hand wakes the install through the polled path instead: the
+/// inference worker (already capped at 4 Hz in Idle/Screensaver, commit
+/// b3d6589a) emits a hand-bearing frame → `poll_all_providers` (`PreUpdate`)
+/// drains it on the next reactive tick → `reset_on_interaction` sees the
+/// `HandTrackingFrame` message → activity returns to `Active` →
+/// `OnExit(Screensaver)` restores the saved present mode. At the 30 fps cap the
+/// loop ticks every ~33 ms, far inside the 250 ms idle inference cadence, so
+/// the throttle adds ≤ 33 ms to the ~300 ms worst-case wake documented on the
+/// inference throttle. At hotter tiers the tick interval (66 / 333 ms) adds
+/// proportionally — worst case ≈ 0.6 s at Hot, an accepted trade in a thermal
+/// emergency.
 ///
 /// Only writes `WinitSettings` when the desired mode changes (avoids churning a
 /// resource every frame).
@@ -226,13 +287,30 @@ fn apply_present_rate(
     }
 }
 
-/// `OnExit(Screensaver)` — restore continuous updates so the live sketch runs at
-/// full rate again the instant a visitor interacts.
-fn restore_present_rate(mut winit: ResMut<'_, WinitSettings>) {
-    if winit.focused_mode != UpdateMode::Continuous {
-        winit.focused_mode = UpdateMode::Continuous;
-        winit.unfocused_mode = UpdateMode::Continuous;
+/// `OnExit(Screensaver)` — restore the [`SavedPresentMode`] snapshot so the
+/// live sketch runs at its configured full rate again the instant a visitor
+/// interacts. Restores *both* modes exactly as they were (no `Continuous`
+/// assumption), then drops the snapshot.
+///
+/// If the snapshot is somehow absent (it is inserted on every `OnEnter`), fall
+/// back to the app's `WinitSettings::default()` modes rather than leaving the
+/// live sketch stranded at the throttled rate.
+fn restore_present_rate(
+    mut commands: Commands<'_, '_>,
+    saved: Option<Res<'_, SavedPresentMode>>,
+    mut winit: ResMut<'_, WinitSettings>,
+) {
+    let (focused, unfocused) = if let Some(saved) = saved {
+        (saved.focused, saved.unfocused)
+    } else {
+        let default = WinitSettings::default();
+        (default.focused_mode, default.unfocused_mode)
+    };
+    if winit.focused_mode != focused || winit.unfocused_mode != unfocused {
+        winit.focused_mode = focused;
+        winit.unfocused_mode = unfocused;
     }
+    commands.remove_resource::<SavedPresentMode>();
 }
 
 /// Capture helper (debug only): when `WC_DEBUG_FORCE_SCREENSAVER` is set, pin
@@ -283,6 +361,16 @@ mod tests {
         assert_eq!(effective_wait(tier, None), tier);
         // Duty cycle slower than tier (long gap) → tier wait wins.
         assert_eq!(effective_wait(tier, Some(Duration::from_millis(350))), tier);
+    }
+
+    #[test]
+    fn cool_tier_wait_enforces_the_screensaver_fps_cap() {
+        // The temperature-independent screensaver cap: even at full thermal
+        // headroom (Cool), presents never exceed SCREENSAVER_FPS.
+        assert_eq!(
+            tier_present_wait(ThermalTier::Cool),
+            Duration::from_secs_f64(1.0 / SCREENSAVER_FPS)
+        );
     }
 
     #[test]
