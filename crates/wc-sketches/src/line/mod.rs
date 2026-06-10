@@ -17,7 +17,10 @@
 //!      plus the grab/depth loudness drive
 //!      [`leap_attractors::HandAudioDrive`] (maintained in the
 //!      `LineLeapAttractorsPlugin` chain) and drives the Line synth voice +
-//!      `LinePostParams` shader uniforms.
+//!      `LinePostParams` shader uniforms. A held mouse press pins the drive
+//!      to full; after any release (click or grab) the tail decays through
+//!      both the drive and the `grouped_upness` envelope — a deliberately
+//!      somewhat faster post-release tail than the envelope alone.
 //! 3. The render world extracts `LineSimParams` and dispatches the compute
 //!    pipeline (`assets/shaders/line/simulate.wgsl`) which updates the
 //!    storage buffer in place.

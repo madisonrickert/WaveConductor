@@ -53,6 +53,28 @@
 //!   drive ([`crate::line::leap_attractors::HandAudioDrive`]). Dev-only knob.
 //! - **`synth_distance_falloff`** — exponent on the hand-depth attenuation in
 //!   the hand→volume drive. Dev-only knob.
+//!
+//! ## Synth timing chain (for tuners)
+//!
+//! Three smoothing stages sit between a gesture and the speaker; each timing
+//! is owned by exactly one place:
+//!
+//! 1. **Hand drive** ([`crate::line::leap_attractors::HandAudioDrive`]) —
+//!    instant on rise; on fall, exponential with
+//!    `τ = max(synth_release_ms / 1000, 0.67 s)`
+//!    ([`crate::line::leap_attractors::hand_drive_release_tau_s`]). Not
+//!    separately tunable: it follows `synth_release_ms` so it can never clip
+//!    stage 2's tail.
+//! 2. **Upness envelope** (`ParticleStats::grouped_upness`) — the musical
+//!    attack/release pair: `synth_attack_ms` owns how fast a press speaks,
+//!    `synth_release_ms` owns the tail length.
+//! 3. **Synth follow** — a fixed 16 ms `follow(0.016)` inside the
+//!    `LineSynth` DSP graph; anti-zipper smoothing only, never tune timing
+//!    there.
+//!
+//! To change press snappiness, adjust `synth_attack_ms`; to change tail
+//! length, `synth_release_ms` (the drive's τ tracks it automatically). The
+//! drive's gamma/falloff knobs shape *loudness*, not timing.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -134,7 +134,7 @@ fn draw_dev_panel(world: &mut World) {
         .order(bevy_egui::egui::Order::Foreground)
         .fixed_pos(bevy_egui::egui::pos2(16.0, 60.0))
         .show(&ctx, |ui| {
-            ui.set_max_width(480.0);
+            ui.set_max_width(DEV_PANEL_MAX_WIDTH);
             ui.set_max_height((window_height - 100.0).max(200.0));
             backdrop_blur_frame(
                 ui,
@@ -254,17 +254,22 @@ fn draw_hand_tuning_controls(
     ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));
 }
 
+/// Fixed maximum width of the dev panel's `Area`, applied via
+/// `ui.set_max_width` in [`draw_dev_panel`]. [`HINT_WRAP_WIDTH`] is derived
+/// from this — change them together by changing only this one.
+const DEV_PANEL_MAX_WIDTH: f32 = 480.0;
+
 /// Fixed wrap width for multi-line hint labels in the dev panel.
 ///
-/// The panel's `Area` pins `max_width` to 480 px; subtract the frame padding
-/// (2 × 20 px) and a scrollbar allowance and 400 px is always available. The
+/// Derived from [`DEV_PANEL_MAX_WIDTH`] minus the frame padding (2 × 20 px)
+/// and a 40 px scrollbar allowance, so this width is always available. The
 /// width must be a constant: a default-wrapped label re-measures against
 /// `ui.available_width()` every frame, and inside the panel's `ScrollArea`
 /// that width shifts slightly as live values (diagnostics, inspector floats)
 /// change the content width — so the wrap points oscillate and the hint text
 /// visibly flickers between layouts. Wrapping inside a fixed-width scope
 /// makes the layout identical every frame.
-const HINT_WRAP_WIDTH: f32 = 400.0;
+const HINT_WRAP_WIDTH: f32 = DEV_PANEL_MAX_WIDTH - 80.0;
 
 /// Draw a small dim multi-line hint at a fixed wrap width (see
 /// [`HINT_WRAP_WIDTH`] for why the width must not track the live

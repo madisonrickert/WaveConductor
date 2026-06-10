@@ -26,9 +26,10 @@
 //!      clustered *and* moving (the v4 "gathering" cue). The `-0.05` threshold
 //!      creates a silence floor under low-action states. `hand_drive`
 //!      ([`super::leap_attractors::HandAudioDrive`]) scales loudness
-//!      continuously with grab strength and hand distance (1.0 for
-//!      mouse-driven interaction); `synth_volume_scale` stays the final
-//!      master fader. See `line_synth_volume` below.
+//!      continuously with grab strength and hand distance (a held mouse
+//!      press is pinned to 1.0; post-release tails decay through both the
+//!      drive and the envelope, deliberately); `synth_volume_scale` stays
+//!      the final master fader. See `line_synth_volume` below.
 //!
 //! 2. **Shader uniforms** — overwrites two fields on [`super::post_process::LinePostParams`]
 //!    (which the [`super::systems::sim_params::update_sim_params`] system also
@@ -84,8 +85,8 @@ pub fn drive_audio_and_shader(
     mut post: ResMut<'_, LinePostParams>,
     settings: Res<'_, super::settings::LineSettings>,
     // Continuous hand-loudness drive, maintained by
-    // `super::leap_attractors::update_hand_audio_drive` (1.0 when interaction
-    // is mouse-driven). Initialised by `LineLeapAttractorsPlugin`.
+    // `super::leap_attractors::update_hand_audio_drive` (pinned to 1.0 while
+    // a mouse press is held). Initialised by `LineLeapAttractorsPlugin`.
     hand_drive: Res<'_, HandAudioDrive>,
     // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
     // only in debug builds). Placed last so the release signature is unchanged.
@@ -202,9 +203,10 @@ pub fn drive_audio_and_shader(
 /// - `× 5.0` — v4's gain constant mapping the envelope's 0–2.5 swing onto the
 ///   synth's expected 0–12.25 volume range.
 /// - `× hand_drive` — continuous grab-strength × hand-distance loudness from
-///   [`HandAudioDrive`] (1.0 for mouse-driven interaction, so click audio is
-///   unchanged). Applied *before* the master fader so the fader's meaning is
-///   stable regardless of input device.
+///   [`HandAudioDrive`] (pinned to 1.0 while a mouse press is held; after any
+///   release it decays alongside the envelope, so post-release tails pass
+///   through both stages — deliberate). Applied *before* the master fader so
+///   the fader's meaning is stable regardless of input device.
 /// - `× volume_scale` — `LineSettings::synth_volume_scale`, the
 ///   user-configurable master fader (default 1.0), deliberately the last
 ///   multiplier.
@@ -259,7 +261,7 @@ mod tests {
 
     #[test]
     fn synth_volume_drive_one_matches_legacy_formula() {
-        // hand_drive = 1.0 (mouse-driven / default) must reproduce the
+        // hand_drive = 1.0 (held mouse press / default) must reproduce the
         // pre-drive formula exactly: (g − 0.05).max(0) × 5 × scale.
         let g = 1.4;
         assert_eq!(

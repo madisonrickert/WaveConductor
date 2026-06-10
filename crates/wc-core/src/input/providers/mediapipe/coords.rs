@@ -43,6 +43,12 @@ use crate::input::projection::{LEAP_X_HALFRANGE_MM, LEAP_Y_MAX_MM, LEAP_Y_MIN_MM
 /// pin sits at `≈ 0.51 m` (inverting [`distance_m_to_leap_z_mm`]), so the
 /// familiar at-rest feel carries over when the estimator is on and the hand is
 /// at a typical desk distance.
+///
+/// The pin also caps Line's hand-audio loudness drive: the audio proximity
+/// term (`hand_audio_drive` in wc-sketches' `line::leap_attractors`) reads
+/// `(350 − z) / (350 − 40)`, so a pinned `z = 120` lands at ≈ 0.74 of full
+/// drive regardless of how close the hand really is. Accepted for the
+/// rollback path — Line's `synth_volume_scale` master fader compensates live.
 pub const MEDIAPIPE_DEPTH_PROXY_MM: f32 = 120.0;
 
 /// Default calibration gain `k` for [`size_estimated_distance_m`]: the camera
