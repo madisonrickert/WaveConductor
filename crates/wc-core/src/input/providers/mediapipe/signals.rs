@@ -214,12 +214,19 @@ struct Track {
 
 impl Default for HandTracker {
     fn default() -> Self {
-        // 60 mm in the Leap-device-mm convention: a hand won't jump that far
-        // between consecutive frames, but two distinct hands are farther apart.
+        // 90 mm in the Leap-device-mm convention: wide enough that one hand's
+        // inter-frame motion stays inside the gate, while two distinct hands
+        // (typically hundreds of mm apart in this convention) stay outside it.
+        // Raised from 60 mm after a hardware session: the letterbox
+        // unprojection (ContentRect::to_content_norm) stretched a 720p
+        // camera's vertical span onto the full Leap Y range, making vertical
+        // motion ~1.78× faster in mm than when 60 was calibrated — fast waves
+        // out-ran the old gate between inference frames and churned track ids
+        // (resetting the per-id smoothing bank mid-gesture).
         Self {
             tracks: Vec::new(),
             next_id: 0,
-            gate: 60.0,
+            gate: 90.0,
             churn: 0,
         }
     }
@@ -476,6 +483,21 @@ mod tests {
     }
 
     #[test]
+    fn fast_wave_jump_inside_widened_gate_keeps_id() {
+        // Hardware regression: a fast vertical wave can move the palm ~70 mm
+        // between inference frames now that the letterbox unprojection maps
+        // the full camera height onto the Leap Y range (~1.78× faster in mm
+        // than when the old 60 mm gate was calibrated). 70 mm > 60 churned the
+        // id (and reset the per-id smoothing bank) mid-wave; the 90 mm gate
+        // must keep identity.
+        let mut t = HandTracker::default();
+        let a = assign_at(&mut t, Chirality::Right, Vec3::new(0.0, 200.0, 0.0));
+        t.end_frame();
+        let b = assign_at(&mut t, Chirality::Right, Vec3::new(0.0, 270.0, 0.0));
+        assert_eq!(a.id, b.id, "a 70 mm inter-frame jump must not churn the id");
+    }
+
+    #[test]
     fn tracker_gives_new_id_for_far_hand() {
         let mut t = HandTracker::default();
         let a = assign_at(&mut t, Chirality::Right, Vec3::new(-200.0, 100.0, 0.0));
@@ -581,7 +603,7 @@ mod tests {
     #[test]
     fn gate_compares_xy_only_so_depth_jumps_keep_identity() {
         // Two assigns differing ONLY in z (a full-range raw-depth jump, far
-        // larger than the 60 mm gate) must keep the same track id: identity
+        // larger than the 90 mm gate) must keep the same track id: identity
         // association is xy-only so depth noise can never churn ids (which
         // would reset the render-rate smoothing bank keyed on the id).
         let mut t = HandTracker::default();

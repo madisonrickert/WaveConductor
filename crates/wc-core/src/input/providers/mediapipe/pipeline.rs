@@ -166,7 +166,11 @@ impl Default for PipelineConfig {
             mirror: true,
             palm_score_threshold: 0.5,
             presence_threshold: 0.5,
-            grab_rest_deadzone: 0.2,
+            // 0.05: the world-landmark grab's relaxed-hand rest floor is far
+            // lower than the image-space grab's was; the old 0.2 (calibrated
+            // pre-world-landmarks) mostly just blunted mid-curl response.
+            // Must stay in sync with `HandTrackingSettings::grab_rest_deadzone`.
+            grab_rest_deadzone: 0.05,
             depth_calibration_k: DEFAULT_DEPTH_CALIBRATION_K,
         }
     }
@@ -285,6 +289,15 @@ pub struct PipelineDiagnostics {
     /// `Hand::palm_position.z`). `0` when there is no hand this frame or the
     /// estimator is disabled (`k <= 0` — no physical estimate under the pin).
     pub est_distance_mm: u64,
+    /// Raw geometric grab of the focal hand, **pre**-deadzone, in permille
+    /// (`round(grab_strength(world) × 1000)`, so `[0, 1000]`) — the dev
+    /// panel's "Grab raw (‰)". Watching this against [`Self::grab_permille`]
+    /// shows the deadzone subtracting and measures the true rest floor (the
+    /// raw value a relaxed-open hand actually sits at). `0` when no hand.
+    pub grab_raw_permille: u64,
+    /// Deadzoned grab of the focal hand in permille — exactly what ships on
+    /// `Hand::grab_strength` (the dev panel's "Grab (‰)"). `0` when no hand.
+    pub grab_permille: u64,
 }
 
 /// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
@@ -498,6 +511,14 @@ impl Pipeline {
                         // estimate rather than wrapping.
                         diagnostics.est_distance_mm =
                             u64::from(floor_u32(tracked.est_distance_mm + 0.5));
+                        // Raw vs deadzoned grab, in permille (both in [0, 1],
+                        // so ×1000 + round stays well inside u32). Surfacing
+                        // the pair lets the operator watch the deadzone
+                        // subtract and measure the true rest floor.
+                        diagnostics.grab_raw_permille =
+                            u64::from(floor_u32(tracked.grab_raw.mul_add(1000.0, 0.5)));
+                        diagnostics.grab_permille =
+                            u64::from(floor_u32(tracked.hand.grab_strength.mul_add(1000.0, 0.5)));
                     }
                     hands.push(tracked.hand);
                     next.push(tracked.next_roi);
@@ -661,6 +682,10 @@ impl Pipeline {
         // Next frame tracks from these landmarks, skipping palm detection.
         let next_roi = roi_from_landmarks(&img_landmarks);
 
+        // Raw geometric grab, computed once: deadzoned onto the emitted hand,
+        // surfaced raw in the diagnostics so the dev panel can show both.
+        let grab_raw = grab_strength(&world);
+
         Ok(Some(TrackedHand {
             hand: Hand {
                 id: assigned.id,
@@ -679,14 +704,12 @@ impl Pipeline {
                 pinch_strength: pinch_strength(&world),
                 // Rest-deadzone the grab so a relaxed-open hand reads exactly 0
                 // (otherwise its small positive floor keeps Line's attractor on).
-                grab_strength: apply_grab_deadzone(
-                    grab_strength(&world),
-                    self.config.grab_rest_deadzone,
-                ),
+                grab_strength: apply_grab_deadzone(grab_raw, self.config.grab_rest_deadzone),
                 landmarks,
             },
             next_roi,
             est_distance_mm: depth.distance_mm,
+            grab_raw,
         }))
     }
 }
@@ -704,6 +727,10 @@ struct TrackedHand {
     /// when the estimator is disabled (`k <= 0`). See
     /// [`super::coords::DepthEstimate::distance_mm`].
     est_distance_mm: f32,
+    /// Raw geometric grab (`grab_strength` on the world landmarks), **before**
+    /// the rest deadzone; the deadzoned value lives on
+    /// [`Self::hand`]`.grab_strength`.
+    grab_raw: f32,
 }
 
 // --- detect-then-track association ---------------------------------------
@@ -2207,6 +2234,61 @@ mod tests {
             pipe.diagnostics().est_distance_mm,
             0,
             "estimator off → no physical estimate → 0"
+        );
+    }
+
+    // --- raw vs deadzoned grab diagnostics (hardware-session visibility) ----
+
+    /// The "Grab raw (‰)" diagnostic must report the PRE-deadzone geometric
+    /// grab while the emitted hand (and "Grab (‰)") carry the post-deadzone
+    /// value. The pair lets the operator SEE the deadzone subtracting — the
+    /// slider felt unrespected because, with grab on world landmarks, a
+    /// relaxed hand's raw grab is already near 0 and the deadzone only shapes
+    /// mid-curl response.
+    #[test]
+    fn grab_diagnostics_report_raw_and_deadzoned_values() {
+        // Mid-curl world fixture: raw grab is mid-range, so raw and deadzoned
+        // genuinely differ (an open hand clamps both to 0 — vacuous).
+        let world = curl_world_fingertips(fixtures::open_world_hand(), 0.6);
+        let (mut pipe, _palm, _lm) = counting_pipeline_with_image_and_world(
+            spread_landmarks(),
+            fixtures::world_tensor(&world),
+            0.98,
+            0.9,
+        );
+        let hands = pipe
+            .process(&consistent_frame(), Duration::from_millis(33))
+            .expect("process");
+        assert_eq!(hands.len(), 1);
+
+        let raw = grab_strength(&world);
+        let deadzoned = apply_grab_deadzone(raw, PipelineConfig::default().grab_rest_deadzone);
+        // Non-vacuous: the fixture must be mid-curl with a real deadzone delta.
+        assert!(raw > 0.1 && raw < 0.9, "raw grab {raw} should be mid-range");
+        assert!(
+            (raw - deadzoned) > 1e-3,
+            "fixture is vacuous: raw {raw} ≈ deadzoned {deadzoned}"
+        );
+
+        assert!(
+            (hands[0].grab_strength - deadzoned).abs() < 1e-6,
+            "emitted hand carries the POST-deadzone grab: {} (want {deadzoned})",
+            hands[0].grab_strength
+        );
+        let d = pipe.diagnostics();
+        assert_eq!(
+            d.grab_raw_permille,
+            u64::from(floor_u32(raw.mul_add(1000.0, 0.5))),
+            "raw diagnostic must be the PRE-deadzone grab"
+        );
+        assert_eq!(
+            d.grab_permille,
+            u64::from(floor_u32(deadzoned.mul_add(1000.0, 0.5))),
+            "deadzoned diagnostic must match the emitted hand"
+        );
+        assert_ne!(
+            d.grab_raw_permille, d.grab_permille,
+            "the two metrics must visibly differ on a mid-curl hand"
         );
     }
 

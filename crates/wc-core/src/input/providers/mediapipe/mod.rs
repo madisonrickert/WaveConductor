@@ -453,6 +453,16 @@ impl HandTrackingProvider for MediaPipeProvider {
                         "Est. distance (mm)",
                         p.est_distance_mm,
                     ));
+                    // Raw (pre-deadzone) vs deadzoned grab of the focal hand,
+                    // permille. Shows the rest deadzone subtracting and lets
+                    // the operator read the true relaxed-hand rest floor.
+                    // (These two land the metric count exactly at the
+                    // SmallVec's 16-slot inline capacity — a 17th metric would
+                    // spill this push to the heap on every diagnostics frame.)
+                    d.metrics
+                        .push(ProviderMetric::count("Grab raw (‰)", p.grab_raw_permille));
+                    d.metrics
+                        .push(ProviderMetric::count("Grab (‰)", p.grab_permille));
                     d.metrics
                         .push(ProviderMetric::count("Track churn", p.track_churn));
                     d.metrics.push(ProviderMetric::count(

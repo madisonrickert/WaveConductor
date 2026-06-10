@@ -30,9 +30,14 @@ pub struct HandTrackingSettings {
     /// MediaPipe-only: grab rest-deadzone — a relaxed-open hand whose raw grab is
     /// at/under this reads exactly `0`, so the attractor releases. Raise if the
     /// attractor lingers when the hand is open; lower if grab feels weak/late.
-    /// Default must match `mediapipe::pipeline::PipelineConfig` (`0.2`).
+    /// The dev panel's "Grab raw (‰)" metric shows the pre-deadzone value, so
+    /// the true rest floor can be read directly. Default must match
+    /// `mediapipe::pipeline::PipelineConfig` (`0.05`). The previous `0.2` was
+    /// calibrated against the image-space grab (pre-world-landmarks); on world
+    /// landmarks a relaxed hand's raw grab is already near `0`, so `0.2`
+    /// mostly blunted mid-curl response instead of trimming a rest floor.
     #[setting(
-        default = 0.2_f32,
+        default = 0.05_f32,
         min = 0.0,
         max = 0.6,
         step = 0.01,
@@ -99,7 +104,7 @@ pub struct HandTrackingSettings {
 /// Serde fallbacks so a config saved before these fields existed still loads
 /// (the values stay in sync with the provider's compile-time defaults).
 fn default_grab_rest_deadzone() -> f32 {
-    0.2
+    0.05
 }
 fn default_depth_calibration_k() -> f32 {
     0.8
