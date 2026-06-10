@@ -22,6 +22,9 @@
 //!                              Res<ProviderRegistry> + Res<HandProviderControl>
 //!
 //! Update: apply_provider_choice
+//!   - resolves Auto's optimistic Leap start (device-presence watcher: the
+//!     Ultraleap daemon connects without a controller plugged in; no device
+//!     within the grace period demotes to MediaPipe / mock)
 //!   - resolves Auto's optimistic MediaPipe start (camera verdict watcher)
 //!   - on dropdown change: stop()s every old provider synchronously
 //!     (worker joined, camera/device released), then build_registry again
@@ -47,8 +50,9 @@ use bevy::prelude::*;
 use wc_core::input::provider::ProviderRegistry;
 #[cfg(feature = "hand-tracking-gestures")]
 use wc_core::input::selection::{
-    auto_mediapipe_camera_failed, build_registry, AutoMediaPipeWatch, BuiltRegistry,
-    ProviderInstallers,
+    auto_leap_device_verdict, auto_mediapipe_camera_failed, build_registry, demote_auto_leap,
+    AutoLeapWatch, AutoMediaPipeWatch, BuiltRegistry, LeapWatchVerdict, ProviderInstallers,
+    AUTO_LEAP_DEVICE_GRACE,
 };
 #[cfg(feature = "hand-tracking-gestures")]
 use wc_core::settings::{HandProviderChoice, HandTrackingSettings};
@@ -70,6 +74,12 @@ pub struct HandProviderControl {
     /// Auto's optimistic-MediaPipe camera watcher (see
     /// [`wc_core::input::selection::AutoMediaPipeWatch`]).
     watch: AutoMediaPipeWatch,
+    /// Auto's optimistic-Leap device watcher (see
+    /// [`wc_core::input::selection::AutoLeapWatch`]): armed when Auto kept
+    /// Leap on its service connection alone, demotes to `MediaPipe` / mock if
+    /// no device attaches within the grace period. Resolved *before* `watch`
+    /// each frame — a Leap demote may itself arm the `MediaPipe` watch.
+    leap_watch: AutoLeapWatch,
 }
 
 /// What `WAVECONDUCTOR_HAND_PROVIDER` resolved to (a launch default — see
@@ -114,6 +124,7 @@ fn parse_env_override(raw: &str) -> Option<EnvOverride> {
 pub fn install_hand_tracking_providers(
     mut commands: Commands<'_, '_>,
     settings: Res<'_, HandTrackingSettings>,
+    time: Res<'_, Time>,
 ) {
     use wc_core::input::provider::{ProviderId, ProviderRole};
     use wc_core::input::providers::mock::MockProvider;
@@ -137,11 +148,11 @@ pub fn install_hand_tracking_providers(
         );
     }
 
-    let (registry, watch) = match env {
+    let (registry, watch, leap_watch) = match env {
         Some(EnvOverride::Mock) => {
             let mut registry = ProviderRegistry::default();
             install_mock(&mut registry);
-            (registry, AutoMediaPipeWatch::Idle)
+            (registry, AutoMediaPipeWatch::Idle, AutoLeapWatch::Idle)
         }
         Some(EnvOverride::Synthetic) => {
             // A sweeping synthetic open hand, for exercising hand-driven
@@ -154,15 +165,17 @@ pub fn install_hand_tracking_providers(
                 Box::new(MockProvider::synthetic_hand()),
             );
             tracing::info!("hand-tracking: synthetic MockProvider installed (open-hand fixture)");
-            (registry, AutoMediaPipeWatch::Idle)
+            (registry, AutoMediaPipeWatch::Idle, AutoLeapWatch::Idle)
         }
         Some(EnvOverride::Choice(choice)) => {
             let built = build_for_choice(choice, &settings);
-            (built.registry, built.watch)
+            let leap_watch = arm_leap_watch(&built, time.elapsed());
+            (built.registry, built.watch, leap_watch)
         }
         None => {
             let built = build_for_choice(settings.provider, &settings);
-            (built.registry, built.watch)
+            let leap_watch = arm_leap_watch(&built, time.elapsed());
+            (built.registry, built.watch, leap_watch)
         }
     };
 
@@ -173,7 +186,25 @@ pub fn install_hand_tracking_providers(
         // dropdown actually moves (see the field docs).
         last_applied: settings.provider,
         watch,
+        leap_watch,
     });
+}
+
+/// Convert [`BuiltRegistry::leap_verdict_outstanding`] into an armed
+/// [`AutoLeapWatch`] with a concrete deadline.
+///
+/// Lives here rather than in `wc_core::input::selection` because the policy
+/// module has no access to Bevy's `Time`; `now` is `Time::elapsed`, the same
+/// clock [`apply_provider_choice`] passes to `auto_leap_device_verdict`.
+#[cfg(feature = "hand-tracking-gestures")]
+fn arm_leap_watch(built: &BuiltRegistry, now: std::time::Duration) -> AutoLeapWatch {
+    if built.leap_verdict_outstanding {
+        AutoLeapWatch::Pending {
+            deadline: now + AUTO_LEAP_DEVICE_GRACE,
+        }
+    } else {
+        AutoLeapWatch::Idle
+    }
 }
 
 /// No-op stub when hand-tracking-gestures is compiled out.
@@ -185,12 +216,13 @@ pub fn install_hand_tracking_providers() {
 }
 
 /// Live provider switch (`Update`): applies dropdown changes to the running
-/// registry, and resolves Auto's outstanding `MediaPipe` camera verdict.
+/// registry, and resolves Auto's outstanding verdicts — Leap's async device
+/// presence first, then `MediaPipe`'s camera open.
 ///
-/// Steady-state cost is two enum compares and no allocation; the watcher arm
-/// reads one provider status only while a verdict is pending (a few frames
-/// after entering Auto-with-MediaPipe), and a switch arm runs only on an
-/// actual dropdown change.
+/// Steady-state cost is three enum compares and no allocation; a watcher arm
+/// reads one provider status only while its verdict is pending (the first
+/// ~3 s of Auto-with-Leap, or a few frames of Auto-with-MediaPipe), and a
+/// switch arm runs only on an actual dropdown change.
 ///
 /// Teardown on switch is explicit and synchronous:
 /// [`ProviderRegistry::shutdown_all`] `stop()`s each provider (`MediaPipe`
@@ -200,16 +232,53 @@ pub fn install_hand_tracking_providers() {
 #[cfg(feature = "hand-tracking-gestures")]
 pub fn apply_provider_choice(
     settings: Res<'_, HandTrackingSettings>,
+    time: Res<'_, Time>,
     mut control: ResMut<'_, HandProviderControl>,
     mut registry: ResMut<'_, ProviderRegistry>,
 ) {
     use wc_core::input::provider::ProviderId;
 
-    // Resolve Auto's optimistic MediaPipe start FIRST — before the
-    // change-check early-out. Watch resolution is choice-independent
-    // book-keeping for a registry that is already installed: an env-launched
-    // `WAVECONDUCTOR_HAND_PROVIDER=auto` session needs its camera verdict
-    // (and mock fallback) exactly as much as a dropdown-driven one.
+    // Resolve the watches FIRST — before the change-check early-out. Watch
+    // resolution is choice-independent book-keeping for a registry that is
+    // already installed: an env-launched `WAVECONDUCTOR_HAND_PROVIDER=auto`
+    // session needs its verdicts (and fallbacks) exactly as much as a
+    // dropdown-driven one.
+    //
+    // The Leap watch resolves before the MediaPipe watch: a Leap demote may
+    // itself register MediaPipe optimistically and arm the camera watch,
+    // which the block below then polls (same frame: harmless — a freshly
+    // started MediaPipe reports `Connecting`, which keeps waiting).
+    if matches!(control.leap_watch, AutoLeapWatch::Pending { .. }) {
+        match registry.provider(ProviderId::Leap) {
+            Some(slot) => {
+                let status = slot.inner.status();
+                match auto_leap_device_verdict(
+                    &mut control.leap_watch,
+                    status.device,
+                    status.service,
+                    time.elapsed(),
+                ) {
+                    LeapWatchVerdict::Demote => {
+                        tracing::info!(
+                            device = ?status.device,
+                            service = ?status.service,
+                            "hand-tracking: auto → Leap service is running but no device \
+                             attached after {}s; trying MediaPipe",
+                            AUTO_LEAP_DEVICE_GRACE.as_secs()
+                        );
+                        // The demote may register MediaPipe optimistically;
+                        // adopt its camera watch.
+                        control.watch = demote_leap_to_next_candidate(&mut registry, &settings);
+                    }
+                    LeapWatchVerdict::Keep | LeapWatchVerdict::KeepWaiting => {}
+                }
+            }
+            // Provider vanished (e.g. a test replaced the registry): nothing
+            // left to watch.
+            None => control.leap_watch = AutoLeapWatch::Idle,
+        }
+    }
+
     if control.watch == AutoMediaPipeWatch::Pending {
         match registry.provider(ProviderId::MediaPipe) {
             Some(slot) => {
@@ -240,9 +309,40 @@ pub fn apply_provider_choice(
     );
     registry.shutdown_all();
     let built = build_for_choice(choice, &settings);
-    *registry = built.registry;
+    // Re-arm both watches from the fresh build (fresh grace deadline) —
+    // re-picking Auto in the dropdown is the deliberate way to re-probe a
+    // Leap that was demoted earlier (a later plug-in never switches back
+    // automatically; see `AutoLeapWatch`).
     control.watch = built.watch;
+    control.leap_watch = arm_leap_watch(&built, time.elapsed());
+    *registry = built.registry;
     control.last_applied = choice;
+}
+
+/// Auto's per-frame Leap demote: fall through to `MediaPipe` (else the mock)
+/// with the real installer closures, mirroring [`build_for_choice`].
+///
+/// Thin on purpose: the demote *policy* (remove Leap, try `MediaPipe`,
+/// else mock, and which watch results) lives in
+/// [`wc_core::input::selection::demote_auto_leap`], unit-tested there with
+/// scripted installers; this binds it to the concrete constructors exactly
+/// like [`build_for_choice`] binds [`build_registry`].
+#[cfg(feature = "hand-tracking-gestures")]
+fn demote_leap_to_next_candidate(
+    registry: &mut ProviderRegistry,
+    settings: &HandTrackingSettings,
+) -> AutoMediaPipeWatch {
+    let mut leap = |registry: &mut ProviderRegistry| try_leap(registry, settings.leap_background);
+    let mut mediapipe = |registry: &mut ProviderRegistry| register_mediapipe(registry, settings);
+    let mut mock = |registry: &mut ProviderRegistry| install_mock(registry);
+    demote_auto_leap(
+        registry,
+        &mut ProviderInstallers {
+            leap: &mut leap,
+            mediapipe: &mut mediapipe,
+            mock: &mut mock,
+        },
+    )
 }
 
 /// Bind the concrete, feature-gated provider constructors to the shared
@@ -428,13 +528,14 @@ mod tests {
 
     use wc_core::input::provider::{HandTrackingProvider, ProviderId, ProviderRole};
     use wc_core::input::state::{
-        HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
+        DevicePresence, HandTrackingError, HandTrackingFrame, ProviderDiagnostics, ProviderStatus,
         ServiceConnection,
     };
 
-    /// Test provider with a scripted service state and a `stop()` counter.
+    /// Test provider with scripted service/device state and a `stop()` counter.
     struct ServiceStub {
         service: ServiceConnection,
+        device: DevicePresence,
         stops: Arc<AtomicUsize>,
     }
 
@@ -452,6 +553,7 @@ mod tests {
         fn status(&self) -> ProviderStatus {
             ProviderStatus {
                 service: self.service,
+                device: self.device,
                 ..ProviderStatus::default()
             }
         }
@@ -463,9 +565,14 @@ mod tests {
 
     /// Minimal headless app running only [`apply_provider_choice`], with a
     /// scripted provider under `id` and the given control state.
+    ///
+    /// `Time` is the default resource (elapsed = 0, never ticked), so an
+    /// `AutoLeapWatch::Pending { deadline: Duration::ZERO }` is already past
+    /// its deadline and any nonzero deadline is comfortably in the future.
     fn test_app(
         id: ProviderId,
         service: ServiceConnection,
+        device: DevicePresence,
         control: HandProviderControl,
     ) -> (App, Arc<AtomicUsize>) {
         let stops = Arc::new(AtomicUsize::new(0));
@@ -475,10 +582,12 @@ mod tests {
             ProviderRole::Primary,
             Box::new(ServiceStub {
                 service,
+                device,
                 stops: Arc::clone(&stops),
             }),
         );
         let mut app = App::new();
+        app.init_resource::<Time>();
         app.insert_resource(HandTrackingSettings::default());
         app.insert_resource(registry);
         app.insert_resource(control);
@@ -496,9 +605,11 @@ mod tests {
         let (mut app, stops) = test_app(
             ProviderId::MediaPipe,
             ServiceConnection::Errored,
+            DevicePresence::NoDevice,
             HandProviderControl {
                 last_applied: HandProviderChoice::Auto,
                 watch: AutoMediaPipeWatch::Pending,
+                leap_watch: AutoLeapWatch::Idle,
             },
         );
         app.update();
@@ -543,9 +654,11 @@ mod tests {
         let (mut app, stops) = test_app(
             ProviderId::Leap,
             ServiceConnection::Connected,
+            DevicePresence::Attached,
             HandProviderControl {
                 last_applied: HandProviderChoice::Auto,
                 watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Idle,
             },
         );
         // `provider` already matches last_applied (both Auto).
@@ -579,5 +692,143 @@ mod tests {
             "switch stops the old provider"
         );
         assert_eq!(app.world().resource::<ProviderRegistry>().iter().count(), 0);
+    }
+
+    // ── Auto's Leap device watch (bookkeeping; no real providers) ───────
+    //
+    // These cover only the verdicts that do NOT demote: a demote calls the
+    // real installer closures (`register_mediapipe` constructs a real
+    // `MediaPipeProvider`, which loads models and opens the webcam), which a
+    // default-run test must never do. The demote *composition* is fully
+    // unit-tested in `wc_core::input::selection` with scripted installers;
+    // the real-installer path is covered by the `#[ignore]`d test below.
+
+    /// Device already attached: the watch resolves to Keep — Leap stays, the
+    /// watch idles, nothing is stopped. Deadline 0 (already expired against
+    /// the unticked test clock) also pins rule precedence at the binary
+    /// level: Attached outranks deadline expiry.
+    #[test]
+    fn leap_watch_keeps_attached_device_and_idles() {
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            DevicePresence::Attached,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Pending {
+                    deadline: Duration::ZERO,
+                },
+            },
+        );
+        app.update();
+
+        assert!(app
+            .world()
+            .resource::<ProviderRegistry>()
+            .provider(ProviderId::Leap)
+            .is_some());
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().leap_watch,
+            AutoLeapWatch::Idle,
+            "verdict arrived; watch must idle permanently"
+        );
+    }
+
+    /// No device yet but the deadline is still ahead: keep waiting, keep Leap.
+    #[test]
+    fn leap_watch_waits_out_the_grace_period() {
+        let deadline = Duration::from_hours(1); // far future vs. unticked Time
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            DevicePresence::NoDevice,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Pending { deadline },
+            },
+        );
+        app.update();
+        app.update();
+
+        assert!(app
+            .world()
+            .resource::<ProviderRegistry>()
+            .provider(ProviderId::Leap)
+            .is_some());
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().leap_watch,
+            AutoLeapWatch::Pending { deadline },
+            "verdict outstanding; watch must stay pending"
+        );
+    }
+
+    /// A pending watch whose Leap provider vanished (e.g. a test replaced
+    /// the registry) idles instead of dangling forever.
+    #[test]
+    fn leap_watch_idles_when_provider_vanished() {
+        let (mut app, _stops) = test_app(
+            ProviderId::Mock, // registry holds no Leap
+            ServiceConnection::Connected,
+            DevicePresence::NoDevice,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Pending {
+                    deadline: Duration::from_hours(1),
+                },
+            },
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().leap_watch,
+            AutoLeapWatch::Idle
+        );
+    }
+
+    /// Full real-installer demote path: service-only Leap past its deadline
+    /// is removed and replaced by the next Auto candidate.
+    ///
+    /// `#[ignore]`d because the demote invokes the REAL
+    /// `register_mediapipe`, which constructs a `MediaPipeProvider` — on a
+    /// machine with the models present that spawns a worker and opens the
+    /// webcam, which default-run tests must never do. Run manually with
+    /// `cargo nextest run -p waveconductor --all-features --run-ignored all
+    /// leap_demote` when validating the wiring end to end.
+    #[test]
+    #[ignore = "constructs a real MediaPipeProvider (may open the webcam); run manually"]
+    fn leap_demote_replaces_service_only_leap_with_next_candidate() {
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            DevicePresence::NoDevice,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Pending {
+                    deadline: Duration::ZERO, // already expired
+                },
+            },
+        );
+        app.update();
+
+        let registry = app.world().resource::<ProviderRegistry>();
+        assert!(
+            registry.provider(ProviderId::Leap).is_none(),
+            "service-only Leap must be demoted after the grace period"
+        );
+        assert!(
+            registry.provider(ProviderId::MediaPipe).is_some()
+                || registry.provider(ProviderId::Mock).is_some(),
+            "a successor candidate must be installed"
+        );
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "demotion stops Leap");
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().leap_watch,
+            AutoLeapWatch::Idle
+        );
     }
 }
