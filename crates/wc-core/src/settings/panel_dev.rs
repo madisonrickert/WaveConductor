@@ -113,9 +113,9 @@ fn draw_dev_panel(world: &mut World) {
         .get_resource::<crate::input::provider::ProviderRegistry>()
         .map(|r| (r.primary_id(), r.primary_status(), r.primary_diagnostics()));
 
-    // Live grab/pinch readout (drives the tuning calibration hint) and a working
-    // copy of the tunable settings — snapshotted before the egui closure borrows
-    // `world`. Slider edits land in `tuning` and are committed back after `show`.
+    // Live grab/pinch readout (drives the tuning calibration hint), snapshotted
+    // before the egui closure borrows `world`. The tunable sliders themselves
+    // moved to the settings dock (Advanced); this panel only reads.
     let hand_readout: Option<(usize, f32, f32)> = world
         .get_resource::<crate::input::state::HandTrackingState>()
         .map(|s| {
@@ -126,9 +126,6 @@ fn draw_dev_panel(world: &mut World) {
                 first.map_or(0.0, |h| h.pinch_strength),
             )
         });
-    let mut tuning: Option<crate::settings::HandTrackingSettings> = world
-        .get_resource::<crate::settings::HandTrackingSettings>()
-        .cloned();
 
     // Left-docked, mirroring the settings dock's frame discipline so the two sit
     // side-by-side as matching leaves: same top (y = 60), same bottom inset (16),
@@ -186,15 +183,14 @@ fn draw_dev_panel(world: &mut World) {
                                     });
                             }
 
-                            // Live MediaPipe feel tuning — readout + sliders bound to
-                            // the persisted settings (edits committed after the closure).
-                            if let Some(t) = tuning.as_mut() {
-                                bevy_egui::egui::CollapsingHeader::new("Hand tuning (MediaPipe)")
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        draw_hand_tuning_controls(ui, &style, t, hand_readout);
-                                    });
-                            }
+                            // Live MediaPipe feel readout — the calibration aid
+                            // you read while adjusting the sliders on the settings
+                            // dock (Advanced); the sliders themselves moved there.
+                            bevy_egui::egui::CollapsingHeader::new("Hand tuning (readout)")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    draw_hand_tuning_readout(ui, &style, hand_readout);
+                                });
 
                             // Collapsed by default: the curated diagnostics grid
                             // above is the day-to-day view; the full world
@@ -208,64 +204,43 @@ fn draw_dev_panel(world: &mut World) {
                 },
             );
         });
-
-    // Commit slider edits back to the resource, but only when a value actually
-    // moved — so `Changed<HandTrackingSettings>` (autosave + the apply-to-provider
-    // system) fires on real edits, not every frame the panel is open.
-    if let Some(edited) = tuning {
-        if let Some(mut res) = world.get_resource_mut::<crate::settings::HandTrackingSettings>() {
-            if *res != edited {
-                *res = edited;
-            }
-        }
-    }
 }
 
-/// Renders the live `MediaPipe` hand-tuning controls inside the dev panel: a
+/// Renders the live `MediaPipe` hand-tuning *readout* inside the dev panel: a
 /// grab/pinch readout (so the operator can see the open-hand grab *floor*) plus
-/// sliders bound to the persisted [`crate::settings::HandTrackingSettings`]
-/// tunables. The caller commits edits back to the resource; the
-/// `apply_mediapipe_tuning_settings` system forwards them to the live provider,
-/// so feel changes apply with no restart.
-fn draw_hand_tuning_controls(
+/// the calibration hint. The tunable sliders themselves now live on the
+/// settings dock's Hand Tracking tab under the Advanced toggle (they are
+/// `Dev`-category settings, surfaced there). This panel keeps only the live aid
+/// you read while adjusting them in the dock side-by-side.
+fn draw_hand_tuning_readout(
     ui: &mut bevy_egui::egui::Ui,
     style: &OverlayStyle,
-    settings: &mut crate::settings::HandTrackingSettings,
     readout: Option<(usize, f32, f32)>,
 ) {
-    use bevy_egui::egui;
-
     if let Some((count, grab, pinch)) = readout {
         ui.label(format!(
             "Live:  {count} hand(s)  ·  grab {grab:.2}  ·  pinch {pinch:.2}"
         ));
-        // Calibration now reads the PRE-deadzone signal directly ("Grab raw
-        // (‰)" in the Hand tracking grid), so there is no need to zero the
-        // deadzone first — the raw readout is unaffected by the slider.
+        // Calibration reads the PRE-deadzone signal directly ("Grab raw (‰)" in
+        // the Hand tracking grid above), so the raw readout is unaffected by the
+        // deadzone slider and there is no need to zero it first.
         hint_label(
             ui,
             style,
             "Open-hand calibration: hold your hand open and relaxed, read the rest \
-             floor from \"Grab raw (‰)\" above, then set the deadzone just above it \
-             (slider value = ‰ ÷ 1000, e.g. raw 60‰ → deadzone 0.07).",
+             floor from \"Grab raw (‰)\" above, then set \"Grab rest deadzone\" just \
+             above it on the Settings dock (Advanced). Slider value = ‰ ÷ 1000, e.g. \
+             raw 60‰ → deadzone 0.07.",
         );
-        ui.add_space(2.0);
+    } else {
+        hint_label(
+            ui,
+            style,
+            "Hand-tracking feel sliders live on the Settings dock's Hand Tracking \
+             tab under Advanced. Connect a provider to see the live grab/pinch \
+             readout here.",
+        );
     }
-    ui.add(
-        egui::Slider::new(&mut settings.grab_rest_deadzone, 0.0..=0.6).text("Grab rest deadzone"),
-    );
-    // Size-estimated depth calibration. The "0 = off" in the label keeps the
-    // escape hatch discoverable mid-set: dragging to 0 disables the estimator
-    // and restores the fixed 120 mm depth pin (grab-only attractor control).
-    ui.add(
-        egui::Slider::new(&mut settings.depth_calibration_k, 0.0..=1.5)
-            .text("Depth calibration k (0 = off)"),
-    );
-    ui.add(
-        egui::Slider::new(&mut settings.smoothing_min_cutoff, 0.1..=20.0)
-            .text("Smoothing min cutoff (Hz)"),
-    );
-    ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));
 }
 
 /// Fixed width of the left debug dock's `Area`, applied via `set_min_size` /

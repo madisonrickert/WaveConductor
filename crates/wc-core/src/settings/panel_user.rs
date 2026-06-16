@@ -83,6 +83,22 @@ impl SettingsTab {
 #[derive(Resource, Default)]
 struct SettingsDockTab(SettingsTab);
 
+/// Whether the dock's Advanced toggle is on, revealing `Dev`-category settings
+/// inline (rendered dimmer). Persists across frames like the tab selection. The
+/// hand-tuning "Feel" sliders are `Dev`-category, so this is what surfaces them
+/// on the Hand Tracking tab.
+#[derive(Resource, Default)]
+struct SettingsDockAdvanced(bool);
+
+/// Whether a field is visible given the current Advanced toggle: `User` fields
+/// always, `Dev` fields only when Advanced is on.
+fn field_visible(def: &SettingDef, advanced: bool) -> bool {
+    match def.category {
+        SettingsCategory::User => true,
+        SettingsCategory::Dev => advanced,
+    }
+}
+
 /// Route a settings struct (identified by its storage key) to its dock tab.
 ///
 /// The map is intentionally total: any key not explicitly placed — including
@@ -125,6 +141,7 @@ fn dock_rect(window_w: f32, window_h: f32) -> (f32, f32, f32, f32) {
 /// a gesture with the panel open).
 pub(super) fn add_systems(app: &mut App) {
     app.init_resource::<SettingsDockTab>();
+    app.init_resource::<SettingsDockAdvanced>();
     app.add_systems(
         bevy_egui::EguiPrimaryContextPass,
         draw_user_panel.run_if(settings_panel_visible),
@@ -189,11 +206,14 @@ fn draw_user_panel(world: &mut World) {
     };
     let (dock_x, dock_y, dock_w, dock_h) = dock_rect(window_width, window_height);
 
-    // Tab selection: read the persisted choice, mutate it from the tab bar this
-    // frame, write it back after the Area closure releases the world borrow.
+    // Tab + Advanced state: read the persisted values, mutate them from the
+    // header this frame, write them back after the Area closure releases world.
     let mut selected_tab = world
         .get_resource::<SettingsDockTab>()
         .map_or(SettingsTab::default(), |t| t.0);
+    let mut advanced = world
+        .get_resource::<SettingsDockAdvanced>()
+        .is_some_and(|a| a.0);
 
     let mut state: bevy::ecs::system::SystemState<EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
@@ -233,22 +253,29 @@ fn draw_user_panel(world: &mut World) {
                     v.selection.stroke = egui::Stroke::new(1.0, style.accent);
                     v.slider_trailing_fill = true;
 
-                    // Header: the tab bar is the title (the old "SETTINGS" label
-                    // is retired). Fixed, outside the scroll body.
-                    draw_dock_tabs(ui, &mut selected_tab, &style);
+                    // Header: tab bar (the title) on the left, Advanced toggle on
+                    // the right. Fixed, outside the scroll body.
+                    draw_dock_header(ui, &mut selected_tab, &mut advanced, &style);
                     ui.add_space(4.0);
                     hairline(ui, &style);
                     ui.add_space(8.0);
 
                     // Body: only the structs routed to the active tab, scrolling
-                    // within the fixed dock height.
+                    // within the fixed dock height. Advanced reveals Dev rows.
                     egui::ScrollArea::vertical()
                         .id_salt("wc-dock-scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for key in &keys {
                                 if tab_for_storage_key(key) == selected_tab {
-                                    render_section_by_key(world, ui, key, provider_status, &style);
+                                    render_section_by_key(
+                                        world,
+                                        ui,
+                                        key,
+                                        provider_status,
+                                        advanced,
+                                        &style,
+                                    );
                                 }
                             }
                         });
@@ -259,15 +286,26 @@ fn draw_user_panel(world: &mut World) {
     if let Some(mut tab) = world.get_resource_mut::<SettingsDockTab>() {
         tab.0 = selected_tab;
     }
+    if let Some(mut adv) = world.get_resource_mut::<SettingsDockAdvanced>() {
+        adv.0 = advanced;
+    }
 }
 
-/// Draw the dock's header tab row, mutating `selected` on click.
+/// Draw the dock's header: the tab row on the left (mutating `selected` on
+/// click) and the Advanced toggle on the right (mutating `advanced`).
 ///
-/// Renders each [`SettingsTab`] as a frameless selectable label (the pill
-/// background is suppressed in a scope so the tabs read as plain text) with a
-/// 2 px accent underline beneath the active tab. The hairline drawn below the
-/// row by the caller reads as the tab bar's baseline.
-fn draw_dock_tabs(ui: &mut egui::Ui, selected: &mut SettingsTab, style: &OverlayStyle) {
+/// Each [`SettingsTab`] is a frameless selectable label (the pill background is
+/// suppressed in a scope so tabs read as plain text) with a 2 px accent
+/// underline beneath the active tab; the caller's hairline below reads as the
+/// tab bar's baseline. The Advanced toggle reuses the same lit/underlined
+/// treatment — it reads as a fourth, modal tab that reveals a layer rather than
+/// switching pages.
+fn draw_dock_header(
+    ui: &mut egui::Ui,
+    selected: &mut SettingsTab,
+    advanced: &mut bool,
+    style: &OverlayStyle,
+) {
     ui.scope(|ui| {
         let v = ui.visuals_mut();
         // Suppress the selectable-label pill so a tab is text + underline only.
@@ -298,6 +336,27 @@ fn draw_dock_tabs(ui: &mut egui::Ui, selected: &mut SettingsTab, style: &Overlay
                     );
                 }
             }
+
+            // Advanced toggle, right-aligned in the same header row.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let color = if *advanced {
+                    style.accent_bright
+                } else {
+                    style.text_faint
+                };
+                let text = egui::RichText::new("ADVANCED").size(11.0).color(color);
+                let resp = ui.selectable_label(*advanced, text);
+                if resp.clicked() {
+                    *advanced = !*advanced;
+                }
+                if *advanced {
+                    ui.painter().hline(
+                        resp.rect.x_range(),
+                        resp.rect.bottom() + 3.0,
+                        egui::Stroke::new(2.0, style.accent),
+                    );
+                }
+            });
         });
     });
 }
@@ -315,6 +374,7 @@ fn render_section_by_key(
     ui: &mut egui::Ui,
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    advanced: bool,
     style: &OverlayStyle,
 ) {
     // Snapshot the entry's defs as an Arc handle so the registry resource
@@ -327,7 +387,9 @@ fn render_section_by_key(
         Some(entry) => Arc::clone(&entry.def),
         None => return,
     };
-    if defs.iter().all(|d| d.category != SettingsCategory::User) {
+    // Nothing to show when no field is visible at the current Advanced state
+    // (e.g. a Dev-only struct while Advanced is off).
+    if !defs.iter().any(|d| field_visible(d, advanced)) {
         return;
     }
 
@@ -376,18 +438,21 @@ fn render_section_by_key(
         storage_key,
         provider_status,
         default_instance.as_deref(),
+        advanced,
         style,
         ui,
     );
 }
 
 /// Walk `reflect` (a `&mut dyn Reflect` over the settings struct) and render
-/// each user-category field as a typed widget, grouped under section headers.
+/// each visible field as a typed widget, grouped under section headers.
 ///
-/// Fields with the same `section` name are clustered together under an
-/// uppercase section header label. Fields with `section == ""` are rendered
-/// first in an unlabeled group (no header). Section order follows the first
-/// appearance of each section name in the `defs` slice.
+/// `advanced` controls which fields are visible: `User` fields always, `Dev`
+/// fields only when the Advanced toggle is on (and then with a dimmed label, so
+/// they read as the secondary layer). Fields with the same `section` name are
+/// clustered together under an uppercase section header label. Fields with
+/// `section == ""` are rendered first in an unlabeled group (no header).
+/// Section order follows the first appearance of each section name in `defs`.
 ///
 /// Each section uses its own `egui::Grid` with three columns: the label
 /// (accent-highlighted when the field differs from its default, with a restart
@@ -409,6 +474,7 @@ fn render_user_fields_via_reflect(
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
     default: Option<&dyn Reflect>,
+    advanced: bool,
     style: &OverlayStyle,
     ui: &mut egui::Ui,
 ) {
@@ -424,10 +490,10 @@ fn render_user_fields_via_reflect(
         return;
     };
 
-    // Pass 1: collect section names in order of first appearance among User
+    // Pass 1: collect section names in order of first appearance among visible
     // fields. `""` (no section) always sorts first when present.
     let mut section_order: Vec<&'static str> = Vec::new();
-    for def in defs.iter().filter(|d| d.category == SettingsCategory::User) {
+    for def in defs.iter().filter(|d| field_visible(d, advanced)) {
         if !section_order.contains(&def.section) {
             section_order.push(def.section);
         }
@@ -456,15 +522,17 @@ fn render_user_fields_via_reflect(
             .show(ui, |ui| {
                 for def in defs
                     .iter()
-                    .filter(|d| d.category == SettingsCategory::User && d.section == section_name)
+                    .filter(|d| field_visible(d, advanced) && d.section == section_name)
                 {
                     let Some(field) = struct_mut.field_mut(def.field_name) else {
                         continue;
                     };
                     let default_field = default_struct.and_then(|s| s.field(def.field_name));
                     let modified = field_differs_from_default(field, default_field);
-                    // Column 1: label (+ restart badge), bold when modified.
-                    render_label_cell(ui, def, modified, style);
+                    let is_dev = def.category == SettingsCategory::Dev;
+                    // Column 1: label (+ restart badge), highlighted when
+                    // modified, dimmed when it is an Advanced (Dev) field.
+                    render_label_cell(ui, def, modified, is_dev, style);
                     // Column 2: the value widget.
                     render_widget_value(field, def, storage_key, ui);
                     // Column 3: reset-to-default glyph, or an aligned spacer.
@@ -509,18 +577,29 @@ fn field_differs_from_default(
 }
 
 /// Render Grid column 1: the field label, accent-highlighted when the value
-/// differs from its default, followed by an amber restart badge when the field
-/// requires a restart to take effect.
+/// differs from its default and dimmed when it is an Advanced (`Dev`) field,
+/// followed by an amber restart badge when the field requires a restart.
 ///
 /// Highlight, not weight: only `Inter-Regular` is loaded and egui has no
 /// faux-bold, so `.strong()` would not change the glyph weight — it only shifts
 /// colour, which our explicit label colour already pins. A modified field is
 /// therefore marked by the accent colour (the dock's signature) rather than by
 /// bold. Loading an Inter bold/semibold face is the path to true weight.
-fn render_label_cell(ui: &mut egui::Ui, def: &SettingDef, modified: bool, style: &OverlayStyle) {
+///
+/// Precedence: a modified field shows the accent even when it is a `Dev` field
+/// (the "you changed this" signal outranks the "this is advanced" dimming).
+fn render_label_cell(
+    ui: &mut egui::Ui,
+    def: &SettingDef,
+    modified: bool,
+    is_dev: bool,
+    style: &OverlayStyle,
+) {
     ui.horizontal(|ui| {
         let color = if modified {
             style.accent_bright
+        } else if is_dev {
+            style.text_faint
         } else {
             style.text_primary
         };
@@ -1059,6 +1138,25 @@ mod tests {
             });
         });
         // Reaching here without a panic is the assertion.
+    }
+
+    /// Advanced gates Dev fields: User always visible, Dev only when on.
+    #[test]
+    fn field_visible_gates_dev_on_advanced() {
+        let mk = |category| SettingDef {
+            field_name: "f",
+            label: "F",
+            section: "",
+            category,
+            kind: SettingKind::Boolean,
+            requires_restart: false,
+        };
+        let user = mk(SettingsCategory::User);
+        let dev = mk(SettingsCategory::Dev);
+        assert!(field_visible(&user, false), "User visible without advanced");
+        assert!(field_visible(&user, true), "User visible with advanced");
+        assert!(!field_visible(&dev, false), "Dev hidden without advanced");
+        assert!(field_visible(&dev, true), "Dev visible with advanced");
     }
 
     #[test]
