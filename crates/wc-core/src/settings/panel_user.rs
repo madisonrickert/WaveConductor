@@ -494,7 +494,9 @@ fn render_user_fields_via_reflect(
                         if let Some(line) = provider_status {
                             ui.label(""); // column 1: keep the grid aligned
                             render_provider_status_row(ui, line);
-                            ui.add_space(18.0); // column 3: match the reset column
+                            // Column 3 spacer — allocate, not `add_space` (which
+                            // panics inside a Grid).
+                            ui.allocate_exact_size(egui::vec2(18.0, 0.0), egui::Sense::hover());
                             ui.end_row();
                         }
                     }
@@ -570,8 +572,10 @@ fn render_reset_cell(
             }
         }
         // Keep the reset column's width stable whether or not the glyph shows.
+        // `add_space` panics inside an `egui::Grid`; allocate an empty
+        // fixed-width cell instead.
         _ => {
-            ui.add_space(18.0);
+            ui.allocate_exact_size(egui::vec2(18.0, 0.0), egui::Sense::hover());
         }
     }
 }
@@ -1022,6 +1026,31 @@ mod tests {
             !field_differs_from_default(&live, None),
             "no default available degrades to not-modified"
         );
+    }
+
+    /// Regression: the reset cell's unmodified branch must use a grid-safe
+    /// allocation, not `ui.add_space`, which panics ("makes no sense in a grid
+    /// layout") the moment the settings panel opens. Render the cell inside a
+    /// real `egui::Grid` and assert the frame completes.
+    #[test]
+    fn reset_cell_unmodified_branch_is_grid_safe() {
+        let ctx = egui::Context::default();
+        let style = OverlayStyle::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::Grid::new("reset_cell_test")
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        let mut field: f32 = 0.5;
+                        ui.label("label");
+                        ui.label("widget");
+                        // Unmodified → the empty-cell branch (the crash path).
+                        render_reset_cell(ui, &mut field, None, false, &style);
+                        ui.end_row();
+                    });
+            });
+        });
+        // Reaching here without a panic is the assertion.
     }
 
     #[test]
