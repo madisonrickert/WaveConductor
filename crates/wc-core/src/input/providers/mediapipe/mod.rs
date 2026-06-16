@@ -251,11 +251,14 @@ impl MediaPipeProvider {
         }
     }
 
-    /// Build the pipeline from the vendored models.
-    fn build_pipeline(&self) -> Result<Pipeline, HandTrackingError> {
+    /// Build the pipeline from the vendored models, returning the combined
+    /// inference backend label (`"ort/CoreML"`, `"ort/CPU"`, or the mixed state)
+    /// for diagnostics.
+    fn build_pipeline(&self) -> Result<(Pipeline, &'static str), HandTrackingError> {
         let dir = &self.config.model_dir;
-        let palm = load_model(dir, "palm_detection.onnx")?;
-        let landmark = load_model(dir, "hand_landmark.onnx")?;
+        let (palm, palm_backend) = load_model(dir, "palm_detection.onnx")?;
+        let (landmark, landmark_backend) = load_model(dir, "hand_landmark.onnx")?;
+        let backend = combined_backend(palm_backend, landmark_backend);
         let cfg = PipelineConfig {
             mirror: self.config.mirror,
             grab_rest_deadzone: self.config.grab_rest_deadzone,
@@ -265,7 +268,7 @@ impl MediaPipeProvider {
         let mut pipeline = Pipeline::new(palm, landmark, cfg);
         // Share the live tuning cell so the dev panel reaches the worker.
         pipeline.set_live_tuning_source(Arc::clone(&self.live_tuning));
-        Ok(pipeline)
+        Ok((pipeline, backend))
     }
 }
 
@@ -445,25 +448,48 @@ fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Capture
     }
 }
 
-/// Load one ONNX model and wrap it as a boxed [`HandInference`].
+/// Load one ONNX model and wrap it as a boxed [`HandInference`], returning the
+/// inference backend label the session registered (`"ort/CoreML"` or
+/// `"ort/CPU"`) alongside it for diagnostics.
 ///
 /// Reads the model file from `dir/name` and builds an [`inference_ort::OrtInference`]
 /// session. ONNX Runtime reads input/output shapes directly from the graph, so no
 /// shape hint is needed here.
-fn load_model(dir: &Path, name: &str) -> Result<Box<dyn HandInference>, HandTrackingError> {
+fn load_model(
+    dir: &Path,
+    name: &str,
+) -> Result<(Box<dyn HandInference>, &'static str), HandTrackingError> {
     let path = dir.join(name);
     let bytes = std::fs::read(&path).map_err(|e| {
         HandTrackingError::Misconfigured(format!("read model {}: {e}", path.display()))
     })?;
     let model = inference_ort::OrtInference::load(&bytes)
         .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
+    // Read the backend before boxing — it lives on the concrete type, not the
+    // `HandInference` trait object.
+    let backend = model.backend();
     let boxed: Box<dyn HandInference> = Box::new(model);
-    Ok(boxed)
+    Ok((boxed, backend))
+}
+
+/// Combine the palm and landmark backend labels into one diagnostics string.
+///
+/// They normally agree; if one stage falls back to CPU while the other reaches
+/// `CoreML`, report the mixed state rather than hiding the slow path.
+fn combined_backend(palm: &'static str, landmark: &'static str) -> &'static str {
+    if palm == landmark {
+        palm
+    } else {
+        "ort/CoreML+CPU"
+    }
 }
 
 impl HandTrackingProvider for MediaPipeProvider {
     fn start(&mut self) -> Result<(), HandTrackingError> {
-        let pipeline = self.build_pipeline()?;
+        let (pipeline, backend) = self.build_pipeline()?;
+        // Surface where inference actually registered so a silent CPU fallback
+        // (the 240% CPU symptom) is visible in the dev panel, not assumed away.
+        tracing::info!("MediaPipe hand inference backend: {backend} (palm+landmark)");
         // A test-injected source is used directly; otherwise the worker opens the
         // webcam on its own thread (camera backends can be !Send). Both arms
         // produce a `Send` factory.
@@ -501,7 +527,7 @@ impl HandTrackingProvider for MediaPipeProvider {
             s.device = DevicePresence::Attached;
         }
         if let Ok(mut d) = self.diagnostics.lock() {
-            d.sdk_version = Some("MediaPipe (ort/CoreML) palm+landmark".into());
+            d.sdk_version = Some(format!("MediaPipe ({backend}) palm+landmark"));
             d.device_serial = Some(format!("camera{}", self.config.camera_index));
         }
         // Cold-start the smoothing so a restart carries no stale pose/momentum.
