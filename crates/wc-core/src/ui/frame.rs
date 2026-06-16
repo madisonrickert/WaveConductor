@@ -107,6 +107,22 @@ pub fn backdrop_blur_frame(
     response
 }
 
+/// Draw a full-width 1px in-panel hairline rule using
+/// [`OverlayStyle::hairline`], allocating its own row.
+///
+/// The quiet in-panel divider for the settings/debug docks — much fainter than
+/// the outer panel stroke and than egui's default `ui.separator()`, which is
+/// too bright against the frosted glass.
+pub fn hairline(ui: &mut egui::Ui, style: &OverlayStyle) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, style.hairline),
+    );
+}
+
 /// Multiply the alpha channel of `color` by `mul`, clamped to [0.0, 1.0].
 ///
 /// The RGB channels are left untouched; only the alpha is scaled. This is the

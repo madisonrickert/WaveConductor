@@ -47,7 +47,7 @@ use super::registry::SettingsRegistry;
 use crate::lifecycle::state::AppState;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::SettingsPanelVisible;
-use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
+use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
 
 /// Inline stack snapshot of registered settings storage keys. Sized for the
 /// expected case of ≤8 settings types per app; spills to the heap above that.
@@ -300,17 +300,6 @@ fn draw_dock_tabs(ui: &mut egui::Ui, selected: &mut SettingsTab, style: &Overlay
             }
         });
     });
-}
-
-/// Draw a full-width in-panel hairline rule using the dock palette.
-fn hairline(ui: &mut egui::Ui, style: &OverlayStyle) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-    ui.painter().hline(
-        rect.x_range(),
-        rect.center().y,
-        egui::Stroke::new(1.0, style.hairline),
-    );
 }
 
 /// Look up the type registration matching `storage_key` and render its

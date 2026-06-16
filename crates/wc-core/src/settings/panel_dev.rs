@@ -25,7 +25,7 @@ use leafwing_input_manager::prelude::ActionState;
 
 use crate::lifecycle::actions::WaveConductorAction;
 use crate::ui::auto_fade::UiOpacity;
-use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
+use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
 
 /// True when the dev inspector window should be drawn.
 ///
@@ -130,12 +130,17 @@ fn draw_dev_panel(world: &mut World) {
         .get_resource::<crate::settings::HandTrackingSettings>()
         .cloned();
 
+    // Left-docked, mirroring the settings dock's frame discipline so the two sit
+    // side-by-side as matching leaves: same top (y = 60), same bottom inset (16),
+    // same side inset (16). Fixed 420 px wide — this is diagnostics-only, narrower
+    // than the settings dock — with the artwork visible in the corridor between.
+    let dock_height = (window_height - 60.0 - 16.0).max(200.0);
     bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("wc-settings-dev-panel"))
         .order(bevy_egui::egui::Order::Foreground)
         .fixed_pos(bevy_egui::egui::pos2(16.0, 60.0))
         .show(&ctx, |ui| {
-            ui.set_max_width(DEV_PANEL_MAX_WIDTH);
-            ui.set_max_height((window_height - 100.0).max(200.0));
+            ui.set_min_size(bevy_egui::egui::vec2(DEBUG_DOCK_WIDTH, dock_height));
+            ui.set_max_size(bevy_egui::egui::vec2(DEBUG_DOCK_WIDTH, dock_height));
             backdrop_blur_frame(
                 ui,
                 &style,
@@ -145,23 +150,29 @@ fn draw_dev_panel(world: &mut World) {
                     opacity_mul,
                 },
                 |ui| {
-                    ui.label(
-                        bevy_egui::egui::RichText::new("DEV INSPECTOR")
-                            .color(style.text_color_dim)
-                            .size(13.0),
-                    );
-                    ui.separator();
+                    // Accent drives selection / inspector highlights; the rest of
+                    // the overlay keeps its existing palette (scoped override).
+                    let v = ui.visuals_mut();
+                    v.selection.bg_fill = style.accent_weak;
+                    v.selection.stroke = bevy_egui::egui::Stroke::new(1.0, style.accent);
 
-                    // One outer scroll area wraps every section so none can fall
-                    // off the bottom of the screen — the curated diagnostics grid
-                    // grew long enough to overflow on shorter displays. Sections
-                    // are collapsible so the long grid can be folded away, and the
-                    // world inspector no longer needs its own (nested) scroll.
-                    // `auto_shrink([false, true])`: keep a stable width, but be only
-                    // as tall as the content up to `max_height`, then scroll.
+                    // Header: a single quiet section title + hairline baseline
+                    // (retires the bright "DEV INSPECTOR" + `ui.separator()`).
+                    ui.label(
+                        bevy_egui::egui::RichText::new("DIAGNOSTICS")
+                            .color(style.text_secondary)
+                            .size(11.5)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    hairline(ui, &style);
+                    ui.add_space(8.0);
+
+                    // One outer scroll area fills the fixed dock height; sections
+                    // are collapsible so the long diagnostics grid can be folded.
                     bevy_egui::egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
-                        .max_height((window_height - 140.0).max(120.0))
+                        .id_salt("wc-debug-scroll")
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
                             // Hand Tracking section — curated diagnostics from the
                             // multi-axis ProviderStatus + ProviderDiagnostics.
@@ -185,8 +196,11 @@ fn draw_dev_panel(world: &mut World) {
                                     });
                             }
 
+                            // Collapsed by default: the curated diagnostics grid
+                            // above is the day-to-day view; the full world
+                            // inspector is opened on demand.
                             bevy_egui::egui::CollapsingHeader::new("World inspector")
-                                .default_open(true)
+                                .default_open(false)
                                 .show(ui, |ui| {
                                     bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
                                 });
@@ -254,14 +268,14 @@ fn draw_hand_tuning_controls(
     ui.add(egui::Slider::new(&mut settings.smoothing_beta, 0.0..=10.0).text("Smoothing beta"));
 }
 
-/// Fixed maximum width of the dev panel's `Area`, applied via
-/// `ui.set_max_width` in [`draw_dev_panel`]. [`HINT_WRAP_WIDTH`] is derived
-/// from this — change them together by changing only this one.
-const DEV_PANEL_MAX_WIDTH: f32 = 480.0;
+/// Fixed width of the left debug dock's `Area`, applied via `set_min_size` /
+/// `set_max_size` in [`draw_dev_panel`]. [`HINT_WRAP_WIDTH`] is derived from
+/// this — change them together by changing only this one.
+const DEBUG_DOCK_WIDTH: f32 = 420.0;
 
 /// Fixed wrap width for multi-line hint labels in the dev panel.
 ///
-/// Derived from [`DEV_PANEL_MAX_WIDTH`] minus the frame padding (2 × 20 px)
+/// Derived from [`DEBUG_DOCK_WIDTH`] minus the frame padding (2 × 20 px)
 /// and a 40 px scrollbar allowance, so this width is always available. The
 /// width must be a constant: a default-wrapped label re-measures against
 /// `ui.available_width()` every frame, and inside the panel's `ScrollArea`
@@ -269,7 +283,7 @@ const DEV_PANEL_MAX_WIDTH: f32 = 480.0;
 /// change the content width — so the wrap points oscillate and the hint text
 /// visibly flickers between layouts. Wrapping inside a fixed-width scope
 /// makes the layout identical every frame.
-const HINT_WRAP_WIDTH: f32 = DEV_PANEL_MAX_WIDTH - 80.0;
+const HINT_WRAP_WIDTH: f32 = DEBUG_DOCK_WIDTH - 80.0;
 
 /// Draw a small dim multi-line hint at a fixed wrap width (see
 /// [`HINT_WRAP_WIDTH`] for why the width must not track the live
