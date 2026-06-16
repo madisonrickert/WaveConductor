@@ -10,8 +10,8 @@
 //! `TouchInput` messages → [`update_pointer_coarse`] → [`PointerCoarse`] resource.
 //! [`overlay_icon_button`] reads [`OverlayStyle`] constants and the egui
 //! animation clock to produce a hover-animated, alpha-scaled button widget.
-//! Task 14 adds `SettingsPanelVisible`, `LastSettingsPanelRect`,
-//! `draw_home_button`, and `draw_settings_button`. Task 15 adds `VolumeMuted`,
+//! Task 14 adds `SettingsPanelVisible`, `draw_home_button`, and
+//! `draw_settings_button`. Task 15 adds `VolumeMuted`,
 //! `draw_volume_button`, and `sync_volume_muted`. This module provides the
 //! shared primitive, touch-detection resource, and all draw systems.
 //! Plan 11.5 Bug 1 refactored all three draw systems from `&mut World` to
@@ -66,7 +66,6 @@ impl Plugin for OverlayButtonsPlugin {
         app.init_resource::<PointerCoarse>();
         app.init_resource::<LastTouchAt>();
         app.init_resource::<SettingsPanelVisible>();
-        app.init_resource::<LastSettingsPanelRect>();
         app.init_resource::<VolumeMuted>();
         // Register the message type if it isn't already present (idempotent).
         // `bevy::input::InputPlugin` handles this in production; tests that
@@ -129,20 +128,6 @@ pub(crate) fn update_pointer_coarse(
 /// frame. Defaults `false` so the panel starts hidden.
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct SettingsPanelVisible(pub bool);
-
-/// Last frame's settings-panel bounding rectangle, in egui points.
-///
-/// Written by Task 18's panel-draw system each frame the panel is open. Used
-/// by the same system's click-outside detection to dismiss the panel when the
-/// user clicks away. Default is [`egui::Rect::NOTHING`] (zero-area sentinel).
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct LastSettingsPanelRect(pub egui::Rect);
-
-impl Default for LastSettingsPanelRect {
-    fn default() -> Self {
-        Self(egui::Rect::NOTHING)
-    }
-}
 
 /// Top-left home button. Hidden when [`AppState`] is already [`AppState::Home`].
 ///

@@ -59,15 +59,13 @@ impl Plugin for SettingsPlugin {
             .init_resource::<autosave::AutosaveState>()
             .init_resource::<EguiPointerCaptured>()
             .init_resource::<EguiKeyboardCaptured>()
-            // `dismiss_on_click_outside` (panel_user.rs) requires these two
-            // resources as hard params and runs whenever SettingsPlugin is
-            // loaded — even in MinimalPlugins test harnesses that don't include
-            // OverlayButtonsPlugin. Init them here so the system's parameter
-            // validation never panics. Calls are idempotent: OverlayButtonsPlugin
-            // also calls init_resource for both, which is a no-op when they
-            // already exist.
+            // The panel's `settings_panel_visible` run condition reads
+            // SettingsPanelVisible as a hard param and runs whenever
+            // SettingsPlugin is loaded — even in MinimalPlugins test harnesses
+            // that don't include OverlayButtonsPlugin. Init it here so parameter
+            // validation never panics. Idempotent with OverlayButtonsPlugin's
+            // own init.
             .init_resource::<crate::ui::buttons::SettingsPanelVisible>()
-            .init_resource::<crate::ui::buttons::LastSettingsPanelRect>()
             .add_message::<SketchRestart>()
             // Real sketches register their own settings via `LinePlugin`, `FlamePlugin`,
             // etc. The synthetic TestSketchSettings only lives in #[cfg(test)] builds

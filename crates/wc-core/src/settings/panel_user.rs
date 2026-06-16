@@ -14,13 +14,16 @@
 //! ladder. Reflection drives a single walker that consumes the metadata
 //! table the derive macro already emits.
 //!
-//! ## Task 18: v4 chrome
+//! ## Chrome and layout
 //!
-//! The panel is now gated on [`crate::ui::buttons::SettingsPanelVisible`]
-//! (default `false`) so it no longer auto-opens at startup. The `egui::Window`
-//! is replaced by `egui::Area` + [`crate::ui::backdrop_blur_frame`] for the
-//! translucent frosted-glass look. A click-outside dismiss system runs each
-//! `Update` frame to match v4's `mousedown`-outside behaviour.
+//! The panel is gated on [`crate::ui::buttons::SettingsPanelVisible`] (default
+//! `false`) so it does not auto-open at startup. It draws as an `egui::Area`
+//! docked to the right half of the window (see [`dock_rect`]) wrapped in
+//! [`crate::ui::backdrop_blur_frame`] for the translucent frosted-glass look,
+//! with a header tab bar ([`SettingsTab`]) that routes each settings struct to
+//! a tab by storage key. As a docked tool it closes via the cog toggle (or
+//! Esc), not by clicking the artwork behind it — so there is no click-outside
+//! dismiss.
 
 #![allow(
     clippy::as_conversions,
@@ -43,25 +46,89 @@ use super::registry::SettingsRegistry;
 use crate::input::state::ServiceConnection;
 use crate::lifecycle::state::AppState;
 use crate::ui::auto_fade::UiOpacity;
-use crate::ui::buttons::{LastSettingsPanelRect, SettingsPanelVisible};
+use crate::ui::buttons::SettingsPanelVisible;
 use crate::ui::{backdrop_blur_frame, FrameOptions, OverlayStyle};
 
 /// Inline stack snapshot of registered settings storage keys. Sized for the
 /// expected case of ≤8 settings types per app; spills to the heap above that.
 type KeySnapshot = SmallVec<[&'static str; 8]>;
 
+/// One tab of the consolidated settings dock.
+///
+/// Each registered settings struct is routed to a tab by its storage key (see
+/// [`tab_for_storage_key`]); the dock renders only the sections whose struct
+/// maps to the active tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    /// Active sketch (Line): particles, visual, spawn, audio.
+    #[default]
+    Line,
+    /// Hand-tracking provider, Leap, and feel.
+    HandTracking,
+    /// Interface (overlay) and attract-mode/screensaver display.
+    Display,
+}
+
+impl SettingsTab {
+    /// All tabs in left-to-right display order, with their header labels.
+    const ORDER: [(SettingsTab, &'static str); 3] = [
+        (SettingsTab::Line, "LINE"),
+        (SettingsTab::HandTracking, "HAND TRACKING"),
+        (SettingsTab::Display, "DISPLAY"),
+    ];
+}
+
+/// The dock's currently selected tab. Persists across frames so the operator's
+/// tab choice survives panel close/reopen.
+#[derive(Resource, Default)]
+struct SettingsDockTab(SettingsTab);
+
+/// Route a settings struct (identified by its storage key) to its dock tab.
+///
+/// The map is intentionally total: any key not explicitly placed — including
+/// the overlay (`auto_fade`) and any future settings struct — falls to
+/// [`SettingsTab::Display`], so a newly registered struct is always reachable
+/// rather than silently hidden.
+fn tab_for_storage_key(key: &str) -> SettingsTab {
+    match key {
+        "line" => SettingsTab::Line,
+        "hand_tracking" => SettingsTab::HandTracking,
+        // "screensaver", overlay/auto_fade, and anything new.
+        _ => SettingsTab::Display,
+    }
+}
+
+/// Geometry of the right-docked settings panel for a window of `window_w` ×
+/// `window_h` egui points, returned as `(x, y, width, height)`.
+///
+/// The dock occupies the right half as a zone, capped to a readable 640 px and
+/// floored at 420 px so it never collapses narrower than the file-picker rows
+/// need; it is inset 16 px from the right and bottom edges and sits 60 px from
+/// the top (below the Home/Settings/Volume button strip). Below ~888 px window
+/// width the floor wins and the dock may cross the midline — the operator-on-a-
+/// laptop case, accepted rather than special-cased.
+fn dock_rect(window_w: f32, window_h: f32) -> (f32, f32, f32, f32) {
+    let width = ((window_w * 0.5) - 24.0).clamp(420.0, 640.0);
+    let x = window_w - 16.0 - width;
+    let y = 60.0;
+    let height = (window_h - 60.0 - 16.0).max(0.0);
+    (x, y, width, height)
+}
+
 /// Plugin assembly hook called by [`super::SettingsPlugin::build`].
 ///
 /// The draw system runs in [`bevy_egui::EguiPrimaryContextPass`] and is gated
 /// on [`SettingsPanelVisible`] so the panel only renders when the settings cog
-/// has been clicked. A second system runs each [`Update`] frame to dismiss the
-/// panel when the user clicks outside its bounds.
+/// has been clicked. The dock is a docked tool: it closes via the cog toggle
+/// (or Esc), not by clicking the artwork behind it — so there is no
+/// click-outside dismiss (the operator must be able to click the sketch to test
+/// a gesture with the panel open).
 pub(super) fn add_systems(app: &mut App) {
+    app.init_resource::<SettingsDockTab>();
     app.add_systems(
         bevy_egui::EguiPrimaryContextPass,
         draw_user_panel.run_if(settings_panel_visible),
     );
-    app.add_systems(Update, dismiss_on_click_outside);
 }
 
 /// Run condition: returns `true` when the settings panel should be visible.
@@ -77,15 +144,14 @@ fn settings_panel_visible(
     visible.0 && **state != AppState::Home
 }
 
-/// Exclusive system that draws the user settings panel with v4 chrome.
+/// Exclusive system that draws the consolidated, right-docked settings panel.
 ///
-/// Uses `egui::Area` for fixed top-right positioning (under the cog) and
-/// wraps content in [`backdrop_blur_frame`] for the translucent frosted-glass
-/// look. Only runs when [`SettingsPanelVisible`] is `true` (gated by the
-/// `settings_panel_visible` run condition in [`add_systems`]).
-///
-/// After drawing, updates [`LastSettingsPanelRect`] so that
-/// [`dismiss_on_click_outside`] knows the panel's bounds for the next frame.
+/// Uses `egui::Area` docked to the right half (see [`dock_rect`]) and wraps
+/// content in [`backdrop_blur_frame`] for the translucent frosted-glass look.
+/// A header tab bar ([`SettingsTab`]) selects which settings structs render;
+/// the selection persists in [`SettingsDockTab`]. Only runs when
+/// [`SettingsPanelVisible`] is `true` (gated by the `settings_panel_visible`
+/// run condition in [`add_systems`]).
 fn draw_user_panel(world: &mut World) {
     // Skip when no egui context is up (e.g., MinimalPlugins test harness).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
@@ -114,12 +180,20 @@ fn draw_user_panel(world: &mut World) {
     // registry resource is absent (tests, `Off` with an empty registry).
     let provider_status = provider_status_snapshot(world);
 
-    // Read window width for top-right positioning; fall back to 1280.
-    let window_width = {
+    // Read window size for the right-dock geometry; fall back to 1280×720.
+    let (window_width, window_height) = {
         let mut q =
             world.query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world).map_or(1280.0, bevy::window::Window::width)
+        q.single(world)
+            .map_or((1280.0, 720.0), |w| (w.width(), w.height()))
     };
+    let (dock_x, dock_y, dock_w, dock_h) = dock_rect(window_width, window_height);
+
+    // Tab selection: read the persisted choice, mutate it from the tab bar this
+    // frame, write it back after the Area closure releases the world borrow.
+    let mut selected_tab = world
+        .get_resource::<SettingsDockTab>()
+        .map_or(SettingsTab::default(), |t| t.0);
 
     let mut state: bevy::ecs::system::SystemState<EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
@@ -133,20 +207,16 @@ fn draw_user_panel(world: &mut World) {
     let ctx = ctx.clone();
     state.apply(world);
 
-    // Position: top-right, 16 px inset, 60 px from the top (below the cog).
-    // Width bumped from 320 px to 420 px so the spawn_template file-picker row
-    // (file name + Browse… button) fits on one line without overflowing.
-    // This is a minor intentional deviation from v4's exact panel width.
-    let area_pos = egui::pos2(window_width - 16.0 - 420.0, 60.0);
-
-    let mut panel_rect = egui::Rect::NOTHING;
-
-    egui::Area::new(egui::Id::new("wc-settings-user-panel"))
+    egui::Area::new(egui::Id::new("wc-settings-dock"))
         .order(egui::Order::Foreground)
-        .fixed_pos(area_pos)
+        .fixed_pos(egui::pos2(dock_x, dock_y))
         .show(&ctx, |ui| {
-            ui.set_max_width(420.0);
-            let resp = backdrop_blur_frame(
+            // Pin the Area to the exact dock rect so `backdrop_blur_frame`'s
+            // `available_size()` allocation fills the dock (not just its
+            // content's natural size).
+            ui.set_min_size(egui::vec2(dock_w, dock_h));
+            ui.set_max_size(egui::vec2(dock_w, dock_h));
+            backdrop_blur_frame(
                 ui,
                 &style,
                 FrameOptions {
@@ -155,65 +225,92 @@ fn draw_user_panel(world: &mut World) {
                     opacity_mul,
                 },
                 |ui| {
-                    // Title row: "SETTINGS" in dim chrome text.
-                    // Note: egui has no built-in letter-spacing; default spacing
-                    // is an approved deviation per Plan 11.5 Task 18.
-                    ui.label(
-                        egui::RichText::new("SETTINGS")
-                            .color(style.text_color_dim)
-                            .size(13.0),
-                    );
-                    ui.separator();
-                    for key in &keys {
-                        render_section_by_key(world, ui, key, provider_status);
-                    }
+                    // Scoped dock visuals: the accent drives selection fills and
+                    // the slider's trailing fill, leaving the rest of the overlay
+                    // chrome on its existing palette.
+                    let v = ui.visuals_mut();
+                    v.selection.bg_fill = style.accent_weak;
+                    v.selection.stroke = egui::Stroke::new(1.0, style.accent);
+                    v.slider_trailing_fill = true;
+
+                    // Header: the tab bar is the title (the old "SETTINGS" label
+                    // is retired). Fixed, outside the scroll body.
+                    draw_dock_tabs(ui, &mut selected_tab, &style);
+                    ui.add_space(4.0);
+                    hairline(ui, &style);
+                    ui.add_space(8.0);
+
+                    // Body: only the structs routed to the active tab, scrolling
+                    // within the fixed dock height.
+                    egui::ScrollArea::vertical()
+                        .id_salt("wc-dock-scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for key in &keys {
+                                if tab_for_storage_key(key) == selected_tab {
+                                    render_section_by_key(world, ui, key, provider_status);
+                                }
+                            }
+                        });
                 },
             );
-            // Capture the panel rect for click-outside detection. Written here
-            // (inside the Area closure) so it reflects the drawn frame's actual
-            // bounds, not a stale value from a previous frame.
-            panel_rect = resp.rect;
         });
 
-    world.resource_mut::<LastSettingsPanelRect>().0 = panel_rect;
+    if let Some(mut tab) = world.get_resource_mut::<SettingsDockTab>() {
+        tab.0 = selected_tab;
+    }
 }
 
-/// Dismiss the settings panel when the user clicks outside its bounds.
+/// Draw the dock's header tab row, mutating `selected` on click.
 ///
-/// Mirrors v4's `mousedown` outside handler. Only triggers on
-/// `MouseButton::Left` just-pressed events. If `EguiPointerCaptured` is true,
-/// the click was consumed by egui (e.g., hitting the cog to toggle the panel),
-/// so this handler skips — the cog's own toggle logic already handled it.
-fn dismiss_on_click_outside(
-    mut visible: ResMut<'_, SettingsPanelVisible>,
-    last_rect: Res<'_, LastSettingsPanelRect>,
-    egui_captured: Res<'_, crate::settings::EguiPointerCaptured>,
-    mouse: Res<'_, ButtonInput<MouseButton>>,
-    windows: Query<'_, '_, &bevy::window::Window, With<bevy::window::PrimaryWindow>>,
-) {
-    if !visible.0 {
-        return;
-    }
-    // Only fire on the frame the left button is first pressed.
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    // If egui captured the pointer this frame, the click landed inside egui
-    // (which includes the panel itself and the cog button). Defer to the cog's
-    // own toggle — don't double-dismiss.
-    if egui_captured.0 {
-        return;
-    }
-    let Some(window) = windows.iter().next() else {
-        return;
-    };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let cursor_egui = egui::pos2(cursor.x, cursor.y);
-    if !last_rect.0.contains(cursor_egui) {
-        visible.0 = false;
-    }
+/// Renders each [`SettingsTab`] as a frameless selectable label (the pill
+/// background is suppressed in a scope so the tabs read as plain text) with a
+/// 2 px accent underline beneath the active tab. The hairline drawn below the
+/// row by the caller reads as the tab bar's baseline.
+fn draw_dock_tabs(ui: &mut egui::Ui, selected: &mut SettingsTab, style: &OverlayStyle) {
+    ui.scope(|ui| {
+        let v = ui.visuals_mut();
+        // Suppress the selectable-label pill so a tab is text + underline only.
+        v.selection.bg_fill = egui::Color32::TRANSPARENT;
+        v.widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
+        v.widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
+        v.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+        ui.spacing_mut().item_spacing.x = 18.0;
+
+        ui.horizontal(|ui| {
+            for (tab, label) in SettingsTab::ORDER {
+                let is_sel = *selected == tab;
+                let color = if is_sel {
+                    style.text_primary
+                } else {
+                    style.text_secondary
+                };
+                let text = egui::RichText::new(label).size(12.5).color(color);
+                let resp = ui.selectable_label(is_sel, text);
+                if resp.clicked() {
+                    *selected = tab;
+                }
+                if is_sel {
+                    ui.painter().hline(
+                        resp.rect.x_range(),
+                        resp.rect.bottom() + 3.0,
+                        egui::Stroke::new(2.0, style.accent),
+                    );
+                }
+            }
+        });
+    });
+}
+
+/// Draw a full-width in-panel hairline rule using the dock palette.
+fn hairline(ui: &mut egui::Ui, style: &OverlayStyle) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, style.hairline),
+    );
 }
 
 /// Look up the type registration matching `storage_key` and render its
@@ -755,6 +852,50 @@ fn settings_type_id_for_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every settings struct lands in a tab, and the map is total: unknown
+    /// keys (a future struct, the overlay) fall to Display rather than vanish.
+    #[test]
+    fn tab_routing_is_total() {
+        assert_eq!(tab_for_storage_key("line"), SettingsTab::Line);
+        assert_eq!(
+            tab_for_storage_key("hand_tracking"),
+            SettingsTab::HandTracking
+        );
+        assert_eq!(tab_for_storage_key("screensaver"), SettingsTab::Display);
+        assert_eq!(tab_for_storage_key("overlay"), SettingsTab::Display);
+        assert_eq!(
+            tab_for_storage_key("some_future_sketch"),
+            SettingsTab::Display,
+            "unrecognized keys must route to Display, never disappear"
+        );
+    }
+
+    /// Dock geometry: right-anchored, capped at 640, floored at 420, inset
+    /// 16/16/60 from right/bottom/top.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "exact arithmetic on integer-valued f32")]
+    fn dock_rect_anchors_right_and_clamps_width() {
+        // 1080p: half is 936, capped to 640; x = 1920 - 16 - 640.
+        let (x, y, w, h) = dock_rect(1920.0, 1080.0);
+        assert_eq!(w, 640.0);
+        assert_eq!(x, 1920.0 - 16.0 - 640.0);
+        assert_eq!(y, 60.0);
+        assert_eq!(h, 1080.0 - 76.0);
+
+        // Narrow window: half-24 floors at 420 and the dock may cross center.
+        let (xn, _, wn, _) = dock_rect(800.0, 600.0);
+        assert_eq!(wn, 420.0, "width floors at 420");
+        assert_eq!(xn, 800.0 - 16.0 - 420.0);
+
+        // Mid width that lands inside the band: 1200*0.5-24 = 576.
+        let (_, _, wm, _) = dock_rect(1200.0, 800.0);
+        assert_eq!(wm, 576.0);
+
+        // Degenerate short window cannot produce a negative height.
+        let (_, _, _, hz) = dock_rect(1920.0, 40.0);
+        assert!(hz >= 0.0, "height is floored at 0");
+    }
 
     #[test]
     #[allow(
