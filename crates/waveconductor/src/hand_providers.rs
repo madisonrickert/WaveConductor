@@ -219,6 +219,12 @@ pub fn install_hand_tracking_providers() {
 /// registry, and resolves Auto's outstanding verdicts — Leap's async device
 /// presence first, then `MediaPipe`'s camera open.
 ///
+/// The watch resolution runs only on frames where the dropdown is *unchanged*.
+/// On a change frame we skip straight to the rebuild, which tears down and
+/// re-arms both watches anyway: resolving a Leap demote on the same frame the
+/// operator moves the dropdown would build — and immediately discard — a real
+/// `MediaPipe` provider (opening the camera) for nothing.
+///
 /// Steady-state cost is three enum compares and no allocation; a watcher arm
 /// reads one provider status only while its verdict is pending (the first
 /// ~3 s of Auto-with-Leap, or a few frames of Auto-with-MediaPipe), and a
@@ -237,68 +243,86 @@ pub fn apply_provider_choice(
     mut registry: ResMut<'_, ProviderRegistry>,
 ) {
     use wc_core::input::provider::ProviderId;
+    use wc_core::input::state::{DevicePresence, ServiceConnection};
 
-    // Resolve the watches FIRST — before the change-check early-out. Watch
+    // Resolve the watches only when the dropdown is unchanged this frame. Watch
     // resolution is choice-independent book-keeping for a registry that is
-    // already installed: an env-launched `WAVECONDUCTOR_HAND_PROVIDER=auto`
+    // already installed — an env-launched `WAVECONDUCTOR_HAND_PROVIDER=auto`
     // session needs its verdicts (and fallbacks) exactly as much as a
-    // dropdown-driven one.
-    //
-    // The Leap watch resolves before the MediaPipe watch: a Leap demote may
-    // itself register MediaPipe optimistically and arm the camera watch,
-    // which the block below then polls (same frame: harmless — a freshly
-    // started MediaPipe reports `Connecting`, which keeps waiting).
-    if matches!(control.leap_watch, AutoLeapWatch::Pending { .. }) {
-        match registry.provider(ProviderId::Leap) {
-            Some(slot) => {
-                let status = slot.inner.status();
-                match auto_leap_device_verdict(
-                    &mut control.leap_watch,
-                    status.device,
-                    status.service,
-                    time.elapsed(),
-                ) {
-                    LeapWatchVerdict::Demote => {
-                        tracing::info!(
-                            device = ?status.device,
-                            service = ?status.service,
-                            "hand-tracking: auto → Leap service is running but no device \
-                             attached after {}s; trying MediaPipe",
-                            AUTO_LEAP_DEVICE_GRACE.as_secs()
-                        );
-                        // The demote may register MediaPipe optimistically;
-                        // adopt its camera watch.
-                        control.watch = demote_leap_to_next_candidate(&mut registry, &settings);
-                    }
-                    LeapWatchVerdict::Keep | LeapWatchVerdict::KeepWaiting => {}
-                }
-            }
-            // Provider vanished (e.g. a test replaced the registry): nothing
-            // left to watch.
-            None => control.leap_watch = AutoLeapWatch::Idle,
-        }
-    }
-
-    if control.watch == AutoMediaPipeWatch::Pending {
-        match registry.provider(ProviderId::MediaPipe) {
-            Some(slot) => {
-                if auto_mediapipe_camera_failed(&mut control.watch, slot.inner.status().service) {
-                    tracing::info!(
-                        "hand-tracking: auto → MediaPipe camera failed to open; \
-                         falling back to MockProvider"
-                    );
-                    registry.remove(ProviderId::MediaPipe);
-                    install_mock(&mut registry);
-                }
-            }
-            // Provider vanished (e.g. a test replaced the registry): nothing
-            // left to watch.
-            None => control.watch = AutoMediaPipeWatch::Idle,
-        }
-    }
-
+    // dropdown-driven one — but on a *change* frame the rebuild below re-arms
+    // both watches anyway, so resolving a Leap demote here would build (and
+    // immediately discard) a real MediaPipe provider on the exact frame a grace
+    // deadline and a dropdown move coincide.
     let choice = settings.provider;
     if choice == control.last_applied {
+        // The Leap watch resolves before the MediaPipe watch: a Leap demote may
+        // itself register MediaPipe optimistically and arm the camera watch,
+        // which the block below then polls (same frame: harmless — a freshly
+        // started MediaPipe reports `Connecting`, which keeps waiting).
+        if matches!(control.leap_watch, AutoLeapWatch::Pending { .. }) {
+            match registry.provider(ProviderId::Leap) {
+                Some(slot) => {
+                    let status = slot.inner.status();
+                    match auto_leap_device_verdict(
+                        &mut control.leap_watch,
+                        status.device,
+                        status.service,
+                        time.elapsed(),
+                    ) {
+                        LeapWatchVerdict::Demote => {
+                            // Name the actual cause: a hard failure (rule 1)
+                            // demotes well before the grace deadline, so a
+                            // blanket "no device after Ns" line would misreport
+                            // it.
+                            let reason = if matches!(status.service, ServiceConnection::Errored) {
+                                "Leap service errored"
+                            } else if matches!(
+                                status.device,
+                                DevicePresence::Lost | DevicePresence::Failed
+                            ) {
+                                "Leap device dropped or failed"
+                            } else {
+                                "Leap service is running but no device attached \
+                                 within the grace period"
+                            };
+                            tracing::info!(
+                                device = ?status.device,
+                                service = ?status.service,
+                                grace_s = AUTO_LEAP_DEVICE_GRACE.as_secs(),
+                                "hand-tracking: auto → {reason}; trying MediaPipe"
+                            );
+                            // The demote may register MediaPipe optimistically;
+                            // adopt its camera watch.
+                            control.watch = demote_leap_to_next_candidate(&mut registry, &settings);
+                        }
+                        LeapWatchVerdict::Keep | LeapWatchVerdict::KeepWaiting => {}
+                    }
+                }
+                // Provider vanished (e.g. a test replaced the registry): nothing
+                // left to watch.
+                None => control.leap_watch = AutoLeapWatch::Idle,
+            }
+        }
+
+        if control.watch == AutoMediaPipeWatch::Pending {
+            match registry.provider(ProviderId::MediaPipe) {
+                Some(slot) => {
+                    if auto_mediapipe_camera_failed(&mut control.watch, slot.inner.status().service)
+                    {
+                        tracing::info!(
+                            "hand-tracking: auto → MediaPipe camera failed to open; \
+                             falling back to MockProvider"
+                        );
+                        registry.remove(ProviderId::MediaPipe);
+                        install_mock(&mut registry);
+                    }
+                }
+                // Provider vanished (e.g. a test replaced the registry): nothing
+                // left to watch.
+                None => control.watch = AutoMediaPipeWatch::Idle,
+            }
+        }
+
         return;
     }
 
@@ -763,6 +787,52 @@ mod tests {
             app.world().resource::<HandProviderControl>().leap_watch,
             AutoLeapWatch::Pending { deadline },
             "verdict outstanding; watch must stay pending"
+        );
+    }
+
+    /// L2: when the Leap device-grace deadline expires on the exact frame the
+    /// operator moves the dropdown, the demote must be skipped — it would build
+    /// (and immediately discard) a real `MediaPipe` provider, opening the
+    /// camera. The rebuild handles the switch instead. Choosing `Off` makes the
+    /// rebuild path observable (empty registry) and constructs no hardware, so
+    /// the test stays camera-free even though the deadline has expired.
+    #[test]
+    fn dropdown_change_skips_expired_leap_demote() {
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            DevicePresence::NoDevice,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Pending {
+                    deadline: Duration::ZERO, // already expired vs. unticked Time
+                },
+            },
+        );
+        // Operator flips the dropdown to Off on the same frame the deadline
+        // lapses.
+        app.world_mut()
+            .resource_mut::<HandTrackingSettings>()
+            .provider = HandProviderChoice::Off;
+        app.update();
+
+        // Took the rebuild path (Off → empty registry), NOT the demote path
+        // (which would have left a real MediaPipe provider or a mock behind).
+        assert_eq!(
+            app.world().resource::<ProviderRegistry>().iter().count(),
+            0,
+            "dropdown change rebuilds to Off; the leap demote must not run"
+        );
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            1,
+            "the switch stops the old Leap exactly once"
+        );
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().leap_watch,
+            AutoLeapWatch::Idle,
+            "rebuild to Off arms no leap watch"
         );
     }
 
