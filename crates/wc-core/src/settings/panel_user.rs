@@ -400,10 +400,10 @@ fn render_section_by_key(
 /// first in an unlabeled group (no header). Section order follows the first
 /// appearance of each section name in the `defs` slice.
 ///
-/// Each section uses its own `egui::Grid` with three columns: the label (bold
-/// when the field differs from its default, with a restart badge when the field
-/// requires a restart), the value widget, and a reset-to-default glyph (shown
-/// only when modified; an aligned spacer otherwise).
+/// Each section uses its own `egui::Grid` with three columns: the label
+/// (accent-highlighted when the field differs from its default, with a restart
+/// badge when the field requires a restart), the value widget, and a
+/// reset-to-default glyph (shown only when modified; an aligned spacer otherwise).
 ///
 /// `default` is a fresh default instance of the same settings struct (from
 /// `#[reflect(Default)]`), used to detect modification and to power the reset
@@ -519,15 +519,23 @@ fn field_differs_from_default(
     }
 }
 
-/// Render Grid column 1: the field label, bold when modified, followed by an
-/// amber restart badge when the field requires a restart to take effect.
+/// Render Grid column 1: the field label, accent-highlighted when the value
+/// differs from its default, followed by an amber restart badge when the field
+/// requires a restart to take effect.
+///
+/// Highlight, not weight: only `Inter-Regular` is loaded and egui has no
+/// faux-bold, so `.strong()` would not change the glyph weight — it only shifts
+/// colour, which our explicit label colour already pins. A modified field is
+/// therefore marked by the accent colour (the dock's signature) rather than by
+/// bold. Loading an Inter bold/semibold face is the path to true weight.
 fn render_label_cell(ui: &mut egui::Ui, def: &SettingDef, modified: bool, style: &OverlayStyle) {
     ui.horizontal(|ui| {
-        let mut label = egui::RichText::new(def.label).color(style.text_primary);
-        if modified {
-            label = label.strong();
-        }
-        ui.label(label);
+        let color = if modified {
+            style.accent_bright
+        } else {
+            style.text_primary
+        };
+        ui.label(egui::RichText::new(def.label).color(color));
         if def.requires_restart {
             ui.label(
                 egui::RichText::new(phosphor::ARROW_CLOCKWISE)
