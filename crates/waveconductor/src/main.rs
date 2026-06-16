@@ -88,9 +88,18 @@ fn main() {
     // Live "Tracking provider" switch: applies dropdown changes to the
     // running provider registry without a restart, and resolves Auto's
     // asynchronous MediaPipe camera verdict. See the `hand_providers`
-    // module docs for the full signal flow.
+    // module docs for the full signal flow. `publish_hand_activation` runs
+    // chained after it so the settings panel's activation cue reflects the
+    // post-rebuild registry/watch state on the same frame.
     #[cfg(feature = "hand-tracking-gestures")]
-    app.add_systems(Update, hand_providers::apply_provider_choice);
+    app.add_systems(
+        Update,
+        (
+            hand_providers::apply_provider_choice,
+            hand_providers::publish_hand_activation,
+        )
+            .chain(),
+    );
 
     // OS display-sleep inhibitor, driven by the persisted "Keep display
     // awake" setting (default on). NonSend: the keepawake handle wraps

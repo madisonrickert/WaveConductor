@@ -44,7 +44,6 @@ use smallvec::SmallVec;
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
-use crate::input::state::ServiceConnection;
 use crate::lifecycle::state::AppState;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::SettingsPanelVisible;
@@ -493,7 +492,7 @@ fn render_user_fields_via_reflect(
                     {
                         if let Some(line) = provider_status {
                             ui.label(""); // column 1: keep the grid aligned
-                            render_provider_status_row(ui, line);
+                            render_provider_status_row(ui, line, style);
                             // Column 3 spacer — allocate, not `add_space` (which
                             // panics inside a Grid).
                             ui.allocate_exact_size(egui::vec2(18.0, 0.0), egui::Sense::hover());
@@ -581,18 +580,22 @@ fn render_reset_cell(
 }
 
 /// What the status row under the "Tracking provider" dropdown should show,
-/// derived from the primary provider's [`ServiceConnection`] axis by
-/// [`provider_status_line`] (the dropdown's *selected* enum value is not
-/// consulted: the row reports the provider actually installed, which is what
-/// the operator is waiting on).
+/// derived from the [`HandTrackingActivation`] cue by [`provider_status_line`]
+/// (the dropdown's *selected* enum value is not consulted: the row reports
+/// whether tracking is actually live, which is what the operator waits on).
+///
+/// [`HandTrackingActivation`]: crate::input::activation::HandTrackingActivation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderStatusLine {
-    /// Provider is between `start()` and its first verdict (`MediaPipe`:
-    /// model load + camera open on the worker; Leap: service handshake).
+    /// A provider is starting, or Auto is still probing a candidate (the
+    /// `MediaPipe` model-load/camera-open window, or Auto's Leap device-grace).
     /// Rendered as a spinner + "starting…".
     Starting,
-    /// Provider is errored / unreachable. Rendered as a short red note
-    /// pointing at the dev panel, which has the full multi-axis status.
+    /// Auto fell back to the silent mock: the app runs but there is no hand
+    /// tracking. Rendered as a short amber note.
+    NoTracking,
+    /// The selected provider failed / is unreachable. Rendered as a short red
+    /// note pointing at the dev panel, which has the full multi-axis status.
     Failed,
 }
 
@@ -605,36 +608,37 @@ impl ProviderStatusLine {
     const FIELD_NAME: &'static str = "provider";
 }
 
-/// Snapshot the primary hand-tracking provider's state as a status-row
-/// verdict. `None` (no row) when the registry resource is absent, when it is
-/// empty (provider `Off`), or when the provider is healthy.
+/// Snapshot the hand-tracking activation cue as a status-row verdict. `None`
+/// (no row) when the activation resource is absent (headless tests), when
+/// tracking is inactive (provider `Off`), or when a real provider is live.
 fn provider_status_snapshot(world: &World) -> Option<ProviderStatusLine> {
-    let registry = world.get_resource::<crate::input::provider::ProviderRegistry>()?;
-    // An empty registry (`Off`) has no provider to wait on — `primary_id()`
-    // is `None` and `primary_status()` would report a default `NotStarted`,
-    // which must NOT render as an eternal spinner.
-    registry.primary_id()?;
-    provider_status_line(registry.primary_status().service)
+    let activation = world
+        .get_resource::<crate::input::activation::HandTrackingActivation>()
+        .copied()?;
+    provider_status_line(activation)
 }
 
-/// Map a provider's [`ServiceConnection`] to the status row to display.
+/// Map the [`HandTrackingActivation`] cue to the status row to display.
 ///
-/// - `NotStarted` / `Connecting` → [`ProviderStatusLine::Starting`]: the
-///   verdict is pending (`MediaPipe` reports `Connecting` from `start()`
-///   until its worker has loaded the ort models and opened the camera).
-/// - `Errored` / `ServiceMissing` / `Disconnected` →
-///   [`ProviderStatusLine::Failed`]: all three mean "you will not get
-///   tracking without intervention" — honest red beats a stuck spinner.
-/// - `Connected` → `None`: tracking works; the panel stays quiet.
-fn provider_status_line(service: ServiceConnection) -> Option<ProviderStatusLine> {
-    match service {
-        ServiceConnection::NotStarted | ServiceConnection::Connecting => {
-            Some(ProviderStatusLine::Starting)
-        }
-        ServiceConnection::Errored
-        | ServiceConnection::ServiceMissing
-        | ServiceConnection::Disconnected => Some(ProviderStatusLine::Failed),
-        ServiceConnection::Connected => None,
+/// - `Settling` → [`ProviderStatusLine::Starting`]: a provider is coming up or
+///   Auto is still probing — covers `MediaPipe`'s model-load/camera-open window
+///   and Auto's Leap device-grace, both of which the raw service axis misreads.
+/// - `FellBackToMock` → [`ProviderStatusLine::NoTracking`]: Auto exhausted its
+///   candidates and is running the silent mock; the app works, hands do not.
+/// - `Failed` → [`ProviderStatusLine::Failed`]: will not recover without
+///   intervention — honest red beats a stuck spinner.
+/// - `Active` / `Inactive` → `None`: tracking is live, or `Off`; stay quiet.
+///
+/// [`HandTrackingActivation`]: crate::input::activation::HandTrackingActivation
+fn provider_status_line(
+    activation: crate::input::activation::HandTrackingActivation,
+) -> Option<ProviderStatusLine> {
+    use crate::input::activation::HandTrackingActivation as A;
+    match activation {
+        A::Settling => Some(ProviderStatusLine::Starting),
+        A::FellBackToMock => Some(ProviderStatusLine::NoTracking),
+        A::Failed => Some(ProviderStatusLine::Failed),
+        A::Active | A::Inactive => None,
     }
 }
 
@@ -642,7 +646,7 @@ fn provider_status_line(service: ServiceConnection) -> Option<ProviderStatusLine
 ///
 /// Cheap and allocation-free: static strings only, one small spinner while
 /// starting (egui spinners self-animate; the egui pass runs every frame).
-fn render_provider_status_row(ui: &mut egui::Ui, line: ProviderStatusLine) {
+fn render_provider_status_row(ui: &mut egui::Ui, line: ProviderStatusLine, style: &OverlayStyle) {
     match line {
         ProviderStatusLine::Starting => {
             ui.horizontal(|ui| {
@@ -650,11 +654,18 @@ fn render_provider_status_row(ui: &mut egui::Ui, line: ProviderStatusLine) {
                 ui.weak("starting…");
             });
         }
+        ProviderStatusLine::NoTracking => {
+            ui.label(
+                egui::RichText::new("no hand tracking (running idle)")
+                    .size(11.0)
+                    .color(style.warn_amber),
+            );
+        }
         ProviderStatusLine::Failed => {
             ui.label(
                 egui::RichText::new("failed: see dev panel (Shift+D)")
                     .size(11.0)
-                    .color(egui::Color32::from_rgb(0xE5, 0x6E, 0x6E)),
+                    .color(style.error_red),
             );
         }
     }
@@ -1098,31 +1109,39 @@ mod tests {
         );
     }
 
-    /// Pre-verdict states spin, dead states warn, healthy shows nothing.
+    /// Every activation state maps to the right row: settling spins, mock
+    /// fallback warns amber, failure warns red, live/off show nothing.
     #[test]
-    fn provider_status_line_maps_every_service_state() {
-        use ProviderStatusLine::{Failed, Starting};
-        for (service, expected) in [
-            (ServiceConnection::NotStarted, Some(Starting)),
-            (ServiceConnection::Connecting, Some(Starting)),
-            (ServiceConnection::Errored, Some(Failed)),
-            (ServiceConnection::ServiceMissing, Some(Failed)),
-            (ServiceConnection::Disconnected, Some(Failed)),
-            (ServiceConnection::Connected, None),
+    fn provider_status_line_maps_every_activation_state() {
+        use crate::input::activation::HandTrackingActivation as A;
+        use ProviderStatusLine::{Failed, NoTracking, Starting};
+        for (activation, expected) in [
+            (A::Settling, Some(Starting)),
+            (A::FellBackToMock, Some(NoTracking)),
+            (A::Failed, Some(Failed)),
+            (A::Active, None),
+            (A::Inactive, None),
         ] {
-            assert_eq!(provider_status_line(service), expected, "{service:?}");
+            assert_eq!(provider_status_line(activation), expected, "{activation:?}");
         }
     }
 
-    /// An empty registry (provider `Off`) must render no status row — its
-    /// default `NotStarted` primary status would otherwise read as an
+    /// An absent activation resource (headless test) and the `Inactive` default
+    /// (provider `Off`) both render no status row — neither may read as an
     /// eternal "starting…" spinner.
     #[test]
-    fn provider_status_snapshot_is_none_for_empty_or_absent_registry() {
+    fn provider_status_snapshot_is_none_when_inactive_or_absent() {
+        use crate::input::activation::HandTrackingActivation;
         let mut world = World::new();
-        assert_eq!(provider_status_snapshot(&world), None, "absent registry");
-        world.insert_resource(crate::input::provider::ProviderRegistry::default());
-        assert_eq!(provider_status_snapshot(&world), None, "empty registry");
+        assert_eq!(provider_status_snapshot(&world), None, "absent resource");
+        world.insert_resource(HandTrackingActivation::Inactive);
+        assert_eq!(provider_status_snapshot(&world), None, "inactive");
+        world.insert_resource(HandTrackingActivation::Settling);
+        assert_eq!(
+            provider_status_snapshot(&world),
+            Some(ProviderStatusLine::Starting),
+            "settling spins"
+        );
     }
 
     /// Unit-variant fixture for the enum write-back tests.

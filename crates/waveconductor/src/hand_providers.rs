@@ -343,6 +343,39 @@ pub fn apply_provider_choice(
     control.last_applied = choice;
 }
 
+/// Publish the coarse [`HandTrackingActivation`] cue the settings panel reads.
+///
+/// Composes the watch bookkeeping this module owns with the registry-derived
+/// state from [`wc_core::input::activation::activation_from_registry`]: while a
+/// watch is still pending (Auto probing Leap's device grace, or `MediaPipe`
+/// starting), tracking is absent-but-expected, so report `Settling` regardless
+/// of what the half-installed registry says. Otherwise defer to the registry —
+/// which catches the silent mock fallback (`FellBackToMock`) and a failed
+/// provider (`Failed`) that the raw service axis reads as healthy.
+///
+/// Runs chained after [`apply_provider_choice`] so it observes the post-rebuild
+/// state. Writes only on change, so the resource's change-detection stays quiet
+/// in the steady state (the panel reads it every frame it is open).
+#[cfg(feature = "hand-tracking-gestures")]
+pub fn publish_hand_activation(
+    control: Res<'_, HandProviderControl>,
+    registry: Res<'_, ProviderRegistry>,
+    mut activation: ResMut<'_, wc_core::input::activation::HandTrackingActivation>,
+) {
+    use wc_core::input::activation::{activation_from_registry, HandTrackingActivation};
+
+    let next = if matches!(control.leap_watch, AutoLeapWatch::Pending { .. })
+        || control.watch == AutoMediaPipeWatch::Pending
+    {
+        HandTrackingActivation::Settling
+    } else {
+        activation_from_registry(&registry)
+    };
+    if *activation != next {
+        *activation = next;
+    }
+}
+
 /// Auto's per-frame Leap demote: fall through to `MediaPipe` (else the mock)
 /// with the real installer closures, mirroring [`build_for_choice`].
 ///
@@ -617,6 +650,83 @@ mod tests {
         app.insert_resource(control);
         app.add_systems(Update, apply_provider_choice);
         (app, stops)
+    }
+
+    /// A scripted provider with the given service/device and a throwaway stop
+    /// counter, boxed for registration.
+    fn stub(service: ServiceConnection, device: DevicePresence) -> Box<dyn HandTrackingProvider> {
+        Box::new(ServiceStub {
+            service,
+            device,
+            stops: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// `publish_hand_activation` composes the watch state with the registry: a
+    /// pending watch settles regardless of registry contents, a mock primary
+    /// reads as fell-back, a connected non-mock is active, and an empty registry
+    /// is inactive.
+    #[test]
+    fn publish_activation_reflects_watch_and_registry() {
+        use wc_core::input::activation::HandTrackingActivation;
+
+        fn run(registry: ProviderRegistry, control: HandProviderControl) -> HandTrackingActivation {
+            let mut app = App::new();
+            app.insert_resource(registry);
+            app.insert_resource(control);
+            app.init_resource::<HandTrackingActivation>();
+            app.add_systems(Update, publish_hand_activation);
+            app.update();
+            *app.world().resource::<HandTrackingActivation>()
+        }
+
+        let idle = || HandProviderControl {
+            last_applied: HandProviderChoice::Auto,
+            watch: AutoMediaPipeWatch::Idle,
+            leap_watch: AutoLeapWatch::Idle,
+        };
+
+        // Pending Leap watch → Settling, even though the Leap stub reports a
+        // healthy service (the whole point: a watch outranks the registry).
+        let mut reg = ProviderRegistry::default();
+        reg.register(
+            ProviderId::Leap,
+            ProviderRole::Primary,
+            stub(ServiceConnection::Connected, DevicePresence::NoDevice),
+        );
+        let pending = HandProviderControl {
+            last_applied: HandProviderChoice::Auto,
+            watch: AutoMediaPipeWatch::Idle,
+            leap_watch: AutoLeapWatch::Pending {
+                deadline: Duration::from_secs(3),
+            },
+        };
+        assert_eq!(run(reg, pending), HandTrackingActivation::Settling);
+
+        // Mock primary, watches idle → FellBackToMock (mock reports Connected,
+        // so identity, not service, must catch it).
+        let mut reg = ProviderRegistry::default();
+        reg.register(
+            ProviderId::Mock,
+            ProviderRole::Primary,
+            stub(ServiceConnection::Connected, DevicePresence::Attached),
+        );
+        assert_eq!(run(reg, idle()), HandTrackingActivation::FellBackToMock);
+
+        // Connected non-mock provider, watches idle → Active.
+        let mut reg = ProviderRegistry::default();
+        reg.register(
+            ProviderId::Leap,
+            ProviderRole::Primary,
+            stub(ServiceConnection::Connected, DevicePresence::Attached),
+        );
+        assert_eq!(run(reg, idle()), HandTrackingActivation::Active);
+
+        // Empty registry (Off), watches idle → Inactive.
+        assert_eq!(
+            run(ProviderRegistry::default(), idle()),
+            HandTrackingActivation::Inactive
+        );
     }
 
     /// Watch resolution runs before the change-check early-out: an

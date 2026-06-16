@@ -44,6 +44,7 @@
 //!   implementation detail. App startup picks one provider; sketches read
 //!   the resources / messages above.
 
+pub mod activation;
 pub mod button;
 pub mod entity;
 pub mod gesture;
@@ -83,6 +84,10 @@ impl Plugin for HandTrackingPlugin {
             .init_resource::<PointerState>()
             // The provider registry is populated by the binary at startup.
             .init_resource::<ProviderRegistry>()
+            // Coarse activation cue for the settings panel; the binary's
+            // provider systems publish it (defaults to `Inactive` so the panel
+            // always has a value, including feature-off / headless builds).
+            .init_resource::<self::activation::HandTrackingActivation>()
             // Global hand-tracking settings (e.g. Leap background policy).
             // Registered here so the setting follows the input subsystem's
             // lifecycle rather than being coupled to SettingsPlugin.
