@@ -69,6 +69,49 @@ pub struct OverlayStyle {
     /// sizing. Palette value applied by `picker.rs` (Task 16) when rendering
     /// each sketch tile; not used by the global egui style.
     pub picker_tile_name_size: f32,
+
+    // ── Settings/debug dock palette (2026-06 UI consult) ────────────────
+    //
+    // These drive the consolidated tabbed settings dock and the diagnostics
+    // window. They are additive: the existing button/picker/panel chrome above
+    // is unchanged, and `apply_overlay_style` does not yet consume them (the
+    // global `override_text_color` removal the consult calls for is a separate,
+    // capture-verified step). The dock applies these via scoped `Visuals`
+    // overrides so the rest of the overlay keeps its current look until the
+    // redesign lands wholesale.
+    /// Dock accent: a desaturated cyan-steel chosen to sit opposite the Line
+    /// artwork's warm white/amber particles on the wheel while staying well off
+    /// the saturated blue/red chromatic fringe — so the chrome reads as a
+    /// separate, quieter material rather than part of the piece.
+    pub accent: egui::Color32,
+    /// Brighter accent for hover/active (tab underline, selected toggle).
+    pub accent_bright: egui::Color32,
+    /// Translucent accent for fills (selection background, slider trailing fill).
+    pub accent_weak: egui::Color32,
+    /// Primary dock text (labels, values): near-white `gray(235)`.
+    pub text_primary: egui::Color32,
+    /// Secondary dock text (section headers, status words): `gray(160)`.
+    pub text_secondary: egui::Color32,
+    /// Faint dock text (footer note, disabled): `gray(120)`.
+    pub text_faint: egui::Color32,
+    /// In-panel hairline (section rules, footer divider): `white_alpha(18)`,
+    /// much quieter than the outer `panel_stroke`.
+    pub hairline: egui::Color32,
+    /// Dock background tint with the backdrop blur on: `black_alpha(178)`
+    /// (~0.70), slightly heavier than `panel_fill` since the dock is a
+    /// long-form reading surface.
+    pub dock_fill: egui::Color32,
+    /// Dock background tint with the backdrop blur off: `black_alpha(216)`
+    /// (~0.85) — without the Kawase pass the tint alone must carry legibility
+    /// when bright particles pass underneath.
+    pub dock_fill_no_blur: egui::Color32,
+    /// Status amber (restart-pending badge, "starting…" dot): `F39C12`.
+    pub warn_amber: egui::Color32,
+    /// Status red (error notes): `E56E6E`, softened from the LED red so it
+    /// does not glare against the glass.
+    pub error_red: egui::Color32,
+    /// Status green (connected dot, ready): `2ECC71`.
+    pub ok_green: egui::Color32,
 }
 
 impl Default for OverlayStyle {
@@ -93,6 +136,20 @@ impl Default for OverlayStyle {
             text_color_dim: egui::Color32::from_gray(140),
             text_color_bright: egui::Color32::WHITE,
             picker_tile_name_size: 40.0,
+
+            // Dock palette — exact values from the UI consult.
+            accent: egui::Color32::from_rgb(0x7A, 0xB8, 0xC8),
+            accent_bright: egui::Color32::from_rgb(0x9E, 0xD2, 0xDE),
+            accent_weak: egui::Color32::from_rgba_unmultiplied(0x7A, 0xB8, 0xC8, 64),
+            text_primary: egui::Color32::from_gray(235),
+            text_secondary: egui::Color32::from_gray(160),
+            text_faint: egui::Color32::from_gray(120),
+            hairline: egui::Color32::from_white_alpha(18),
+            dock_fill: egui::Color32::from_black_alpha(178),
+            dock_fill_no_blur: egui::Color32::from_black_alpha(216),
+            warn_amber: egui::Color32::from_rgb(0xF3, 0x9C, 0x12),
+            error_red: egui::Color32::from_rgb(0xE5, 0x6E, 0x6E),
+            ok_green: egui::Color32::from_rgb(0x2E, 0xCC, 0x71),
         }
     }
 }
@@ -252,5 +309,33 @@ mod tests {
         // button_stroke: intentional deviation from v4's alpha 38 → bumped to 76
         // so the border is perceptible in egui's render pipeline (see style.rs doc).
         assert_eq!(style.button_stroke, egui::Color32::from_white_alpha(76));
+    }
+
+    /// Pin the dock palette to the UI consult's exact values — these drive the
+    /// settings/debug dock and a drift here would silently re-tint the chrome.
+    #[test]
+    fn overlay_style_dock_palette_matches_the_consult() {
+        let style = OverlayStyle::default();
+        assert_eq!(style.accent, egui::Color32::from_rgb(0x7A, 0xB8, 0xC8));
+        assert_eq!(
+            style.accent_bright,
+            egui::Color32::from_rgb(0x9E, 0xD2, 0xDE)
+        );
+        assert_eq!(
+            style.accent_weak,
+            egui::Color32::from_rgba_unmultiplied(0x7A, 0xB8, 0xC8, 64)
+        );
+        assert_eq!(style.text_primary, egui::Color32::from_gray(235));
+        assert_eq!(style.text_secondary, egui::Color32::from_gray(160));
+        assert_eq!(style.text_faint, egui::Color32::from_gray(120));
+        assert_eq!(style.hairline, egui::Color32::from_white_alpha(18));
+        assert_eq!(style.dock_fill, egui::Color32::from_black_alpha(178));
+        assert_eq!(
+            style.dock_fill_no_blur,
+            egui::Color32::from_black_alpha(216)
+        );
+        assert_eq!(style.warn_amber, egui::Color32::from_rgb(0xF3, 0x9C, 0x12));
+        assert_eq!(style.error_red, egui::Color32::from_rgb(0xE5, 0x6E, 0x6E));
+        assert_eq!(style.ok_green, egui::Color32::from_rgb(0x2E, 0xCC, 0x71));
     }
 }
