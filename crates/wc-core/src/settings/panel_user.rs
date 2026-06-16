@@ -39,6 +39,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use bevy::reflect::ReflectMut;
 use bevy_egui::{egui, EguiContexts};
+use egui_phosphor::regular as phosphor;
 use smallvec::SmallVec;
 
 use super::def::{SettingDef, SettingKind, SettingsCategory};
@@ -248,7 +249,7 @@ fn draw_user_panel(world: &mut World) {
                         .show(ui, |ui| {
                             for key in &keys {
                                 if tab_for_storage_key(key) == selected_tab {
-                                    render_section_by_key(world, ui, key, provider_status);
+                                    render_section_by_key(world, ui, key, provider_status, &style);
                                 }
                             }
                         });
@@ -326,6 +327,7 @@ fn render_section_by_key(
     ui: &mut egui::Ui,
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    style: &OverlayStyle,
 ) {
     // Snapshot the entry's defs as an Arc handle so the registry resource
     // stays unborrowed while we re-enter `world` for reflection. Cloning an
@@ -353,8 +355,10 @@ fn render_section_by_key(
         return;
     };
 
-    // Get a Reflect handle on the resource.
-    // Clone the Arc so the read guard doesn't borrow `world`.
+    // Get a Reflect handle on the resource, plus a default instance for
+    // modified-from-default detection and reset. Clone the Arc so the read
+    // guard doesn't borrow `world`; build the default while the guard is alive
+    // so the owned `Box` outlives the `drop` below.
     let registry = world.resource::<AppTypeRegistry>().clone();
     let registry_read = registry.read();
     let Some(type_data) =
@@ -363,6 +367,12 @@ fn render_section_by_key(
         ui.label("(no ReflectResource on settings type)");
         return;
     };
+    // A fresh default instance, available when the type registered
+    // `#[reflect(Default)]`. Absent → rows degrade to no bold / no reset glyph,
+    // never a hard failure.
+    let default_instance: Option<Box<dyn Reflect>> = registry_read
+        .get_type_data::<bevy::reflect::std_traits::ReflectDefault>(type_id)
+        .map(bevy::reflect::std_traits::ReflectDefault::default);
     // `&mut World` implements `Into<FilteredResourcesMut>`, so this is
     // safe to call without any unsafe code.
     let reflect_result = type_data.reflect_mut(world);
@@ -377,6 +387,8 @@ fn render_section_by_key(
         defs.as_ref(),
         storage_key,
         provider_status,
+        default_instance.as_deref(),
+        style,
         ui,
     );
 }
@@ -389,9 +401,15 @@ fn render_section_by_key(
 /// first in an unlabeled group (no header). Section order follows the first
 /// appearance of each section name in the `defs` slice.
 ///
-/// Each section uses its own `egui::Grid` with two columns so labels are
-/// left-aligned in column 1 and input widgets fill column 2. This is the
-/// idiomatic egui form-layout pattern.
+/// Each section uses its own `egui::Grid` with three columns: the label (bold
+/// when the field differs from its default, with a restart badge when the field
+/// requires a restart), the value widget, and a reset-to-default glyph (shown
+/// only when modified; an aligned spacer otherwise).
+///
+/// `default` is a fresh default instance of the same settings struct (from
+/// `#[reflect(Default)]`), used to detect modification and to power the reset
+/// glyph. `None` when the type did not register a default — rows then render
+/// without the bold / reset affordances.
 ///
 /// `storage_key` salts every egui id created below (Grids, `ComboBox`es) so
 /// that two settings structs using the same section or field names don't
@@ -402,8 +420,17 @@ fn render_user_fields_via_reflect(
     defs: &[SettingDef],
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    default: Option<&dyn Reflect>,
+    style: &OverlayStyle,
     ui: &mut egui::Ui,
 ) {
+    use bevy::reflect::ReflectRef;
+
+    let default_struct = match default.map(|d| d.reflect_ref()) {
+        Some(ReflectRef::Struct(s)) => Some(s),
+        _ => None,
+    };
+
     let ReflectMut::Struct(struct_mut) = reflect.reflect_mut() else {
         ui.label("(settings is not a struct)");
         return;
@@ -436,7 +463,7 @@ fn render_user_fields_via_reflect(
         // settings struct's storage key — two structs may both use e.g. a
         // "Hand Tracking" section name without sharing Grid layout state.
         egui::Grid::new(("settings_form", storage_key, section_name))
-            .num_columns(2)
+            .num_columns(3)
             .spacing(egui::vec2(12.0, 8.0))
             .show(ui, |ui| {
                 for def in defs
@@ -446,10 +473,14 @@ fn render_user_fields_via_reflect(
                     let Some(field) = struct_mut.field_mut(def.field_name) else {
                         continue;
                     };
-                    // Column 1: label, left-aligned by default in egui Grid.
-                    ui.label(def.label);
-                    // Column 2: widget fills remaining width automatically.
+                    let default_field = default_struct.and_then(|s| s.field(def.field_name));
+                    let modified = field_differs_from_default(field, default_field);
+                    // Column 1: label (+ restart badge), bold when modified.
+                    render_label_cell(ui, def, modified, style);
+                    // Column 2: the value widget.
                     render_widget_value(field, def, storage_key, ui);
+                    // Column 3: reset-to-default glyph, or an aligned spacer.
+                    render_reset_cell(ui, field, default_field, modified, style);
                     ui.end_row();
 
                     // Status row directly under the "Tracking provider"
@@ -463,11 +494,85 @@ fn render_user_fields_via_reflect(
                         if let Some(line) = provider_status {
                             ui.label(""); // column 1: keep the grid aligned
                             render_provider_status_row(ui, line);
+                            ui.add_space(18.0); // column 3: match the reset column
                             ui.end_row();
                         }
                     }
                 }
             });
+    }
+}
+
+/// Whether a field's current value differs from its struct default.
+///
+/// Conservative: an absent default (a type without `#[reflect(Default)]`) or an
+/// undecidable comparison reads as *not* modified, so the row never shows a
+/// spurious bold label or reset glyph.
+fn field_differs_from_default(
+    field: &dyn bevy::reflect::PartialReflect,
+    default_field: Option<&dyn bevy::reflect::PartialReflect>,
+) -> bool {
+    match default_field {
+        Some(df) => !field.reflect_partial_eq(df).unwrap_or(true),
+        None => false,
+    }
+}
+
+/// Render Grid column 1: the field label, bold when modified, followed by an
+/// amber restart badge when the field requires a restart to take effect.
+fn render_label_cell(ui: &mut egui::Ui, def: &SettingDef, modified: bool, style: &OverlayStyle) {
+    ui.horizontal(|ui| {
+        let mut label = egui::RichText::new(def.label).color(style.text_primary);
+        if modified {
+            label = label.strong();
+        }
+        ui.label(label);
+        if def.requires_restart {
+            ui.label(
+                egui::RichText::new(phosphor::ARROW_CLOCKWISE)
+                    .family(egui::FontFamily::Name("phosphor".into()))
+                    .size(10.0)
+                    .color(style.warn_amber),
+            )
+            .on_hover_text("Takes effect after restart");
+        }
+    });
+}
+
+/// Render Grid column 3: a frameless reset-to-default glyph when the field is
+/// modified, or a fixed-width spacer otherwise so the column stays aligned.
+///
+/// The reset writes the default back through the same reflected field handle as
+/// every widget, so Bevy change detection, autosave, and restart diffing all
+/// fire identically. `try_apply` cannot fail here — `default_field` is the same
+/// field from a default instance of the same type.
+fn render_reset_cell(
+    ui: &mut egui::Ui,
+    field: &mut dyn bevy::reflect::PartialReflect,
+    default_field: Option<&dyn bevy::reflect::PartialReflect>,
+    modified: bool,
+    style: &OverlayStyle,
+) {
+    match (modified, default_field) {
+        (true, Some(df)) => {
+            let glyph = egui::RichText::new(phosphor::ARROW_COUNTER_CLOCKWISE)
+                .family(egui::FontFamily::Name("phosphor".into()))
+                .size(12.0)
+                .color(style.text_secondary);
+            if ui
+                .add(egui::Button::new(glyph).frame(false))
+                .on_hover_text("Reset to default")
+                .clicked()
+            {
+                if let Err(err) = field.try_apply(df) {
+                    tracing::warn!(?err, "settings reset-to-default write-back failed");
+                }
+            }
+        }
+        // Keep the reset column's width stable whether or not the glyph shows.
+        _ => {
+            ui.add_space(18.0);
+        }
     }
 }
 
@@ -895,6 +1000,28 @@ mod tests {
         // Degenerate short window cannot produce a negative height.
         let (_, _, _, hz) = dock_rect(1920.0, 40.0);
         assert!(hz >= 0.0, "height is floored at 0");
+    }
+
+    /// Modified-from-default detection: equal reads unmodified, differing reads
+    /// modified, and an absent default degrades to unmodified (no bold/reset).
+    #[test]
+    fn field_modified_detection() {
+        use bevy::reflect::PartialReflect;
+        let live: f32 = 0.5;
+        let same: f32 = 0.5;
+        let diff: f32 = 0.9;
+        assert!(
+            !field_differs_from_default(&live, Some(&same as &dyn PartialReflect)),
+            "value equal to default is not modified"
+        );
+        assert!(
+            field_differs_from_default(&live, Some(&diff as &dyn PartialReflect)),
+            "value differing from default is modified"
+        );
+        assert!(
+            !field_differs_from_default(&live, None),
+            "no default available degrades to not-modified"
+        );
     }
 
     #[test]
