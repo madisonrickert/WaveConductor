@@ -764,7 +764,7 @@ fn render_widget_value(
     ui: &mut egui::Ui,
 ) {
     match &def.kind {
-        SettingKind::Number(range) => render_number(field, range, ui),
+        SettingKind::Number(range) => render_number(field, range, def.unit, ui),
         SettingKind::Boolean => render_bool(field, ui),
         SettingKind::Color => render_color(field, ui),
         SettingKind::Text => render_text(field, ui),
@@ -783,18 +783,29 @@ fn render_widget_value(
 /// Render the numeric widget (slider) for a field. Called from inside a Grid row
 /// where the label has already been placed in column 1. Dispatches on the
 /// field's concrete Rust type (u32, f32, etc.) via `try_downcast_mut`.
+///
+/// `unit` is appended after the value as the slider's suffix (e.g. ` ms`); an
+/// empty string renders no suffix.
 fn render_number(
     field: &mut dyn bevy::reflect::PartialReflect,
     range: &super::def::NumberRange,
+    unit: &str,
     ui: &mut egui::Ui,
 ) {
     let lo = range.min.unwrap_or(0.0);
     let hi = range.max.unwrap_or(1.0);
     let step = range.step;
+    // egui renders the suffix verbatim; lead with a space so it reads "12 ms",
+    // not "12ms". Empty unit → empty suffix → nothing shown.
+    let suffix = if unit.is_empty() {
+        String::new()
+    } else {
+        format!(" {unit}")
+    };
 
     if let Some(v) = field.try_downcast_mut::<u32>() {
         let mut tmp = *v as i64;
-        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
+        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64)).suffix(&suffix);
         if let Some(s) = step {
             slider = slider.step_by(s);
         }
@@ -802,20 +813,20 @@ fn render_number(
             *v = tmp.max(0) as u32;
         }
     } else if let Some(v) = field.try_downcast_mut::<f32>() {
-        let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32));
+        let mut slider = egui::Slider::new(v, (lo as f32)..=(hi as f32)).suffix(&suffix);
         if let Some(s) = step {
             slider = slider.step_by(s);
         }
         ui.add(slider);
     } else if let Some(v) = field.try_downcast_mut::<f64>() {
-        let mut slider = egui::Slider::new(v, lo..=hi);
+        let mut slider = egui::Slider::new(v, lo..=hi).suffix(&suffix);
         if let Some(s) = step {
             slider = slider.step_by(s);
         }
         ui.add(slider);
     } else if let Some(v) = field.try_downcast_mut::<i32>() {
         let mut tmp = *v as i64;
-        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64));
+        let mut slider = egui::Slider::new(&mut tmp, (lo as i64)..=(hi as i64)).suffix(&suffix);
         if let Some(s) = step {
             slider = slider.step_by(s);
         }
@@ -823,7 +834,7 @@ fn render_number(
             *v = tmp.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         }
     } else if let Some(v) = field.try_downcast_mut::<i64>() {
-        let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64));
+        let mut slider = egui::Slider::new(v, (lo as i64)..=(hi as i64)).suffix(&suffix);
         if let Some(s) = step {
             slider = slider.step_by(s);
         }
@@ -1146,6 +1157,7 @@ mod tests {
         let mk = |category| SettingDef {
             field_name: "f",
             label: "F",
+            unit: "",
             section: "",
             category,
             kind: SettingKind::Boolean,
@@ -1168,6 +1180,7 @@ mod tests {
         let def = SettingDef {
             field_name: "path",
             label: "Path",
+            unit: "",
             section: "",
             category: SettingsCategory::User,
             kind: SettingKind::FilePath {

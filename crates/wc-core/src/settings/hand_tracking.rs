@@ -127,7 +127,8 @@ pub struct HandTrackingSettings {
         step = 0.05,
         category = Dev,
         section = "Hand Tracking",
-        label = "Smoothing min cutoff (Hz)"
+        label = "Smoothing min cutoff",
+        unit = "Hz"
     )]
     #[serde(default = "default_smoothing_min_cutoff")]
     pub smoothing_min_cutoff: f32,

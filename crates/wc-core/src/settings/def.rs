@@ -117,6 +117,10 @@ pub struct SettingDef {
     /// Human-facing label. Defaults to `field_name` when `label = "..."` is
     /// not given in the attribute.
     pub label: &'static str,
+    /// Optional unit suffix shown after a numeric value (e.g. `"ms"`, `"Hz"`,
+    /// `"mm"`). Empty string (`""`) means no unit. Rendered as the slider's
+    /// suffix; ignored for non-numeric kinds.
+    pub unit: &'static str,
     /// Optional section group name shown as a header above a cluster of
     /// related fields. Empty string (`""`) means no header — the field
     /// renders in an unlabeled group at the start of the panel.

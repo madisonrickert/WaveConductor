@@ -286,7 +286,8 @@ pub struct LineSettings {
         min = 100.0_f32,
         max = 1500.0_f32,
         step = 10.0_f32,
-        label = "Audio full-volume distance (mm)",
+        label = "Audio full-volume distance",
+        unit = "mm",
         category = Dev
     )]
     #[serde(default = "default_synth_full_volume_mm")]
@@ -304,7 +305,8 @@ pub struct LineSettings {
         min = 600.0_f32,
         max = 4000.0_f32,
         step = 50.0_f32,
-        label = "Audio silence distance (mm)",
+        label = "Audio silence distance",
+        unit = "mm",
         category = Dev
     )]
     #[serde(default = "default_synth_silence_mm")]

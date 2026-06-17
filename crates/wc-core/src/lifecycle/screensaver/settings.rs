@@ -51,7 +51,8 @@ pub struct ScreensaverSettings {
         step = 1.0,
         section = "Attract Mode",
         category = User,
-        label = "Screensaver FPS cap"
+        label = "Screensaver frame cap",
+        unit = "fps"
     )]
     #[serde(default = "default_screensaver_fps")]
     pub screensaver_fps: f32,

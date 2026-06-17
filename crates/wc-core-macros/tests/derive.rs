@@ -32,7 +32,7 @@ enum Quality {
 #[reflect(Resource, Default)]
 #[settings(storage_key = "derive_test")]
 struct Fixture {
-    #[setting(default = 7_u32, min = 1_u32, max = 10_u32, category = User, requires_restart)]
+    #[setting(default = 7_u32, min = 1_u32, max = 10_u32, unit = "ms", category = User, requires_restart)]
     count: u32,
     #[setting(default = 0.25_f32, min = 0.0_f32, max = 1.0_f32, step = 0.05_f32, category = Dev)]
     smoothing: f32,
@@ -97,6 +97,16 @@ fn label_title_cases_field_name_when_unset() {
     assert_eq!(defs[0].label, "Count");
     // Explicit `label = "Greeting"` overrides the title-case default.
     assert_eq!(defs[4].label, "Greeting");
+}
+
+#[test]
+fn unit_attribute_propagates_and_defaults_empty() {
+    let defs = Fixture::settings_def();
+    // Explicit `unit = "ms"` on the first field.
+    assert_eq!(defs[0].unit, "ms");
+    // Fields without a `unit` attribute serialise to the empty string.
+    assert_eq!(defs[1].unit, "");
+    assert_eq!(defs[4].unit, "");
 }
 
 #[test]
