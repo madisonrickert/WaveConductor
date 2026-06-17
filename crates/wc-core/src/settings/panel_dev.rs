@@ -127,6 +127,15 @@ fn draw_dev_panel(world: &mut World) {
             )
         });
 
+    // Snapshot recent log records (cloned out under a brief lock, never held
+    // across rendering — see `diagnostics::LogBuffer`). Absent when the binary
+    // did not install the capture layer (headless tests). Dev-panel-only, so
+    // the per-open-frame allocation is acceptable.
+    let mut log_lines: Vec<crate::diagnostics::LogLine> = Vec::new();
+    if let Some(buf) = world.get_resource::<crate::diagnostics::LogBuffer>() {
+        buf.snapshot_recent(200, &mut log_lines);
+    }
+
     // Left-docked, mirroring the settings dock's frame discipline so the two sit
     // side-by-side as matching leaves: same top (y = 60), same bottom inset (16),
     // same side inset (16). Fixed 420 px wide — this is diagnostics-only, narrower
@@ -190,6 +199,14 @@ fn draw_dev_panel(world: &mut World) {
                                 .default_open(true)
                                 .show(ui, |ui| {
                                     draw_hand_tuning_readout(ui, &style, hand_readout);
+                                });
+
+                            // Captured log records (newest at the bottom),
+                            // colour-coded by level.
+                            bevy_egui::egui::CollapsingHeader::new("Log")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    crate::diagnostics::render_log_view(ui, &log_lines, &style);
                                 });
 
                             // Collapsed by default: the curated diagnostics grid

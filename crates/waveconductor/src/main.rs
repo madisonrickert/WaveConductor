@@ -38,9 +38,11 @@ const LINE_BACKGROUND_PATH: &str = concat!(
 const LINE_BACKGROUND_PATH: &str = "assets/sketches/line/line_background.ogg";
 
 fn main() {
-    init_tracing();
+    // `init_tracing` returns the in-app log buffer the capture layer feeds; the
+    // dev panel's Log view reads it as a resource.
+    let log_buffer = init_tracing();
     let mut app = App::new();
-    app
+    app.insert_resource(log_buffer)
         // v4 Line renders against a black background; Bevy defaults to gray.
         // Setting the clear color globally is the simplest way to match —
         // future sketches can override per-state via `OnEnter`/`OnExit` if
@@ -347,11 +349,65 @@ fn apply_display_keepawake(
 /// Honors `RUST_LOG` (e.g. `RUST_LOG=info,wc_core=debug`). When unset, defaults
 /// to `info` for the application crates so users can see navigation and idle
 /// state transitions in the terminal during manual testing.
-fn init_tracing() {
+/// Captures the reserved `message` field of a tracing event into a string.
+///
+/// Structured key/value fields are intentionally dropped — the in-app viewer
+/// shows the human message; the full structured record still goes to stderr via
+/// the fmt layer.
+#[derive(Default)]
+struct LogMessageVisitor(String);
+
+impl tracing::field::Visit for LogMessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        // tracing records the event message under the reserved `message` field
+        // via `record_debug`; the value is `format_args!`, whose Debug renders
+        // as the text itself (Debug == Display), so no surrounding quotes.
+        if field.name() == "message" {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{value:?}");
+        }
+    }
+}
+
+/// A `tracing` layer that mirrors each event into the shared
+/// [`wc_core::diagnostics::LogBuffer`] for the dev panel's Log view.
+struct LogCaptureLayer {
+    buffer: wc_core::diagnostics::LogBuffer,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCaptureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = LogMessageVisitor::default();
+        event.record(&mut visitor);
+        let meta = event.metadata();
+        self.buffer.push(wc_core::diagnostics::LogLine {
+            level: *meta.level(),
+            target: meta.target().to_owned(),
+            message: visitor.0,
+        });
+    }
+}
+
+/// Initialize the tracing subscriber: env-filtered fmt to stderr plus a capture
+/// layer feeding the in-app [`wc_core::diagnostics::LogBuffer`], which is
+/// returned so `main` can insert it as a resource for the dev panel to read.
+fn init_tracing() -> wc_core::diagnostics::LogBuffer {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let buffer = wc_core::diagnostics::LogBuffer::new(500);
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,waveconductor=info,wc_core=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(LogCaptureLayer {
+            buffer: buffer.clone(),
+        })
         .init();
+    buffer
 }

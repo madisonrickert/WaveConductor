@@ -24,6 +24,7 @@ pub mod audio;
 pub mod capture;
 #[cfg(debug_assertions)]
 pub mod debug;
+pub mod diagnostics;
 pub mod input;
 pub mod lifecycle;
 pub mod settings;
