@@ -95,11 +95,20 @@ pub fn render_log_view(ui: &mut egui::Ui, lines: &[LogLine], style: &OverlayStyl
         .stick_to_bottom(true)
         .show(ui, |ui| {
             for line in lines {
-                ui.label(
-                    egui::RichText::new(format!("{:>5} {}", level_label(line.level), line.message))
+                // Wrap long records (paths, multi-clause messages) to the panel
+                // width instead of overflowing the dock to the right.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "{:>5} {}",
+                            level_label(line.level),
+                            line.message
+                        ))
                         .monospace()
                         .size(11.0)
                         .color(level_color(line.level, style)),
+                    )
+                    .wrap(),
                 );
             }
         });

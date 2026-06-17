@@ -312,8 +312,15 @@ fn draw_hand_tracking_section(
 
     bevy_egui::egui::Grid::new("hand_tracking_diag")
         .num_columns(2)
+        // Cap the value column so long strings (streaming line, SDK version,
+        // metric text) wrap within the 420px dock instead of widening it.
+        .max_col_width(HINT_WRAP_WIDTH - 100.0)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
+            // Grid rows lay out horizontally, so labels default to Extend (no
+            // wrap) and a long value widens the dock. Force Wrap so they fold
+            // within the capped column width instead.
+            ui.style_mut().wrap_mode = Some(bevy_egui::egui::TextWrapMode::Wrap);
             ui.label("Provider:");
             ui.label(primary_id.map_or("(none)", |id| id.label()));
             ui.end_row();
