@@ -9,6 +9,13 @@ ignore = [
     # need to migrate. Tracked widely across the Bevy ecosystem. Re-evaluate
     # when wgpu or metal drop the dependency.
     "RUSTSEC-2024-0436",
+    # `proc-macro-error` is unmaintained. It is a BUILD-TIME-ONLY proc-macro,
+    # pulled in transitively by the dev console's command derive
+    # (bevy_console → bevy_console_derive → better-bae → proc-macro-error); it
+    # is never in the runtime binary. "Unmaintained", not a vulnerability — no
+    # safe upgrade until bevy_console's derive chain drops it. Re-evaluate on
+    # the next bevy_console bump.
+    "RUSTSEC-2024-0370",
 ]
 
 [licenses]

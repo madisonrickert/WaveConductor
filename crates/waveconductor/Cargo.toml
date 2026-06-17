@@ -53,6 +53,8 @@ keepawake = { workspace = true }
 # Optional: pulled in when the `hand-tracking-gestures` feature is active.
 # Waveconductor is native-only so no wasm target table needed here.
 leaprs = { workspace = true, optional = true }
+bevy_console = "0.17.1"
+clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wc-core = { workspace = true, features = ["thermal-sensor", "thermal-sensor-macos"] }
