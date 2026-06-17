@@ -24,6 +24,7 @@
 //!    seconds. Callers can also invoke [`persistence::save::<S>`] directly.
 
 pub mod autosave;
+pub mod commands;
 pub mod def;
 pub mod event;
 pub mod hand_tracking;
@@ -35,6 +36,7 @@ pub mod trait_def;
 
 mod panel_user;
 
+pub use commands::set_setting;
 pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
 pub use hand_tracking::{HandProviderChoice, HandTrackingSettings};

@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 use bevy_console::{reply, AddConsoleCommand, ConsoleCommand, ConsoleConfiguration, ConsolePlugin};
 use clap::Parser;
-use wc_core::settings::{HandProviderChoice, HandTrackingSettings};
+use wc_core::settings::{HandProviderChoice, HandTrackingSettings, SettingsRegistry};
 
 /// Adds the `bevy_console` dev command console, themed and with the app's
 /// commands registered. Debug-only — added under `#[cfg(debug_assertions)]`.
@@ -38,7 +38,9 @@ impl Plugin for DevConsolePlugin {
             cfg.foreground_color = Color32::from_gray(235);
         }
 
-        app.add_console_command::<ProviderCommand, _>(provider_command);
+        app.add_console_command::<ProviderCommand, _>(provider_command)
+            .add_console_command::<SetCommand, _>(set_command)
+            .add_console_command::<SettingsListCommand, _>(settings_list_command);
     }
 }
 
@@ -79,4 +81,79 @@ fn provider_command(
         );
         cmd.failed();
     }
+}
+
+/// `set <key> <field> <value>` — set any registered setting by its storage key
+/// and field name. The value is parsed against the field's kind (number, bool,
+/// enum, text). The lever for every setting, the same writes the panel makes.
+#[derive(Parser, ConsoleCommand)]
+#[command(name = "set")]
+struct SetCommand {
+    /// Settings storage key, e.g. `line`, `hand_tracking` (see `settings`).
+    key: String,
+    /// Field name within that settings struct.
+    field: String,
+    /// New value, parsed against the field's type.
+    value: String,
+}
+
+/// Handler for [`SetCommand`]. Validates the setting exists synchronously (for
+/// inline feedback), then queues an exclusive command to apply it: the
+/// reflection write needs `&mut World`, which a console command system can't
+/// take alongside [`ConsoleCommand`]. The apply's result is logged, so it lands
+/// in the dev panel's Log view.
+fn set_command(
+    mut cmd: ConsoleCommand<'_, SetCommand>,
+    registry: Res<'_, SettingsRegistry>,
+    mut commands: Commands<'_, '_>,
+) {
+    let Some(Ok(SetCommand { key, field, value })) = cmd.take() else {
+        return;
+    };
+    let exists = registry
+        .entries
+        .iter()
+        .find(|e| e.storage_key == key)
+        .is_some_and(|e| e.def.iter().any(|d| d.field_name == field));
+    if !exists {
+        reply!(cmd, "unknown setting '{key}.{field}' — run `settings`");
+        cmd.failed();
+        return;
+    }
+    let summary = format!("{key}.{field} = {value}");
+    commands.queue(move |world: &mut World| {
+        match wc_core::settings::set_setting(world, &key, &field, &value) {
+            Ok(msg) => tracing::info!("console: set {msg}"),
+            Err(err) => tracing::warn!("console: set failed: {err}"),
+        }
+    });
+    reply!(cmd, "set {summary} (result in the Log panel)");
+    cmd.ok();
+}
+
+/// `settings [key]` — list registered settings (storage key → field names),
+/// optionally filtered to one key, so the operator knows what `set` accepts.
+#[derive(Parser, ConsoleCommand)]
+#[command(name = "settings")]
+struct SettingsListCommand {
+    /// Optional storage key to show only that struct's fields.
+    key: Option<String>,
+}
+
+/// Handler for [`SettingsListCommand`].
+fn settings_list_command(
+    mut cmd: ConsoleCommand<'_, SettingsListCommand>,
+    registry: Res<'_, SettingsRegistry>,
+) {
+    let Some(Ok(SettingsListCommand { key })) = cmd.take() else {
+        return;
+    };
+    for entry in &registry.entries {
+        if key.as_deref().is_some_and(|k| k != entry.storage_key) {
+            continue;
+        }
+        let fields: Vec<&str> = entry.def.iter().map(|d| d.field_name).collect();
+        reply!(cmd, "{}: {}", entry.storage_key, fields.join(", "));
+    }
+    cmd.ok();
 }
