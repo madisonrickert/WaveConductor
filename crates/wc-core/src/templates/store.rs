@@ -1,7 +1,7 @@
 //! Filesystem operations for the template store: content hashing, ingest
 //! (copy + thumbnail bake + manifest upsert), delete, reconcile.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::templates::manifest::{load_manifest, save_manifest, Manifest, TemplateEntry};
 
@@ -115,6 +115,48 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Absolute path to the blob for `entry` within `dir`.
+#[must_use]
+pub fn managed_path(dir: &Path, entry: &TemplateEntry) -> PathBuf {
+    dir.join(format!("{}.{}", entry.hash, entry.ext))
+}
+
+/// True if `path` lives inside the managed store `dir` (so it must not be
+/// re-ingested). Compares by prefix; both paths are used as-is (callers pass
+/// absolute paths).
+#[must_use]
+pub fn is_managed(dir: &Path, path: &Path) -> bool {
+    path.starts_with(dir)
+}
+
+/// Remove the blob, thumbnail, and manifest entry for `hash`. Missing files are
+/// ignored (idempotent). Returns the first I/O error from manifest persistence.
+pub fn delete(dir: &Path, hash: &str) -> std::io::Result<()> {
+    let mut manifest = load_manifest(dir);
+    if let Some(pos) = manifest.template.iter().position(|e| e.hash == hash) {
+        let entry = manifest.template.remove(pos);
+        // Best-effort blob + thumb removal; absence is not an error.
+        let _ = std::fs::remove_file(managed_path(dir, &entry));
+        let _ = std::fs::remove_file(dir.join(&entry.thumb));
+    }
+    save_manifest(dir, &manifest)
+}
+
+/// Drop manifest entries whose blob no longer exists on disk, persist, and
+/// return the pruned manifest. Run once at startup to heal out-of-band deletes.
+#[must_use]
+pub fn reconcile(dir: &Path) -> Manifest {
+    let mut manifest = load_manifest(dir);
+    let before = manifest.template.len();
+    manifest.template.retain(|e| managed_path(dir, e).exists());
+    if manifest.template.len() != before {
+        if let Err(err) = save_manifest(dir, &manifest) {
+            tracing::warn!(?err, "failed to persist reconciled template manifest");
+        }
+    }
+    manifest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +218,58 @@ mod tests {
         let err = ingest(dir.path(), &dir.path().join("nope.png"));
         assert!(err.is_err());
         assert!(load_manifest(dir.path()).template.is_empty());
+    }
+
+    #[test]
+    fn delete_removes_blob_thumb_and_entry() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("a.png");
+        write_test_png(&src, 32, 32);
+        let entry = ingest(dir.path(), &src).unwrap();
+
+        delete(dir.path(), &entry.hash).unwrap();
+
+        assert!(!dir.path().join(format!("{}.png", entry.hash)).exists());
+        assert!(!dir.path().join(&entry.thumb).exists());
+        assert!(load_manifest(dir.path()).template.is_empty());
+    }
+
+    #[test]
+    fn reconcile_drops_entries_with_missing_blob() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("a.png");
+        write_test_png(&src, 32, 32);
+        let entry = ingest(dir.path(), &src).unwrap();
+        // Delete the blob out-of-band, leaving the manifest entry dangling.
+        std::fs::remove_file(dir.path().join(format!("{}.png", entry.hash))).unwrap();
+
+        let pruned = reconcile(dir.path());
+
+        assert!(pruned.template.is_empty());
+        assert!(load_manifest(dir.path()).template.is_empty());
+    }
+
+    #[test]
+    fn is_managed_distinguishes_store_paths() {
+        let dir = TempDir::new().unwrap();
+        assert!(is_managed(dir.path(), &dir.path().join("abc.png")));
+        assert!(is_managed(dir.path(), &dir.path().join("thumbs/abc.png")));
+        assert!(!is_managed(dir.path(), std::path::Path::new("/somewhere/else/abc.png")));
+    }
+
+    #[test]
+    fn managed_path_points_at_blob() {
+        let dir = TempDir::new().unwrap();
+        let entry = TemplateEntry {
+            hash: "h".into(),
+            ext: "jpg".into(),
+            original_name: "x.jpg".into(),
+            imported_at: 0,
+            width: 1,
+            height: 1,
+            bytes: 1,
+            thumb: "thumbs/h.png".into(),
+        };
+        assert_eq!(managed_path(dir.path(), &entry), dir.path().join("h.jpg"));
     }
 }
