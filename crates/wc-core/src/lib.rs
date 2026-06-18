@@ -57,6 +57,8 @@ impl Plugin for CorePlugin {
         #[cfg(debug_assertions)]
         app.add_plugins(debug::DebugPlugin);
         app.add_plugins(ui::WaveConductorUiPlugin);
+        #[cfg(feature = "templates")]
+        app.add_plugins(templates::resource::TemplatesPlugin);
     }
 }
 
