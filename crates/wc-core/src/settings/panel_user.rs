@@ -197,6 +197,15 @@ fn draw_user_panel(world: &mut World) {
     // registry resource is absent (tests, `Off` with an empty registry).
     let provider_status = provider_status_snapshot(world);
 
+    // Snapshot the template library into display rows before the egui closure
+    // borrows `world`. Empty when the feature is off or the resource is absent.
+    #[cfg(feature = "templates")]
+    let template_rows = template_library_rows(world);
+    // Set true inside the closure when an import/delete changed the store, so the
+    // in-memory library resource is reloaded after the closure releases `world`.
+    #[cfg(feature = "templates")]
+    let mut template_dirty = false;
+
     // Read window size for the right-dock geometry; fall back to 1280×720.
     let (window_width, window_height) = {
         let mut q =
@@ -273,6 +282,10 @@ fn draw_user_panel(world: &mut World) {
                                         ui,
                                         key,
                                         provider_status,
+                                        #[cfg(feature = "templates")]
+                                        &template_rows,
+                                        #[cfg(feature = "templates")]
+                                        &mut template_dirty,
                                         advanced,
                                         &style,
                                     );
@@ -288,6 +301,17 @@ fn draw_user_panel(world: &mut World) {
     }
     if let Some(mut adv) = world.get_resource_mut::<SettingsDockAdvanced>() {
         adv.0 = advanced;
+    }
+
+    // An import/delete inside the dock changed the store on disk; reload the
+    // in-memory library so the dropdown reflects it next frame.
+    #[cfg(feature = "templates")]
+    if template_dirty {
+        if let Some(mut lib) =
+            world.get_resource_mut::<crate::templates::resource::TemplateLibrary>()
+        {
+            lib.reload();
+        }
     }
 }
 
@@ -374,6 +398,8 @@ fn render_section_by_key(
     ui: &mut egui::Ui,
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
+    #[cfg(feature = "templates")] template_dirty: &mut bool,
     advanced: bool,
     style: &OverlayStyle,
 ) {
@@ -437,6 +463,10 @@ fn render_section_by_key(
         defs.as_ref(),
         storage_key,
         provider_status,
+        #[cfg(feature = "templates")]
+        template_rows,
+        #[cfg(feature = "templates")]
+        template_dirty,
         default_instance.as_deref(),
         advanced,
         style,
@@ -473,6 +503,8 @@ fn render_user_fields_via_reflect(
     defs: &[SettingDef],
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
+    #[cfg(feature = "templates")] template_dirty: &mut bool,
     default: Option<&dyn Reflect>,
     advanced: bool,
     style: &OverlayStyle,
@@ -534,7 +566,16 @@ fn render_user_fields_via_reflect(
                     // modified, dimmed when it is an Advanced (Dev) field.
                     render_label_cell(ui, def, modified, is_dev, style);
                     // Column 2: the value widget.
-                    render_widget_value(field, def, storage_key, ui);
+                    render_widget_value(
+                        field,
+                        def,
+                        storage_key,
+                        #[cfg(feature = "templates")]
+                        template_rows,
+                        #[cfg(feature = "templates")]
+                        template_dirty,
+                        ui,
+                    );
                     // Column 3: reset-to-default glyph, or an aligned spacer.
                     render_reset_cell(ui, field, default_field, modified, style);
                     ui.end_row();
@@ -761,6 +802,8 @@ fn render_widget_value(
     field: &mut dyn bevy::reflect::PartialReflect,
     def: &SettingDef,
     storage_key: &'static str,
+    #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
+    #[cfg(feature = "templates")] template_dirty: &mut bool,
     ui: &mut egui::Ui,
 ) {
     match &def.kind {
@@ -778,14 +821,76 @@ fn render_widget_value(
             filter_label,
             extensions,
         } => {
-            // Interim: until the library widget lands (and as the permanent
-            // fallback when the `templates` feature is off) render the plain file
-            // picker so the field stays usable and the match is exhaustive.
+            #[cfg(feature = "templates")]
+            {
+                // `filter_label`/`extensions` drive the Import dialog (a later
+                // task); unused in this select-only version.
+                let _ = (filter_label, extensions);
+                render_template_library(
+                    field,
+                    storage_key,
+                    def.field_name,
+                    template_rows,
+                    template_dirty,
+                    ui,
+                );
+            }
+            // Permanent fallback when the `templates` feature is off.
+            #[cfg(not(feature = "templates"))]
             render_file_path(field, filter_label, extensions, ui);
         }
         SettingKind::Enum { variants } => {
             render_enum(field, storage_key, def.field_name, variants, ui);
         }
+    }
+}
+
+/// Snapshot the template library into display rows before the egui closure
+/// borrows `world`. Empty when the `TemplateLibrary` resource is absent.
+#[cfg(feature = "templates")]
+fn template_library_rows(world: &mut World) -> Vec<crate::templates::view::TemplateRow> {
+    world
+        .get_resource::<crate::templates::resource::TemplateLibrary>()
+        .map(crate::templates::view::build_rows)
+        .unwrap_or_default()
+}
+
+/// Render the template-library picker: a `ComboBox` of cached templates whose
+/// selection writes the managed blob path into the setting. Uses the
+/// `selectable_value` idiom (auto-closes the popup on click), mirroring
+/// [`render_enum`]. Import, delete, and thumbnails land in later tasks.
+#[cfg(feature = "templates")]
+fn render_template_library(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    storage_key: &'static str,
+    field_name: &'static str,
+    rows: &[crate::templates::view::TemplateRow],
+    dirty: &mut bool,
+    ui: &mut egui::Ui,
+) {
+    // `dirty` is set when import/delete change the store (a later task); the
+    // select path only mutates the setting, never the library.
+    let _ = dirty;
+    let Some(v) = field.try_downcast_mut::<String>() else {
+        ui.label("(expected String for template path)");
+        return;
+    };
+    // Closed-state label: the active template's friendly name, or "(none)".
+    let selected_text = rows
+        .iter()
+        .find(|r| r.managed_path == *v)
+        .map_or("(none)", |r| r.label.as_str());
+    let mut selected = v.clone();
+    egui::ComboBox::from_id_salt(("wc-template-lib", storage_key, field_name))
+        .selected_text(selected_text)
+        .height(280.0)
+        .show_ui(ui, |ui| {
+            for row in rows {
+                ui.selectable_value(&mut selected, row.managed_path.clone(), row.label.as_str());
+            }
+        });
+    if selected != *v {
+        *v = selected;
     }
 }
 
