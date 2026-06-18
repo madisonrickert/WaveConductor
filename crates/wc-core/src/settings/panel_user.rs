@@ -774,6 +774,15 @@ fn render_widget_value(
         } => {
             render_file_path(field, filter_label, extensions, ui);
         }
+        SettingKind::TemplateLibrary {
+            filter_label,
+            extensions,
+        } => {
+            // Interim: until the library widget lands (and as the permanent
+            // fallback when the `templates` feature is off) render the plain file
+            // picker so the field stays usable and the match is exhaustive.
+            render_file_path(field, filter_label, extensions, ui);
+        }
         SettingKind::Enum { variants } => {
             render_enum(field, storage_key, def.field_name, variants, ui);
         }

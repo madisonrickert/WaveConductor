@@ -108,6 +108,9 @@ enum Kind {
     Color,
     Text,
     FilePath,
+    /// Managed image template library; same `filter_label`/`extensions`
+    /// attributes as `FilePath`, distinct `SettingKind`.
+    TemplateLibrary,
     /// Unit-variant enum rendered as a `ComboBox`. Variant names are derived
     /// from the field type's reflection info at runtime, not listed in the
     /// attribute — see the module docs (`## ty = Enum`).
@@ -251,10 +254,11 @@ fn parse_setting_attr(
             "Color" => Kind::Color,
             "Text" => Kind::Text,
             "FilePath" => Kind::FilePath,
+            "TemplateLibrary" => Kind::TemplateLibrary,
             "Enum" => Kind::Enum,
             other => {
                 return Err(meta.error(format!(
-                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `FilePath`, or `Enum`)"
+                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `FilePath`, `TemplateLibrary`, or `Enum`)"
                 )))
             }
         };
@@ -376,6 +380,22 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
                     .collect();
                 quote! {
                     ::wc_core::settings::SettingKind::FilePath {
+                        filter_label: #filter_label,
+                        extensions: &[ #( #exts, )* ],
+                    }
+                }
+            }
+            Kind::TemplateLibrary => {
+                let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
+                let exts: Vec<&str> = f
+                    .extensions
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                quote! {
+                    ::wc_core::settings::SettingKind::TemplateLibrary {
                         filter_label: #filter_label,
                         extensions: &[ #( #exts, )* ],
                     }

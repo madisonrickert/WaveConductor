@@ -172,3 +172,34 @@ fn two_enum_fields_carry_independent_variant_lists() {
     assert_eq!(*quality, ["Low", "Medium", "High"]);
     assert_eq!(*theme, ["Dark", "Light"]);
 }
+
+/// Fixture exercising `ty = TemplateLibrary`: same `filter_label`/`extensions`
+/// plumbing as `FilePath`, distinct `SettingKind` variant.
+#[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Resource, Default)]
+#[settings(storage_key = "derive_test_template")]
+struct TemplateFixture {
+    #[setting(
+        default = String::new(),
+        ty = TemplateLibrary,
+        filter_label = "Image",
+        extensions = ["png", "jpg"],
+        category = User
+    )]
+    #[serde(default)]
+    template_field: String,
+}
+
+#[test]
+fn template_library_kind_carries_filter_and_extensions() {
+    let defs = TemplateFixture::settings_def();
+    let SettingKind::TemplateLibrary {
+        filter_label,
+        extensions,
+    } = &defs[0].kind
+    else {
+        panic!("expected TemplateLibrary kind for template_field");
+    };
+    assert_eq!(*filter_label, "Image");
+    assert_eq!(*extensions, ["png", "jpg"]);
+}

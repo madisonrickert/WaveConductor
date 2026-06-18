@@ -28,6 +28,19 @@ pub enum SettingKind {
         /// Empty means no filter (and the label is ignored).
         extensions: &'static [&'static str],
     },
+    /// Like [`SettingKind::FilePath`], but the field is backed by the managed
+    /// image **template library** (`crate::templates`): the widget is a picker
+    /// of previously-imported templates with thumbnails plus an import button,
+    /// and the stored value is the absolute path to the managed blob. The
+    /// `filter_label` / `extensions` configure the import file dialog exactly as
+    /// for `FilePath`. Falls back to a plain file picker when the `templates`
+    /// feature is off.
+    TemplateLibrary {
+        /// File-dialog filter label for the Import action (e.g. "Image").
+        filter_label: &'static str,
+        /// Extensions the import dialog accepts (e.g. `&["png", "jpg"]`).
+        extensions: &'static [&'static str],
+    },
     /// A unit-variant Rust enum. Rendered as an `egui::ComboBox` listing each
     /// variant by name. The derive macro fills `variants` from the field
     /// type's [`bevy::reflect::TypeInfo`] (see [`enum_variant_names`]), so the

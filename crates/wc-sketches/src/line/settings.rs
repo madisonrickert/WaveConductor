@@ -136,11 +136,12 @@ pub struct LineSettings {
     /// Empty string = use the default horizontal-line layout. Relative paths
     /// resolve against the process current directory; absolute paths are
     /// honored as-is. v4 default = "" (no template). Restart on change so
-    /// `spawn_line` re-runs with the new sampler. Rendered as a Browse… file
-    /// picker (Plan 11 Phase C).
+    /// `spawn_line` re-runs with the new sampler. Rendered as the image
+    /// template library picker (a plain Browse… file picker when the
+    /// `templates` feature is off).
     #[setting(
         default = String::new(),
-        ty = FilePath,
+        ty = TemplateLibrary,
         filter_label = "Image",
         extensions = ["png", "jpg", "jpeg", "webp"],
         section = "Spawn",
