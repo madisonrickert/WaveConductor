@@ -988,7 +988,19 @@ EOF
 
 ---
 
-## Task 6: Line migration system (ingest external `spawn_template`)
+## Task 6: Line migration system (ingest external `spawn_template`) — DROPPED
+
+> **DROPPED 2026-06-18 (per operator), after being implemented + reverted.** The
+> app is pre-release with one operator whose only external template was already
+> deleted (migration no-ops on the real config), and a permanent backward-compat
+> migration shim is unwanted churn in active development. The original-file
+> deletion bug is fixed by import-caches-immediately (Task 8); a stale path is
+> covered by the honest-status UI (Task 9); users re-import via the Import button.
+> The startup `reconcile` (Task 4) stays (store hygiene, not migration). The
+> wc-sketches `templates` feature + `tempfile` dev-dep added here were reverted;
+> no wc-sketches templates-gated code remains, so Task 10 enables `wc-core/templates`
+> only (not `wc-sketches/templates`). The original task text is retained below for
+> the record.
 
 **Files:**
 - Create: `crates/wc-sketches/src/line/template_migrate.rs`

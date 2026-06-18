@@ -152,19 +152,17 @@ on import/delete. Not a hot path, so serialize allocations are acceptable.
   legacy migration never re-ingests our own copy).
 - `managed_path(entry) -> PathBuf` — absolute path written into `spawn_template`.
 
-### Legacy / migration path
+### Legacy / migration path — dropped (2026-06-18)
 
-Two separate, explicitly-timed steps:
-
-- **Reconcile (once, at startup when the `TemplateLibrary` resource loads):** drop
-  manifest entries whose blob is missing.
-- **Field migration (on `OnEnter(AppState::Line)`, ordered before `spawn_line`):**
-  - If `spawn_template` is empty or already managed-and-present → no-op.
-  - If it points at an external path that exists → ingest it, repoint
-    `spawn_template` to the managed copy (existing settings autosave persists it).
-  - If it points at a missing path → leave it untouched so the UI surfaces
-    "file missing, using default" (this is the user's current broken state; it
-    migrates honestly rather than silently).
+An earlier draft auto-migrated an external `spawn_template` into the store on Line
+entry. **Dropped during implementation:** the app is pre-release with a single
+operator whose only external template was already deleted (so the migration would
+no-op on the real config), and a permanent backward-compat migration shim is
+unwanted churn in active development. The transition is covered instead by the
+honest-status UI (active name / "(none)" / "file missing") plus re-importing via
+the Import button, which caches immediately. The startup **reconcile** (pruning
+manifest entries whose blob is missing) is kept — it is store hygiene, not
+migration.
 
 ## Interaction flows
 
