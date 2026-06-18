@@ -400,8 +400,15 @@ fn init_tracing() -> wc_core::diagnostics::LogBuffer {
     use tracing_subscriber::util::SubscriberInitExt as _;
 
     let buffer = wc_core::diagnostics::LogBuffer::new(500);
+    // `ort=warn`: the `ort` crate creates the ONNX Runtime environment at VERBOSE
+    // and bridges every ORT message into `tracing` under the `ort` target, relying
+    // on this filter to gate it. At `info` the graph-transformer / initializer /
+    // model-cache chatter (hundreds of lines per session init) floods the log;
+    // `warn` keeps the meaningful ORT warnings (partition counts, EP assignment)
+    // and drops the noise. Overridable: `RUST_LOG=ort=trace` restores the full
+    // node-placement dump for debugging (see `inference_ort::backend`).
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,waveconductor=info,wc_core=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,waveconductor=info,wc_core=info,ort=warn"));
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(false))

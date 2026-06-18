@@ -278,7 +278,9 @@ fn drain_thermal_readings(
             tracing::info!(
                 from = ?state.tier,
                 to = ?new_tier,
-                temp_c = reading.temp_c,
+                // Round to one decimal: the sensor's f32 reading widens to a long
+                // f64 tail (e.g. 76.68995666503906) that adds no signal to the log.
+                temp_c = (reading.temp_c * 10.0).round() / 10.0,
                 "thermal: tier transition"
             );
         }

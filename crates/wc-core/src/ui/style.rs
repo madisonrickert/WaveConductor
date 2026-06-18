@@ -221,10 +221,11 @@ pub(super) fn apply_overlay_style(
         .or_default()
         .insert(0, "fira_code".to_owned());
     // Named family for sketch titles — callers reference it as
-    // `FontFamily::Name("orbitron".into())`.
+    // `FontFamily::Name("orbitron".into())`. Inter is appended as a fallback so the
+    // family has a replacement glyph (see the phosphor family below for why).
     fonts.families.insert(
         egui::FontFamily::Name("orbitron".into()),
-        vec!["orbitron".to_owned()],
+        vec!["orbitron".to_owned(), "inter".to_owned()],
     );
     // Register Phosphor icon font so PUA glyphs (HOUSE, GEAR, SPEAKER_HIGH, etc.)
     // resolve correctly.
@@ -242,9 +243,16 @@ pub(super) fn apply_overlay_style(
     // non-icon callers that happen to use PUA codepoints outside the Inter clash
     // range, but critical icon sites use the named family directly.
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    // Phosphor first (so PUA icon codepoints resolve to the icon font), Inter
+    // appended as a fallback. epaint derives each family's replacement glyph from
+    // '◻' then '?' when the family is first used; the icon font has neither, so a
+    // phosphor-only family logs "Failed to find replacement characters '◻' or '?'.
+    // Will use empty glyph." the first time it renders (e.g. the Home overlay
+    // buttons). Inter is consulted only when Phosphor lacks a codepoint, so it
+    // supplies '?' for the replacement glyph while real icons still win.
     fonts.families.insert(
         egui::FontFamily::Name("phosphor".into()),
-        vec!["phosphor".to_owned()],
+        vec!["phosphor".to_owned(), "inter".to_owned()],
     );
     ctx.set_fonts(fonts);
 
