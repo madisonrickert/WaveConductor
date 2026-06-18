@@ -43,6 +43,10 @@ thermal-sensor = []
 # compiles cleanly on macOS by never touching `macmon`; macOS dev builds opt in
 # through this separate feature.
 thermal-sensor-macos = ["dep:macmon"]
+# Image template library: content-addressed cache + manifest + thumbnails for
+# the spawn-template picker. Native-only (uses `rfd`/`image`); mirrors the
+# `hand-tracking-mediapipe` pattern of a feature that pulls optional native deps.
+templates = ["dep:image", "dep:blake3"]
 
 [dependencies]
 bevy = { workspace = true }
@@ -63,6 +67,7 @@ egui-phosphor = { workspace = true }
 serde.workspace = true
 toml.workspace = true
 dirs.workspace = true
+blake3 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }

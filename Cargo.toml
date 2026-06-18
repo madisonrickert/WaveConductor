@@ -103,6 +103,7 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 # Bitflag types for hand-tracking device-side / service-side health
 # (DeviceHealth, ServiceHealth). Used by `input::state::ProviderStatus`.
 bitflags = "2"
+blake3 = "1"
 # Thermal sensing for the screensaver's adaptive `ThermalState` signal (Plan 11.8)
 # needs NO workspace dependency. The Linux deployment NUC is read by a
 # zero-dependency `std::fs` sysfs reader (`wc-core`

@@ -7733,6 +7733,7 @@ dependencies = [
  "bevy-inspector-egui",
  "bevy_egui",
  "bitflags 2.11.1",
+ "blake3",
  "cpal",
  "dirs",
  "egui-phosphor",

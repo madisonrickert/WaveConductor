@@ -29,6 +29,9 @@ pub mod input;
 pub mod lifecycle;
 pub mod settings;
 pub mod sketch;
+/// Image template library (native-only, behind the `templates` feature).
+#[cfg(feature = "templates")]
+pub mod templates;
 pub mod ui;
 
 use bevy::prelude::*;
