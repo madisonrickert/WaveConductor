@@ -51,9 +51,10 @@ pub fn ingest(dir: &Path, source: &Path) -> Result<TemplateEntry, IngestError> {
         .extension()
         .and_then(|e| e.to_str())
         .map_or_else(|| "png".to_string(), str::to_ascii_lowercase);
-    let original_name = source
-        .file_name()
-        .map_or_else(|| format!("{hash}.{ext}"), |n| n.to_string_lossy().into_owned());
+    let original_name = source.file_name().map_or_else(
+        || format!("{hash}.{ext}"),
+        |n| n.to_string_lossy().into_owned(),
+    );
 
     // Decode once for dimensions + thumbnail.
     let decoded = image::load_from_memory(&bytes).map_err(IngestError::Decode)?;
@@ -155,6 +156,12 @@ pub fn reconcile(dir: &Path) -> Manifest {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "unwrap and the small modulo cast are fine in deterministic test code"
+)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -251,7 +258,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert!(is_managed(dir.path(), &dir.path().join("abc.png")));
         assert!(is_managed(dir.path(), &dir.path().join("thumbs/abc.png")));
-        assert!(!is_managed(dir.path(), std::path::Path::new("/somewhere/else/abc.png")));
+        assert!(!is_managed(
+            dir.path(),
+            std::path::Path::new("/somewhere/else/abc.png")
+        ));
     }
 
     #[test]

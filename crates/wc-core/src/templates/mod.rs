@@ -2,10 +2,12 @@
 //! used as particle-spawn templates.
 //!
 //! # Data flow
-//! An image picked by the user is **ingested** ([`store::ingest`]): its bytes
-//! are content-hashed with `blake3`, copied verbatim into the managed store as
+//! An image picked by the user is **ingested**
+//! ([`store::ingest`](crate::templates::store::ingest)): its bytes are
+//! content-hashed with `blake3`, copied verbatim into the managed store as
 //! `<hash>.<ext>`, a downscaled thumbnail is baked to `thumbs/<hash>.png`, and a
-//! [`manifest::TemplateEntry`] is appended to `manifest.toml`. Sketches reference
+//! [`manifest::TemplateEntry`](crate::templates::manifest::TemplateEntry) is
+//! appended to `manifest.toml`. Sketches reference
 //! the managed blob by absolute path, so deleting the user's original file no
 //! longer breaks the template. The store is native-only (file dialog + decode)
 //! and lives behind the `templates` cargo feature.

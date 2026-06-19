@@ -73,9 +73,9 @@ pub fn set_setting(
         SettingKind::Enum { variants } => apply_enum(field_ref, variants, value)?,
         // A file path / template path is stored as a plain String, so a string
         // value works.
-        SettingKind::Text
-        | SettingKind::FilePath { .. }
-        | SettingKind::TemplateLibrary { .. } => apply_text(field_ref, value)?,
+        SettingKind::Text | SettingKind::FilePath { .. } | SettingKind::TemplateLibrary { .. } => {
+            apply_text(field_ref, value)?;
+        }
         SettingKind::Color => {
             return Err("color settings can't be set from the console; use the panel".to_owned());
         }

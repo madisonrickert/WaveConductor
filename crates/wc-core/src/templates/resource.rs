@@ -66,6 +66,7 @@ fn load_library_on_startup(mut commands: Commands<'_, '_>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unwrap is fine in test code")]
 mod tests {
     use super::*;
     use tempfile::TempDir;

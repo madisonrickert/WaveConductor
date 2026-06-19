@@ -66,6 +66,7 @@ pub fn save_manifest(dir: &Path, m: &Manifest) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unwrap is fine in test code")]
 mod tests {
     use super::*;
     use tempfile::TempDir;

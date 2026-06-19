@@ -929,7 +929,11 @@ fn load_thumb_texture(
         usize::try_from(img.height()).ok()?,
     ];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-    Some(ctx.load_texture(format!("wc-tpl-thumb-{hash}"), color, egui::TextureOptions::LINEAR))
+    Some(ctx.load_texture(
+        format!("wc-tpl-thumb-{hash}"),
+        color,
+        egui::TextureOptions::LINEAR,
+    ))
 }
 
 /// Render one template row inside the dropdown: select-on-click plus a trailing
