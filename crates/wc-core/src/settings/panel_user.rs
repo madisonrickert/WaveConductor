@@ -980,41 +980,79 @@ fn render_template_row(
             }
         });
     } else {
-        ui.horizontal(|ui| {
-            if let Some(tid) = row.thumb {
-                ui.add(
-                    egui::Image::new(egui::load::SizedTexture::new(tid, egui::vec2(40.0, 40.0)))
-                        .fit_to_exact_size(egui::vec2(40.0, 40.0)),
-                );
-            }
-            ui.vertical(|ui| {
-                if ui
-                    .selectable_label(*v == row.managed_path, row.label.as_str())
-                    .clicked()
-                {
-                    v.clone_from(&row.managed_path);
-                }
-                // Dimensions + byte size, dimmed; disambiguates same-named imports.
-                ui.label(
+        // The whole row is one fixed-height click target (so the thumbnail and
+        // whitespace select too, not just the text). A fixed height also stops
+        // the trailing right-to-left trash layout from expanding each row to the
+        // popup height — which is what hid all but one row.
+        let row_h = 40.0_f32;
+        let (row_rect, row_resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), row_h),
+            egui::Sense::click(),
+        );
+
+        // Full-row background for selected / hover, so selection reads as a row
+        // rather than a text-tight highlight (which looked like a copy/paste
+        // selection of the label).
+        let bg = if *v == row.managed_path {
+            style.accent_weak
+        } else if row_resp.hovered() {
+            egui::Color32::from_white_alpha(10)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        if bg != egui::Color32::TRANSPARENT {
+            ui.painter()
+                .rect_filled(row_rect, egui::CornerRadius::same(3), bg);
+        }
+
+        // Content drawn into the pre-allocated rect (no second cursor advance).
+        let mut cui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(row_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        if let Some(tid) = row.thumb {
+            cui.add(
+                egui::Image::new(egui::load::SizedTexture::new(tid, egui::vec2(36.0, 36.0)))
+                    .fit_to_exact_size(egui::vec2(36.0, 36.0)),
+            );
+        }
+        // Cap the text column so a long name elides with `…` instead of colliding
+        // with the trash button or stretching the row; full name shows on hover.
+        let trash_budget = 28.0 + cui.spacing().item_spacing.x;
+        let text_w = (cui.available_width() - trash_budget).max(0.0);
+        cui.vertical(|ui| {
+            ui.set_max_width(text_w);
+            ui.add(egui::Label::new(row.label.as_str()).truncate())
+                .on_hover_text(row.label.as_str());
+            ui.add(
+                egui::Label::new(
                     egui::RichText::new(row.subtext.as_str())
                         .size(10.0)
                         .color(style.text_faint),
-                );
-            });
-            // Trailing frameless trash button, right-aligned.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let trash = egui::RichText::new(phosphor::TRASH)
-                    .family(egui::FontFamily::Name("phosphor".into()))
-                    .color(style.text_secondary);
-                if ui
-                    .add(egui::Button::new(trash).frame(false))
-                    .on_hover_text("Delete from cache")
-                    .clicked()
-                {
-                    *confirm = Some(row.hash.clone());
-                }
-            });
+                )
+                .truncate(),
+            );
         });
+        // Trailing frameless trash button, right-aligned in the remaining slice.
+        cui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let trash = egui::RichText::new(phosphor::TRASH)
+                .family(egui::FontFamily::Name("phosphor".into()))
+                .color(style.text_secondary);
+            if ui
+                .add(egui::Button::new(trash).frame(false))
+                .on_hover_text("Delete from cache")
+                .clicked()
+            {
+                *confirm = Some(row.hash.clone());
+            }
+        });
+
+        // Clicking anywhere on the row selects it — guarded so a trash click
+        // (which sets `confirm`) doesn't also change the selection.
+        if row_resp.clicked() && confirm.is_none() {
+            v.clone_from(&row.managed_path);
+        }
     }
 }
 
@@ -1061,13 +1099,40 @@ fn render_template_library(
     // survives frames without a Bevy resource.
     let confirm_id = egui::Id::new(("wc-template-confirm", storage_key, field_name));
 
+    // Bound the closed-state width so a long selected name can't stretch the
+    // dropdown or push the grid's column-3 reset glyph off the panel; `.truncate()`
+    // clips the selected text with `…` instead of letting it overflow.
+    let combo_w = ui.available_width().min(220.0);
+
     egui::ComboBox::from_id_salt(("wc-template-lib", storage_key, field_name))
         .selected_text(selected_text)
-        .height(280.0)
+        .width(combo_w)
+        .truncate()
+        .height(320.0)
         .show_ui(ui, |ui| {
-            // Pinned import row (a `selectable_label` closes the popup on click).
-            let import_label = egui::RichText::new(format!("{}  Import image…", phosphor::PLUS))
-                .family(egui::FontFamily::Name("phosphor".into()));
+            // Pinned import row: the ＋ glyph (phosphor font, accent) followed by a
+            // readable sentence (proportional font). A LayoutJob mixes the two
+            // fonts in one widget — a single RichText family would force the Latin
+            // text through the icon font and render it garbled.
+            let mut import_label = egui::text::LayoutJob::default();
+            import_label.append(
+                phosphor::PLUS,
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(14.0, egui::FontFamily::Name("phosphor".into())),
+                    color: style.accent_bright,
+                    ..Default::default()
+                },
+            );
+            import_label.append(
+                "  Import image\u{2026}",
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(13.0, egui::FontFamily::Proportional),
+                    color: style.text_primary,
+                    ..Default::default()
+                },
+            );
             if ui.selectable_label(false, import_label).clicked() {
                 // Native-only: rfd's synchronous `FileDialog` does not compile on
                 // wasm. The whole `templates` feature is native (it also pulls the
