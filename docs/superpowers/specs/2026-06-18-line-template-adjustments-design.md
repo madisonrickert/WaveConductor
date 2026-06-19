@@ -41,20 +41,23 @@ pub struct TemplateAdjustments {
 
 `Default` reproduces today's behavior bit-exactly (white 1, black 0, gamma 1, invert off, position 0, scale 1, color 0) — an image with no saved adjustments samples and renders identically to now. **Zero regression at defaults** is a hard requirement and is covered by a test.
 
-Persisted as a Line-owned resource:
+Held in a Bevy resource that is **registered through the existing settings system** so it rides the centralized persistence/autosave rails (per the settings-architecture decision below):
 
 ```rust
-#[derive(Resource)]
+#[derive(Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[reflect(Resource, Default)]
 pub struct LineTemplateAdjustments {
     map: HashMap<String /* content hash */, TemplateAdjustments>,
-    // set true on edit; drives debounced save + re-seed
-    dirty: bool,
 }
 ```
 
 - **Key** = the image's content hash. The active hash is the file stem of `spawn_template` (managed blobs are stored as `{hash}.{ext}`), so no separate "active hash" field is needed.
-- **Persistence:** a small Line-owned TOML file, `line-template-adjustments.toml`, in the same config dir as `sketch-settings.toml` (`persistence::settings_path().parent()`). Loaded at startup; debounced-saved (~0.5s) when `dirty`, mirroring the settings autosave pattern, plus a flush on `AppExit`. This is deliberately separate from the per-type `SketchSettings` persistence because the data is a hash-keyed map, not a flat field set the settings macro can render.
-- **Pruning:** when an image is deleted from the template cache, its hash is removed from the map. (See "Deletion" below.)
+- **Persistence:** `LineTemplateAdjustments` implements `SketchSettings` with `STORAGE_KEY = "line-template-adjustments"` and an **empty `settings_def()`** (so the reflection walker draws nothing for it). It is `register_sketch_settings::<…>()`'d like any other settings type. The existing `persistence` layer is pure serde (`toml::Value::try_from`), so the `HashMap` field serializes fine into the combined `sketch-settings.toml` under its own table; `autosave` arms off `is_resource_changed`, and there are **no `requires_restart` fields** so it never triggers the fade reload. No separate file, no separate flush machinery — editing the map through `world.get_resource_mut::<LineTemplateAdjustments>()` arms the existing debounce.
+- **Pruning:** when an image is deleted from the template cache, its hash is removed from the map; startup reconcile drops entries whose hash is no longer in the library. (See "Deletion" below.)
+
+### Settings-architecture decision (custom hook is render-only)
+
+A senior-engineer review confirmed: the reflection-based `SketchSettings` system stays the default for **every** flat setting (no existing setting moves to the new hook — the codebase deliberately retired per-sketch custom renderers). The custom dock section is a **rendering-only** escape hatch for data the `SettingDef` table cannot express (this hash-keyed map). Its backing state MUST be a registered resource (as above) so persistence, autosave, and change-detection stay centralized — the hook renders, it does not persist. The `CustomDockSections` rustdoc will state this constraint so the hook does not become a route around the uniform settings system. Known accepted gap: the dev console's `set_setting` cannot address individual map entries by key.
 
 ## Spawn-density math (white / black / gamma / invert)
 
@@ -94,7 +97,7 @@ The sampler currently uses `rand::rng()` (fresh entropy each call), so every re-
 
 ## Re-apply
 
-- **Six position knobs** (white/black/gamma/invert, position, scale): a debounced (~200ms) Line system detects `LineTemplateAdjustments.dirty` (or a dedicated change signal), re-runs the sampler with the active adjustments, and **re-uploads the existing particle buffer in place** via `Assets<ShaderStorageBuffer>::get_mut` — no fade, no Home round-trip. Particles snap to the new layout and the sim animates from there. These knobs are therefore **not** `requires_restart`.
+- **Six position knobs** (white/black/gamma/invert, position, scale): a debounced (~200ms) Line system gated on `is_resource_changed::<LineTemplateAdjustments>()` re-runs the sampler with the active adjustments and **re-uploads the existing particle buffer in place** via `Assets<ShaderStorageBuffer>::get_mut` — no fade, no Home round-trip. Particles snap to the new layout and the sim animates from there. The system keeps a `Local` snapshot of the last-seeded *position-affecting* fields and skips the re-seed when only `color_influence` changed, so color tuning never re-seeds. Nothing here is `requires_restart`.
 - **Color influence:** a system writes `color_influence` into the `LineMaterial` uniform each frame (or on change). Instant, no re-seed.
 
 ## UI: a custom Line dock section
@@ -105,7 +108,7 @@ The Line sketch registers one section, **"Template adjustments"**, rendered in t
 
 - Shows nothing when `spawn_template` is empty.
 - Otherwise resolves the active hash, looks up (default-inserts) its `TemplateAdjustments`, and renders **draggable normalized-percentage sliders** for every numeric knob (egui `Slider`, drag-the-track interaction, value shown as a percentage) plus a checkbox for invert. Each knob is presented on a percentage scale with **100% = its neutral/identity value** so the defaults read as a clean baseline: white 100%, black 0%, gamma 100%, position 0% (center), scale 100%, color influence 0%. The internal `f32` is derived from the percentage (see the ranges table). Emphasis on drag: these are slider widgets, not number-entry fields.
-- On any edit: writes the value into the map, sets `dirty` (drives both the debounced save and the in-place re-seed).
+- On any edit: writes the value into the map via `world.get_resource_mut::<LineTemplateAdjustments>()`, which arms the existing autosave (persist) and the change-gated re-seed.
 - Section sits directly below the template picker (the `spawn_template` field is ordered last in the Line settings section so the adjustments follow it).
 
 ## Deletion and the active-path bug
