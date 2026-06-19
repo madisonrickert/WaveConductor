@@ -119,14 +119,6 @@ pub fn managed_path(dir: &Path, entry: &TemplateEntry) -> PathBuf {
     dir.join(format!("{}.{}", entry.hash, entry.ext))
 }
 
-/// True if `path` lives inside the managed store `dir` — a low-level store
-/// primitive. Compares by prefix; both paths are used as-is (callers pass
-/// absolute paths).
-#[must_use]
-pub fn is_managed(dir: &Path, path: &Path) -> bool {
-    path.starts_with(dir)
-}
-
 /// Remove the blob, thumbnail, and manifest entry for `hash`. Missing files are
 /// ignored (idempotent). Returns the first I/O error from manifest persistence.
 pub fn delete(dir: &Path, hash: &str) -> std::io::Result<()> {
@@ -251,17 +243,6 @@ mod tests {
 
         assert!(pruned.template.is_empty());
         assert!(load_manifest(dir.path()).template.is_empty());
-    }
-
-    #[test]
-    fn is_managed_distinguishes_store_paths() {
-        let dir = TempDir::new().unwrap();
-        assert!(is_managed(dir.path(), &dir.path().join("abc.png")));
-        assert!(is_managed(dir.path(), &dir.path().join("thumbs/abc.png")));
-        assert!(!is_managed(
-            dir.path(),
-            std::path::Path::new("/somewhere/else/abc.png")
-        ));
     }
 
     #[test]
