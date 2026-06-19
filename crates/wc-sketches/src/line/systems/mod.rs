@@ -18,6 +18,8 @@
 //!   A1) so the live writer here and the screensaver's wandering-pulse writer
 //!   (`crate::line::screensaver`) bake identically and cannot drift.
 
+#[cfg(feature = "templates")]
+pub mod color_influence;
 pub mod mouse;
 #[cfg(feature = "templates")]
 pub mod reseed;

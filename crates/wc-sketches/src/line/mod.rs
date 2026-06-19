@@ -191,6 +191,13 @@ impl Plugin for LinePlugin {
             Update,
             systems::reseed::reseed_on_adjustments_change.run_if(sketch_active(AppState::Line)),
         );
+        // Live colour-influence uniform: tints particles toward their source
+        // image colour with no re-seed (the blend strength is a shader uniform).
+        #[cfg(feature = "templates")]
+        app.add_systems(
+            Update,
+            systems::color_influence::drive_color_influence.run_if(sketch_active(AppState::Line)),
+        );
 
         // Restart listener: begins the FadeOut phase of the reload overlay when
         // a requires_restart setting changes. The overlay's `drive_reload_state`
