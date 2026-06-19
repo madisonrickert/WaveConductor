@@ -25,7 +25,9 @@ struct Particle {
     age: f32,
     lifespan: f32,
     spawn_hash: f32,
-    _pad: vec2<f32>,
+    // Packed RGB8 spawn colour (render-only); the sim never touches it.
+    spawn_color: f32,
+    _pad: f32,
 };
 
 struct Attractor {

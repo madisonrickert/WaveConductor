@@ -166,7 +166,8 @@ mod tests {
             age: 0.0,
             lifespan: 0.0,
             spawn_hash: 0.0,
-            _pad: [0.0; 2],
+            spawn_color: f32::from_bits(0x00FF_FFFF), // white = no colour tint
+            _pad: 0.0,
         };
         step_one(&mut p, &params);
         // Inertial drag = 0.5, applied to velocity before integration.
@@ -190,7 +191,8 @@ mod tests {
             age: 0.0,
             lifespan: 0.0,
             spawn_hash: 0.0,
-            _pad: [0.0; 2],
+            spawn_color: f32::from_bits(0x00FF_FFFF), // white = no colour tint
+            _pad: 0.0,
         };
         step_one(&mut p, &params);
         // Attractor at (100, 0), particle at (0, 0) → purely x-aligned pull.
@@ -227,7 +229,8 @@ mod tests {
             age: 0.0,
             lifespan: 0.0,
             spawn_hash: 0.0,
-            _pad: [0.0; 2],
+            spawn_color: f32::from_bits(0x00FF_FFFF), // white = no colour tint
+            _pad: 0.0,
         };
         step_one(&mut p, &params);
         assert_eq!(p.position, [-5.0, 2.5]);
@@ -254,7 +257,8 @@ mod tests {
             age: 0.0,
             lifespan: 0.0,
             spawn_hash: 0.0,
-            _pad: [0.0; 2],
+            spawn_color: f32::from_bits(0x00FF_FFFF), // white = no colour tint
+            _pad: 0.0,
         };
         step_one(&mut p, &params);
         let expected = params.dt / params.fade_duration;
@@ -271,7 +275,8 @@ mod tests {
             age: 0.0,
             lifespan: 30.0,
             spawn_hash: 0.9,
-            _pad: [0.0; 2],
+            spawn_color: f32::from_bits(0x00FF_FFFF), // white = no colour tint
+            _pad: 0.0,
         }
     }
 

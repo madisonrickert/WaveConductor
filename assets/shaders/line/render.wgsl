@@ -15,7 +15,9 @@ struct Particle {
     age: f32,
     lifespan: f32,
     spawn_hash: f32,
-    _pad: vec2<f32>,
+    // Packed RGB8 spawn colour (`pack_rgb8`, 0x00RRGGBB), recovered below.
+    spawn_color: f32,
+    _pad: f32,
 };
 
 @group(2) @binding(0) var<storage, read> particles: array<Particle>;
@@ -30,6 +32,11 @@ struct Particle {
 // `drive_attract_color`; y/z/w reserved (zero). Strength 0 (the Active-mode
 // value) makes the fragment tint a bit-exact no-op: mix(rgb, _, 0.0) == rgb.
 @group(2) @binding(4) var<uniform> attract_color: vec4<f32>;
+// Per-image colour-influence params. x = blend strength 0..1 (the active
+// template's `color_influence`), driven by `drive_color_influence`; y/z/w
+// reserved. Strength 0 makes the per-particle image tint a bit-exact no-op:
+// mix(rgb, rgb*img, 0.0) == rgb.
+@group(2) @binding(5) var<uniform> template_color: vec4<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -37,6 +44,8 @@ struct VertexOutput {
     @location(1) alpha: f32,
     // Particle speed (|velocity|, world px/s) for the attract velocity tint.
     @location(2) speed: f32,
+    // Packed RGB8 spawn colour, carried per-particle to the fragment stage.
+    @location(3) spawn_color: f32,
 };
 
 // Velocity band for the attract tint, in world px/s. Below LO the particle is
@@ -103,6 +112,7 @@ fn vertex(
     out.uv = c.uv;
     out.alpha = p.alpha;
     out.speed = length(p.velocity);
+    out.spawn_color = p.spawn_color;
     return out;
 }
 
@@ -128,8 +138,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // warm-white personality. `wake` is zero when attract_color.x is zero
     // (Active mode) OR the particle is calm (speed < WAKE_SPEED_LO), and
     // mix(rgb, _, 0.0) returns rgb bit-exactly — live rendering is unchanged.
+    // Per-image colour influence: tint the star toward the particle's source
+    // image colour (multiply, preserving the sprite's luminance shape like the
+    // wake tint). template_color.x == 0 (no template / influence 0%) makes this
+    // a bit-exact no-op: mix(texel.rgb, _, 0.0) == texel.rgb.
+    let packed = bitcast<u32>(in.spawn_color);
+    let img_rgb = vec3<f32>(
+        f32((packed >> 16u) & 0xFFu),
+        f32((packed >> 8u) & 0xFFu),
+        f32(packed & 0xFFu)) / 255.0;
+    let base = mix(texel.rgb, texel.rgb * img_rgb, template_color.x);
+    // Attract-only velocity tint applies on top of the image-coloured base.
     let wake = smoothstep(WAKE_SPEED_LO, WAKE_SPEED_HI, in.speed) * attract_color.x;
-    let rgb = mix(texel.rgb, texel.rgb * WAKE_TINT, wake);
+    let rgb = mix(base, base * WAKE_TINT, wake);
     // Final alpha = sprite-alpha × particle-alpha so quad corners fade smoothly.
     return vec4<f32>(rgb, texel.a * in.alpha);
 }

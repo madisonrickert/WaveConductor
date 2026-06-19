@@ -70,6 +70,25 @@ pub fn attract_lifespan(index: u32) -> f32 {
     ATTRACT_LIFESPAN_MIN_SECS + (ATTRACT_LIFESPAN_MAX_SECS - ATTRACT_LIFESPAN_MIN_SECS) * unit
 }
 
+/// Construct a [`Particle`] at world-space `(x, y)` with zero velocity, its
+/// spawn anchor at the same point, the attract-mode lifetime/identity fields
+/// seeded deterministically from `index`, and the packed `spawn_color`. Shared
+/// by both spawn layouts and the in-place re-seed so the particle fields stay
+/// in one place.
+pub(crate) fn make_particle(index: u32, x: f32, y: f32, spawn_color: f32) -> Particle {
+    Particle {
+        position: [x, y],
+        velocity: [0.0, 0.0],
+        original_xy: [x, y],
+        alpha: 0.0,
+        age: 0.0,
+        lifespan: attract_lifespan(index),
+        spawn_hash: spawn_hash01(index),
+        spawn_color,
+        _pad: 0.0,
+    }
+}
+
 /// `OnEnter(AppState::Line)`.
 ///
 /// Allocates the particle storage buffer, constructs a flat quad mesh
@@ -124,31 +143,22 @@ pub fn spawn_line(
     // window-space (top-left origin, +y down); we convert to world-space
     // (centered, +y up) during Particle construction below.
     let initial: Vec<Particle> = if settings.spawn_template.is_empty() {
-        let mut v: Vec<Particle> = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            // Evenly space across the window width, centered on origin.
-            let x = (i as f32 / count as f32) * w - half_w;
-            // v4: subtle sawtooth Y-jitter `((i % 5) - 2) * 2` so particles sit on
-            // five stacked horizontal strands rather than a single line.
-            let jitter_strand = (i % 5) as f32 - 2.0;
-            let y = mid_y + jitter_strand * 2.0;
-            v.push(Particle {
-                position: [x, y],
-                velocity: [0.0, 0.0],
-                original_xy: [x, y],
-                alpha: 0.0,
-                age: 0.0,
-                lifespan: attract_lifespan(i),
-                spawn_hash: spawn_hash01(i),
-                _pad: [0.0; 2],
-            });
-        }
-        v
+        let white = crate::line::template_adjustments::pack_rgb8([255, 255, 255]);
+        (0..count)
+            .map(|i| {
+                // Evenly space across the window width, centered on origin.
+                let x = (i as f32 / count as f32) * w - half_w;
+                // v4: subtle sawtooth Y-jitter `((i % 5) - 2) * 2` so particles
+                // sit on five stacked horizontal strands rather than a line. No
+                // template: white = no colour tint (template_color uniform 0).
+                let y = mid_y + ((i % 5) as f32 - 2.0) * 2.0;
+                make_particle(i, x, y, white)
+            })
+            .collect()
     } else {
         // Window-space positions + per-particle colours from the heatmap
         // sampler. Task 7 swaps `default()` for the active image's adjustments;
-        // defaults reproduce the prior behaviour exactly. The sampled colour is
-        // wired into the particle in Task 3 (GPU spawn-colour field).
+        // defaults reproduce the prior behaviour exactly.
         let path = Path::new(&settings.spawn_template);
         let adj = crate::line::template_adjustments::TemplateAdjustments::default();
         let sampled = sample_from_heatmap(path, w, win_h, count as usize, &adj);
@@ -161,16 +171,12 @@ pub fn spawn_line(
                 // sketch uses.
                 let x = sp.pos.x - half_w;
                 let y = -(sp.pos.y - half_h);
-                Particle {
-                    position: [x, y],
-                    velocity: [0.0, 0.0],
-                    original_xy: [x, y],
-                    alpha: 0.0,
-                    age: 0.0,
-                    lifespan: attract_lifespan(i as u32),
-                    spawn_hash: spawn_hash01(i as u32),
-                    _pad: [0.0; 2],
-                }
+                make_particle(
+                    i as u32,
+                    x,
+                    y,
+                    crate::line::template_adjustments::pack_rgb8(sp.color),
+                )
             })
             .collect()
     };
@@ -210,6 +216,9 @@ pub fn spawn_line(
         // Velocity tint off at spawn (Active-mode value); the attract driver
         // ramps it with the screensaver fade.
         attract_color: LineMaterial::attract_color_off(),
+        // Colour influence off at spawn; the colour-influence driver writes the
+        // active template's value each frame.
+        template_color: LineMaterial::template_color_off(),
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

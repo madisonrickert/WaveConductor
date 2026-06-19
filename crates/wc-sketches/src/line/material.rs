@@ -29,7 +29,8 @@ use bevy::sprite_render::{AlphaMode2d, Material2d};
 /// (read-only at the render stage; write happens in the compute stage);
 /// `@binding(1)` is the star sprite texture and `@binding(2)` its sampler,
 /// both sampled in the fragment shader; `@binding(3)` is the debug solid
-/// override and `@binding(4)` the attract-mode velocity-color params.
+/// override, `@binding(4)` the attract-mode velocity-color params, and
+/// `@binding(5)` the per-image colour-influence params.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct LineMaterial {
     /// Particle storage buffer, read-only from the vertex shader.
@@ -57,6 +58,14 @@ pub struct LineMaterial {
     /// returns `rgb` bit-exactly) — Active rendering is unchanged.
     #[uniform(4)]
     pub attract_color: Vec4,
+    /// Per-image colour-influence params: `x` = blend strength `0..=1` (the
+    /// active template's `color_influence`, driven by
+    /// [`crate::line::systems::color_influence::drive_color_influence`]);
+    /// `y`/`z`/`w` reserved (zero). `Vec4::ZERO` ([`Self::template_color_off`])
+    /// makes the per-particle image tint a provable no-op
+    /// (`mix(rgb, rgb*img, 0.0)` returns `rgb` bit-exactly).
+    #[uniform(5)]
+    pub template_color: Vec4,
 }
 
 impl LineMaterial {
@@ -69,6 +78,13 @@ impl LineMaterial {
     /// The `attract_color` value meaning "no velocity tint" (live / Active
     /// rendering). Shared by the spawn site, the attract driver, and tests.
     pub fn attract_color_off() -> Vec4 {
+        Vec4::ZERO
+    }
+
+    /// The `template_color` value meaning "no image-colour tint" (color
+    /// influence 0% / no active template). Shared by the spawn site, the
+    /// colour-influence driver, and tests.
+    pub fn template_color_off() -> Vec4 {
         Vec4::ZERO
     }
 }
@@ -105,5 +121,11 @@ mod tests {
     fn default_attract_color_is_off() {
         // strength (x) == 0 means "no velocity tint" — the Active-mode value.
         assert_eq!(LineMaterial::attract_color_off(), Vec4::ZERO);
+    }
+
+    #[test]
+    fn default_template_color_is_off() {
+        // strength (x) == 0 means "no image-colour tint" — the no-template value.
+        assert_eq!(LineMaterial::template_color_off(), Vec4::ZERO);
     }
 }

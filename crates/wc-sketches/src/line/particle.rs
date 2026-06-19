@@ -40,12 +40,17 @@ pub struct Particle {
     /// comparing the raw index) makes the cull spatially uniform, since the
     /// line layout assigns indices left-to-right across the window.
     pub spawn_hash: f32,
+    /// Packed RGB8 spawn colour sampled from the template image at this
+    /// particle's anchor (`pack_rgb8`; white `0x00FFFFFF` = no tint). The render
+    /// shader recovers it via `bitcast<u32>`; it is an opaque bit pattern, never
+    /// used in float math here or on the GPU.
+    pub spawn_color: f32,
     /// Padding to keep the struct multiple-of-16 aligned for WGSL storage rules.
     #[allow(
         clippy::pub_underscore_fields,
         reason = "GPU struct layout padding must be pub for bytemuck"
     )]
-    pub _pad: [f32; 2],
+    pub _pad: f32,
 }
 
 /// One gravitational attractor — position in world space + power (force scale).
