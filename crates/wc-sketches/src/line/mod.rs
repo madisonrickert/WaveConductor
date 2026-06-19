@@ -49,6 +49,7 @@ pub mod screensaver;
 pub mod settings;
 pub mod sim_cpu;
 pub mod systems;
+pub mod template_adjustments;
 
 pub use systems::LineRoot;
 
