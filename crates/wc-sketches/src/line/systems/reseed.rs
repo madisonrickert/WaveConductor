@@ -42,8 +42,10 @@ use crate::line::template_adjustments::{pack_rgb8, TemplateAdjustments};
 use crate::line::template_adjustments_store::{hash_of_path_str, LineTemplateAdjustments};
 use crate::line::LineRoot;
 
-/// Quiescence window before a re-seed fires (so a slider drag coalesces).
-const RESEED_DEBOUNCE: Duration = Duration::from_millis(200);
+/// Quiescence window before a re-seed fires (so a slider drag coalesces). Short
+/// enough to feel connected while tuning; each fire is one full buffer
+/// re-upload, but at human pause cadence that is a non-issue.
+const RESEED_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Per-system state for the re-seed debounce: the last-seeded position-shaping
 /// snapshot and the pending-fire timestamp.
