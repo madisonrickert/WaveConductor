@@ -119,8 +119,8 @@ pub fn managed_path(dir: &Path, entry: &TemplateEntry) -> PathBuf {
     dir.join(format!("{}.{}", entry.hash, entry.ext))
 }
 
-/// True if `path` lives inside the managed store `dir` (so it must not be
-/// re-ingested). Compares by prefix; both paths are used as-is (callers pass
+/// True if `path` lives inside the managed store `dir` — a low-level store
+/// primitive. Compares by prefix; both paths are used as-is (callers pass
 /// absolute paths).
 #[must_use]
 pub fn is_managed(dir: &Path, path: &Path) -> bool {

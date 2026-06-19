@@ -881,6 +881,9 @@ fn template_library_rows(
         (rows, entries)
     };
 
+    // `TemplateThumbnailCache` is registered alongside `TemplateLibrary` by
+    // `TemplatesPlugin`, so it is present whenever the library above resolved —
+    // the hard `resource()`/`resource_mut()` accesses below cannot panic.
     // Decode + upload any thumbnail not already cached (one-time per session).
     let needed: Vec<(String, std::path::PathBuf)> = {
         let cache = world.resource::<TemplateThumbnailCache>();
@@ -984,12 +987,20 @@ fn render_template_row(
                         .fit_to_exact_size(egui::vec2(40.0, 40.0)),
                 );
             }
-            if ui
-                .selectable_label(*v == row.managed_path, row.label.as_str())
-                .clicked()
-            {
-                v.clone_from(&row.managed_path);
-            }
+            ui.vertical(|ui| {
+                if ui
+                    .selectable_label(*v == row.managed_path, row.label.as_str())
+                    .clicked()
+                {
+                    v.clone_from(&row.managed_path);
+                }
+                // Dimensions + byte size, dimmed; disambiguates same-named imports.
+                ui.label(
+                    egui::RichText::new(row.subtext.as_str())
+                        .size(10.0)
+                        .color(style.text_faint),
+                );
+            });
             // Trailing frameless trash button, right-aligned.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let trash = egui::RichText::new(phosphor::TRASH)
