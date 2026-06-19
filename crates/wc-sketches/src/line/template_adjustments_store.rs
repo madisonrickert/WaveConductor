@@ -51,19 +51,38 @@ impl LineTemplateAdjustments {
     pub fn entry_mut(&mut self, hash: &str) -> &mut TemplateAdjustments {
         self.map.entry(hash.to_owned()).or_default()
     }
+
+    /// The active template's colour influence (`0..1`), or `0.0` when no
+    /// template is active or it has no saved entry. Allocation-free — used by
+    /// the per-frame colour-influence driver, so it must not allocate (the
+    /// no-hot-path-allocation rule in AGENTS.md).
+    #[must_use]
+    pub fn color_influence_for(&self, spawn_template: &str) -> f32 {
+        hash_of_path_str(spawn_template)
+            .and_then(|h| self.map.get(h))
+            .map_or(0.0, |a| a.color_influence)
+    }
 }
 
-/// The content hash for an active `spawn_template` path: the managed blob's file
-/// stem (blobs are stored as `{hash}.{ext}`). `None` for an empty path.
+/// The content hash for an active `spawn_template` path, **borrowed** from the
+/// path: the managed blob's file stem (blobs are stored as `{hash}.{ext}`).
+/// `None` for an empty path. Allocation-free for per-frame callers.
 #[must_use]
-pub fn hash_of_path(spawn_template: &str) -> Option<String> {
+pub fn hash_of_path_str(spawn_template: &str) -> Option<&str> {
     if spawn_template.is_empty() {
         return None;
     }
     Path::new(spawn_template)
         .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_owned)
+        .and_then(std::ffi::OsStr::to_str)
+}
+
+/// Owned variant of [`hash_of_path_str`] for cold callers that need a `String`
+/// key (the panel's `entry_mut`, spawn). Per-frame callers use the borrowing
+/// form to avoid allocating.
+#[must_use]
+pub fn hash_of_path(spawn_template: &str) -> Option<String> {
+    hash_of_path_str(spawn_template).map(str::to_owned)
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ use crate::line::particle::Particle;
 use crate::line::settings::LineSettings;
 use crate::line::systems::spawn::make_particle;
 use crate::line::template_adjustments::{pack_rgb8, TemplateAdjustments};
-use crate::line::template_adjustments_store::{hash_of_path, LineTemplateAdjustments};
+use crate::line::template_adjustments_store::{hash_of_path_str, LineTemplateAdjustments};
 
 /// Quiescence window before a re-seed fires (so a slider drag coalesces).
 const RESEED_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -76,12 +76,14 @@ pub fn reseed_on_adjustments_change(
     let Some(sim) = sim else {
         return;
     };
-    let Some(hash) = hash_of_path(&settings.spawn_template) else {
+    // Borrowed stem (no per-frame allocation, per the no-hot-path-allocation
+    // rule); `get` takes `&str` and returns a stack-only clone.
+    let Some(hash) = hash_of_path_str(&settings.spawn_template) else {
         state.last = None;
         state.debounce = None;
         return;
     };
-    let adj = adjustments.get(&hash);
+    let adj = adjustments.get(hash);
 
     match state.last.clone() {
         // First observation: snapshot the spawn state without re-seeding (spawn

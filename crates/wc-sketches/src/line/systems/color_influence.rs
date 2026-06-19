@@ -15,14 +15,15 @@ use bevy::sprite_render::MeshMaterial2d;
 
 use crate::line::material::LineMaterial;
 use crate::line::settings::LineSettings;
-use crate::line::template_adjustments_store::{hash_of_path, LineTemplateAdjustments};
+use crate::line::template_adjustments_store::LineTemplateAdjustments;
 use crate::line::LineRoot;
 
 /// The active template's colour influence (`0..1`), or `0.0` when no template is
-/// active.
+/// active. Delegates to the allocation-free [`LineTemplateAdjustments::color_influence_for`]
+/// since this runs every frame.
 #[must_use]
 pub fn influence_for(spawn_template: &str, store: &LineTemplateAdjustments) -> f32 {
-    hash_of_path(spawn_template).map_or(0.0, |h| store.get(&h).color_influence)
+    store.color_influence_for(spawn_template)
 }
 
 /// Sync the active colour influence into the `LineMaterial` uniform. Only writes

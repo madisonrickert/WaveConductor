@@ -59,9 +59,9 @@ pub struct LineMaterial {
     #[uniform(4)]
     pub attract_color: Vec4,
     /// Per-image colour-influence params: `x` = blend strength `0..=1` (the
-    /// active template's `color_influence`, driven by
-    /// [`crate::line::systems::color_influence::drive_color_influence`]);
-    /// `y`/`z`/`w` reserved (zero). `Vec4::ZERO` ([`Self::template_color_off`])
+    /// active template's `color_influence`, driven by `drive_color_influence`
+    /// in the templates-gated `systems::color_influence` module); `y`/`z`/`w`
+    /// reserved (zero). `Vec4::ZERO` ([`Self::template_color_off`])
     /// makes the per-particle image tint a provable no-op
     /// (`mix(rgb, rgb*img, 0.0)` returns `rgb` bit-exactly).
     #[uniform(5)]

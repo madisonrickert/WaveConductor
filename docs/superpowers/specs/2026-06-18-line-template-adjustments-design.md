@@ -79,7 +79,7 @@ weight = t * alpha
 Applied to the sampler's output coordinates, about the canvas center:
 
 ```
-pos = center + (sampled - center) * scale + position * canvas_size
+pos = center + (sampled - center) * scale + position * (canvas_size / 2)
 ```
 
 Scale zooms the layout, position shifts it. Particles that land outside the canvas are kept (the sim/camera already handle off-screen positions); we do **not** drop them, so scale-down/translate reads as the image moving within the field rather than particles vanishing.
