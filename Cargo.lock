@@ -7778,6 +7778,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "bytemuck",
+ "egui-phosphor",
  "image",
  "leafwing-input-manager",
  "rand 0.9.4",

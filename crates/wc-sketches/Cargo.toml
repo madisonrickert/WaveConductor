@@ -20,7 +20,7 @@ hand-tracking-gestures = ["wc-core/hand-tracking-gestures"]
 # pruning. Native-only (pulls wc-core/templates, which uses rfd/image/blake3);
 # the binary enables it, CI exercises it under --all-features. `dep:bevy_egui`
 # is for the custom dock-section renderer's `egui::Ui` parameter.
-templates = ["wc-core/templates", "dep:bevy_egui"]
+templates = ["wc-core/templates", "dep:bevy_egui", "dep:egui-phosphor"]
 
 [dependencies]
 bevy.workspace = true
@@ -33,8 +33,10 @@ leafwing-input-manager.workspace = true
 # Line heatmap-image spawn (Plan 10 Phase A): PNG decode + CDF inversion.
 image.workspace = true
 rand.workspace = true
-# Only for the `templates` feature's custom dock-section renderer (egui::Ui).
+# Only for the `templates` feature's custom dock-section renderer (egui::Ui +
+# the phosphor reset-to-default glyph, matching the main settings panel).
 bevy_egui = { workspace = true, optional = true }
+egui-phosphor = { workspace = true, optional = true }
 
 [dev-dependencies]
 smallvec.workspace = true
