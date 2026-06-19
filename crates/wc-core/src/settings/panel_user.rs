@@ -1002,7 +1002,8 @@ fn render_template_row(
     }
     // Cap the text column so a long name elides with `…` instead of colliding
     // with the trash button or stretching the row; full name shows on hover.
-    let trash_budget = 28.0 + cui.spacing().item_spacing.x;
+    // Budget = trash glyph (~28) + its 6px right margin + layout spacing.
+    let trash_budget = 34.0 + cui.spacing().item_spacing.x;
     let text_w = (cui.available_width() - trash_budget).max(0.0);
     cui.vertical(|ui| {
         ui.set_max_width(text_w);
@@ -1019,6 +1020,9 @@ fn render_template_row(
     });
     // Trailing frameless trash button, right-aligned in the remaining slice.
     cui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // A little breathing room so the icon isn't flush against the row's edge
+        // (right_to_left lays out from the right, so this space sits on its right).
+        ui.add_space(6.0);
         let trash = egui::RichText::new(phosphor::TRASH)
             .family(egui::FontFamily::Name("phosphor".into()))
             .color(style.text_secondary);
@@ -1055,7 +1059,15 @@ fn render_template_delete_confirm(
     ui: &mut egui::Ui,
 ) {
     use crate::templates::store;
-    ui.label(egui::RichText::new(format!("Delete \"{}\"?", row.label)).color(style.error_red));
+    // `.truncate()`: grid cells default to `Extend` wrap, so a long name would
+    // run the prompt off the right edge of the panel instead of clipping.
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(format!("Delete \"{}\"?", row.label)).color(style.error_red),
+        )
+        .truncate(),
+    )
+    .on_hover_text(row.label.as_str());
     ui.horizontal(|ui| {
         if ui
             .add(egui::Button::new(
