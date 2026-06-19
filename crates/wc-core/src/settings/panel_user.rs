@@ -1023,9 +1023,15 @@ fn render_template_row(
         // A little breathing room so the icon isn't flush against the row's edge
         // (right_to_left lays out from the right, so this space sits on its right).
         ui.add_space(6.0);
-        let trash = egui::RichText::new(phosphor::TRASH)
-            .family(egui::FontFamily::Name("phosphor".into()))
-            .color(style.text_secondary);
+        // Colour the glyph from the widget's interact state (not a fixed RichText
+        // colour) so it has a hover effect: neutral grey at rest, red on hover — a
+        // cue that the action is destructive. Scoped to this child ui, so it does
+        // not tint other widgets.
+        ui.visuals_mut().widgets.inactive.fg_stroke.color = style.text_secondary;
+        ui.visuals_mut().widgets.hovered.fg_stroke.color = style.error_red;
+        ui.visuals_mut().widgets.active.fg_stroke.color = style.error_red;
+        let trash =
+            egui::RichText::new(phosphor::TRASH).family(egui::FontFamily::Name("phosphor".into()));
         if ui
             .add(egui::Button::new(trash).frame(false))
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1150,13 +1156,16 @@ fn render_template_library(
     // (col 3), then clamp.
     let combo_w = (ui.clip_rect().width() - 170.0).clamp(180.0, 380.0);
 
-    // Bound the picker to `combo_w` inside a child scope. A long selected name
-    // grows the closed button toward `available_width` (the `.width()` below is
-    // only a minimum), so bounding the surrounding width is what keeps the reset
-    // glyph on-panel. The scope is essential: the Grid shares one `ui` across all
-    // cells and rows, so a bare `set_max_width` here would shrink the reset
-    // column and every later row.
-    ui.scope(|ui| {
+    // Render the picker in a child `vertical` so the combobox, the delete
+    // confirm, and the status line stack top-to-bottom. This is essential: a
+    // Grid cell flows left-to-right, so without a vertical sub-layout the
+    // confirm's prompt and `[Delete]`/`[Cancel]` buttons march off the right edge
+    // of the panel instead of sitting under the dropdown. `set_max_width` bounds
+    // the block to `combo_w` (a long selected name grows the closed button toward
+    // `available_width`; the `.width()` below is only a minimum), keeping the
+    // column-3 reset glyph on-panel — and being a child ui, the width bound does
+    // not leak to the Grid's shared `ui` (reset column, later rows).
+    ui.vertical(|ui| {
         ui.set_max_width(combo_w);
 
         egui::ComboBox::from_id_salt(("wc-template-lib", storage_key, field_name))
