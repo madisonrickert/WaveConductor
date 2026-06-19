@@ -971,7 +971,9 @@ fn render_template_row(
     let row_w = (ui.available_width() - POPUP_SCROLLBAR_GUTTER).max(0.0);
     let (row_rect, row_resp) =
         ui.allocate_exact_size(egui::vec2(row_w, row_h), egui::Sense::click());
-    let row_resp = row_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let row_resp = row_resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(row.label.as_str());
 
     // Full-row background for selected / hover, so selection reads as a row
     // rather than a text-tight highlight (which looked like a copy/paste
@@ -988,62 +990,96 @@ fn render_template_row(
             .rect_filled(row_rect, egui::CornerRadius::same(3), bg);
     }
 
-    // Content drawn into the pre-allocated rect (no second cursor advance).
-    let mut cui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(row_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    if let Some(tid) = row.thumb {
-        cui.add(
-            egui::Image::new(egui::load::SizedTexture::new(tid, egui::vec2(36.0, 36.0)))
-                .fit_to_exact_size(egui::vec2(36.0, 36.0)),
-        );
-    }
-    // Cap the text column so a long name elides with `…` instead of colliding
-    // with the trash button or stretching the row; full name shows on hover.
-    // Budget = trash glyph (~28) + its 6px right margin + layout spacing.
-    let trash_budget = 34.0 + cui.spacing().item_spacing.x;
-    let text_w = (cui.available_width() - trash_budget).max(0.0);
-    cui.vertical(|ui| {
-        ui.set_max_width(text_w);
-        ui.add(egui::Label::new(row.label.as_str()).truncate())
-            .on_hover_text(row.label.as_str());
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(row.subtext.as_str())
-                    .size(10.0)
-                    .color(style.text_faint),
-            )
-            .truncate(),
-        );
-    });
-    // Trailing frameless trash button, right-aligned in the remaining slice.
-    cui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        // A little breathing room so the icon isn't flush against the row's edge
-        // (right_to_left lays out from the right, so this space sits on its right).
-        ui.add_space(6.0);
-        // Colour the glyph from the widget's interact state (not a fixed RichText
-        // colour) so it has a hover effect: neutral grey at rest, red on hover — a
-        // cue that the action is destructive. Scoped to this child ui, so it does
-        // not tint other widgets.
-        ui.visuals_mut().widgets.inactive.fg_stroke.color = style.text_secondary;
-        ui.visuals_mut().widgets.hovered.fg_stroke.color = style.error_red;
-        ui.visuals_mut().widgets.active.fg_stroke.color = style.error_red;
-        let trash =
-            egui::RichText::new(phosphor::TRASH).family(egui::FontFamily::Name("phosphor".into()));
-        if ui
-            .add(egui::Button::new(trash).frame(false))
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Delete from cache")
-            .clicked()
-        {
-            *confirm = Some(row.hash.clone());
-        }
-    });
+    // The row content (thumbnail, name, subtext) is *painted*, not built from
+    // widgets: a `Label` is selectable (I-beam cursor) and captures hover, which
+    // would override the row's pointer cursor over the text. Only the trash gets
+    // its own interactive region (so it can be hovered/clicked independently);
+    // everything else routes through `row_resp`.
+    let pad = 6.0;
+    let mut content_left = row_rect.left() + pad;
 
-    // Clicking anywhere on the row selects it — guarded so a trash click (which
-    // sets `confirm`) doesn't also change the selection.
+    // Thumbnail: painted to a fixed 36px box, vertically centred.
+    if let Some(tid) = row.thumb {
+        let size = 36.0;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(content_left, row_rect.center().y - size / 2.0),
+            egui::vec2(size, size),
+        );
+        ui.painter().image(
+            tid,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        content_left = rect.right() + 8.0;
+    }
+
+    // Trash glyph on the right with a 6px margin. Its own click region so hover
+    // recolours it (grey → red, a destructive-action cue) and a click flips the
+    // row into delete-confirm without selecting it.
+    let trash_size = 20.0;
+    let trash_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            row_rect.right() - pad - trash_size,
+            row_rect.center().y - trash_size / 2.0,
+        ),
+        egui::vec2(trash_size, trash_size),
+    );
+    let trash_resp = ui
+        .interact(trash_rect, row_resp.id.with("trash"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Delete from cache");
+    let trash_color = if trash_resp.hovered() {
+        style.error_red
+    } else {
+        style.text_secondary
+    };
+    ui.painter().text(
+        trash_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        phosphor::TRASH,
+        egui::FontId::new(16.0, egui::FontFamily::Name("phosphor".into())),
+        trash_color,
+    );
+    if trash_resp.clicked() {
+        *confirm = Some(row.hash.clone());
+    }
+
+    // Name + subtext, each elided to the column between the thumbnail and the
+    // trash so a long name clips with `…` (full name shows on the row hover).
+    let text_w = (trash_rect.left() - 8.0 - content_left).max(0.0);
+    let name =
+        egui::WidgetText::from(egui::RichText::new(row.label.as_str()).color(style.text_primary))
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Truncate),
+                text_w,
+                egui::TextStyle::Body,
+            );
+    let subtext = egui::WidgetText::from(
+        egui::RichText::new(row.subtext.as_str())
+            .size(10.0)
+            .color(style.text_faint),
+    )
+    .into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        text_w,
+        egui::TextStyle::Small,
+    );
+    let (name_h, sub_h) = (name.size().y, subtext.size().y);
+    let gap = 1.0;
+    let top = row_rect.center().y - (name_h + gap + sub_h) / 2.0;
+    ui.painter()
+        .galley(egui::pos2(content_left, top), name, style.text_primary);
+    ui.painter().galley(
+        egui::pos2(content_left, top + name_h + gap),
+        subtext,
+        style.text_faint,
+    );
+
+    // Clicking anywhere on the row (outside the trash) selects it — guarded so a
+    // trash click doesn't also change the selection.
     if row_resp.clicked() && confirm.is_none() {
         v.clone_from(&row.managed_path);
     }
