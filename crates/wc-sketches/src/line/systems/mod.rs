@@ -19,6 +19,8 @@
 //!   (`crate::line::screensaver`) bake identically and cannot drift.
 
 pub mod mouse;
+#[cfg(feature = "templates")]
+pub mod reseed;
 pub mod sim_params;
 pub mod spawn;
 

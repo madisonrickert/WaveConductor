@@ -109,6 +109,11 @@ pub(crate) fn make_particle(index: u32, x: f32, y: f32, spawn_color: f32) -> Par
 /// (v4 parity: `particleDensity = 10` per canvas-pixel of width yields ~12,800
 /// particles at 1280px), clamped to `[100, 100_000]` so a sudden resize spike
 /// does not catastrophically allocate.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system: commands, settings, window, asset server, three asset \
+              stores, plus the gated adjustments and debug-toggle params"
+)]
 pub fn spawn_line(
     mut commands: Commands<'_, '_>,
     settings: Res<'_, LineSettings>,
@@ -117,6 +122,11 @@ pub fn spawn_line(
     mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
     mut materials: ResMut<'_, Assets<LineMaterial>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
+    // The active image's per-image adjustments (templates feature only). Absent
+    // resource / no active template ⇒ identity defaults (prior behaviour).
+    #[cfg(feature = "templates")] adjustments: Option<
+        Res<'_, crate::line::template_adjustments_store::LineTemplateAdjustments>,
+    >,
     // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
     // only in debug builds). Placed last so the release signature is unchanged.
     #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
@@ -157,9 +167,18 @@ pub fn spawn_line(
             .collect()
     } else {
         // Window-space positions + per-particle colours from the heatmap
-        // sampler. Task 7 swaps `default()` for the active image's adjustments;
-        // defaults reproduce the prior behaviour exactly.
+        // sampler, reshaped by the active image's adjustments (identity defaults
+        // when the feature is off or no entry exists — prior behaviour exactly).
         let path = Path::new(&settings.spawn_template);
+        #[cfg(feature = "templates")]
+        let adj = adjustments
+            .as_ref()
+            .and_then(|a| {
+                crate::line::template_adjustments_store::hash_of_path(&settings.spawn_template)
+                    .map(|h| a.get(&h))
+            })
+            .unwrap_or_default();
+        #[cfg(not(feature = "templates"))]
         let adj = crate::line::template_adjustments::TemplateAdjustments::default();
         let sampled = sample_from_heatmap(path, w, win_h, count as usize, &adj);
         sampled
