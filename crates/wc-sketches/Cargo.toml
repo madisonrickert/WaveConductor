@@ -15,6 +15,11 @@ workspace = true
 [features]
 default = []
 hand-tracking-gestures = ["wc-core/hand-tracking-gestures"]
+# Per-image template adjustments (Line): the registered adjustments map, the
+# custom dock-section UI, the re-seed/colour-influence drivers, and orphan
+# pruning. Native-only (pulls wc-core/templates, which uses rfd/image/blake3);
+# the binary enables it, CI exercises it under --all-features.
+templates = ["wc-core/templates"]
 
 [dependencies]
 bevy.workspace = true

@@ -45,7 +45,7 @@ bevy_egui = { workspace = true }
 # the Linux NUC this reads the hottest hardware component via zero-dependency
 # sysfs probing; macOS adds `thermal-sensor-macos` below for Apple Silicon.
 wc-core = { workspace = true, features = ["thermal-sensor", "templates"] }
-wc-sketches = { workspace = true }
+wc-sketches = { workspace = true, features = ["templates"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Display-sleep inhibitor for the kiosk: see the workspace Cargo.toml comment.

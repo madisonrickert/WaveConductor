@@ -50,6 +50,8 @@ pub mod settings;
 pub mod sim_cpu;
 pub mod systems;
 pub mod template_adjustments;
+#[cfg(feature = "templates")]
+pub mod template_adjustments_store;
 
 pub use systems::LineRoot;
 
@@ -71,6 +73,10 @@ impl Plugin for LinePlugin {
     fn build(&self, app: &mut App) {
         // Register LineSettings with the settings system (panel + persistence).
         app.register_sketch_settings::<settings::LineSettings>();
+        // Per-image template adjustments ride the same settings rails (empty
+        // settings_def; rendered by the custom dock section, persisted centrally).
+        #[cfg(feature = "templates")]
+        app.register_sketch_settings::<template_adjustments_store::LineTemplateAdjustments>();
 
         // Register the picker-tile manifest entry (async screenshot load).
         register_line_manifest(app);
