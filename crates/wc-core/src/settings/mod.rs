@@ -25,6 +25,7 @@
 
 pub mod autosave;
 pub mod commands;
+pub mod custom_section;
 pub mod def;
 pub mod event;
 pub mod hand_tracking;
@@ -37,6 +38,7 @@ pub mod trait_def;
 mod panel_user;
 
 pub use commands::set_setting;
+pub use custom_section::{CustomDockSections, DockSectionFn, RegisterDockSectionExt};
 pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
 pub use hand_tracking::{HandProviderChoice, HandTrackingSettings};
@@ -58,6 +60,7 @@ impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsRegistry>()
             .init_resource::<DevPanelVisible>()
+            .init_resource::<custom_section::CustomDockSections>()
             .init_resource::<autosave::AutosaveState>()
             .init_resource::<EguiPointerCaptured>()
             .init_resource::<EguiKeyboardCaptured>()

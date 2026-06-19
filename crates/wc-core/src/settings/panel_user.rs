@@ -42,6 +42,7 @@ use bevy_egui::{egui, EguiContexts};
 use egui_phosphor::regular as phosphor;
 use smallvec::SmallVec;
 
+use super::custom_section::{CustomDockSections, DockSectionFn};
 use super::def::{SettingDef, SettingKind, SettingsCategory};
 use super::registry::SettingsRegistry;
 use crate::lifecycle::state::AppState;
@@ -291,6 +292,7 @@ fn draw_user_panel(world: &mut World) {
                                         advanced,
                                         &style,
                                     );
+                                    render_custom_sections(world, ui, key, &style);
                                 }
                             }
                         });
@@ -385,6 +387,21 @@ fn draw_dock_header(
             });
         });
     });
+}
+
+/// Render any sketch-contributed custom dock sections registered after `key`,
+/// immediately below that key's reflected section (render-only; see
+/// [`super::custom_section::CustomDockSections`]). The fn pointers are snapshotted
+/// (they are `Copy`) so the [`CustomDockSections`] borrow is released before each
+/// section re-enters `world`.
+fn render_custom_sections(world: &mut World, ui: &mut egui::Ui, key: &str, style: &OverlayStyle) {
+    let custom: SmallVec<[DockSectionFn; 2]> = world
+        .get_resource::<CustomDockSections>()
+        .map(|c| c.for_key(key).collect())
+        .unwrap_or_default();
+    for render in custom {
+        render(world, ui, style);
+    }
 }
 
 /// Look up the type registration matching `storage_key` and render its
