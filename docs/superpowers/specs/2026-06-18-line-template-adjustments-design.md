@@ -152,3 +152,22 @@ All numeric knobs are draggable percentage sliders; `internal = f(percent)` is t
 - GPU-side image re-sampling (particles recycle to fixed anchors; not needed).
 - Adjustments for sketches other than Line (the dock-section hook is generic, but only Line registers one now).
 - Value-conditional field hiding in the generic settings macro (the custom section handles its own show/hide).
+
+## Future tuning-UX enhancements (from a UX review; deferred)
+
+The debounced re-seed (snap to the new layout on pause) was shipped and works.
+A UX review recommended keeping the snap rather than building a full per-particle
+tween, but flagged two higher-value follow-ups worth a future pass:
+
+- **Position/scale as a live render transform, not a re-seed.** `transform_point`
+  is a pure affine map, so position X/Y and scale X/Y could ride a live render
+  uniform (like `color_influence`) for continuous, zero-re-upload feedback while
+  dragging — only the density knobs (white/black/gamma/invert) genuinely need
+  re-sampling. **Caveat:** a render-only transform decouples the GPU sim
+  (attractors, constrain-to-box anchors operate on the un-transformed positions)
+  from what is shown, so it needs a "live uniform while dragging, bake into the
+  spawn on pause" hybrid (or an inverse-transform of the attractor inputs) to keep
+  interaction aligned. This is the reason it was deferred rather than shipped.
+- **Preserve particle velocity across a re-seed** so the field never visibly
+  freezes on each fire. Harder than it looks: velocities live on the GPU buffer,
+  so this needs a readback or a GPU-side re-seed rather than the CPU rebuild.
