@@ -45,7 +45,11 @@ struct VertexOutput {
     // Particle speed (|velocity|, world px/s) for the attract velocity tint.
     @location(2) speed: f32,
     // Packed RGB8 spawn colour, carried per-particle to the fragment stage.
-    @location(3) spawn_color: f32,
+    // `@interpolate(flat)` is REQUIRED: this is an opaque bit pattern, not a real
+    // number. Default perspective interpolation does FP arithmetic on the bits
+    // (and may flush denormals — dark-red colours decode as denormals), which
+    // would corrupt the colour. Flat = provoking-vertex value, bit-preserved.
+    @location(3) @interpolate(flat) spawn_color: f32,
 };
 
 // Velocity band for the attract tint, in world px/s. Below LO the particle is
