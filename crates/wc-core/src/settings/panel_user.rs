@@ -498,6 +498,13 @@ fn render_section_by_key(
 /// that two settings structs using the same section or field names don't
 /// collide in egui's id-to-state map (colliding Grids share column widths;
 /// colliding `ComboBox`es share popup open/close state).
+#[cfg_attr(
+    feature = "templates",
+    expect(
+        clippy::too_many_arguments,
+        reason = "the settings render chain threads the template snapshot + dirty flag through this fn when the feature is on"
+    )
+)]
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
@@ -574,6 +581,8 @@ fn render_user_fields_via_reflect(
                         template_rows,
                         #[cfg(feature = "templates")]
                         template_dirty,
+                        #[cfg(feature = "templates")]
+                        style,
                         ui,
                     );
                     // Column 3: reset-to-default glyph, or an aligned spacer.
@@ -804,6 +813,7 @@ fn render_widget_value(
     storage_key: &'static str,
     #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
     #[cfg(feature = "templates")] template_dirty: &mut bool,
+    #[cfg(feature = "templates")] style: &OverlayStyle,
     ui: &mut egui::Ui,
 ) {
     match &def.kind {
@@ -822,19 +832,17 @@ fn render_widget_value(
             extensions,
         } => {
             #[cfg(feature = "templates")]
-            {
-                // `filter_label`/`extensions` drive the Import dialog (a later
-                // task); unused in this select-only version.
-                let _ = (filter_label, extensions);
-                render_template_library(
-                    field,
-                    storage_key,
-                    def.field_name,
-                    template_rows,
-                    template_dirty,
-                    ui,
-                );
-            }
+            render_template_library(
+                field,
+                storage_key,
+                def.field_name,
+                filter_label,
+                extensions,
+                template_rows,
+                template_dirty,
+                style,
+                ui,
+            );
             // Permanent fallback when the `templates` feature is off.
             #[cfg(not(feature = "templates"))]
             render_file_path(field, filter_label, extensions, ui);
@@ -855,43 +863,167 @@ fn template_library_rows(world: &mut World) -> Vec<crate::templates::view::Templ
         .unwrap_or_default()
 }
 
-/// Render the template-library picker: a `ComboBox` of cached templates whose
-/// selection writes the managed blob path into the setting. Uses the
-/// `selectable_value` idiom (auto-closes the popup on click), mirroring
-/// [`render_enum`]. Import, delete, and thumbnails land in later tasks.
+/// Render one template row inside the dropdown: select-on-click plus a trailing
+/// trash button — or, when this row's hash is the one mid-confirm, an inline
+/// `Delete "name"? [Delete] [Cancel]`. Mutates `confirm` (the pending-delete
+/// hash), the field `v`, and `dirty` as the user acts.
 #[cfg(feature = "templates")]
+fn render_template_row(
+    row: &crate::templates::view::TemplateRow,
+    v: &mut String,
+    dir: &std::path::Path,
+    confirm: &mut Option<String>,
+    dirty: &mut bool,
+    style: &OverlayStyle,
+    ui: &mut egui::Ui,
+) {
+    use crate::templates::store;
+    if confirm.as_deref() == Some(row.hash.as_str()) {
+        // Inline two-step delete confirm replaces the row body.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Delete \"{}\"?", row.label)).color(style.error_red),
+            );
+            if ui
+                .button(egui::RichText::new("Delete").color(style.error_red))
+                .clicked()
+            {
+                if let Err(err) = store::delete(dir, &row.hash) {
+                    tracing::warn!(?err, "template delete failed");
+                }
+                // Clear the field if the active template was deleted; the sketch
+                // falls back to its default layout.
+                if *v == row.managed_path {
+                    v.clear();
+                }
+                *dirty = true;
+                *confirm = None;
+            }
+            if ui.button("Cancel").clicked() {
+                *confirm = None;
+            }
+        });
+    } else {
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(*v == row.managed_path, row.label.as_str())
+                .clicked()
+            {
+                v.clone_from(&row.managed_path);
+            }
+            // Trailing frameless trash button, right-aligned.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let trash = egui::RichText::new(phosphor::TRASH)
+                    .family(egui::FontFamily::Name("phosphor".into()))
+                    .color(style.text_secondary);
+                if ui
+                    .add(egui::Button::new(trash).frame(false))
+                    .on_hover_text("Delete from cache")
+                    .clicked()
+                {
+                    *confirm = Some(row.hash.clone());
+                }
+            });
+        });
+    }
+}
+
+/// Render the template-library picker: a `ComboBox` of cached templates. The
+/// pinned top row imports a new image (file dialog → ingest → select); each
+/// existing row selects on click (`selectable_label` closes the popup), with a
+/// trailing trash button (a `Button`, which keeps the popup open) that flips the
+/// row into an inline two-step delete confirm. `dirty` is set when an
+/// import/delete mutates the store so the caller reloads the in-memory library.
+/// Thumbnails land in the next task.
+#[cfg(feature = "templates")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the template-library widget threads field, ids, dialog filters, rows, dirty, and style"
+)]
 fn render_template_library(
     field: &mut dyn bevy::reflect::PartialReflect,
     storage_key: &'static str,
     field_name: &'static str,
+    filter_label: &str,
+    extensions: &[&str],
     rows: &[crate::templates::view::TemplateRow],
     dirty: &mut bool,
+    style: &OverlayStyle,
     ui: &mut egui::Ui,
 ) {
-    // `dirty` is set when import/delete change the store (a later task); the
-    // select path only mutates the setting, never the library.
-    let _ = dirty;
+    use crate::templates::{store, templates_dir};
+
     let Some(v) = field.try_downcast_mut::<String>() else {
         ui.label("(expected String for template path)");
         return;
     };
+    // The store dir is resolved the same way the `TemplateLibrary` resource was
+    // at startup, so an ingest/delete here targets the dir the caller reloads.
+    let dir = templates_dir();
+
     // Closed-state label: the active template's friendly name, or "(none)".
     let selected_text = rows
         .iter()
         .find(|r| r.managed_path == *v)
         .map_or("(none)", |r| r.label.as_str());
-    let mut selected = v.clone();
+
+    // Which hash (if any) is mid delete-confirm. Stored in egui memory so it
+    // survives frames without a Bevy resource.
+    let confirm_id = egui::Id::new(("wc-template-confirm", storage_key, field_name));
+
     egui::ComboBox::from_id_salt(("wc-template-lib", storage_key, field_name))
         .selected_text(selected_text)
         .height(280.0)
         .show_ui(ui, |ui| {
-            for row in rows {
-                ui.selectable_value(&mut selected, row.managed_path.clone(), row.label.as_str());
+            // Pinned import row (a `selectable_label` closes the popup on click).
+            let import_label = egui::RichText::new(format!("{}  Import image…", phosphor::PLUS))
+                .family(egui::FontFamily::Name("phosphor".into()));
+            if ui.selectable_label(false, import_label).clicked() {
+                // Native-only: rfd's synchronous `FileDialog` does not compile on
+                // wasm. The whole `templates` feature is native (it also pulls the
+                // native-only `image` crate), mirroring `hand-tracking-mediapipe`;
+                // this guard matches `render_file_path`'s own rfd guard.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let mut dlg = rfd::FileDialog::new();
+                    if !extensions.is_empty() {
+                        dlg = dlg.add_filter(filter_label, extensions);
+                    }
+                    if let Some(path) = dlg.pick_file() {
+                        match store::ingest(&dir, &path) {
+                            Ok(entry) => {
+                                *v = store::managed_path(&dir, &entry)
+                                    .to_string_lossy()
+                                    .into_owned();
+                                *dirty = true;
+                            }
+                            Err(err) => tracing::warn!(?err, "template import failed"),
+                        }
+                    }
+                }
             }
+            ui.separator();
+
+            if rows.is_empty() {
+                ui.label(
+                    egui::RichText::new("No templates yet")
+                        .italics()
+                        .color(style.text_faint),
+                );
+            }
+
+            let mut confirm: Option<String> = ui.memory(|m| m.data.get_temp(confirm_id));
+
+            for row in rows {
+                render_template_row(row, v, &dir, &mut confirm, dirty, style, ui);
+            }
+
+            // Persist the confirm state for next frame.
+            ui.memory_mut(|m| match &confirm {
+                Some(h) => m.data.insert_temp(confirm_id, h.clone()),
+                None => m.data.remove::<String>(confirm_id),
+            });
         });
-    if selected != *v {
-        *v = selected;
-    }
 }
 
 /// Render the numeric widget (slider) for a field. Called from inside a Grid row

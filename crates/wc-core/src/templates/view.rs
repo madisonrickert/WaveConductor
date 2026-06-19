@@ -28,7 +28,7 @@ pub struct TemplateRow {
 #[must_use]
 pub fn build_rows(lib: &TemplateLibrary) -> Vec<TemplateRow> {
     let mut entries: Vec<_> = lib.entries.iter().collect();
-    entries.sort_by(|a, b| b.imported_at.cmp(&a.imported_at));
+    entries.sort_by_key(|e| core::cmp::Reverse(e.imported_at));
     entries
         .into_iter()
         .map(|e| TemplateRow {
@@ -52,8 +52,15 @@ pub fn human_bytes(n: u64) -> String {
         // Round to nearest KB (not truncate): 482_133 B → 471 KB, not 470.
         format!("{} KB", (n + KB / 2) / KB)
     } else {
-        // u64 -> f64 is lossy only above 2^53 bytes (8 PB); irrelevant for images.
-        format!("{:.1} MB", n as f64 / MB as f64)
+        // Integer math avoids a u64 -> f64 cast; round the first decimal (with
+        // carry) so the MB tier rounds like the KB tier instead of truncating.
+        let whole = n / MB;
+        let tenths = ((n % MB) * 10 + MB / 2) / MB;
+        if tenths >= 10 {
+            format!("{}.0 MB", whole + 1)
+        } else {
+            format!("{whole}.{tenths} MB")
+        }
     }
 }
 

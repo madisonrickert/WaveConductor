@@ -50,12 +50,10 @@ pub fn ingest(dir: &Path, source: &Path) -> Result<TemplateEntry, IngestError> {
     let ext = source
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_else(|| "png".to_string());
+        .map_or_else(|| "png".to_string(), str::to_ascii_lowercase);
     let original_name = source
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| format!("{hash}.{ext}"));
+        .map_or_else(|| format!("{hash}.{ext}"), |n| n.to_string_lossy().into_owned());
 
     // Decode once for dimensions + thumbnail.
     let decoded = image::load_from_memory(&bytes).map_err(IngestError::Decode)?;
@@ -111,8 +109,7 @@ pub fn ingest(dir: &Path, source: &Path) -> Result<TemplateEntry, IngestError> {
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Absolute path to the blob for `entry` within `dir`.
