@@ -7776,12 +7776,14 @@ name = "wc-sketches"
 version = "5.0.0-dev"
 dependencies = [
  "bevy",
+ "bevy_egui",
  "bytemuck",
  "image",
  "leafwing-input-manager",
  "rand 0.9.4",
  "serde",
  "smallvec 1.15.1",
+ "tempfile",
  "toml",
  "tracing",
  "wc-core",
