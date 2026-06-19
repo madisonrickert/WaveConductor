@@ -51,6 +51,8 @@ pub mod sim_cpu;
 pub mod systems;
 pub mod template_adjustments;
 #[cfg(feature = "templates")]
+pub mod template_adjustments_panel;
+#[cfg(feature = "templates")]
 pub mod template_adjustments_store;
 
 pub use systems::LineRoot;
@@ -63,6 +65,8 @@ use wc_core::debug::DebugToggles;
 use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;
+#[cfg(feature = "templates")]
+use wc_core::settings::RegisterDockSectionExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
 use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
 
@@ -77,6 +81,14 @@ impl Plugin for LinePlugin {
         // settings_def; rendered by the custom dock section, persisted centrally).
         #[cfg(feature = "templates")]
         app.register_sketch_settings::<template_adjustments_store::LineTemplateAdjustments>();
+        // The per-image adjustment sliders render under the template picker via
+        // the settings dock's custom-section hook (render-only; state lives in
+        // the registered resource above).
+        #[cfg(feature = "templates")]
+        app.register_dock_section(
+            "line",
+            template_adjustments_panel::render_template_adjustments,
+        );
 
         // Register the picker-tile manifest entry (async screenshot load).
         register_line_manifest(app);
