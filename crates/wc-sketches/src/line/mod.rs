@@ -198,6 +198,18 @@ impl Plugin for LinePlugin {
             Update,
             systems::color_influence::drive_color_influence.run_if(sketch_active(AppState::Line)),
         );
+        // Prune per-image adjustments when the template library changes (delete,
+        // out-of-band removal, startup reconcile), keeping the persisted map in
+        // sync with the store.
+        #[cfg(feature = "templates")]
+        app.add_systems(
+            Update,
+            systems::prune_adjustments::prune_orphan_adjustments.run_if(
+                bevy::ecs::schedule::common_conditions::resource_exists_and_changed::<
+                    wc_core::templates::resource::TemplateLibrary,
+                >,
+            ),
+        );
 
         // Restart listener: begins the FadeOut phase of the reload overlay when
         // a requires_restart setting changes. The overlay's `drive_reload_state`

@@ -22,6 +22,8 @@
 pub mod color_influence;
 pub mod mouse;
 #[cfg(feature = "templates")]
+pub mod prune_adjustments;
+#[cfg(feature = "templates")]
 pub mod reseed;
 pub mod sim_params;
 pub mod spawn;
