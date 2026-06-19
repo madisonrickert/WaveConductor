@@ -6,7 +6,8 @@
 )]
 #![allow(
     clippy::expect_used,
-    reason = "expect with a clear message is appropriate in test code"
+    clippy::panic,
+    reason = "expect/panic with a clear message are appropriate in test code"
 )]
 
 use bevy::prelude::*;
@@ -213,5 +214,191 @@ fn autosave_fires_after_debounce_window() {
         (loaded.tempo_hz - 2.5).abs() < 1e-6,
         "got {}",
         loaded.tempo_hz
+    );
+}
+
+/// Mutate the `String` field `field_name` of `TestSketchSettings` through the
+/// *exact* reflection path the settings panel uses: clone the `AppTypeRegistry`
+/// Arc, fetch `ReflectResource`, take a `Mut<dyn Reflect>` over the resource,
+/// descend into the struct, `try_downcast_mut::<String>()`, and apply `set`.
+/// The outer `Mut` deref is what arms Bevy change detection — identical to
+/// `render_section_by_key` → `render_template_library`.
+fn mutate_string_via_reflect(app: &mut App, field_name: &str, set: impl FnOnce(&mut String)) {
+    use bevy::ecs::reflect::ReflectResource;
+    use bevy::reflect::ReflectMut;
+
+    let registry = app.world().resource::<AppTypeRegistry>().clone();
+    let reflect_resource = registry
+        .read()
+        .get_type_data::<ReflectResource>(std::any::TypeId::of::<TestSketchSettings>())
+        .cloned()
+        .expect("ReflectResource registered for TestSketchSettings");
+    let mut reflect_mut = reflect_resource
+        .reflect_mut(app.world_mut())
+        .expect("TestSketchSettings resource present");
+    let reflect: &mut dyn bevy::reflect::Reflect = &mut *reflect_mut;
+    match reflect.reflect_mut() {
+        ReflectMut::Struct(s) => {
+            let field = s.field_mut(field_name).expect("field exists");
+            let v = field
+                .try_downcast_mut::<String>()
+                .expect("field is a String");
+            set(v);
+        }
+        _ => panic!("TestSketchSettings is not a struct"),
+    }
+}
+
+/// Hypothesis (b), via the production `reflect_mut` path: set a `String` setting
+/// to a non-empty value (mimics template IMPORT), confirm it persists, then
+/// CLEAR it to "" (mimics template DELETE) and confirm the empty value also
+/// reaches disk after the debounce window.
+#[test]
+fn autosave_persists_empty_string_via_reflect_mut() {
+    use std::time::Duration;
+
+    let mut app = make_app();
+    app.update(); // baseline snapshot
+    app.world_mut()
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(100),
+        ));
+
+    // --- Phase 1: IMPORT (set non-empty) ---
+    mutate_string_via_reflect(&mut app, "dev_label", |s| *s = String::from("blob/abc.png"));
+    for _ in 0..7_u32 {
+        app.update();
+    }
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(
+        loaded.dev_label, "blob/abc.png",
+        "non-empty value set via reflect_mut must persist"
+    );
+
+    // --- Phase 2: DELETE (clear to "") ---
+    mutate_string_via_reflect(&mut app, "dev_label", String::clear);
+    for _ in 0..7_u32 {
+        app.update();
+    }
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(
+        loaded.dev_label, "",
+        "cleared empty value set via reflect_mut must persist, got {:?}",
+        loaded.dev_label
+    );
+}
+
+/// Same hypothesis (b) using plain `resource_mut` (isolates persistence from the
+/// reflect layer). If this passes but the reflect variant fails, the bug is in
+/// the reflect path; if both pass, the empty value persists in isolation and the
+/// real cause is elsewhere (timing / reload).
+#[test]
+fn autosave_persists_empty_string_via_resource_mut() {
+    use std::time::Duration;
+
+    let mut app = make_app();
+    app.update();
+    app.world_mut()
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(100),
+        ));
+
+    app.world_mut()
+        .resource_mut::<TestSketchSettings>()
+        .dev_label = String::from("blob/abc.png");
+    for _ in 0..7_u32 {
+        app.update();
+    }
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(loaded.dev_label, "blob/abc.png");
+
+    app.world_mut()
+        .resource_mut::<TestSketchSettings>()
+        .dev_label
+        .clear();
+    for _ in 0..7_u32 {
+        app.update();
+    }
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(
+        loaded.dev_label, "",
+        "cleared empty value must persist via resource_mut, got {:?}",
+        loaded.dev_label
+    );
+}
+
+/// Replicates the real panel timing: the settings dock marks the resource
+/// changed EVERY frame (the `reflect_mut` deref), which continuously resets the
+/// debounce timer so `tick` never fires while the dock is open. The only save is
+/// then `flush_on_exit`. Confirms the empty value still reaches disk under this
+/// continuous-re-arm pattern (i.e. timing is not the asymmetry).
+#[test]
+fn continuous_rearm_then_exit_persists_empty_string() {
+    use std::time::Duration;
+
+    let mut app = make_app();
+    app.update();
+    app.world_mut()
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(100),
+        ));
+
+    // Dock "open" with a non-empty value: touch every frame (no value change),
+    // re-arming the debounce so the tick never fires.
+    mutate_string_via_reflect(&mut app, "dev_label", |s| *s = String::from("blob/x.png"));
+    for _ in 0..10_u32 {
+        mutate_string_via_reflect(&mut app, "dev_label", |_| {});
+        app.update();
+    }
+    // Clear (delete), then keep the dock "open" (re-arming) for a while.
+    mutate_string_via_reflect(&mut app, "dev_label", String::clear);
+    for _ in 0..10_u32 {
+        mutate_string_via_reflect(&mut app, "dev_label", |_| {});
+        app.update();
+    }
+    // Quit: flush_on_exit is the only save opportunity.
+    app.world_mut().write_message(bevy::app::AppExit::Success);
+    app.update();
+
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(
+        loaded.dev_label, "",
+        "continuous re-arm + exit must still persist empty, got {:?}",
+        loaded.dev_label
+    );
+}
+
+/// Hypothesis (b), the `flush_on_exit` path: set then clear a String field and
+/// let an `AppExit`-triggered flush (not the debounce tick) write it. Confirms
+/// the empty value is not lost on shutdown specifically.
+#[test]
+fn flush_on_exit_persists_empty_string() {
+    let mut app = make_app();
+    app.update();
+
+    // Set non-empty, arm the debounce (no time advance so `tick` won't fire),
+    // then exit-flush.
+    app.world_mut()
+        .resource_mut::<TestSketchSettings>()
+        .dev_label = String::from("blob/x.png");
+    app.update(); // detect_changes arms the pending timer
+    app.world_mut().write_message(bevy::app::AppExit::Success);
+    app.update(); // flush_on_exit drains pending + saves
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(loaded.dev_label, "blob/x.png");
+
+    // Clear and exit-flush again.
+    app.world_mut()
+        .resource_mut::<TestSketchSettings>()
+        .dev_label
+        .clear();
+    app.update();
+    app.world_mut().write_message(bevy::app::AppExit::Success);
+    app.update();
+    let loaded = wc_core::settings::persistence::load::<TestSketchSettings>();
+    assert_eq!(
+        loaded.dev_label, "",
+        "flush_on_exit must persist empty, got {:?}",
+        loaded.dev_label
     );
 }

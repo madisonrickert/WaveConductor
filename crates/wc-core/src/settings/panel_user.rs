@@ -1121,7 +1121,12 @@ fn render_template_delete_confirm(
             if let Err(err) = store::delete(dir, &row.hash) {
                 tracing::warn!(?err, "template delete failed");
             }
-            if *v == row.managed_path {
+            // Clear the active template reference if it pointed at the blob we
+            // just deleted — matched by path OR by a now-missing backing file.
+            // The existence check (not bare string equality) heals a divergent
+            // or dead path, e.g. a raw source path from the file-picker fallback,
+            // which otherwise re-persists and warns "file missing" next launch.
+            if store::active_ref_is_stale(v, &row.managed_path) {
                 v.clear();
             }
             *dirty = true;

@@ -119,6 +119,23 @@ pub fn managed_path(dir: &Path, entry: &TemplateEntry) -> PathBuf {
     dir.join(format!("{}.{}", entry.hash, entry.ext))
 }
 
+/// Whether an active template reference (`active`, e.g. `LineSettings::spawn_template`)
+/// should be cleared after the template at `deleted_managed_path` was removed
+/// from the store.
+///
+/// True when the active reference is the just-deleted blob (exact match), OR its
+/// backing file no longer exists. The existence check is the load-bearing part:
+/// exact-string equality alone silently skips the clear whenever `active`
+/// diverges from the regenerated managed path — a raw source path written by the
+/// file-picker fallback, or any store/setting desync — leaving a dead path to be
+/// re-persisted (the "file missing, using default" bug). `delete` removes the
+/// blob first, so an active reference to it then fails the existence check and is
+/// caught. An unrelated delete that leaves `active`'s file intact returns false.
+#[must_use]
+pub fn active_ref_is_stale(active: &str, deleted_managed_path: &str) -> bool {
+    active == deleted_managed_path || (!active.is_empty() && !Path::new(active).exists())
+}
+
 /// Remove the blob, thumbnail, and manifest entry for `hash`. Missing files are
 /// ignored (idempotent). Returns the first I/O error from manifest persistence.
 pub fn delete(dir: &Path, hash: &str) -> std::io::Result<()> {

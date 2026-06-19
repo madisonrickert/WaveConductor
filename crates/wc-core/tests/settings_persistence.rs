@@ -80,6 +80,33 @@ fn save_then_load_round_trips() {
 }
 
 #[test]
+fn save_then_load_round_trips_empty_string_field() {
+    with_temp_dir(|_dir| {
+        // Mimics IMPORT: set the String field to a non-empty value, save, load.
+        let mut original = TestSketchSettings::default();
+        original.dev_label = String::from("blob/abc123.png");
+        persistence::save(&original);
+        let loaded = persistence::load::<TestSketchSettings>();
+        assert_eq!(
+            loaded.dev_label, "blob/abc123.png",
+            "non-empty must persist"
+        );
+
+        // Mimics DELETE-CLEAR: clear the same field to "", save over the
+        // existing file, load. Does an empty String round-trip through
+        // toml::to_string_pretty + the load path, or does it get dropped?
+        original.dev_label = String::new();
+        persistence::save(&original);
+        let loaded = persistence::load::<TestSketchSettings>();
+        assert_eq!(
+            loaded.dev_label, "",
+            "empty string did not round-trip: {:?}",
+            loaded.dev_label
+        );
+    });
+}
+
+#[test]
 fn enum_field_absent_from_file_falls_back_to_default() {
     use std::fs;
 
