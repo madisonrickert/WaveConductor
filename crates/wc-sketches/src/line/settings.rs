@@ -41,7 +41,14 @@
 //! - **`attract_particle_fraction`** — fraction of particles kept alive during
 //!   attract mode; the rest fade out and stay dead until wake. Dev-only knob.
 //! - **`attract_color_strength`** — peak strength of the attract-mode
-//!   velocity tint (meteor wakes pull toward a cool colour). Dev-only knob.
+//!   velocity tint (fast-moving particles pull toward a cool colour). Dev-only
+//!   knob.
+//! - **`attract_brightness`** — attract-mode brightness lift on particle rgb
+//!   so the calm field's whites clear the `AgX` tonemapper's white knee instead
+//!   of reading dim grey. `1.0` = off. Dev-only knob.
+//! - **`attract_turbulence`** — drift speed of the attract-mode noise
+//!   turbulence, the screensaver's primary slow-morph motion. `0.0` = off.
+//!   Dev-only knob.
 //! - **`synth_volume_scale`** — master output gain trim for the synth voice.
 //!   1.0 = unchanged. Lower values reduce kiosk loudness without touching
 //!   system volume.
@@ -167,12 +174,12 @@ pub struct LineSettings {
     #[serde(default = "default_attract_particle_fraction")]
     pub attract_particle_fraction: f32,
 
-    /// Peak strength of the attract-mode velocity tint (fast particles —
-    /// meteor wakes — pull toward a desaturated cool colour). Scaled by the
-    /// screensaver fade envelope, so it ramps in/out with attract mode and is
-    /// exactly 0 during live interaction. `0.0` disables the tint entirely;
-    /// keep it subtle — the calm field's warm-white personality must hold.
-    /// Dev-only knob.
+    /// Peak strength of the attract-mode velocity tint: fast-moving particles
+    /// (those a pulse has stirred up) pull toward a desaturated cool colour.
+    /// Scaled by the screensaver fade envelope, so it ramps in/out with attract
+    /// mode and is exactly 0 during live interaction. `0.0` disables the tint
+    /// entirely; keep it subtle — the calm field's warm-white personality must
+    /// hold. Dev-only knob.
     #[setting(
         default = 0.35_f32,
         min = 0.0_f32,
@@ -183,6 +190,44 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_attract_color_strength")]
     pub attract_color_strength: f32,
+
+    /// Attract-mode brightness lift: a multiplier on particle rgb while the
+    /// screensaver is showing, ramped in/out with the screensaver fade. The
+    /// calm attract field never drives pixels past the `AgX` tonemapper's white
+    /// knee, so its whites otherwise read as dim grey; lifting the particle
+    /// brightness pushes the bright cores (and the gravity smear that samples
+    /// them) back into `AgX`'s white region. `1.0` disables the lift (whites stay
+    /// dim); the default `2.2` keeps the calm field reading bright white. Exactly
+    /// `1.0` of effect during live interaction (the fade is `0`), so Active
+    /// rendering is unchanged. Dev-only knob.
+    #[setting(
+        default = 2.2_f32,
+        min = 1.0_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Attract brightness",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_brightness")]
+    pub attract_brightness: f32,
+
+    /// Attract-mode noise-turbulence drift speed (world px/s): how fast the
+    /// divergence-free curl-noise flow advects the screensaver field. This is
+    /// the screensaver's primary motion — a slow organic morph — so it is the
+    /// main "stir" knob. `0.0` freezes the field (only the gentle wandering
+    /// pulses move it); larger values stir harder, but past ~12 the cumulative
+    /// drift starts to tangle the line before the lifetime respawn heals it.
+    /// Only active during the screensaver. Dev-only knob.
+    #[setting(
+        default = 6.0_f32,
+        min = 0.0_f32,
+        max = 20.0_f32,
+        step = 0.5_f32,
+        label = "Attract turbulence",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_turbulence")]
+    pub attract_turbulence: f32,
 
     /// Master output gain trim for the synth voice. `1.0` = unchanged.
     /// Applied as a final multiplier on the `volume` audio param so kiosk
@@ -335,6 +380,14 @@ fn default_attract_particle_fraction() -> f32 {
 
 fn default_attract_color_strength() -> f32 {
     0.35
+}
+
+fn default_attract_brightness() -> f32 {
+    2.2
+}
+
+fn default_attract_turbulence() -> f32 {
+    6.0
 }
 
 fn default_synth_volume_scale() -> f32 {

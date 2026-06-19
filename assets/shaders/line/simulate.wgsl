@@ -33,7 +33,10 @@ struct Particle {
 struct Attractor {
     position: vec2<f32>,
     power: f32,
-    _pad: f32,
+    // Localized influence radius (world units). 0 = unbounded (constant-magnitude
+    // pull, v4 parity — what every current attractor uses); > 0 fades the pull
+    // to zero by `radius` (generic localized-attractor support).
+    radius: f32,
 };
 
 const MAX_ATTRACTORS: u32 = 8u;
@@ -49,11 +52,45 @@ struct SimParams {
     constrain_max: vec2<f32>,
     attract_gate: u32,
     attract_fraction: f32,
+    // Attract-mode noise turbulence: amplitude (0 = off), spatial frequency, and
+    // animation phase. _turb_pad keeps `attractors` 16-byte aligned.
+    turbulence_amp: f32,
+    turbulence_scale: f32,
+    turbulence_time: f32,
+    _turb_pad: f32,
     attractors: array<Attractor, MAX_ATTRACTORS>,
 };
 
 @group(0) @binding(0) var<uniform> params: SimParams;
 @group(0) @binding(1) var<storage, read_write> particles: array<Particle>;
+
+// Divergence-free "curl noise" turbulence force at a world-space point.
+//
+// We build a scalar stream function psi as a sum of two incommensurate sine
+// octaves, then take its 2D curl `(d psi/dy, -d psi/dx)`. The curl of any
+// scalar field is divergence-free by construction, so the flow has no sources
+// or sinks — particles drift and swirl organically but the field never
+// collapses inward (the failure mode a plain gradient/noise pull would have).
+// The constant `scale` factor from the chain rule (d/dx = scale * d/dX) is
+// folded into `turbulence_amp` by the caller rather than applied here.
+fn turbulence_force(pos: vec2<f32>, scale: f32, t: f32) -> vec2<f32> {
+    let x = pos.x * scale;
+    let y = pos.y * scale;
+    // Octave 1: base swirl, slow drift.
+    let a1 = x + 0.13 * t;
+    let b1 = y - 0.11 * t;
+    // Octave 2: half-wavelength detail drifting the other way.
+    let a2 = 2.0 * x - 0.17 * t;
+    let b2 = 2.0 * y + 0.15 * t;
+    // psi = sin(a1)cos(b1) + 0.5 sin(a2)cos(b2)
+    //   d psi/dX =  cos(a1)cos(b1) +     cos(a2)cos(b2)
+    //   d psi/dY = -sin(a1)sin(b1) -     sin(a2)sin(b2)
+    // (octave 2's factor-of-2 from the 2X/2Y argument cancels its 0.5 weight).
+    let dpsi_dx = cos(a1) * cos(b1) + cos(a2) * cos(b2);
+    let dpsi_dy = -sin(a1) * sin(b1) - sin(a2) * sin(b2);
+    // curl = (d psi/dy, -d psi/dx).
+    return vec2<f32>(dpsi_dy, -dpsi_dx);
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -98,7 +135,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let delta = a.position - p.position;
         let dist = max(length(delta), 1e-6);
         let dir = delta / dist;
-        let force_mag = a.power * params.size_scale;
+        var force_mag = a.power * params.size_scale;
+        // Localized attractors (radius > 0) fade their pull to zero by `radius`,
+        // so they only tug nearby particles rather than dragging the whole
+        // field. radius == 0 keeps the v4-parity unbounded constant-magnitude
+        // pull, which is what every current attractor uses (mouse, hands, pulses).
+        if (a.radius > 0.0) {
+            force_mag = force_mag * (1.0 - smoothstep(0.0, a.radius, dist));
+        }
         accel = accel + dir * force_mag;
     }
     p.velocity = p.velocity + accel * params.dt;
@@ -111,6 +155,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // --- Euler integration -----------------------------------------------
     p.position = p.position + p.velocity * params.dt;
+
+    // --- Attract-mode noise turbulence (position advection) --------------
+    // A gentle divergence-free flow field (curl noise) advects the particle
+    // position directly, so the calm field drifts organically between pulses
+    // instead of sitting dead. Advecting position (rather than adding a force)
+    // keeps the drift speed constant — `turbulence_amp` px/s — independent of
+    // the drag regime, so it cannot build up under the light "pulling" drag a
+    // pulse selects, and being divergence-free it never collapses the
+    // field. Off (amp == 0) during live interaction — provably inert.
+    if (attract && params.turbulence_amp > 0.0) {
+        let turb = turbulence_force(p.position, params.turbulence_scale, params.turbulence_time);
+        p.position = p.position + turb * params.turbulence_amp * params.dt;
+    }
 
     // --- Constrain to box; reset to original on OOB ----------------------
     let oob = (p.position.x < params.constrain_min.x ||
@@ -127,7 +184,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Survivors age while attract is on; past their CPU-seeded lifespan they
     // reset exactly like an OOB particle (home, still, alpha-0 re-fade), so
     // the image continuously self-heals. Lifespans are per-particle hashed
-    // (~20-45 s) so respawns stagger rather than arriving in waves. During
+    // (~10-18 s) so respawns stagger rather than arriving in waves. During
     // Active the age is pinned to 0, making the mechanism provably inert.
     if (attract) {
         p.age = p.age + params.dt;

@@ -24,22 +24,23 @@ DISABLE_BLOOM = "1"
 # ── Line screensaver / attract mode ─────────────────────────────────────────
 # Forces the app into SketchActivity::Screensaver at startup (FORCE_SCREENSAVER)
 # so the attract visual is captured deterministically. provider = "mock" (silent,
-# no synthetic hand): the motion comes from the sketch's own "Wandering Pulses +
-# Meteors" choreography (three slow Lissajous walkers pulsing 1.2 s of gentle
-# attraction once per 14 / 19 / 23.5 s, plus two meteor lanes crossing the frame
-# for 4 s once per 29 / 43 s on per-cycle hashed trajectories), not a tracked
-# hand. Frame indices are chosen against that schedule (dt = 1/60; walker 0's
-# first pulse spans t = 4.0–5.2 s, meteor lane 0's first crossing spans
-# t = 7.5–11.5 s, lane 1's spans t = 20.0–24.0 s; attract-mode lifetime respawns
-# begin at t = 20 s, the shortest seeded lifespan):
-#   180 (t= 3.0)  settled field, post fade-in — the fraction-thinned "picture"
-#   276 (t= 4.6)  pulse peak (walker 0 envelope = 1.0)
-#   495 (t= 8.25) meteor ramp-in (lane 0, u=0.19) overlapping walker 1's pulse
-#   570 (t= 9.5)  meteor plateau mid-crossing — comet wake + trailing smear glow
-#   666 (t=11.1)  meteor ramp-out (u=0.9), wake releasing
-#   780 (t=13.0)  settled again post-crossing, field healing home
-#  1320 (t=22.0)  meteor lane 1 plateau + first lifetime respawns fading back in
-#  1770 (t=29.5)  quiet late frame: respawn self-heal visibly rebuilding the line
+# no synthetic hand): the motion comes from the sketch's own "Wandering Pulses"
+# choreography (three slow Lissajous walkers pulsing 1.2 s of gentle attraction
+# once per 14 / 19 / 23.5 s) plus a gentle divergence-free noise turbulence that
+# slowly morphs the calm field — the screensaver's primary motion. (An earlier
+# composition also had fast "meteor" attractors; they were cut for jolting the
+# gravity smear too hard.) Frame indices sample a spread of the pulse schedule +
+# the steadily-building turbulence drift (dt = 1/60; walker 0's first pulse spans
+# t = 4.0–5.2 s; attract-mode lifetime respawns begin at t = 10 s, the shortest
+# seeded lifespan):
+#   180 (t= 3.0)  early field, post fade-in — gentle turbulence ripple only
+#   276 (t= 4.6)  walker 0 pulse peak (envelope = 1.0)
+#   495 (t= 8.25) between pulses — turbulence drift
+#   570 (t= 9.5)  between pulses — turbulence drift building
+#   666 (t=11.1)  between pulses — more developed drift
+#   780 (t=13.0)  later drift, first respawns healing home
+#  1320 (t=22.0)  steady-state morph + lifetime respawns fading back in
+#  1770 (t=29.5)  late frame: respawn self-heal + drift, line still readable
 #
 # ONE scenario, not three-per-tier: under the "Low-Rate Ember" Hot model the
 # thermal tier changes only the present *rate* (winit UpdateMode wait), which the

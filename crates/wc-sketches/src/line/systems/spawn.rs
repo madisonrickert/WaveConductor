@@ -40,10 +40,18 @@ use crate::line::sim_cpu::LineCpuMirror;
 pub struct LineRoot;
 
 /// Shortest attract-mode lifespan a particle can be seeded with, in seconds.
-pub const ATTRACT_LIFESPAN_MIN_SECS: f32 = 20.0;
+///
+/// Lowered from 20 s so the attract field cycles faster: particles reach their
+/// lifespan and respawn (teleport home, re-fade) sooner, giving the screensaver
+/// more continuous renewal instead of long-lived static strands.
+pub const ATTRACT_LIFESPAN_MIN_SECS: f32 = 10.0;
 
 /// Longest attract-mode lifespan a particle can be seeded with, in seconds.
-pub const ATTRACT_LIFESPAN_MAX_SECS: f32 = 45.0;
+/// Lowered from 45 s alongside [`ATTRACT_LIFESPAN_MIN_SECS`] for faster cycling.
+/// The upper bound also caps how far the cumulative noise turbulence
+/// ([`crate::line::screensaver`]) can carry a particle before it respawns, so a
+/// shorter max keeps the drifting field from tangling.
+pub const ATTRACT_LIFESPAN_MAX_SECS: f32 = 18.0;
 
 /// Salt XOR-ed into the index before hashing for [`attract_lifespan`], so the
 /// lifespan stream is decorrelated from the [`spawn_hash01`] stream (otherwise

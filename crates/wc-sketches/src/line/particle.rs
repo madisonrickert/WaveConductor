@@ -30,7 +30,7 @@ pub struct Particle {
     /// interaction so the lifetime mechanism is provably inert outside attract.
     pub age: f32,
     /// Attract-mode lifespan in seconds. CPU-seeded at spawn from a
-    /// deterministic per-index hash (uniform in ≈20–45 s — see
+    /// deterministic per-index hash (uniform in ≈10–18 s — see
     /// `systems::spawn::attract_lifespan`) so respawns stagger instead of
     /// arriving in visible waves. Never written by the kernel.
     pub lifespan: f32,
@@ -53,7 +53,8 @@ pub struct Particle {
     pub _pad: f32,
 }
 
-/// One gravitational attractor — position in world space + power (force scale).
+/// One gravitational attractor — position in world space + power (force scale)
+/// + an optional localized influence radius.
 ///
 /// `power == 0.0` means inactive; the simulate kernel skips zero-power entries.
 /// 16-byte aligned (4 × f32) matching the WGSL `struct Attractor` layout.
@@ -64,12 +65,14 @@ pub struct Attractor {
     pub position: [f32; 2],
     /// Force scale. Mouse attractor uses power=10 at press, decays geometrically.
     pub power: f32,
-    /// Padding to keep the struct 16-byte aligned (WGSL std140/storage rules).
-    #[allow(
-        clippy::pub_underscore_fields,
-        reason = "GPU struct layout padding must be pub for bytemuck"
-    )]
-    pub _pad: f32,
+    /// Localized influence radius in world units. `0.0` = unbounded (the
+    /// v4-parity constant-magnitude pull every particle feels — what every
+    /// current attractor uses: the mouse, hands, and the wandering pulses);
+    /// `> 0.0` smoothly fades the pull to zero by `radius` distance, so the
+    /// attractor only tugs nearby particles. Generic support for localized
+    /// attractors (no current caller sets it non-zero; it occupies the former
+    /// 16-byte alignment pad, so the struct size is unchanged).
+    pub radius: f32,
 }
 
 /// Maximum simultaneous attractors. Index 0 is the mouse; indices 1..=N are
@@ -114,14 +117,33 @@ pub struct SimParams {
     /// Attract-mode gate: `1` while the screensaver drives the sim, `0` during
     /// live (Active) interaction. Gates **both** attract-only mechanisms — the
     /// per-particle lifetime respawn and the fraction kill — so live behavior
-    /// is bit-identical to the pre-attract kernel. Doubles as header padding:
-    /// these two fields bring the 40-byte scalar header to 48 (a multiple of
-    /// 16) so the `attractors` array begins aligned.
+    /// is bit-identical to the pre-attract kernel. The scalar header (through
+    /// the turbulence block below) totals 64 bytes — a multiple of 16 — so the
+    /// `attractors` array begins aligned.
     pub attract_gate: u32,
     /// Survivor fraction `0..=1` for the attract-mode kill: particles whose
     /// `Particle::spawn_hash >= attract_fraction` fade out and stay dead while
     /// `attract_gate` is set. Ignored when the gate is `0`.
     pub attract_fraction: f32,
+    /// Attract-mode noise-turbulence drift speed (world px/s): the position is
+    /// advected along the curl-noise flow at this speed. `0.0` disables the
+    /// turbulence entirely (the live writer's value, so Active is provably
+    /// unchanged); the screensaver driver sets a small positive value so the
+    /// field drifts organically between pulses.
+    pub turbulence_amp: f32,
+    /// Spatial frequency of the turbulence flow (radians per world unit). Larger
+    /// = tighter swirls. Ignored when `turbulence_amp == 0.0`.
+    pub turbulence_scale: f32,
+    /// Animation phase for the turbulence flow (seconds of elapsed wall-clock).
+    /// Advancing it scrolls the divergence-free flow field so the drift evolves.
+    pub turbulence_time: f32,
+    /// Padding so `attractors` (16-byte aligned in WGSL) starts on a 16-byte
+    /// boundary — this turbulence block totals 16 bytes. Never read by the kernel.
+    #[allow(
+        clippy::pub_underscore_fields,
+        reason = "GPU struct layout padding must be pub for bytemuck"
+    )]
+    pub _turb_pad: f32,
     /// Attractor list. Entries `[0..attractor_count]` are live; the rest are
     /// zero-power and ignored.
     pub attractors: [Attractor; MAX_ATTRACTORS],

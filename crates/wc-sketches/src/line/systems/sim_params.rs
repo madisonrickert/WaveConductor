@@ -99,6 +99,31 @@ impl AttractGate {
     };
 }
 
+/// Attract-mode noise-turbulence parameters for the kernel's divergence-free
+/// drift force. Only the screensaver's attract writer supplies a non-zero
+/// amplitude; the live writer passes [`Turbulence::OFF`] so the force is
+/// provably inert during Active interaction (`turbulence_amp == 0.0` skips the
+/// kernel branch entirely).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Turbulence {
+    /// Drift speed (world px/s) the curl-noise flow advects positions at.
+    /// `0.0` disables the turbulence.
+    pub amp: f32,
+    /// Spatial frequency of the flow (radians per world unit).
+    pub scale: f32,
+    /// Animation phase (seconds of elapsed wall-clock).
+    pub time: f32,
+}
+
+impl Turbulence {
+    /// The live (Active-mode) value: turbulence fully off.
+    pub const OFF: Self = Self {
+        amp: 0.0,
+        scale: 0.0,
+        time: 0.0,
+    };
+}
+
 /// **Plan 11.8 Condition A1 (shared bake fn).** Build the full [`SimParams`] for a
 /// frame from a baked attractor array, the frame `dt`, and the window geometry.
 /// Both the live writer ([`update_sim_params`]) and the screensaver's
@@ -111,7 +136,9 @@ impl AttractGate {
 /// the array, matching the mouse/hand attractor treatment); `attractor_count`
 /// is the number of live entries. `dt` is the (uncapped) per-frame delta — the
 /// 50 ms cap is applied here. `gate` switches the attract-only lifetime/
-/// fraction mechanisms (live writer: [`AttractGate::OFF`]).
+/// fraction mechanisms (live writer: [`AttractGate::OFF`]); `turbulence`
+/// supplies the attract-only noise-drift force (live writer:
+/// [`Turbulence::OFF`]).
 #[must_use]
 pub fn bake_sim_params(
     dt: f32,
@@ -119,6 +146,7 @@ pub fn bake_sim_params(
     attractors: [Attractor; MAX_ATTRACTORS],
     attractor_count: u32,
     gate: AttractGate,
+    turbulence: Turbulence,
 ) -> SimParams {
     // --- Drag baking (v4-parity, against the FIXED dt, not render dt) ----
     let pulling_drag_baked = V4_PULLING_DRAG_CONSTANT.powf(V4_FIXED_DT);
@@ -144,6 +172,10 @@ pub fn bake_sim_params(
         constrain_max: [half_w, half_h],
         attract_gate: u32::from(gate.enabled),
         attract_fraction: gate.fraction,
+        turbulence_amp: turbulence.amp,
+        turbulence_scale: turbulence.scale,
+        turbulence_time: turbulence.time,
+        _turb_pad: 0.0,
         attractors,
     }
 }
@@ -197,7 +229,8 @@ pub fn update_sim_params(
             // Bake `gravity_constant` into the attractor's `power` so the
             // WGSL kernel can treat power uniformly across attractor sources.
             power: mouse.power * settings.gravity_constant,
-            _pad: 0.0,
+            // Unbounded pull (v4 parity): no current attractor localizes its radius.
+            radius: 0.0,
         };
         attractor_count = 1;
     }
@@ -222,15 +255,16 @@ pub fn update_sim_params(
             // Bake gravity_constant into power, matching the mouse
             // attractor's treatment.
             power: hand_attractor.power * settings.gravity_constant,
-            _pad: 0.0,
+            // Unbounded pull (v4 parity): no current attractor localizes its radius.
+            radius: 0.0,
         };
         attractor_count += 1;
         slot += 1;
     }
 
     // --- Bake via the shared baker (Condition A1) -------------------------
-    // `AttractGate::OFF`: the attract-only lifetime respawn + fraction kill
-    // never run during live interaction.
+    // `AttractGate::OFF` + `Turbulence::OFF`: the attract-only lifetime respawn,
+    // fraction kill, and noise turbulence never run during live interaction.
     let geom = WindowGeom::from_window(&window);
     sim.params = bake_sim_params(
         time.delta_secs(),
@@ -238,6 +272,7 @@ pub fn update_sim_params(
         attractors,
         attractor_count,
         AttractGate::OFF,
+        Turbulence::OFF,
     );
 
     // --- Gravity-smear post-process uniforms ---------------------------
@@ -280,18 +315,37 @@ mod tests {
         };
         let attractors = [Attractor::default(); MAX_ATTRACTORS];
 
-        // Live writer: gate off — both attract mechanisms disabled.
-        let live = bake_sim_params(0.016, geom, attractors, 0, AttractGate::OFF);
+        // Live writer: gate off — both attract mechanisms disabled, turbulence off.
+        let live = bake_sim_params(
+            0.016,
+            geom,
+            attractors,
+            0,
+            AttractGate::OFF,
+            Turbulence::OFF,
+        );
         assert_eq!(live.attract_gate, 0, "live bake must leave the gate off");
+        assert_eq!(
+            live.turbulence_amp, 0.0,
+            "live bake must leave turbulence off"
+        );
 
-        // Attract writer: gate on, fraction passed through verbatim.
+        // Attract writer: gate on, fraction passed through verbatim, turbulence on.
         let gate = AttractGate {
             enabled: true,
             fraction: 0.6,
         };
-        let attract = bake_sim_params(0.016, geom, attractors, 0, gate);
+        let turb = Turbulence {
+            amp: 12.0,
+            scale: 0.012,
+            time: 3.5,
+        };
+        let attract = bake_sim_params(0.016, geom, attractors, 0, gate, turb);
         assert_eq!(attract.attract_gate, 1);
         assert!((attract.attract_fraction - 0.6).abs() < 1e-6);
+        assert!((attract.turbulence_amp - 12.0).abs() < 1e-6);
+        assert!((attract.turbulence_scale - 0.012).abs() < 1e-6);
+        assert!((attract.turbulence_time - 3.5).abs() < 1e-6);
 
         // Everything the two writers share is identical — the gate is the
         // ONLY difference between live and attract baking (Condition A1).

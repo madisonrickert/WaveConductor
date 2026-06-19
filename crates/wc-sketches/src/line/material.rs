@@ -49,13 +49,15 @@ pub struct LineMaterial {
     /// builds always seed this with the off sentinel.
     #[uniform(3)]
     pub solid_color: Vec4,
-    /// Attract-mode velocity-color params: `x` = tint strength `0..=1`
-    /// (`ScreensaverFade × LineSettings::attract_color_strength`), `y`/`z`/`w`
-    /// reserved (zero). Driven by
-    /// [`crate::line::screensaver::drive_attract_color`]; spawned at (and
-    /// driven back to) [`Self::attract_color_off`] outside attract, where
-    /// strength 0 makes the fragment tint a provable no-op (`mix(rgb, _, 0.0)`
-    /// returns `rgb` bit-exactly) — Active rendering is unchanged.
+    /// Attract-mode color params: `x` = velocity-tint strength `0..=1`
+    /// (`ScreensaverFade × LineSettings::attract_color_strength`); `y` =
+    /// brightness lift (`ScreensaverFade × (LineSettings::attract_brightness −
+    /// 1)`), applied as `rgb *= 1 + y` so the calm field's whites clear the
+    /// `AgX` tonemapper's white knee; `z`/`w` reserved (zero). Driven by
+    /// [`crate::line::screensaver::drive_attract_color`]; spawned at (and driven
+    /// back to) [`Self::attract_color_off`] outside attract, where `x = y = 0`
+    /// makes both the tint (`mix(rgb, _, 0.0)`) and the lift (`rgb * 1.0`)
+    /// provable no-ops — Active rendering is unchanged.
     #[uniform(4)]
     pub attract_color: Vec4,
     /// Per-image colour-influence params: `x` = blend strength `0..=1` (the

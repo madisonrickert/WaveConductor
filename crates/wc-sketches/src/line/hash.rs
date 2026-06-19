@@ -1,11 +1,9 @@
 //! Deterministic integer hashing shared by the Line sketch's seeded systems.
 //!
-//! Both the spawn-time particle seeding ([`crate::line::systems::spawn`]) and
-//! the attract-mode meteor choreography
-//! ([`crate::line::screensaver::choreography`]) need *stateless, reproducible*
-//! pseudo-randomness: the same input always hashes to the same value, on every
-//! platform, with no RNG state. That is what keeps particle lifespans, the
-//! fraction-kill survivor set, and meteor trajectories capture-reproducible.
+//! The spawn-time particle seeding ([`crate::line::systems::spawn`]) needs
+//! *stateless, reproducible* pseudo-randomness: the same input always hashes to
+//! the same value, on every platform, with no RNG state. That is what keeps
+//! particle lifespans and the fraction-kill survivor set capture-reproducible.
 
 /// Wang's 32-bit integer mix.
 ///

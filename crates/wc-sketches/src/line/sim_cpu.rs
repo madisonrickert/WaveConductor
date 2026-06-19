@@ -54,6 +54,37 @@ pub fn step_cpu_mirror(
     }
 }
 
+/// Hermite smoothstep over `e0..e1`, clamped — mirrors WGSL's built-in
+/// `smoothstep`, used for the localized-attractor influence falloff.
+#[inline]
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * 2.0_f32.mul_add(-t, 3.0)
+}
+
+/// Divergence-free curl-noise turbulence flow — the exact CPU mirror of
+/// `turbulence_force` in `simulate.wgsl`. Returns the flow direction at `pos`;
+/// the caller advects position by `flow * speed * dt`. Allocation-free; keep in
+/// lock-step with the WGSL version (and re-check parity) on any change.
+#[inline]
+#[allow(
+    clippy::similar_names,
+    reason = "a1/b1/a2/b2 are the stream-function octave arguments; the paired \
+              names mirror the WGSL source and the math, renaming hurts clarity"
+)]
+fn turbulence_force(pos: [f32; 2], scale: f32, t: f32) -> [f32; 2] {
+    let x = pos[0] * scale;
+    let y = pos[1] * scale;
+    let a1 = x + 0.13 * t;
+    let b1 = y - 0.11 * t;
+    let a2 = 2.0 * x - 0.17 * t;
+    let b2 = 2.0 * y + 0.15 * t;
+    let dpsi_dx = a1.cos() * b1.cos() + a2.cos() * b2.cos();
+    let dpsi_dy = -a1.sin() * b1.sin() - a2.sin() * b2.sin();
+    // curl = (d psi/dy, -d psi/dx).
+    [dpsi_dy, -dpsi_dx]
+}
+
 /// Pure function, allocation-free: step a single particle. Called once per
 /// particle per frame from [`step_cpu_mirror`]; extracted for unit testing.
 /// Hot path — do not introduce branches or allocations.
@@ -83,10 +114,24 @@ pub fn step_one(p: &mut Particle, params: &SimParams) {
         let dy = a.position[1] - p.position[1];
         let dist = (dx * dx + dy * dy).sqrt().max(1e-6);
         let inv_dist = 1.0 / dist;
-        let force_mag = a.power * params.size_scale;
+        let mut force_mag = a.power * params.size_scale;
+        // Localized attractors (radius > 0) fade to zero by `radius`; radius == 0
+        // keeps the unbounded constant-magnitude pull (every current attractor).
+        if a.radius > 0.0 {
+            force_mag *= 1.0 - smoothstep(0.0, a.radius, dist);
+        }
         accel[0] += dx * inv_dist * force_mag;
         accel[1] += dy * inv_dist * force_mag;
     }
+
+    // Attract-mode noise turbulence (off — and provably inert — during Active,
+    // where turbulence_amp is 0).
+    if attract && params.turbulence_amp > 0.0 {
+        let turb = turbulence_force(p.position, params.turbulence_scale, params.turbulence_time);
+        accel[0] += turb[0] * params.turbulence_amp;
+        accel[1] += turb[1] * params.turbulence_amp;
+    }
+
     p.velocity[0] += accel[0] * params.dt;
     p.velocity[1] += accel[1] * params.dt;
 
@@ -151,6 +196,10 @@ mod tests {
             constrain_max: [100.0, 100.0],
             attract_gate: 0,
             attract_fraction: 1.0,
+            turbulence_amp: 0.0,
+            turbulence_scale: 0.0,
+            turbulence_time: 0.0,
+            _turb_pad: 0.0,
             attractors: [Attractor::default(); MAX_ATTRACTORS],
         }
     }
@@ -181,7 +230,7 @@ mod tests {
         params.attractors[0] = Attractor {
             position: [100.0, 0.0],
             power: 1000.0,
-            _pad: 0.0,
+            radius: 0.0,
         };
         let mut p = Particle {
             position: [0.0, 0.0],
@@ -355,5 +404,105 @@ mod tests {
         assert_eq!(gated.velocity, baseline.velocity);
         assert_eq!(gated.alpha, baseline.alpha);
         assert_eq!(gated.age, 0.0, "Active mode pins age to zero");
+    }
+
+    /// A roomy params (no constrain reset) for the radius / turbulence tests.
+    fn unbounded_box_params() -> SimParams {
+        let mut params = zero_attractor_params();
+        params.constrain_min = [-1.0e6, -1.0e6];
+        params.constrain_max = [1.0e6, 1.0e6];
+        params
+    }
+
+    fn still_particle(x: f32, y: f32) -> Particle {
+        Particle {
+            position: [x, y],
+            velocity: [0.0, 0.0],
+            original_xy: [x, y],
+            alpha: 1.0,
+            age: 0.0,
+            lifespan: 1.0e6,
+            spawn_hash: 0.0,
+            spawn_color: f32::from_bits(0x00FF_FFFF),
+            _pad: 0.0,
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the past-radius particle feels zero force, so its velocity/position stay bit-exact"
+    )]
+    fn localized_attractor_pull_falls_off_past_its_radius() {
+        // A radius-100 attractor at the origin pulls a particle inside the
+        // radius but leaves one well outside it untouched — the localized-pull
+        // falloff (an unbounded radius-0 attractor would pull both).
+        let mut params = unbounded_box_params();
+        params.attractor_count = 1;
+        params.attractors[0] = Attractor {
+            position: [0.0, 0.0],
+            power: 1000.0,
+            radius: 100.0,
+        };
+        let mut near = still_particle(40.0, 0.0); // dist 40 < radius
+        let mut far = still_particle(300.0, 0.0); // dist 300 > radius → no pull
+        step_one(&mut near, &params);
+        step_one(&mut far, &params);
+        assert!(
+            near.velocity[0] < -1.0,
+            "particle inside the radius is pulled inward, got {}",
+            near.velocity[0]
+        );
+        // smoothstep(0,100,300) == 1 → falloff 0 → no force; the only velocity
+        // change would be drag on its (zero) velocity, so it stays put.
+        assert_eq!(
+            far.velocity,
+            [0.0, 0.0],
+            "particle past the radius feels no pull"
+        );
+        assert_eq!(
+            far.position,
+            [300.0, 0.0],
+            "untouched particle does not move"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the off/inert paths must leave position bit-identical"
+    )]
+    fn turbulence_advects_only_in_attract_and_when_enabled() {
+        let mut params = unbounded_box_params();
+        params.attract_gate = 1;
+        params.attract_fraction = 1.0; // everyone survives the fraction gate
+        params.turbulence_scale = 0.01;
+        params.turbulence_time = 1.0;
+
+        // amp 0: no advection (the still particle has no other reason to move).
+        params.turbulence_amp = 0.0;
+        let mut off = still_particle(123.0, 45.0);
+        step_one(&mut off, &params);
+        assert_eq!(off.position, [123.0, 45.0], "amp 0 advects nothing");
+
+        // amp > 0 in attract: the curl flow advects the position.
+        params.turbulence_amp = 50.0;
+        let mut on = still_particle(123.0, 45.0);
+        step_one(&mut on, &params);
+        assert_ne!(
+            on.position,
+            [123.0, 45.0],
+            "turbulence advects the position"
+        );
+
+        // Same amp but Active (gate off): provably inert — position unchanged.
+        params.attract_gate = 0;
+        let mut active = still_particle(123.0, 45.0);
+        step_one(&mut active, &params);
+        assert_eq!(
+            active.position,
+            [123.0, 45.0],
+            "turbulence is inert when the attract gate is off"
+        );
     }
 }

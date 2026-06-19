@@ -27,10 +27,12 @@ struct Particle {
 // instead of the star texel. Set from `LineMaterial.solid_color`
 // (WC_DEBUG_SOLID_PARTICLES). Vec4(0) means "off" in normal runs and release.
 @group(2) @binding(3) var<uniform> solid_color: vec4<f32>;
-// Attract-mode velocity-color params. x = tint strength 0..1, driven from the
-// screensaver fade envelope x LineSettings::attract_color_strength by
-// `drive_attract_color`; y/z/w reserved (zero). Strength 0 (the Active-mode
-// value) makes the fragment tint a bit-exact no-op: mix(rgb, _, 0.0) == rgb.
+// Attract-mode velocity-color params. x = tint strength 0..1; y = brightness
+// lift (extra multiplier on the final rgb, so `rgb *= 1 + y`). Both are driven
+// from the screensaver fade envelope by `drive_attract_color`; z/w reserved
+// (zero). x = 0 makes the velocity tint a bit-exact no-op (mix(rgb, _, 0.0) ==
+// rgb) and y = 0 makes the brightness lift a bit-exact no-op (rgb * 1.0 == rgb),
+// so the Active-mode value Vec4::ZERO leaves live rendering unchanged.
 @group(2) @binding(4) var<uniform> attract_color: vec4<f32>;
 // Per-image colour-influence params. x = blend strength 0..1 (the active
 // template's `color_influence`), driven by `drive_color_influence`; y/z/w
@@ -54,10 +56,10 @@ struct VertexOutput {
 
 // Velocity band for the attract tint, in world px/s. Below LO the particle is
 // "calm" and renders exactly as today (warm star-sprite white); the tint
-// reaches full strength at HI. Tuned against the meteor wake: accel =
-// METEOR_PEAK_POWER (0.12) x gravity_constant (280) = ~34 px/s^2 sustained
-// over a 4 s crossing yields wake speeds of ~60-130 px/s, so calm drift stays
-// untinted and a deep wake saturates.
+// reaches full strength at HI. The slow noise turbulence drifts well below LO,
+// so the calm field stays untinted; only particles a wandering pulse has
+// stirred up (peak accel ~PULSE_PEAK_POWER x gravity_constant) move fast enough
+// to pick up the cool tint, so colour traces the perturbances.
 const WAKE_SPEED_LO: f32 = 30.0;
 const WAKE_SPEED_HI: f32 = 180.0;
 
@@ -136,10 +138,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // stationary particles to render at 5% brightness instead of the correct
     // ~89% (the star.png centre pixel is RGBA(228,221,222,237)).
     //
-    // Attract-only velocity tint ("tripper trap", kept subtle): fast
-    // particles — the meteor wakes — pull toward a desaturated cool tint, so
-    // colour literally traces the perturbances while the calm field keeps the
-    // warm-white personality. `wake` is zero when attract_color.x is zero
+    // Attract-only velocity tint ("tripper trap", kept subtle): fast-moving
+    // particles (those a wandering pulse has stirred up) pull toward a
+    // desaturated cool tint, so colour literally traces the perturbances while
+    // the calm field keeps the warm-white personality. `wake` is zero when
+    // attract_color.x is zero
     // (Active mode) OR the particle is calm (speed < WAKE_SPEED_LO), and
     // mix(rgb, _, 0.0) returns rgb bit-exactly — live rendering is unchanged.
     // Per-image colour influence: tint the star toward the particle's source
@@ -154,7 +157,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let base = mix(texel.rgb, texel.rgb * img_rgb, template_color.x);
     // Attract-only velocity tint applies on top of the image-coloured base.
     let wake = smoothstep(WAKE_SPEED_LO, WAKE_SPEED_HI, in.speed) * attract_color.x;
-    let rgb = mix(base, base * WAKE_TINT, wake);
+    let tinted = mix(base, base * WAKE_TINT, wake);
+    // Attract-mode brightness lift: the calm screensaver field never drives
+    // pixels past the AgX tonemapper's white knee, so its whites read as dim
+    // grey. Scaling the particle rgb up during attract pushes the bright cores
+    // (and the gravity smear that samples them) back into AgX's white region,
+    // so whites stay white. `attract_color.y == 0` (Active) is a bit-exact
+    // no-op; the lift ramps in/out with the screensaver fade.
+    let rgb = tinted * (1.0 + attract_color.y);
     // Final alpha = sprite-alpha × particle-alpha so quad corners fade smoothly.
     return vec4<f32>(rgb, texel.a * in.alpha);
 }

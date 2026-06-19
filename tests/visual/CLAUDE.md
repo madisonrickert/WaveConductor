@@ -63,30 +63,32 @@ Scenarios defined today:
 | `line-screensaver` | `line` | `mock` | `clean` | `[180, 276, 495, 570, 666, 780, 1320, 1770]` | `FORCE_SCREENSAVER` |
 
 The `line-screensaver` scenario drives Line's attract mode: the "Wandering
-Pulses + Meteors" choreography
+Pulses" choreography
 (`wc-sketches/src/line/screensaver/choreography.rs`) — three slow Lissajous
 walkers, each briefly pulsing gentle attraction (peak 0.35, 1.2 s on, once
-per 14 / 19 / 23.5 s), plus two meteor lanes whose invisible attractors
-cross the frame for 4 s once per 29 / 43 s on per-cycle hashed
-trajectories, dragging particles into comet wakes. Attract mode also thins
-the field to `attract_particle_fraction` (default 0.6) and respawns each
-surviving particle at its spawn position on a staggered ~20–45 s lifetime,
+per 14 / 19 / 23.5 s) — plus a gentle divergence-free noise turbulence
+(`attract_turbulence`) that slowly morphs the whole field, which is the
+screensaver's primary motion. (An earlier composition also had fast "meteor"
+attractors; they were cut for jolting the gravity smear too hard.) A
+fade-ramped brightness lift (`attract_brightness`) keeps the calm field's
+whites bright under the `AgX` tonemapper instead of dim grey. Attract mode also
+thins the field to `attract_particle_fraction` (default 0.6) and respawns each
+surviving particle at its spawn position on a staggered ~10–18 s lifetime,
 so the picture continuously self-heals. It forces
 `SketchActivity::Screensaver` at startup; the choreography is thermal-tier
 agnostic, so one scenario covers all tiers (the tier only changes present
-rate, which the capture clock ignores). The frame spread samples **rest →
-pulse peak → meteor ramp-in → meteor plateau → meteor ramp-out → rest →
-second meteor + first respawns → late self-heal** (indices documented in
-`scenarios.toml`).
+rate, which the capture clock ignores). The frame spread samples a spread of
+the pulse schedule + the steadily-building turbulence drift (indices documented
+in `scenarios.toml`).
 Expected per-frame signal: `delta_prev` ~10–30 (continuous gentle motion —
 never ~0/frozen, never the old grab's mass convergence). Review the PNGs to
 confirm: (a) visibly Line — the particle line spans the frame and stays
-readable in *every* frame (thinner than Active, by design), (b) pulses read
-as a gentle local bow/wave near the walker, not a collapse toward it, (c) a
-meteor pass reads as a traveling wake with the smear glow trailing it, with
-the field re-forming afterward, (d) rest frames are calm but not dead (soft
-smear-ripple halo), (e) wakes pick up a subtle cool tint (velocity color,
-attract-only), while calm regions keep the warm-white personality.
+readable in *every* frame (thinner than Active, by design), (b) the field
+slowly morphs into a gentle organic undulation (turbulence), never tangling
+into a knot, (c) pulses read as a gentle local bow/wave near the walker, not a
+collapse toward it, (d) whites stay bright white (not dim grey), and (e)
+stirred-up particles pick up a subtle cool tint (velocity color, attract-only),
+while calm regions keep the warm-white personality.
 
 Schema:
 
