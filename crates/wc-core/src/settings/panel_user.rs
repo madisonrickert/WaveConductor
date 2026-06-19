@@ -690,6 +690,7 @@ fn render_reset_cell(
                 .color(style.text_secondary);
             if ui
                 .add(egui::Button::new(glyph).frame(false))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Reset to default")
                 .clicked()
             {
@@ -939,12 +940,112 @@ fn load_thumb_texture(
     ))
 }
 
-/// Render one template row inside the dropdown: select-on-click plus a trailing
-/// trash button — or, when this row's hash is the one mid-confirm, an inline
-/// `Delete "name"? [Delete] [Cancel]`. Mutates `confirm` (the pending-delete
-/// hash), the field `v`, and `dirty` as the user acts.
+/// Width (px) reserved at a popup row's right edge for the `ScrollArea`'s
+/// floating scrollbar, so the trailing trash button never sits under it. egui's
+/// floating scrollbar overlays the content (it does not shrink `available_width`)
+/// — without this gutter the bar paints over the trash icon.
+#[cfg(feature = "templates")]
+const POPUP_SCROLLBAR_GUTTER: f32 = 16.0;
+
+/// Render one template row inside the dropdown: a full-row click target that
+/// selects the template, plus a trailing trash button that flips the row into a
+/// pending-delete state. The two-step `Delete "name"? [Delete] [Cancel]` confirm
+/// is rendered by the caller *below* the (closed) combobox — the popup's default
+/// `CloseOnClick` dismisses it the instant the trash button is clicked, so an
+/// in-popup confirm would be invisible until the next open. Mutates `confirm`
+/// (the pending-delete hash) and the field `v`.
 #[cfg(feature = "templates")]
 fn render_template_row(
+    row: &crate::templates::view::TemplateRow,
+    v: &mut String,
+    confirm: &mut Option<String>,
+    style: &OverlayStyle,
+    ui: &mut egui::Ui,
+) {
+    // The whole row is one fixed-height click target (so the thumbnail and
+    // whitespace select too, not just the text). A fixed height also stops the
+    // trailing right-to-left trash layout from expanding each row to the popup
+    // height — which is what hid all but one row. The width is inset by the
+    // scrollbar gutter so the trash button clears the floating scrollbar.
+    let row_h = 40.0_f32;
+    let row_w = (ui.available_width() - POPUP_SCROLLBAR_GUTTER).max(0.0);
+    let (row_rect, row_resp) =
+        ui.allocate_exact_size(egui::vec2(row_w, row_h), egui::Sense::click());
+    let row_resp = row_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    // Full-row background for selected / hover, so selection reads as a row
+    // rather than a text-tight highlight (which looked like a copy/paste
+    // selection of the label).
+    let bg = if *v == row.managed_path {
+        style.accent_weak
+    } else if row_resp.hovered() {
+        egui::Color32::from_white_alpha(24)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    if bg != egui::Color32::TRANSPARENT {
+        ui.painter()
+            .rect_filled(row_rect, egui::CornerRadius::same(3), bg);
+    }
+
+    // Content drawn into the pre-allocated rect (no second cursor advance).
+    let mut cui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(row_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    if let Some(tid) = row.thumb {
+        cui.add(
+            egui::Image::new(egui::load::SizedTexture::new(tid, egui::vec2(36.0, 36.0)))
+                .fit_to_exact_size(egui::vec2(36.0, 36.0)),
+        );
+    }
+    // Cap the text column so a long name elides with `…` instead of colliding
+    // with the trash button or stretching the row; full name shows on hover.
+    let trash_budget = 28.0 + cui.spacing().item_spacing.x;
+    let text_w = (cui.available_width() - trash_budget).max(0.0);
+    cui.vertical(|ui| {
+        ui.set_max_width(text_w);
+        ui.add(egui::Label::new(row.label.as_str()).truncate())
+            .on_hover_text(row.label.as_str());
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(row.subtext.as_str())
+                    .size(10.0)
+                    .color(style.text_faint),
+            )
+            .truncate(),
+        );
+    });
+    // Trailing frameless trash button, right-aligned in the remaining slice.
+    cui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let trash = egui::RichText::new(phosphor::TRASH)
+            .family(egui::FontFamily::Name("phosphor".into()))
+            .color(style.text_secondary);
+        if ui
+            .add(egui::Button::new(trash).frame(false))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Delete from cache")
+            .clicked()
+        {
+            *confirm = Some(row.hash.clone());
+        }
+    });
+
+    // Clicking anywhere on the row selects it — guarded so a trash click (which
+    // sets `confirm`) doesn't also change the selection.
+    if row_resp.clicked() && confirm.is_none() {
+        v.clone_from(&row.managed_path);
+    }
+}
+
+/// Render the two-step delete confirm below the (closed) combobox: a prompt line
+/// plus `[Delete] [Cancel]`. Lives outside the popup so it stays visible after
+/// the trash click closes it. On `Delete`: removes the blob from the store,
+/// clears the field if the deleted template was active (the sketch falls back to
+/// its default layout), and sets `dirty` so the caller reloads the library.
+#[cfg(feature = "templates")]
+fn render_template_delete_confirm(
     row: &crate::templates::view::TemplateRow,
     v: &mut String,
     dir: &std::path::Path,
@@ -954,115 +1055,42 @@ fn render_template_row(
     ui: &mut egui::Ui,
 ) {
     use crate::templates::store;
-    if confirm.as_deref() == Some(row.hash.as_str()) {
-        // Inline two-step delete confirm replaces the row body.
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("Delete \"{}\"?", row.label)).color(style.error_red),
-            );
-            if ui
-                .button(egui::RichText::new("Delete").color(style.error_red))
-                .clicked()
-            {
-                if let Err(err) = store::delete(dir, &row.hash) {
-                    tracing::warn!(?err, "template delete failed");
-                }
-                // Clear the field if the active template was deleted; the sketch
-                // falls back to its default layout.
-                if *v == row.managed_path {
-                    v.clear();
-                }
-                *dirty = true;
-                *confirm = None;
+    ui.label(egui::RichText::new(format!("Delete \"{}\"?", row.label)).color(style.error_red));
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Delete").color(style.error_red),
+            ))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            if let Err(err) = store::delete(dir, &row.hash) {
+                tracing::warn!(?err, "template delete failed");
             }
-            if ui.button("Cancel").clicked() {
-                *confirm = None;
+            if *v == row.managed_path {
+                v.clear();
             }
-        });
-    } else {
-        // The whole row is one fixed-height click target (so the thumbnail and
-        // whitespace select too, not just the text). A fixed height also stops
-        // the trailing right-to-left trash layout from expanding each row to the
-        // popup height — which is what hid all but one row.
-        let row_h = 40.0_f32;
-        let (row_rect, row_resp) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), row_h),
-            egui::Sense::click(),
-        );
-
-        // Full-row background for selected / hover, so selection reads as a row
-        // rather than a text-tight highlight (which looked like a copy/paste
-        // selection of the label).
-        let bg = if *v == row.managed_path {
-            style.accent_weak
-        } else if row_resp.hovered() {
-            egui::Color32::from_white_alpha(10)
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        if bg != egui::Color32::TRANSPARENT {
-            ui.painter()
-                .rect_filled(row_rect, egui::CornerRadius::same(3), bg);
+            *dirty = true;
+            *confirm = None;
         }
-
-        // Content drawn into the pre-allocated rect (no second cursor advance).
-        let mut cui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(row_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        if let Some(tid) = row.thumb {
-            cui.add(
-                egui::Image::new(egui::load::SizedTexture::new(tid, egui::vec2(36.0, 36.0)))
-                    .fit_to_exact_size(egui::vec2(36.0, 36.0)),
-            );
+        if ui
+            .button("Cancel")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *confirm = None;
         }
-        // Cap the text column so a long name elides with `…` instead of colliding
-        // with the trash button or stretching the row; full name shows on hover.
-        let trash_budget = 28.0 + cui.spacing().item_spacing.x;
-        let text_w = (cui.available_width() - trash_budget).max(0.0);
-        cui.vertical(|ui| {
-            ui.set_max_width(text_w);
-            ui.add(egui::Label::new(row.label.as_str()).truncate())
-                .on_hover_text(row.label.as_str());
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(row.subtext.as_str())
-                        .size(10.0)
-                        .color(style.text_faint),
-                )
-                .truncate(),
-            );
-        });
-        // Trailing frameless trash button, right-aligned in the remaining slice.
-        cui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let trash = egui::RichText::new(phosphor::TRASH)
-                .family(egui::FontFamily::Name("phosphor".into()))
-                .color(style.text_secondary);
-            if ui
-                .add(egui::Button::new(trash).frame(false))
-                .on_hover_text("Delete from cache")
-                .clicked()
-            {
-                *confirm = Some(row.hash.clone());
-            }
-        });
-
-        // Clicking anywhere on the row selects it — guarded so a trash click
-        // (which sets `confirm`) doesn't also change the selection.
-        if row_resp.clicked() && confirm.is_none() {
-            v.clone_from(&row.managed_path);
-        }
-    }
+    });
 }
 
 /// Render the template-library picker: a `ComboBox` of cached templates. The
 /// pinned top row imports a new image (file dialog → ingest → select); each
-/// existing row selects on click (`selectable_label` closes the popup), with a
-/// trailing trash button (a `Button`, which keeps the popup open) that flips the
-/// row into an inline two-step delete confirm. `dirty` is set when an
-/// import/delete mutates the store so the caller reloads the in-memory library.
-/// Thumbnails land in the next task.
+/// existing row selects on click, with a trailing trash button that flips the
+/// row into a pending-delete state. The `Delete "name"? [Delete] [Cancel]`
+/// confirm renders *below* the closed combobox (the popup's default
+/// `CloseOnClick` dismisses it on the trash click, so an in-popup confirm would
+/// be invisible until reopen). `dirty` is set when an import/delete mutates the
+/// store so the caller reloads the in-memory library.
 #[cfg(feature = "templates")]
 #[expect(
     clippy::too_many_arguments,
@@ -1096,99 +1124,132 @@ fn render_template_library(
         .map_or("(none)", |r| r.label.as_str());
 
     // Which hash (if any) is mid delete-confirm. Stored in egui memory so it
-    // survives frames without a Bevy resource.
+    // survives frames without a Bevy resource. Read before the combobox so the
+    // in-popup trash button can set it and the confirm prompt below the closed
+    // combobox can read it.
     let confirm_id = egui::Id::new(("wc-template-confirm", storage_key, field_name));
+    let mut confirm: Option<String> = ui.memory(|m| m.data.get_temp(confirm_id));
 
-    // Bound the closed-state width so a long selected name can't stretch the
-    // dropdown or push the grid's column-3 reset glyph off the panel; `.truncate()`
-    // clips the selected text with `…` instead of letting it overflow.
-    let combo_w = ui.available_width().min(220.0);
+    // Fill the panel with the picker while keeping the column-3 reset glyph
+    // on-panel. `clip_rect().width()` is the scroll viewport's stable width —
+    // unlike the grid cell's `available_width()`, which collapses on the first
+    // frame inside the auto-shrink scroll area (that was the "first open is too
+    // narrow" bug). Reserve room for the label (col 1) and the reset glyph
+    // (col 3), then clamp.
+    let combo_w = (ui.clip_rect().width() - 170.0).clamp(180.0, 380.0);
 
-    egui::ComboBox::from_id_salt(("wc-template-lib", storage_key, field_name))
-        .selected_text(selected_text)
-        .width(combo_w)
-        .truncate()
-        .height(320.0)
-        .show_ui(ui, |ui| {
-            // Pinned import row: the ＋ glyph (phosphor font, accent) followed by a
-            // readable sentence (proportional font). A LayoutJob mixes the two
-            // fonts in one widget — a single RichText family would force the Latin
-            // text through the icon font and render it garbled.
-            let mut import_label = egui::text::LayoutJob::default();
-            import_label.append(
-                phosphor::PLUS,
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(14.0, egui::FontFamily::Name("phosphor".into())),
-                    color: style.accent_bright,
-                    ..Default::default()
-                },
-            );
-            import_label.append(
-                "  Import image\u{2026}",
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(13.0, egui::FontFamily::Proportional),
-                    color: style.text_primary,
-                    ..Default::default()
-                },
-            );
-            if ui.selectable_label(false, import_label).clicked() {
-                // Native-only: rfd's synchronous `FileDialog` does not compile on
-                // wasm. The whole `templates` feature is native (it also pulls the
-                // native-only `image` crate), mirroring `hand-tracking-mediapipe`;
-                // this guard matches `render_file_path`'s own rfd guard.
-                #[cfg(not(target_arch = "wasm32"))]
+    // Bound the picker to `combo_w` inside a child scope. A long selected name
+    // grows the closed button toward `available_width` (the `.width()` below is
+    // only a minimum), so bounding the surrounding width is what keeps the reset
+    // glyph on-panel. The scope is essential: the Grid shares one `ui` across all
+    // cells and rows, so a bare `set_max_width` here would shrink the reset
+    // column and every later row.
+    ui.scope(|ui| {
+        ui.set_max_width(combo_w);
+
+        egui::ComboBox::from_id_salt(("wc-template-lib", storage_key, field_name))
+            .selected_text(selected_text)
+            .width(combo_w)
+            .truncate()
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                // Pinned import row: the ＋ glyph (phosphor font, accent) followed by a
+                // readable sentence (proportional font). A LayoutJob mixes the two
+                // fonts in one widget — a single RichText family would force the Latin
+                // text through the icon font and render it garbled.
+                let mut import_label = egui::text::LayoutJob::default();
+                import_label.append(
+                    phosphor::PLUS,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::new(14.0, egui::FontFamily::Name("phosphor".into())),
+                        color: style.accent_bright,
+                        ..Default::default()
+                    },
+                );
+                import_label.append(
+                    "  Import image\u{2026}",
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::new(13.0, egui::FontFamily::Proportional),
+                        color: style.text_primary,
+                        ..Default::default()
+                    },
+                );
+                if ui
+                    .selectable_label(false, import_label)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
                 {
-                    let mut dlg = rfd::FileDialog::new();
-                    if !extensions.is_empty() {
-                        dlg = dlg.add_filter(filter_label, extensions);
-                    }
-                    if let Some(path) = dlg.pick_file() {
-                        match store::ingest(&dir, &path) {
-                            Ok(entry) => {
-                                *v = store::managed_path(&dir, &entry)
-                                    .to_string_lossy()
-                                    .into_owned();
-                                *dirty = true;
+                    // Native-only: rfd's synchronous `FileDialog` does not compile on
+                    // wasm. The whole `templates` feature is native (it also pulls the
+                    // native-only `image` crate), mirroring `hand-tracking-mediapipe`;
+                    // this guard matches `render_file_path`'s own rfd guard.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let mut dlg = rfd::FileDialog::new();
+                        if !extensions.is_empty() {
+                            dlg = dlg.add_filter(filter_label, extensions);
+                        }
+                        if let Some(path) = dlg.pick_file() {
+                            match store::ingest(&dir, &path) {
+                                Ok(entry) => {
+                                    *v = store::managed_path(&dir, &entry)
+                                        .to_string_lossy()
+                                        .into_owned();
+                                    *dirty = true;
+                                }
+                                Err(err) => tracing::warn!(?err, "template import failed"),
                             }
-                            Err(err) => tracing::warn!(?err, "template import failed"),
                         }
                     }
                 }
-            }
-            ui.separator();
+                ui.separator();
 
-            if rows.is_empty() {
-                ui.label(
-                    egui::RichText::new("No templates yet")
-                        .italics()
-                        .color(style.text_faint),
-                );
-            }
+                if rows.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No templates yet")
+                            .italics()
+                            .color(style.text_faint),
+                    );
+                }
 
-            let mut confirm: Option<String> = ui.memory(|m| m.data.get_temp(confirm_id));
-
-            for row in rows {
-                render_template_row(row, v, &dir, &mut confirm, dirty, style, ui);
-            }
-
-            // Persist the confirm state for next frame.
-            ui.memory_mut(|m| match &confirm {
-                Some(h) => m.data.insert_temp(confirm_id, h.clone()),
-                None => m.data.remove::<String>(confirm_id),
+                for row in rows {
+                    render_template_row(row, v, &mut confirm, style, ui);
+                }
             });
-        });
 
-    // Honest status: a non-empty active path whose file is gone reads as missing
-    // (the sketch falls back to its default layout).
-    if !v.is_empty() && !std::path::Path::new(v.as_str()).exists() {
-        ui.label(
-            egui::RichText::new("file missing, using default")
-                .size(10.0)
-                .color(style.warn_amber),
-        );
-    }
+        // Two-step delete confirm, rendered BELOW the closed combobox (inside the
+        // bounded scope so a long prompt can't widen the column) so it stays
+        // visible after the trash click closes the popup (default `CloseOnClick`).
+        if let Some(hash) = confirm.clone() {
+            match rows.iter().find(|r| r.hash == hash) {
+                Some(row) => {
+                    render_template_delete_confirm(row, v, &dir, &mut confirm, dirty, style, ui);
+                }
+                // The pending row vanished (e.g. reconciled away out-of-band);
+                // drop the stale confirm so the prompt does not linger.
+                None => confirm = None,
+            }
+        }
+
+        // Honest status: a non-empty active path whose file is gone reads as
+        // missing (the sketch falls back to its default layout).
+        if !v.is_empty() && !std::path::Path::new(v.as_str()).exists() {
+            ui.label(
+                egui::RichText::new("file missing, using default")
+                    .size(10.0)
+                    .color(style.warn_amber),
+            );
+        }
+    });
+
+    // Persist the confirm state for next frame, after the scope releases its
+    // borrow of `confirm`.
+    ui.memory_mut(|m| match &confirm {
+        Some(h) => m.data.insert_temp(confirm_id, h.clone()),
+        None => m.data.remove::<String>(confirm_id),
+    });
 }
 
 /// Render the numeric widget (slider) for a field. Called from inside a Grid row
