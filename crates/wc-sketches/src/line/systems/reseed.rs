@@ -29,15 +29,18 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
+use bevy::sprite_render::MeshMaterial2d;
 use bytemuck::cast_slice;
 
 use crate::line::compute::LineSimParams;
 use crate::line::heatmap::sample_from_heatmap;
+use crate::line::material::LineMaterial;
 use crate::line::particle::Particle;
 use crate::line::settings::LineSettings;
 use crate::line::systems::spawn::make_particle;
 use crate::line::template_adjustments::{pack_rgb8, TemplateAdjustments};
 use crate::line::template_adjustments_store::{hash_of_path_str, LineTemplateAdjustments};
+use crate::line::LineRoot;
 
 /// Quiescence window before a re-seed fires (so a slider drag coalesces).
 const RESEED_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -63,12 +66,21 @@ pub fn position_fields_changed(a: &TemplateAdjustments, b: &TemplateAdjustments)
 }
 
 /// Debounced in-place re-seed when the active template's position knobs change.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system: adjustments, settings, sim, window, buffers, materials, roots, time, state"
+)]
 pub fn reseed_on_adjustments_change(
     adjustments: Res<'_, LineTemplateAdjustments>,
     settings: Res<'_, LineSettings>,
     sim: Option<Res<'_, LineSimParams>>,
     window: Single<'_, '_, &Window>,
     mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
+    // The render buffer is *recreated* on re-upload (Bevy's ShaderStorageBuffer
+    // prepare does `create_buffer_with_data`), which invalidates the material's
+    // cached bind group; touch the material so it rebinds to the new buffer.
+    roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<LineMaterial>>,
     time: Res<'_, Time>,
     mut state: Local<'_, ReseedState>,
 ) {
@@ -118,14 +130,27 @@ pub fn reseed_on_adjustments_change(
         .map(|(i, sp)| {
             let x = sp.pos.x - half_w;
             let y = -(sp.pos.y - half_h);
-            make_particle(i as u32, x, y, pack_rgb8(sp.color))
+            let mut p = make_particle(i as u32, x, y, pack_rgb8(sp.color));
+            // Immediately visible (vs the spawn's fade-in-from-0): a live preview
+            // should show the new layout at once, not flash invisible each tweak.
+            p.alpha = 1.0;
+            p
         })
         .collect();
 
-    // Re-upload in place: setting the asset's bytes via `get_mut` marks it
-    // changed, so the render world re-extracts and re-uploads the GPU buffer.
-    if let Some(buf) = buffers.get_mut(&sim.particles_handle) {
+    // Re-upload: setting the asset's bytes via `get_mut` marks it changed, so the
+    // render world re-extracts and re-creates the GPU buffer.
+    if buffers.get_mut(&sim.particles_handle).is_some_and(|buf| {
         buf.data = Some(cast_slice::<Particle, u8>(&particles).to_vec());
+        true
+    }) {
+        // The buffer was recreated (new GpuBuffer), so the material's cached bind
+        // group now points at the freed buffer. Touch the material to force a
+        // bind-group rebind — without this the render stays frozen on the stale
+        // buffer until something else marks the material changed.
+        for handle in &roots {
+            let _ = materials.get_mut(&handle.0);
+        }
     }
 }
 
