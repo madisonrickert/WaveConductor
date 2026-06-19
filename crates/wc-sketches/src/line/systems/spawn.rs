@@ -145,18 +145,22 @@ pub fn spawn_line(
         }
         v
     } else {
-        // Window-space positions from the heatmap sampler.
+        // Window-space positions + per-particle colours from the heatmap
+        // sampler. Task 7 swaps `default()` for the active image's adjustments;
+        // defaults reproduce the prior behaviour exactly. The sampled colour is
+        // wired into the particle in Task 3 (GPU spawn-colour field).
         let path = Path::new(&settings.spawn_template);
-        let positions = sample_from_heatmap(path, w, win_h, count as usize);
-        positions
+        let adj = crate::line::template_adjustments::TemplateAdjustments::default();
+        let sampled = sample_from_heatmap(path, w, win_h, count as usize, &adj);
+        sampled
             .into_iter()
             .enumerate()
-            .map(|(i, win_pos)| {
+            .map(|(i, sp)| {
                 // Convert window-space (top-left origin, +y down) to centered
                 // world-space (+y up) — the coordinate system the rest of the
                 // sketch uses.
-                let x = win_pos.x - half_w;
-                let y = -(win_pos.y - half_h);
+                let x = sp.pos.x - half_w;
+                let y = -(sp.pos.y - half_h);
                 Particle {
                     position: [x, y],
                     velocity: [0.0, 0.0],

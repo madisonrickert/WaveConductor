@@ -31,3 +31,4 @@ rand.workspace = true
 [dev-dependencies]
 smallvec.workspace = true
 toml = { workspace = true }
+tempfile.workspace = true
