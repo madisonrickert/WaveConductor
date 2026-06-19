@@ -197,10 +197,6 @@ fn draw_user_panel(world: &mut World) {
     // registry resource is absent (tests, `Off` with an empty registry).
     let provider_status = provider_status_snapshot(world);
 
-    // Snapshot the template library into display rows before the egui closure
-    // borrows `world`. Empty when the feature is off or the resource is absent.
-    #[cfg(feature = "templates")]
-    let template_rows = template_library_rows(world);
     // Set true inside the closure when an import/delete changed the store, so the
     // in-memory library resource is reloaded after the closure releases `world`.
     #[cfg(feature = "templates")]
@@ -235,6 +231,12 @@ fn draw_user_panel(world: &mut World) {
     // borrow before the `show` closure re-enters `World` to render each section.
     let ctx = ctx.clone();
     state.apply(world);
+
+    // Snapshot the template library into display rows (lazily decoding each
+    // thumbnail into a cached egui texture) before the dock closure borrows
+    // `world`. After the ctx clone so the loader can upload textures.
+    #[cfg(feature = "templates")]
+    let template_rows = template_library_rows(world, &ctx);
 
     egui::Area::new(egui::Id::new("wc-settings-dock"))
         .order(egui::Order::Foreground)
@@ -853,14 +855,81 @@ fn render_widget_value(
     }
 }
 
-/// Snapshot the template library into display rows before the egui closure
-/// borrows `world`. Empty when the `TemplateLibrary` resource is absent.
+/// Snapshot the template library into display rows, lazily decoding each
+/// thumbnail into a session-cached egui texture and attaching its id. Built
+/// after the egui ctx clone (it needs `ctx` to upload textures) but before the
+/// dock closure borrows `world`. Empty when the resource is absent.
 #[cfg(feature = "templates")]
-fn template_library_rows(world: &mut World) -> Vec<crate::templates::view::TemplateRow> {
+fn template_library_rows(
+    world: &mut World,
+    ctx: &egui::Context,
+) -> Vec<crate::templates::view::TemplateRow> {
+    use crate::templates::resource::{TemplateLibrary, TemplateThumbnailCache};
+
+    // Pull the rows + (hash, thumb-path) list out so the immutable library
+    // borrow is released before we mutate the thumbnail cache below.
+    let (mut rows, entries) = {
+        let Some(lib) = world.get_resource::<TemplateLibrary>() else {
+            return Vec::new();
+        };
+        let rows = crate::templates::view::build_rows(lib);
+        let entries: Vec<(String, std::path::PathBuf)> = lib
+            .entries
+            .iter()
+            .map(|e| (e.hash.clone(), lib.dir.join(&e.thumb)))
+            .collect();
+        (rows, entries)
+    };
+
+    // Decode + upload any thumbnail not already cached (one-time per session).
+    let needed: Vec<(String, std::path::PathBuf)> = {
+        let cache = world.resource::<TemplateThumbnailCache>();
+        entries
+            .iter()
+            .filter(|(hash, _)| !cache.0.contains_key(hash))
+            .cloned()
+            .collect()
+    };
+    for (hash, thumb_path) in needed {
+        if let Some(handle) = load_thumb_texture(ctx, &hash, &thumb_path) {
+            world
+                .resource_mut::<TemplateThumbnailCache>()
+                .0
+                .insert(hash, handle);
+        }
+    }
+
+    // Drop cached textures whose template was deleted (frees the GPU texture).
+    let live: std::collections::HashSet<String> =
+        entries.iter().map(|(hash, _)| hash.clone()).collect();
     world
-        .get_resource::<crate::templates::resource::TemplateLibrary>()
-        .map(crate::templates::view::build_rows)
-        .unwrap_or_default()
+        .resource_mut::<TemplateThumbnailCache>()
+        .0
+        .retain(|hash, _| live.contains(hash));
+
+    // Attach texture ids to the rows.
+    let cache = world.resource::<TemplateThumbnailCache>();
+    for row in &mut rows {
+        row.thumb = cache.0.get(&row.hash).map(egui::TextureHandle::id);
+    }
+    rows
+}
+
+/// Decode a baked thumbnail PNG and upload it as a session-lived egui texture.
+/// `None` on any read/decode failure (the row then renders without a thumbnail).
+#[cfg(feature = "templates")]
+fn load_thumb_texture(
+    ctx: &egui::Context,
+    hash: &str,
+    path: &std::path::Path,
+) -> Option<egui::TextureHandle> {
+    let img = image::open(path).ok()?.to_rgba8();
+    let size = [
+        usize::try_from(img.width()).ok()?,
+        usize::try_from(img.height()).ok()?,
+    ];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    Some(ctx.load_texture(format!("wc-tpl-thumb-{hash}"), color, egui::TextureOptions::LINEAR))
 }
 
 /// Render one template row inside the dropdown: select-on-click plus a trailing
@@ -905,6 +974,12 @@ fn render_template_row(
         });
     } else {
         ui.horizontal(|ui| {
+            if let Some(tid) = row.thumb {
+                ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(tid, egui::vec2(40.0, 40.0)))
+                        .fit_to_exact_size(egui::vec2(40.0, 40.0)),
+                );
+            }
             if ui
                 .selectable_label(*v == row.managed_path, row.label.as_str())
                 .clicked()
@@ -1024,6 +1099,16 @@ fn render_template_library(
                 None => m.data.remove::<String>(confirm_id),
             });
         });
+
+    // Honest status: a non-empty active path whose file is gone reads as missing
+    // (the sketch falls back to its default layout).
+    if !v.is_empty() && !std::path::Path::new(v.as_str()).exists() {
+        ui.label(
+            egui::RichText::new("file missing, using default")
+                .size(10.0)
+                .color(style.warn_amber),
+        );
+    }
 }
 
 /// Render the numeric widget (slider) for a field. Called from inside a Grid row
