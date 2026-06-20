@@ -180,6 +180,63 @@ pub fn bake_sim_params(
     }
 }
 
+/// Center-bias weight `W₀` for the smear-focal centroid: a virtual sample
+/// pinned at the world origin (screen center). Keeps the focal point defined
+/// and smoothly moving when every attractor weight is zero, instead of dividing
+/// by ~0 or snapping. Shared by the live writer ([`update_sim_params`]) and the
+/// screensaver choreography
+/// (`crate::line::screensaver::choreography::attract_frame`) so the two compute
+/// the focal identically and cannot drift.
+pub const FOCAL_CENTER_WEIGHT: f32 = 0.15;
+
+/// Center-biased, weight-weighted centroid of `(weight, world_pos)` samples:
+/// `Σ wᵢ·posᵢ / (Σ wᵢ + center_weight)`. The extra `center_weight` term is a
+/// virtual sample at the origin, so the result is always defined and relaxes to
+/// `[0, 0]` (screen center, world origin) as the sample weights fall to zero —
+/// no divide-by-zero and no pop when the last sample releases.
+///
+/// Pure and allocation-free; the caller supplies a stack slice.
+#[must_use]
+pub fn weighted_focal(samples: &[(f32, [f32; 2])], center_weight: f32) -> [f32; 2] {
+    let mut weighted = [0.0_f32, 0.0_f32];
+    let mut weight_sum = 0.0_f32;
+    for &(w, pos) in samples {
+        weighted[0] += w * pos[0];
+        weighted[1] += w * pos[1];
+        weight_sum += w;
+    }
+    let denom = weight_sum + center_weight;
+    // Degenerate guard: with no center bias and no (or net-negative) weights,
+    // fall back to screen center rather than dividing by ~0.
+    if denom <= 0.0 {
+        return [0.0, 0.0];
+    }
+    [weighted[0] / denom, weighted[1] / denom]
+}
+
+/// Frame-rate-independent exponential ease of `current` toward `target` over
+/// time constant `tau` seconds: `current + (target − current)·(1 − e^(−dt/τ))`.
+///
+/// `dt` is capped at 50 ms (matching the sim's `dt.min(0.05)`) so a long pause
+/// can't teleport the focal in one frame. `tau <= 0` snaps instantly (α = 1) —
+/// the un-smoothed / "off" setting. The discrete form composes exactly, so N
+/// small steps land on the same point as one big step for a constant target
+/// (the frame-rate-independence guarantee). Pure; operates on `[f32; 2]` so it
+/// has no Bevy dependency.
+#[must_use]
+pub fn ease_focal(current: [f32; 2], target: [f32; 2], dt: f32, tau: f32) -> [f32; 2] {
+    let dt = dt.min(0.05);
+    let alpha = if tau <= 0.0 {
+        1.0
+    } else {
+        1.0 - (-dt / tau).exp()
+    };
+    [
+        current[0] + (target[0] - current[0]) * alpha,
+        current[1] + (target[1] - current[1]) * alpha,
+    ]
+}
+
 /// **Plan 11.8 Condition A1 (shared post-process base).** Set the geometry- and
 /// time-derived fields of [`LinePostParams`] both writers share: `i_resolution`,
 /// `i_mouse` (focal point in window-pixel space), `i_global_time`, and `gamma`.
@@ -403,5 +460,93 @@ mod tests {
         assert!((live.size_scale - attract.size_scale).abs() < 1e-9);
         assert_eq!(live.constrain_min, attract.constrain_min);
         assert_eq!(live.constrain_max, attract.constrain_max);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "empty input: numerator is exactly 0.0, result is 0.0/center_weight = 0.0 — bit-exact")]
+    fn weighted_focal_empty_is_center() {
+        assert_eq!(weighted_focal(&[], FOCAL_CENTER_WEIGHT), [0.0, 0.0]);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "zero-weight sample: numerator stays exactly 0.0, result is 0.0/center_weight = 0.0 — bit-exact")]
+    fn weighted_focal_zero_weight_is_center() {
+        assert_eq!(
+            weighted_focal(&[(0.0, [100.0, 50.0])], FOCAL_CENTER_WEIGHT),
+            [0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn weighted_focal_single_sample_sits_on_it_as_center_weight_vanishes() {
+        // With no center bias a lone sample sits exactly on its position.
+        let f = weighted_focal(&[(10.0, [100.0, 50.0])], 0.0);
+        assert!((f[0] - 100.0).abs() < 1e-4);
+        assert!((f[1] - 50.0).abs() < 1e-4);
+        // With the center bias it sits slightly center-ward (power 10 >> W0).
+        let biased = weighted_focal(&[(10.0, [100.0, 50.0])], FOCAL_CENTER_WEIGHT);
+        assert!(biased[0] > 98.0 && biased[0] < 100.0);
+    }
+
+    #[test]
+    fn weighted_focal_is_biased_toward_center() {
+        // Two equal-weight samples at x = 100 and x = 200: the unbiased midpoint
+        // is 150; the center bias pulls the focal below it (toward 0).
+        let f = weighted_focal(
+            &[(1.0, [100.0, 0.0]), (1.0, [200.0, 0.0])],
+            FOCAL_CENTER_WEIGHT,
+        );
+        assert!(
+            f[0] > 0.0 && f[0] < 150.0,
+            "expected center-biased midpoint, got {}",
+            f[0]
+        );
+    }
+
+    #[test]
+    fn ease_focal_moves_toward_target() {
+        let f = ease_focal([0.0, 0.0], [100.0, 0.0], 0.016, 0.25);
+        assert!(f[0] > 0.0 && f[0] < 100.0, "should ease partway, got {}", f[0]);
+    }
+
+    #[test]
+    fn ease_focal_is_framerate_independent() {
+        // One step of dt equals two steps of dt/2 for a constant target — the
+        // discrete exponential form composes exactly.
+        let target = [100.0, 40.0];
+        let one = ease_focal([0.0, 0.0], target, 0.02, 0.3);
+        let half = ease_focal([0.0, 0.0], target, 0.01, 0.3);
+        let two = ease_focal(half, target, 0.01, 0.3);
+        assert!((one[0] - two[0]).abs() < 1e-5, "{} vs {}", one[0], two[0]);
+        assert!((one[1] - two[1]).abs() < 1e-5, "{} vs {}", one[1], two[1]);
+    }
+
+    #[test]
+    fn ease_focal_converges_to_center() {
+        let mut f = [300.0, 150.0];
+        for _ in 0..200 {
+            f = ease_focal(f, [0.0, 0.0], 0.016, 0.25);
+        }
+        assert!(
+            f[0].abs() < 0.5 && f[1].abs() < 0.5,
+            "should converge to center, got {f:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "tau<=0 snaps to the target exactly")]
+    fn ease_focal_zero_tau_snaps() {
+        assert_eq!(
+            ease_focal([0.0, 0.0], [100.0, 50.0], 0.016, 0.0),
+            [100.0, 50.0]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "dt cap makes the two calls bit-identical")]
+    fn ease_focal_caps_dt() {
+        let huge = ease_focal([0.0, 0.0], [100.0, 0.0], 10.0, 0.25);
+        let capped = ease_focal([0.0, 0.0], [100.0, 0.0], 0.05, 0.25);
+        assert_eq!(huge, capped);
     }
 }
