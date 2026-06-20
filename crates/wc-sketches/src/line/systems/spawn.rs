@@ -246,6 +246,9 @@ pub fn spawn_line(
         // Colour influence off at spawn; the colour-influence driver writes the
         // active template's value each frame.
         template_color: LineMaterial::template_color_off(),
+        // Palette off at spawn (mode index 0); the palette driver writes the
+        // active LineSettings palette values each frame (change-gated).
+        palette_params: LineMaterial::palette_off(),
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

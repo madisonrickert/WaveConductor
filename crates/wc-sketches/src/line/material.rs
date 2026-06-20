@@ -29,8 +29,9 @@ use bevy::sprite_render::{AlphaMode2d, Material2d};
 /// (read-only at the render stage; write happens in the compute stage);
 /// `@binding(1)` is the star sprite texture and `@binding(2)` its sampler,
 /// both sampled in the fragment shader; `@binding(3)` is the debug solid
-/// override, `@binding(4)` the attract-mode velocity-color params, and
-/// `@binding(5)` the per-image colour-influence params.
+/// override, `@binding(4)` the attract-mode velocity-color params,
+/// `@binding(5)` the per-image colour-influence params, and `@binding(6)` is
+/// the psychedelic palette params.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct LineMaterial {
     /// Particle storage buffer, read-only from the vertex shader.
@@ -68,6 +69,15 @@ pub struct LineMaterial {
     /// (`mix(rgb, rgb*img, 0.0)` returns `rgb` bit-exactly).
     #[uniform(5)]
     pub template_color: Vec4,
+    /// Psychedelic palette params: `x` = mode index (`PaletteMode::index()`:
+    /// `0` Off / `1` Velocity / `2` Scatter), `y` = crossfade strength `0..=1`,
+    /// `z` = time-cycle rate (cycles/s, read against `globals.time`), `w` =
+    /// palette spread. Driven by [`crate::line::systems::palette::drive_palette`].
+    /// [`Vec4::ZERO`] ([`Self::palette_off`]) sets mode `0`, so the render
+    /// shader's uniform-mode branch is skipped and color is the pre-palette path
+    /// bit-exactly.
+    #[uniform(6)]
+    pub palette_params: Vec4,
 }
 
 impl LineMaterial {
@@ -87,6 +97,12 @@ impl LineMaterial {
     /// influence 0% / no active template). Shared by the spawn site, the
     /// colour-influence driver, and tests.
     pub fn template_color_off() -> Vec4 {
+        Vec4::ZERO
+    }
+
+    /// The `palette_params` value meaning "palette off" (mode index `0`). Shared
+    /// by the spawn site, the palette driver, and tests.
+    pub fn palette_off() -> Vec4 {
         Vec4::ZERO
     }
 }
@@ -129,5 +145,11 @@ mod tests {
     fn default_template_color_is_off() {
         // strength (x) == 0 means "no image-colour tint" — the no-template value.
         assert_eq!(LineMaterial::template_color_off(), Vec4::ZERO);
+    }
+
+    #[test]
+    fn default_palette_params_is_off() {
+        // mode channel (x) == 0 means "palette off" — the shader branch is skipped.
+        assert_eq!(LineMaterial::palette_off(), Vec4::ZERO);
     }
 }
