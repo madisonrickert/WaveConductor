@@ -47,6 +47,16 @@ impl Plugin for LifecyclePlugin {
             .add_plugins(InputManagerPlugin::<actions::WaveConductorAction>::default())
             .insert_resource(actions::default_input_map())
             .init_resource::<ActionState<actions::WaveConductorAction>>()
+            // In-house action input (replaces leafwing; see action_map). Runs
+            // alongside leafwing during migration.
+            .add_message::<action_map::ActionInput>()
+            .insert_resource(action_map::default_bindings())
+            .add_systems(
+                PreUpdate,
+                action_map::emit_action_input
+                    .run_if(crate::settings::input_capture::egui_not_capturing_keyboard)
+                    .after(bevy::input::InputSystems),
+            )
             // Idle / interaction tracking
             .init_resource::<idle::InteractionTimer>()
             .init_resource::<idle::IdleVetoes>()

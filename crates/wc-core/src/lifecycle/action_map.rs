@@ -129,6 +129,40 @@ pub struct ActionInput {
     pub phase: ActionPhase,
 }
 
+/// `PreUpdate` producer: reads `ButtonInput<KeyCode>` and [`InputBindings`] and
+/// emits one [`ActionInput`] per action edge this frame.
+///
+/// Iterates [`WaveConductorAction::ALL`] and OR-s each action's bindings, so an
+/// action with multiple bindings (e.g. `Z` and `ArrowLeft` → `NavigatePrev`)
+/// yields at most one `Pressed` and one `Released` message per frame, with no
+/// per-frame heap allocation.
+///
+/// Registered with `.run_if(egui_not_capturing_keyboard)` so no action fires
+/// while an egui text field holds keyboard focus.
+pub fn emit_action_input(
+    keys: Res<'_, ButtonInput<KeyCode>>,
+    bindings: Res<'_, InputBindings>,
+    mut writer: MessageWriter<'_, ActionInput>,
+) {
+    for action in WaveConductorAction::ALL {
+        let mut pressed = false;
+        let mut released = false;
+        for (bound_action, binding) in &bindings.0 {
+            if *bound_action != action {
+                continue;
+            }
+            pressed |= binding.pressed(&keys);
+            released |= binding.released(&keys);
+        }
+        if pressed {
+            writer.write(ActionInput { action, phase: ActionPhase::Pressed });
+        }
+        if released {
+            writer.write(ActionInput { action, phase: ActionPhase::Released });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +213,95 @@ mod tests {
                 "no binding for {action:?}",
             );
         }
+    }
+
+    use crate::settings::input_capture::egui_not_capturing_keyboard;
+
+    #[derive(Resource, Default)]
+    struct Captured(Vec<ActionInput>);
+
+    fn capture(mut reader: MessageReader<'_, '_, ActionInput>, mut out: ResMut<'_, Captured>) {
+        for ev in reader.read() {
+            out.0.push(*ev);
+        }
+    }
+
+    fn producer_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::input::InputPlugin);
+        app.add_message::<ActionInput>();
+        app.insert_resource(default_bindings());
+        app.init_resource::<Captured>();
+        app.add_systems(
+            PreUpdate,
+            emit_action_input
+                .run_if(egui_not_capturing_keyboard)
+                .after(bevy::input::InputSystems),
+        );
+        app.add_systems(Update, capture);
+        app
+    }
+
+    fn send_key(app: &mut App, key: KeyCode, state: bevy::input::ButtonState) {
+        app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
+            key_code: key,
+            logical_key: bevy::input::keyboard::Key::Unidentified(
+                bevy::input::keyboard::NativeKey::Unidentified,
+            ),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+
+    #[test]
+    fn producer_emits_pressed_for_bound_key() {
+        let mut app = producer_app();
+        app.update(); // settle
+        app.world_mut().resource_mut::<Captured>().0.clear();
+        send_key(&mut app, KeyCode::Digit1, bevy::input::ButtonState::Pressed);
+        app.update();
+        let got = &app.world().resource::<Captured>().0;
+        assert_eq!(
+            got.as_slice(),
+            &[ActionInput { action: WaveConductorAction::SelectLine, phase: ActionPhase::Pressed }],
+        );
+    }
+
+    #[test]
+    fn producer_dedups_multi_binding_action() {
+        let mut app = producer_app();
+        app.update();
+        app.world_mut().resource_mut::<Captured>().0.clear();
+        // Z and ArrowLeft both map to NavigatePrev; pressing both the same frame
+        // must still yield exactly one Pressed message.
+        send_key(&mut app, KeyCode::KeyZ, bevy::input::ButtonState::Pressed);
+        send_key(&mut app, KeyCode::ArrowLeft, bevy::input::ButtonState::Pressed);
+        app.update();
+        let prev: Vec<_> = app
+            .world()
+            .resource::<Captured>()
+            .0
+            .iter()
+            .filter(|e| e.action == WaveConductorAction::NavigatePrev && e.phase == ActionPhase::Pressed)
+            .collect();
+        assert_eq!(prev.len(), 1, "multi-binding action must de-dup to one message");
+    }
+
+    #[test]
+    fn producer_chord_needs_modifier() {
+        let mut app = producer_app();
+        app.update();
+        app.world_mut().resource_mut::<Captured>().0.clear();
+        // KeyD alone (no Shift) must NOT emit ToggleDevPanel.
+        send_key(&mut app, KeyCode::KeyD, bevy::input::ButtonState::Pressed);
+        app.update();
+        assert!(
+            !app.world().resource::<Captured>().0.iter().any(|e| e.action
+                == WaveConductorAction::ToggleDevPanel),
+            "chord must not fire without its modifier",
+        );
     }
 }
