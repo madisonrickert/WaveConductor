@@ -1,8 +1,22 @@
 # Line Gravity Smear Follows the Attractors (Smoothed) — Design Spec
 
 **Date:** 2026-06-20
-**Status:** Approved design, ready for implementation plan
+**Status:** Implemented, then revised post-live-review (see Revision below)
 **Related:** [2026-05-29-line-screensaver-attract-mode-design.md](2026-05-29-line-screensaver-attract-mode-design.md) (the screensaver work that pinned the smear focal to avoid the jolt this feature must also avoid)
+
+> **Revision (2026-06-20, post-live-review):** As originally implemented, the
+> mouse was treated like a hand — it fed the smoothed centroid only while
+> `mouse.power > 0` (button held), so a non-pressed mouse left the smear pinned
+> to center. The operator's intent was the **established mouse behavior** (the
+> focal tracks the cursor continuously and instantly, button or no button), with
+> the new smoothed-follow reserved for **hands**. The wiring below in
+> "Active-mode wiring" is therefore amended: the mouse no longer contributes to
+> the centroid; instead, when no hand is grabbing, the focal is set to
+> `mouse.position` directly (instant). When a hand is grabbing, the focal eases
+> toward the center-biased **hand** centroid (the smoothing knob governs the hand
+> follow only, and it relaxes to center as the grab releases). The
+> `weighted_focal` / `ease_focal` / `LineSmearFocal` / center-bias pieces are
+> unchanged; only the mouse's role in the centroid changed.
 
 ## Goal
 
