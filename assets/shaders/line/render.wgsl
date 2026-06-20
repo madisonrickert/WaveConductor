@@ -5,7 +5,7 @@
 //   @binding(1): star sprite texture (Texture2D<f32>)
 //   @binding(2): star sprite sampler
 
-#import bevy_sprite::mesh2d_view_bindings::view
+#import bevy_sprite::mesh2d_view_bindings::{view, globals}
 
 struct Particle {
     position: vec2<f32>,
@@ -39,6 +39,12 @@ struct Particle {
 // reserved. Strength 0 makes the per-particle image tint a bit-exact no-op:
 // mix(rgb, rgb*img, 0.0) == rgb.
 @group(2) @binding(5) var<uniform> template_color: vec4<f32>;
+// Psychedelic palette params (LineMaterial::palette_params). x = mode index
+// (0 off / 1 velocity / 2 scatter); y = crossfade strength 0..1; z = time-cycle
+// rate (cycles/s, multiplied by globals.time for the phase); w = palette spread.
+// x = 0 (Vec4(0), the Active/no-palette value) skips the palette branch below,
+// so color is the pre-palette path bit-exactly.
+@group(2) @binding(6) var<uniform> palette_params: vec4<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -52,6 +58,9 @@ struct VertexOutput {
     // (and may flush denormals — dark-red colours decode as denormals), which
     // would corrupt the colour. Flat = provoking-vertex value, bit-preserved.
     @location(3) @interpolate(flat) spawn_color: f32,
+    // Per-particle spawn hash (0..1), carried for the Scatter palette mode.
+    // Flat because it is a per-particle constant (no meaningful interpolation).
+    @location(4) @interpolate(flat) scatter: f32,
 };
 
 // Velocity band for the attract tint, in world px/s. Below LO the particle is
@@ -119,7 +128,20 @@ fn vertex(
     out.alpha = p.alpha;
     out.speed = length(p.velocity);
     out.spawn_color = p.spawn_color;
+    out.scatter = p.spawn_hash;
     return out;
+}
+
+// Inigo Quilez cosine palette — smooth, tunable, the de-facto psychedelic ramp.
+// color(t) = a + b * cos(2*pi*(c*t + d)). Each term: a = per-channel bias,
+// b = amplitude, c = frequency, d = per-channel phase. These coefficients are
+// the canonical rainbow (full hue sweep over t in [0,1]).
+fn palette(t: f32) -> vec3<f32> {
+    let a = vec3<f32>(0.5, 0.5, 0.5);
+    let b = vec3<f32>(0.5, 0.5, 0.5);
+    let c = vec3<f32>(1.0, 1.0, 1.0);
+    let d = vec3<f32>(0.0, 0.33, 0.67);
+    return a + b * cos(6.28318530718 * (c * t + d));
 }
 
 @fragment
@@ -154,8 +176,31 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         f32((packed >> 16u) & 0xFFu),
         f32((packed >> 8u) & 0xFFu),
         f32(packed & 0xFFu)) / 255.0;
-    let base = mix(texel.rgb, texel.rgb * img_rgb, template_color.x);
-    // Attract-only velocity tint applies on top of the image-coloured base.
+    // img_base is the pre-palette path: image color-influence tint over the star.
+    let img_base = mix(texel.rgb, texel.rgb * img_rgb, template_color.x);
+    // Psychedelic palette (uniform-mode branch). palette_params is a uniform --
+    // constant across the whole draw -- so every fragment takes the same branch
+    // (no warp divergence) and the Off case never runs the cos/fract math.
+    var base = img_base;
+    if (palette_params.x > 0.5) {
+        let strength = palette_params.y;
+        let cycle = palette_params.z;
+        let scale = palette_params.w;
+        var driver_t: f32;
+        if (palette_params.x < 1.5) {
+            // Velocity: ~180 px/s spans one palette cycle at spread 1 (the wake band).
+            driver_t = in.speed * scale / 180.0;
+        } else {
+            // Scatter: stable per-particle hash, repeated `scale` times across 0..1.
+            driver_t = in.scatter * scale;
+        }
+        // fract wraps the ramp; globals.time * cycle scrolls the whole palette.
+        let t = fract(driver_t + globals.time * cycle);
+        let pal_base = texel.rgb * palette(t);
+        // Crossfade image-coloured -> palette by strength (0 = image, 1 = palette).
+        base = mix(img_base, pal_base, strength);
+    }
+    // Attract-only velocity tint applies on top of the (palette-or-image) base.
     let wake = smoothstep(WAKE_SPEED_LO, WAKE_SPEED_HI, in.speed) * attract_color.x;
     let tinted = mix(base, base * WAKE_TINT, wake);
     // Attract-mode brightness lift: the calm screensaver field never drives
