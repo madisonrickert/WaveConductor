@@ -36,12 +36,11 @@
 //!   `GRAVITY_CONSTANT`, default 280).
 //! - **`gamma`** — per-channel gamma curve on the post-process pass.
 //! - **`palette_mode`** — psychedelic color-palette driver: `Off` / `Velocity`
-//!   / `Scatter`. `Off` is the bit-exact pre-palette path.
+//!   / `Spectrum`. `Off` is the bit-exact pre-palette path.
 //! - **`palette_strength`** — crossfade from the image-influence color (0) to the
 //!   full palette color (1). Ignored when the mode is `Off`.
-//! - **`palette_cycle`** — palette time-cycle rate (cycles/s); `0` = static.
-//! - **`palette_scale`** — how far the driving property spreads across the
-//!   palette. Dev knob.
+//! - **`palette_scale`** — per-mode palette tuning knob (`Velocity`: speed
+//!   sensitivity; `Spectrum`: tent sharpness). Dev knob.
 //! - **`spawn_template`** — optional PNG path whose luminance × alpha weights
 //!   the particle spawn density (empty = horizontal-line layout). Shown as a
 //!   Browse… file picker in the user panel (Plan 11 Phase C).
@@ -121,20 +120,20 @@ pub enum PaletteMode {
     /// Hue keyed to `|velocity|`: calm particles sit at one end of the palette,
     /// stirred-up particles sweep through it, so color traces motion/energy.
     Velocity,
-    /// Hue keyed to the stable per-particle `spawn_hash` (`0..=1`): a static
-    /// rainbow-confetti scatter where each particle keeps its own color.
-    Scatter,
+    /// Hue keyed to the particle's creation index: a center-peak heatmap that is
+    /// hot at the middle of the spawn list and cools toward both ends.
+    Spectrum,
 }
 
 impl PaletteMode {
     /// Encode the mode as the `palette_params.x` uniform channel the render
-    /// shader branches on: `Off → 0.0`, `Velocity → 1.0`, `Scatter → 2.0`.
+    /// shader branches on: `Off → 0.0`, `Velocity → 1.0`, `Spectrum → 2.0`.
     #[must_use]
     pub fn index(self) -> f32 {
         match self {
             PaletteMode::Off => 0.0,
             PaletteMode::Velocity => 1.0,
-            PaletteMode::Scatter => 2.0,
+            PaletteMode::Spectrum => 2.0,
         }
     }
 }
@@ -204,27 +203,10 @@ pub struct LineSettings {
     #[serde(default = "default_palette_strength")]
     pub palette_strength: f32,
 
-    /// Palette time-cycle rate (cycles per second): the whole palette scrolls
-    /// over time so the field slowly shifts hue. `0.0` = static. The shader
-    /// reads the phase from `globals.time`, so animating it costs no per-frame
-    /// uniform write. Ignored when `palette_mode` is `Off`.
-    #[setting(
-        default = 0.03_f32,
-        min = 0.0_f32,
-        max = 0.5_f32,
-        step = 0.01_f32,
-        label = "Palette cycle speed",
-        section = "Palette",
-        category = User
-    )]
-    #[serde(default = "default_palette_cycle")]
-    pub palette_cycle: f32,
-
-    /// Palette spread: how far the driving property stretches across the palette.
-    /// `Velocity` mode scales the speed→hue mapping (≈`180 / scale` px/s spans one
-    /// palette cycle); `Scatter` mode multiplies the per-particle hash so the
-    /// rainbow repeats more often across the field. Dev tuning knob. Ignored when
-    /// `palette_mode` is `Off`.
+    /// Per-mode palette tuning. `Velocity`: speed sensitivity — roughly
+    /// `180 / scale` px/s maps to the hot end. `Spectrum`: tent sharpness — the
+    /// `pow` exponent on the center-peak ramp (>1 narrows the hot center, <1
+    /// widens it). Ignored when `palette_mode` is `Off`. Dev knob.
     #[setting(
         default = 1.0_f32,
         min = 0.1_f32,
@@ -479,10 +461,6 @@ fn default_palette_strength() -> f32 {
     0.8
 }
 
-fn default_palette_cycle() -> f32 {
-    0.03
-}
-
 fn default_palette_scale() -> f32 {
     1.0
 }
@@ -558,6 +536,7 @@ mod tests {
             particle_density = 7.5
             gravity_constant = 320.0
             spawn_template = ""
+            palette_cycle = 0.03
         "#;
         let parsed: LineSettings = toml::from_str(legacy).expect("legacy TOML must parse");
         assert!(
@@ -587,10 +566,6 @@ mod tests {
             "palette_strength not default"
         );
         assert!(
-            (parsed.palette_cycle - 0.03).abs() < 1e-6,
-            "palette_cycle not default"
-        );
-        assert!(
             (parsed.palette_scale - 1.0).abs() < 1e-6,
             "palette_scale not default"
         );
@@ -605,7 +580,7 @@ mod tests {
     fn palette_mode_index_encodes_uniform_channel() {
         assert!((PaletteMode::Off.index() - 0.0).abs() < f32::EPSILON);
         assert!((PaletteMode::Velocity.index() - 1.0).abs() < f32::EPSILON);
-        assert!((PaletteMode::Scatter.index() - 2.0).abs() < f32::EPSILON);
+        assert!((PaletteMode::Spectrum.index() - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -624,7 +599,7 @@ mod tests {
         assert_eq!(def.category, SettingsCategory::User);
         match &def.kind {
             SettingKind::Enum { variants } => {
-                assert_eq!(*variants, &["Off", "Velocity", "Scatter"]);
+                assert_eq!(*variants, &["Off", "Velocity", "Spectrum"]);
             }
             other => panic!("expected Enum kind, got {other:?}"),
         }

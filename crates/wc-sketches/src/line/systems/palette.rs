@@ -1,13 +1,12 @@
 //! Live palette-uniform driver.
 //!
 //! Maps the `LineSettings` palette knobs onto [`LineMaterial`]`::palette_params`
-//! (`x` = mode index, `y` = strength, `z` = cycle, `w` = spread). Compares
+//! (`x` = mode index, `y` = strength, `z` = spread, `w` = reserved). Compares
 //! against the material's current value rather than a `Local` cache, so a
 //! freshly respawned material (seeded [`LineMaterial::palette_off`]) picks up the
 //! correct target on the next frame without any user interaction. Dragging an
 //! unrelated slider or sitting idle costs one float compare per frame with no
-//! asset re-upload. The palette's time animation reads `globals.time` in the
-//! shader, so cycling does NOT churn this uniform.
+//! asset re-upload.
 
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
@@ -17,22 +16,17 @@ use crate::line::settings::{LineSettings, PaletteMode};
 use crate::line::LineRoot;
 
 /// Pack the palette settings into the `palette_params` uniform value
-/// (`x` = mode index, `y` = strength, `z` = cycle, `w` = spread). `Off` returns
-/// [`LineMaterial::palette_off`] (`Vec4::ZERO`) regardless of the other knobs, so
-/// the shader's uniform-mode branch is skipped and color is the pre-palette path.
-/// Strength is clamped to `0..=1`; cycle and spread are clamped non-negative so a
-/// stray value can never invert the crossfade or run the phase backward.
+/// (`x` = mode index, `y` = strength, `z` = spread, `w` = reserved). `Off`
+/// returns [`LineMaterial::palette_off`] (`Vec4::ZERO`) regardless of the other
+/// knobs, so the shader's uniform-mode branch is skipped and color is the
+/// pre-palette path bit-exactly. Strength is clamped to `0..=1`; spread is clamped
+/// non-negative so a stray value can't invert the mapping.
 #[must_use]
-pub fn palette_params(mode: PaletteMode, strength: f32, cycle: f32, scale: f32) -> Vec4 {
+pub fn palette_params(mode: PaletteMode, strength: f32, scale: f32) -> Vec4 {
     if mode == PaletteMode::Off {
         return LineMaterial::palette_off();
     }
-    Vec4::new(
-        mode.index(),
-        strength.clamp(0.0, 1.0),
-        cycle.max(0.0),
-        scale.max(0.0),
-    )
+    Vec4::new(mode.index(), strength.clamp(0.0, 1.0), scale.max(0.0), 0.0)
 }
 
 /// Drive [`LineMaterial::palette_params`] from the `LineSettings` palette knobs.
@@ -56,7 +50,6 @@ pub fn drive_palette(
     let target = palette_params(
         settings.palette_mode,
         settings.palette_strength,
-        settings.palette_cycle,
         settings.palette_scale,
     );
     for handle in &roots {
@@ -84,30 +77,30 @@ mod tests {
 
     #[test]
     fn off_mode_is_zero_regardless_of_knobs() {
-        assert_eq!(palette_params(PaletteMode::Off, 0.8, 0.03, 1.0), Vec4::ZERO);
+        assert_eq!(palette_params(PaletteMode::Off, 0.8, 1.0), Vec4::ZERO);
     }
 
     #[test]
     fn velocity_mode_packs_channels() {
-        let p = palette_params(PaletteMode::Velocity, 0.8, 0.03, 1.5);
+        let p = palette_params(PaletteMode::Velocity, 0.8, 1.5);
         assert!((p.x - 1.0).abs() < 1e-6, "mode index 1 for Velocity");
         assert!((p.y - 0.8).abs() < 1e-6);
-        assert!((p.z - 0.03).abs() < 1e-6);
-        assert!((p.w - 1.5).abs() < 1e-6);
+        assert!((p.z - 1.5).abs() < 1e-6, "z is spread (scale)");
+        assert!(p.w.abs() < 1e-6, "w is reserved (zero)");
     }
 
     #[test]
-    fn scatter_mode_index_is_two() {
-        let p = palette_params(PaletteMode::Scatter, 1.0, 0.0, 1.0);
-        assert!((p.x - 2.0).abs() < 1e-6, "mode index 2 for Scatter");
+    fn spectrum_mode_index_is_two() {
+        let p = palette_params(PaletteMode::Spectrum, 1.0, 1.0);
+        assert!((p.x - 2.0).abs() < 1e-6, "mode index 2 for Spectrum");
     }
 
     #[test]
     fn out_of_range_inputs_clamp() {
-        let p = palette_params(PaletteMode::Velocity, 5.0, -1.0, -2.0);
+        let p = palette_params(PaletteMode::Velocity, 5.0, -2.0);
         assert!((p.y - 1.0).abs() < 1e-6, "strength clamps to 1");
-        assert!(p.z.abs() < 1e-6, "cycle clamps to 0");
-        assert!(p.w.abs() < 1e-6, "spread clamps to 0");
+        assert!(p.z.abs() < 1e-6, "spread clamps to 0");
+        assert!(p.w.abs() < 1e-6, "reserved is zero");
     }
 
     /// Regression: after a material respawn (seeded `palette_off()`), `drive_palette`
@@ -122,9 +115,9 @@ mod tests {
         reason = "test-only: panics are acceptable failures"
     )]
     fn drive_palette_self_corrects_on_material_respawn() {
-        // LineSettings::default() uses palette_strength=0.8, palette_cycle=0.03,
-        // palette_scale=1.0 (verified by settings.rs tests). Override palette_mode
-        // to Velocity so the target is non-Off.
+        // LineSettings::default() uses palette_strength=0.8, palette_scale=1.0
+        // (verified by settings.rs tests). Override palette_mode to Velocity so
+        // the target is non-Off.
         let mut world = World::new();
         let settings = LineSettings {
             palette_mode: PaletteMode::Velocity,
@@ -133,7 +126,6 @@ mod tests {
         let expected = palette_params(
             PaletteMode::Velocity,
             settings.palette_strength,
-            settings.palette_cycle,
             settings.palette_scale,
         );
         world.insert_resource(settings);

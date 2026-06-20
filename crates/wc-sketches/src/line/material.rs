@@ -70,12 +70,11 @@ pub struct LineMaterial {
     #[uniform(5)]
     pub template_color: Vec4,
     /// Psychedelic palette params: `x` = mode index (`PaletteMode::index()`:
-    /// `0` Off / `1` Velocity / `2` Scatter), `y` = crossfade strength `0..=1`,
-    /// `z` = time-cycle rate (cycles/s, read against `globals.time`), `w` =
-    /// palette spread. Driven by [`crate::line::systems::palette::drive_palette`].
-    /// [`Vec4::ZERO`] ([`Self::palette_off`]) sets mode `0`, so the render
-    /// shader's uniform-mode branch is skipped and color is the pre-palette path
-    /// bit-exactly.
+    /// `0` Off / `1` Velocity / `2` Spectrum), `y` = crossfade strength `0..=1`,
+    /// `z` = palette spread (per-mode tuning), `w` = reserved. Driven by
+    /// [`crate::line::systems::palette::drive_palette`]. [`Vec4::ZERO`]
+    /// ([`Self::palette_off`]) sets mode `0`, so the render shader's uniform-mode
+    /// branch is skipped and color is the pre-palette path bit-exactly.
     #[uniform(6)]
     pub palette_params: Vec4,
 }
