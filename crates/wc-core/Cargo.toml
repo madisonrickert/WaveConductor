@@ -55,7 +55,6 @@ cpal = { workspace = true }
 fundsp = { workspace = true }
 leafwing-input-manager = { workspace = true }
 rtrb = { workspace = true }
-rustfft = { workspace = true }
 smallvec = { workspace = true }
 symphonia = { workspace = true }
 thiserror = { workspace = true }

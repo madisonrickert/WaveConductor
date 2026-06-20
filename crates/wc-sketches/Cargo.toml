@@ -29,7 +29,6 @@ wc-core-macros.workspace = true
 bytemuck.workspace = true
 serde.workspace = true
 tracing.workspace = true
-leafwing-input-manager.workspace = true
 # Line heatmap-image spawn (Plan 10 Phase A): PNG decode + CDF inversion.
 image.workspace = true
 rand.workspace = true

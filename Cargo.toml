@@ -18,7 +18,7 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 # Core engine. Note: bevy_audio is deliberately omitted (spec §5.4 says we use
-# cpal+fundsp+rustfft directly, not bevy_audio). DefaultPlugins gracefully
+# cpal+fundsp directly, not bevy_audio). DefaultPlugins gracefully
 # skips AudioPlugin when the feature is absent.
 bevy = { version = "0.18", default-features = false, features = [
     "bevy_state",
@@ -72,11 +72,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # sleeps the display ~1 minute in (observed 2026-06-10 as "screen dimming
 # during attract mode"). MIT.
 keepawake = "0.6"
-# Audio (Plan 4): cross-platform I/O, DSP graph, FFT, lock-free rings.
+# Audio (Plan 4): cross-platform I/O, DSP graph, lock-free rings. (rustfft was
+# removed 2026-06-20 — declared but never imported; fundsp covers FFT/DSP. Re-add
+# here if a sketch ever needs a standalone FFT planner.)
 cpal = "0.16"
-fundsp = { version = "0.21", default-features = false }
+# default-features=false drops fundsp's `files` (its own symphonia copy) and
+# `fft` (fft-convolver) features we don't use. `std` must be re-enabled
+# explicitly: 0.23's `resample` module uses `Vec`/`vec!` without an `alloc`
+# import, so it fails to compile under fundsp's `no_std` path (`std = []`, so
+# this adds no dependencies).
+fundsp = { version = "0.23", default-features = false, features = ["std"] }
 rtrb = "0.3"
-rustfft = "6"
 # Audio decode (Plan 9 Phase B): the background sample ships as Vorbis-in-Ogg.
 # We pull only the codecs we actually need so the dependency footprint stays
 # narrow; if other sketches need WAV/FLAC/MP3, extend the feature list here.
