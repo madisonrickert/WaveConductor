@@ -269,6 +269,9 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 /// the next `OnEnter`. The mirror is not stepped in production (Plan 11 Phase
 /// F); it is only a spawn-time snapshot for heatmap test coverage.
 ///
+/// Also drops [`systems::sim_params::LineSmearFocal`] so the next `OnEnter`
+/// re-seeds a centered focal instead of inheriting the last in-Line value.
+///
 /// Resets [`post_process::LinePostParams`] to its `Default` (which has
 /// `g_constant = 0.0`) so the gravity-smear post-process is visually no-op
 /// outside `AppState::Line`. The `update_sim_params` system that writes the
@@ -278,6 +281,7 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<compute::LineSimParams>();
     commands.remove_resource::<sim_cpu::LineCpuMirror>();
+    commands.remove_resource::<systems::sim_params::LineSmearFocal>();
     commands.insert_resource(post_process::LinePostParams::default());
 }
 
@@ -465,6 +469,25 @@ mod tests {
             ..all_off
         };
         assert!(!should_register_bone_composite(Some(&no_comp)));
+    }
+
+    /// `remove_sim_params` must drop `LineSmearFocal` on Line exit so a
+    /// re-entry's `spawn_line` re-seeds a fresh centered focal rather than
+    /// inheriting a stale off-center one (the resource-not-Local guarantee).
+    #[test]
+    fn remove_sim_params_drops_smear_focal() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(systems::sim_params::LineSmearFocal(Vec2::new(123.0, 45.0)));
+        world
+            .run_system_once(remove_sim_params)
+            .expect("remove_sim_params run");
+        assert!(
+            world
+                .get_resource::<systems::sim_params::LineSmearFocal>()
+                .is_none(),
+            "LineSmearFocal must be removed on Line exit"
+        );
     }
 
     /// Verifies that `register_line_manifest` appends an entry for

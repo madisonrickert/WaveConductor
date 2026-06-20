@@ -77,6 +77,19 @@ impl WindowGeom {
     }
 }
 
+/// The live-mode smoothed gravity-smear focal point, in world space (centered
+/// on the origin, +y up). [`update_sim_params`] eases it toward the
+/// active-attractor centroid each frame; [`bake_post_base`] converts it to the
+/// shader's window-pixel space for [`LinePostParams::i_mouse`].
+///
+/// Inserted at [`Vec2::ZERO`] (screen center) in
+/// [`crate::line::systems::spawn::spawn_line`] (`OnEnter(AppState::Line)`) and
+/// removed in `remove_sim_params` (`OnExit(AppState::Line)`). Deliberately a
+/// `Resource`, not a `Local`, so it cannot carry a stale focal across a Line
+/// re-entry.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct LineSmearFocal(pub Vec2);
+
 /// Attract-mode gate for the per-particle lifetime respawn + fraction kill in
 /// `simulate.wgsl`. Only the screensaver's attract writer enables it; the live
 /// writer passes [`AttractGate::OFF`] so Active behavior is provably

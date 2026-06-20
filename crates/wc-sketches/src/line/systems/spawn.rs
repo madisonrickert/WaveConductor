@@ -30,6 +30,7 @@ use crate::line::heatmap::sample_from_heatmap;
 use crate::line::material::LineMaterial;
 use crate::line::particle::{Particle, SimParams};
 use crate::line::settings::LineSettings;
+use crate::line::systems::sim_params::LineSmearFocal;
 use crate::line::sim_cpu::LineCpuMirror;
 
 /// Marker component placed on every entity owned by the Line sketch.
@@ -287,6 +288,11 @@ pub fn spawn_line(
         particles_handle,
         particle_count: count,
     });
+
+    // Seed the smoothed smear focal at screen center. `update_sim_params` eases
+    // it toward the active-attractor centroid each frame; a resource (not a
+    // Local) so a Line re-entry can't inherit a stale off-center focal.
+    commands.insert_resource(LineSmearFocal(Vec2::ZERO));
 
     tracing::info!(count, "spawned Line sketch");
 }
