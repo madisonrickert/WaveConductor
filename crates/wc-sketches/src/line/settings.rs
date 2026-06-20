@@ -83,6 +83,10 @@
 //! - **`smear_chroma_gain`** — scales the fringe colors into HDR (>1 boosts
 //!   the dominant channel past 1 for the additive glow). `1.5667` reproduces
 //!   the legacy fringe intensity. User knob.
+//! - **`smear_focal_smoothing`** — live-mode smear-focal ease time constant τ
+//!   (seconds): how slowly the gravity-smear focal eases toward the active
+//!   attractor centroid. `0.0` = instant snap; larger = calmer/laggier follow.
+//!   Dev-only knob.
 //!
 //! ## Synth timing chain (for tuners)
 //!
@@ -266,6 +270,23 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_smear_chroma_gain")]
     pub smear_chroma_gain: f32,
+
+    /// Live-mode smear-focal ease time constant τ (seconds): how slowly the
+    /// gravity-smear focal eases toward the active-attractor centroid. `0.0` =
+    /// snap (instant follow, the un-smoothed feel); larger values lag and calm
+    /// the follow so a moving hand can't jolt the concentric rings. Dev-only
+    /// knob.
+    #[setting(
+        default = 0.25_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Smear follow smoothing",
+        unit = "s",
+        category = Dev
+    )]
+    #[serde(default = "default_smear_focal_smoothing")]
+    pub smear_focal_smoothing: f32,
 
     /// Path to a PNG file whose luminance × alpha drives particle spawn density.
     /// Empty string = use the default horizontal-line layout. Relative paths
@@ -526,6 +547,10 @@ fn default_smear_chroma_gain() -> f32 {
     1.5667
 }
 
+fn default_smear_focal_smoothing() -> f32 {
+    0.25
+}
+
 fn default_attract_particle_fraction() -> f32 {
     0.6
 }
@@ -647,6 +672,10 @@ mod tests {
             parsed.smear_incoming_color,
             [1.0, 0.6383, 0.4074, 1.0],
             "smear_incoming_color not default"
+        );
+        assert!(
+            (parsed.smear_focal_smoothing - 0.25).abs() < 1e-6,
+            "smear_focal_smoothing not default"
         );
     }
 
