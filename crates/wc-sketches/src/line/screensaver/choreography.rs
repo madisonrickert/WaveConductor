@@ -34,6 +34,8 @@
 //! grab's 15.7. The attract-mode lifetime respawn (`simulate.wgsl`) continuously
 //! heals whatever the drift displaces, so the picture re-forms over time.
 
+use crate::line::systems::sim_params::{weighted_focal, FOCAL_CENTER_WEIGHT};
+
 /// World-space attractor sample: position + raw power, ready to bake into a
 /// [`crate::line::particle::Attractor`] (after the caller multiplies power by
 /// `gravity_constant`).
@@ -153,12 +155,6 @@ const WALKERS: [Walker; PULSE_COUNT] = [
     },
 ];
 
-/// Center-bias weight in the smear-focal centroid: a virtual sample of this
-/// weight pinned at the origin. Keeps the focal point defined (and smoothly
-/// moving) when every pulse envelope is zero, instead of dividing by ~0 or
-/// snapping between walkers.
-const FOCAL_CENTER_WEIGHT: f32 = 0.15;
-
 /// Window geometry the choreography needs (half-extents in world units).
 #[derive(Debug, Clone, Copy)]
 pub struct Bounds {
@@ -222,13 +218,13 @@ pub fn attract_frame(t: f32, bounds: Bounds) -> AttractFrame {
         position: [0.0, 0.0],
         power: 0.0,
     }; PULSE_COUNT];
-    // Accumulators for the envelope-weighted focal centroid:
-    //   focal = Σ envᵢ·posᵢ / (Σ envᵢ + W₀)
-    // where W₀ = FOCAL_CENTER_WEIGHT is a virtual sample at the origin. When
-    // one pulse dominates the focal sits (almost) on it; when all envelopes
-    // are zero the focal relaxes exactly to screen center — continuous in t,
-    // no branch, no snap.
-    let mut weighted_pos = [0.0_f32, 0.0_f32];
+    // (envelope, world_pos) samples for the shared center-biased focal
+    // centroid: focal = Σ envᵢ·posᵢ / (Σ envᵢ + W₀), where W₀ is a virtual
+    // sample at the origin (see FOCAL_CENTER_WEIGHT). When one pulse dominates
+    // the focal sits (almost) on it; when all envelopes are zero it relaxes
+    // exactly to screen center. Built in walker order so the centroid is
+    // bit-identical to the prior inline accumulation.
+    let mut focal_samples = [(0.0_f32, [0.0_f32, 0.0_f32]); PULSE_COUNT];
     let mut env_sum = 0.0_f32;
 
     for (i, walker) in WALKERS.iter().enumerate() {
@@ -243,13 +239,14 @@ pub fn attract_frame(t: f32, bounds: Bounds) -> AttractFrame {
         // swells linearly in the envelope: AMBIENT + (PEAK − AMBIENT)·env.
         let power = AMBIENT_POWER + (PULSE_PEAK_POWER - AMBIENT_POWER) * env;
         pulses[i] = AttractorSample { position, power };
-        weighted_pos[0] += env * position[0];
-        weighted_pos[1] += env * position[1];
+        focal_samples[i] = (env, position);
         env_sum += env;
     }
 
-    let focal_denom = env_sum + FOCAL_CENTER_WEIGHT;
-    let focal_world = [weighted_pos[0] / focal_denom, weighted_pos[1] / focal_denom];
+    // Shared center-biased weighted centroid (DRY with the live writer in
+    // `systems::sim_params`): same formula, same constant — behavior-identical
+    // to the prior inline math.
+    let focal_world = weighted_focal(&focal_samples, FOCAL_CENTER_WEIGHT);
 
     AttractFrame {
         pulses,
