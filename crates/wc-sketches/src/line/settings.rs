@@ -592,6 +592,10 @@ mod tests {
         clippy::expect_used,
         reason = "test-only: panic on bad TOML is the intended failure mode"
     )]
+    #[allow(
+        clippy::float_cmp,
+        reason = "comparing parsed [f32;4] against the exact serde default literals — bit-exact by construction"
+    )]
     fn missing_field_preserves_sibling_values() {
         let legacy = r#"
             particle_density = 7.5
@@ -629,6 +633,20 @@ mod tests {
         assert!(
             (parsed.palette_scale - 1.0).abs() < 1e-6,
             "palette_scale not default"
+        );
+        assert!(
+            (parsed.smear_chroma_gain - 1.5667).abs() < 1e-6,
+            "smear_chroma_gain not default"
+        );
+        assert_eq!(
+            parsed.smear_outgoing_color,
+            [0.4074, 0.6383, 1.0, 1.0],
+            "smear_outgoing_color not default"
+        );
+        assert_eq!(
+            parsed.smear_incoming_color,
+            [1.0, 0.6383, 0.4074, 1.0],
+            "smear_incoming_color not default"
         );
     }
 

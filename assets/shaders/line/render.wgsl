@@ -205,7 +205,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         } else {
             // Spectrum: center-peak tent over creation index, sharpened by spread.
             let tent = 1.0 - abs(2.0 * in.index_norm - 1.0);
-            t = pow(tent, spread);
+            t = pow(tent, max(spread, 1e-4));
         }
         // Palette = hue only (value-normalized); star supplies brightness.
         let pal_base = texel.rgb * value_normalize(turbo(t));
