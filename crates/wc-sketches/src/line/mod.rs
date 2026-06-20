@@ -198,6 +198,22 @@ impl Plugin for LinePlugin {
             Update,
             systems::color_influence::drive_color_influence.run_if(sketch_active(AppState::Line)),
         );
+        // Live palette-uniform driver: maps the LineSettings palette knobs into
+        // the LineMaterial::palette_params uniform. Registered under both the
+        // active and screensaver gates (mirrors drive_attract_color) so the
+        // palette applies live AND in attract while running zero systems when
+        // idle. Change-gated internally, so it is a single float compare per
+        // frame in the settled state.
+        app.add_systems(
+            Update,
+            systems::palette::drive_palette.run_if(sketch_active(AppState::Line)),
+        );
+        app.add_systems(
+            Update,
+            systems::palette::drive_palette.run_if(
+                wc_core::lifecycle::screensaver::in_screensaver(AppState::Line),
+            ),
+        );
         // Prune per-image adjustments when the template library changes (delete,
         // out-of-band removal, startup reconcile), keeping the persisted map in
         // sync with the store.

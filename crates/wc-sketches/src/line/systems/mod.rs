@@ -21,6 +21,7 @@
 #[cfg(feature = "templates")]
 pub mod color_influence;
 pub mod mouse;
+pub mod palette;
 #[cfg(feature = "templates")]
 pub mod prune_adjustments;
 #[cfg(feature = "templates")]
