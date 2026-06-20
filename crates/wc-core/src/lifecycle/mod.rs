@@ -16,6 +16,7 @@
 //! Sketches (registered in `wc-sketches`) gate their update systems on
 //! `in_state(SketchActivity::Active)` so they stop simulating when idle.
 
+pub mod action_map;
 pub mod actions;
 pub mod idle;
 pub mod nav;

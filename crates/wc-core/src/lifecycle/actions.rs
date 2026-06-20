@@ -43,6 +43,25 @@ pub enum WaveConductorAction {
     StartScreensaver,
 }
 
+impl WaveConductorAction {
+    /// Every action variant, in nav-precedence order. Used by the action-input
+    /// producer to iterate actions without per-frame allocation.
+    pub const ALL: [WaveConductorAction; 12] = [
+        WaveConductorAction::SelectLine,
+        WaveConductorAction::SelectFlame,
+        WaveConductorAction::SelectDots,
+        WaveConductorAction::SelectCymatics,
+        WaveConductorAction::SelectWaves,
+        WaveConductorAction::NavigateHome,
+        WaveConductorAction::NavigateNext,
+        WaveConductorAction::NavigatePrev,
+        WaveConductorAction::ToggleVolume,
+        WaveConductorAction::ToggleDevPanel,
+        WaveConductorAction::ToggleFullscreen,
+        WaveConductorAction::StartScreensaver,
+    ];
+}
+
 /// Build the default `InputMap<WaveConductorAction>` matching v4's hotkey table.
 ///
 /// Returned as a `Resource` so the lifecycle plugin can register it and a future
