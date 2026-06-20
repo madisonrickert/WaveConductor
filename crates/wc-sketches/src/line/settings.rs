@@ -83,9 +83,10 @@
 //! - **`smear_chroma_gain`** — scales the fringe colors into HDR (>1 boosts
 //!   the dominant channel past 1 for the additive glow). `1.5667` reproduces
 //!   the legacy fringe intensity. User knob.
-//! - **`smear_focal_smoothing`** — live-mode smear-focal ease time constant τ
-//!   (seconds): how slowly the gravity-smear focal eases toward the active
-//!   attractor centroid. `0.0` = instant snap; larger = calmer/laggier follow.
+//! - **`smear_focal_smoothing`** — hand smear-focal ease time constant τ
+//!   (seconds): how slowly the gravity-smear focal eases toward a grabbing
+//!   hand. `0.0` = instant snap; larger = calmer/laggier follow. Governs the
+//!   hand follow only; the mouse cursor always drives the focal instantly.
 //!   Dev-only knob.
 //!
 //! ## Synth timing chain (for tuners)
@@ -271,17 +272,17 @@ pub struct LineSettings {
     #[serde(default = "default_smear_chroma_gain")]
     pub smear_chroma_gain: f32,
 
-    /// Live-mode smear-focal ease time constant τ (seconds): how slowly the
-    /// gravity-smear focal eases toward the active-attractor centroid. `0.0` =
-    /// snap (instant follow, the un-smoothed feel); larger values lag and calm
-    /// the follow so a moving hand can't jolt the concentric rings. Dev-only
-    /// knob.
+    /// Hand smear-focal ease time constant τ (seconds): how slowly the
+    /// gravity-smear focal eases toward a grabbing hand. `0.0` = snap (instant
+    /// follow); larger values lag and calm the follow so a moving hand can't
+    /// jolt the concentric rings. Governs the hand follow only — the mouse
+    /// cursor always drives the focal directly and instantly. Dev-only knob.
     #[setting(
         default = 0.25_f32,
         min = 0.0_f32,
         max = 1.0_f32,
         step = 0.05_f32,
-        label = "Smear follow smoothing",
+        label = "Hand smear smoothing",
         unit = "s",
         category = Dev
     )]

@@ -77,9 +77,10 @@ impl WindowGeom {
     }
 }
 
-/// The live-mode smoothed gravity-smear focal point, in world space (centered
-/// on the origin, +y up). [`update_sim_params`] eases it toward the
-/// active-attractor centroid each frame; [`bake_post_base`] converts it to the
+/// The live-mode gravity-smear focal point, in world space (centered on the
+/// origin, +y up). [`update_sim_params`] updates it each frame: while a hand is
+/// grabbing it eases toward the hand centroid (smoothed); otherwise it is set to
+/// the mouse cursor directly (instant). [`bake_post_base`] converts it to the
 /// shader's window-pixel space for [`LinePostParams::i_mouse`].
 ///
 /// Inserted at [`Vec2::ZERO`] (screen center) in
@@ -290,12 +291,15 @@ pub fn bake_smear_tints(post: &mut LinePostParams, settings: &LineSettings) {
 /// `Update` — gated by `sketch_active(AppState::Line)`.
 ///
 /// Collects the live attractors (mouse + tracked hands), bakes them via the
-/// shared [`bake_sim_params`] (Condition A1), eases the [`LineSmearFocal`]
-/// toward the center-biased attractor centroid (so the gravity smear tracks the
-/// user's pull without snapping), bakes the post-process base via
-/// [`bake_post_base`] with that eased focal, and writes placeholder
-/// `g_constant` / `i_mouse_factor` that `audio_coupling` overrides later in the
-/// same frame.
+/// shared [`bake_sim_params`] (Condition A1), and updates the
+/// [`LineSmearFocal`]: while a hand is actively grabbing, the focal eases toward
+/// the center-biased hand centroid (smoothed, so the gravity smear follows the
+/// hand without snapping, relaxing to center as the grab releases); otherwise
+/// the mouse cursor drives the focal directly and instantly (the established
+/// behavior — the smear tracks the cursor whether or not the button is held).
+/// Then bakes the post-process base via [`bake_post_base`] with that focal, and
+/// writes placeholder `g_constant` / `i_mouse_factor` that `audio_coupling`
+/// overrides later in the same frame.
 pub fn update_sim_params(
     time: Res<'_, Time>,
     settings: Res<'_, LineSettings>,
@@ -310,11 +314,13 @@ pub fn update_sim_params(
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
     let mut attractor_count = 0_u32;
 
-    // Center-biased focal-centroid samples (raw source power pre-
-    // `gravity_constant`, world position). Fixed-size stack buffer sized to the
-    // worst case (mouse + every attractor slot) — no heap in this per-frame
-    // hot path. `focal_count` tracks the live entries.
-    let mut focal_samples = [(0.0_f32, [0.0_f32, 0.0_f32]); 1 + MAX_ATTRACTORS];
+    // Hand-only smear-focal samples (raw hand power pre-`gravity_constant`,
+    // world position). The mouse does NOT feed this centroid — the mouse cursor
+    // drives the focal directly and instantly below (the established behavior).
+    // Fixed-size stack buffer (every attractor slot can be a hand when no mouse
+    // is active) — no heap in this per-frame hot path. `focal_count` tracks the
+    // live hand entries.
+    let mut focal_samples = [(0.0_f32, [0.0_f32, 0.0_f32]); MAX_ATTRACTORS];
     let mut focal_count = 0_usize;
 
     if mouse.power > 0.0 {
@@ -327,9 +333,6 @@ pub fn update_sim_params(
             radius: 0.0,
         };
         attractor_count = 1;
-        // Focal sample uses the RAW mouse power (pre-`gravity_constant`).
-        focal_samples[focal_count] = (mouse.power, mouse.position);
-        focal_count += 1;
     }
 
     // Append LineHandAttractor entries after the mouse attractor.
@@ -376,20 +379,27 @@ pub fn update_sim_params(
         Turbulence::OFF,
     );
 
-    // --- Smear focal: ease toward the active-attractor centroid ---------
+    // --- Smear focal: hands ease toward it, the mouse drives it directly ---
     //
-    // Center-biased weighted centroid of the active attractors (relaxing to
-    // screen center as powers fade), then a frame-rate-independent exponential
-    // ease (τ = `smear_focal_smoothing`) so a moving or jittery hand can't snap
-    // the concentric rings. `smear_focal_smoothing = 0.0` recovers the old
-    // instant-snap-to-mouse feel.
-    let target = weighted_focal(&focal_samples[..focal_count], FOCAL_CENTER_WEIGHT);
-    focal.0 = Vec2::from(ease_focal(
-        focal.0.to_array(),
-        target,
-        time.delta_secs(),
-        settings.smear_focal_smoothing,
-    ));
+    // Active (grabbing) hands: the focal eases toward their center-biased
+    // centroid with a frame-rate-independent exponential filter (τ =
+    // `smear_focal_smoothing`), so a moving or jittery hand can't snap the
+    // concentric rings; the centroid relaxes smoothly to screen center as the
+    // grab releases (no jolt). No active hand: the mouse cursor drives the focal
+    // directly and instantly — the established behavior, tracking the cursor
+    // whether or not the button is held. (So the smoothing knob governs the hand
+    // follow only; the mouse stays instant, as it always was.)
+    if focal_count > 0 {
+        let target = weighted_focal(&focal_samples[..focal_count], FOCAL_CENTER_WEIGHT);
+        focal.0 = Vec2::from(ease_focal(
+            focal.0.to_array(),
+            target,
+            time.delta_secs(),
+            settings.smear_focal_smoothing,
+        ));
+    } else {
+        focal.0 = Vec2::from(mouse.position);
+    }
 
     // --- Gravity-smear post-process uniforms ---------------------------
     //
@@ -427,11 +437,18 @@ mod tests {
         clippy::expect_used,
         reason = "test-only: panic on system-run failure is the intended failure mode"
     )]
-    fn update_sim_params_eases_focal_toward_active_mouse() {
+    #[allow(
+        clippy::float_cmp,
+        reason = "the mouse focal is copied verbatim (instant, no ease) — equality is exact"
+    )]
+    fn update_sim_params_focal_tracks_mouse_cursor_instantly() {
+        // No hands and the mouse button NOT held (power 0): the cursor still
+        // drives the focal directly and instantly — the established behavior,
+        // not gated on an active pull.
         let mut world = World::new();
-        world.insert_resource(LineSettings::default()); // smear_focal_smoothing = 0.25
+        world.insert_resource(LineSettings::default());
         world.insert_resource(MouseAttractorState {
-            power: 10.0,
+            power: 0.0,
             position: [200.0, 100.0],
         });
         world.insert_resource(LineSimParams {
@@ -450,35 +467,15 @@ mod tests {
             .run_system_once(update_sim_params)
             .expect("update_sim_params run");
 
-        // One 16 ms step at τ = 0.25 s eases ~6% of the way from center toward
-        // the (center-biased) mouse target — strictly between center and mouse.
+        // Focal lands exactly on the cursor (instant copy, no ease, no bias).
         let focal = world.resource::<LineSmearFocal>().0;
-        assert!(
-            focal.x > 0.0 && focal.x < 200.0,
-            "x eased partway: {}",
-            focal.x
-        );
-        assert!(
-            focal.y > 0.0 && focal.y < 100.0,
-            "y eased partway: {}",
-            focal.y
-        );
+        assert_eq!(focal, Vec2::new(200.0, 100.0));
 
-        // The eased focal reaches the smear uniform: i_mouse is the focal in
-        // window-pixel space (top-left origin, +y down) for a 1280x720 window,
-        // so a positive-x/positive-y world focal shifts i_mouse right of and
-        // above center (640, 360).
+        // It reaches the smear uniform: i_mouse is the focal in window-pixel
+        // space (top-left origin, +y down) for a 1280x720 window:
+        // [200 + 640, 720 - (100 + 360)] = [840, 260].
         let post = world.resource::<LinePostParams>();
-        assert!(
-            post.i_mouse[0] > 640.0,
-            "focal.x>0 shifts i_mouse right: {}",
-            post.i_mouse[0]
-        );
-        assert!(
-            post.i_mouse[1] < 360.0,
-            "focal.y>0 shifts i_mouse up: {}",
-            post.i_mouse[1]
-        );
+        assert_eq!(post.i_mouse, [840.0, 260.0]);
     }
 
     #[test]
@@ -486,10 +483,13 @@ mod tests {
         clippy::expect_used,
         reason = "test-only: panic on system-run failure is the intended failure mode"
     )]
-    fn update_sim_params_relaxes_focal_to_center_when_idle() {
+    fn update_sim_params_focal_eases_toward_grabbing_hand() {
+        // A grabbing hand (power > 1e-2) drives the focal via the smoothed,
+        // center-biased centroid — NOT the mouse. The mouse cursor sits at the
+        // origin, so a non-origin focal proves the hand path was taken and the
+        // ease moved the focal only partway in one 16 ms step (τ = 0.25).
         let mut world = World::new();
-        world.insert_resource(LineSettings::default());
-        // No active attractors: mouse power 0, no tracked hands spawned.
+        world.insert_resource(LineSettings::default()); // smear_focal_smoothing = 0.25
         world.insert_resource(MouseAttractorState {
             power: 0.0,
             position: [0.0, 0.0],
@@ -500,27 +500,37 @@ mod tests {
             particle_count: 0,
         });
         world.insert_resource(LinePostParams::default());
-        // Start off-center; with no attractors the target is center, so the
-        // eased focal must move back toward the origin (without overshooting).
-        world.insert_resource(LineSmearFocal(Vec2::new(300.0, 150.0)));
+        world.insert_resource(LineSmearFocal(Vec2::ZERO));
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_millis(16));
         world.insert_resource(time);
         world.spawn(Window::default());
+        // One grabbing hand at (200, 100), power 1.0.
+        world.spawn((
+            TrackedHand,
+            LineHandAttractor {
+                power: 1.0,
+                position: Vec2::new(200.0, 100.0),
+            },
+        ));
 
         world
             .run_system_once(update_sim_params)
             .expect("update_sim_params run");
 
+        // Center-biased hand target ≈ [200, 100] / 1.15 ≈ [173.9, 87.0]; one
+        // 16 ms ease at τ = 0.25 (α ≈ 0.063) moves the focal partway there —
+        // strictly between the origin and the target, and clearly off-origin
+        // (so the hand, not the idle mouse at [0,0], drove it).
         let focal = world.resource::<LineSmearFocal>().0;
         assert!(
-            focal.x < 300.0 && focal.x > 0.0,
-            "x relaxes toward center: {}",
+            focal.x > 1.0 && focal.x < 173.9,
+            "x eased toward hand: {}",
             focal.x
         );
         assert!(
-            focal.y < 150.0 && focal.y > 0.0,
-            "y relaxes toward center: {}",
+            focal.y > 0.5 && focal.y < 87.0,
+            "y eased toward hand: {}",
             focal.y
         );
     }
