@@ -5,7 +5,7 @@
 //   @binding(1): star sprite texture (Texture2D<f32>)
 //   @binding(2): star sprite sampler
 
-#import bevy_sprite::mesh2d_view_bindings::{view, globals}
+#import bevy_sprite::mesh2d_view_bindings::view
 
 struct Particle {
     position: vec2<f32>,
@@ -40,8 +40,8 @@ struct Particle {
 // mix(rgb, rgb*img, 0.0) == rgb.
 @group(2) @binding(5) var<uniform> template_color: vec4<f32>;
 // Psychedelic palette params (LineMaterial::palette_params). x = mode index
-// (0 off / 1 velocity / 2 scatter); y = crossfade strength 0..1; z = time-cycle
-// rate (cycles/s, multiplied by globals.time for the phase); w = palette spread.
+// (0 Off / 1 Velocity / 2 Spectrum); y = crossfade strength 0..1; z = spread
+// (controls heatmap width for Velocity, peak sharpness for Spectrum); w unused.
 // x = 0 (Vec4(0), the Active/no-palette value) skips the palette branch below,
 // so color is the pre-palette path bit-exactly.
 @group(2) @binding(6) var<uniform> palette_params: vec4<f32>;
@@ -58,9 +58,9 @@ struct VertexOutput {
     // (and may flush denormals — dark-red colours decode as denormals), which
     // would corrupt the colour. Flat = provoking-vertex value, bit-preserved.
     @location(3) @interpolate(flat) spawn_color: f32,
-    // Per-particle spawn hash (0..1), carried for the Scatter palette mode.
-    // Flat because it is a per-particle constant (no meaningful interpolation).
-    @location(4) @interpolate(flat) scatter: f32,
+    // Normalized creation index (particle buffer index / (count-1)), 0..1, for
+    // the Spectrum palette. Flat: a per-particle constant.
+    @location(4) @interpolate(flat) index_norm: f32,
 };
 
 // Velocity band for the attract tint, in world px/s. Below LO the particle is
@@ -128,20 +128,33 @@ fn vertex(
     out.alpha = p.alpha;
     out.speed = length(p.velocity);
     out.spawn_color = p.spawn_color;
-    out.scatter = p.spawn_hash;
+    // arrayLength gives the live particle count; guard the (count-1) divide.
+    let count = f32(arrayLength(&particles));
+    out.index_norm = f32(particle_index) / max(count - 1.0, 1.0);
     return out;
 }
 
-// Inigo Quilez cosine palette — smooth, tunable, the de-facto psychedelic ramp.
-// color(t) = a + b * cos(2*pi*(c*t + d)). Each term: a = per-channel bias,
-// b = amplitude, c = frequency, d = per-channel phase. These coefficients are
-// the canonical rainbow (full hue sweep over t in [0,1]).
-fn palette(t: f32) -> vec3<f32> {
-    let a = vec3<f32>(0.5, 0.5, 0.5);
-    let b = vec3<f32>(0.5, 0.5, 0.5);
-    let c = vec3<f32>(1.0, 1.0, 1.0);
-    let d = vec3<f32>(0.0, 0.33, 0.67);
-    return a + b * cos(6.28318530718 * (c * t + d));
+// Turbo colormap (Anton Mikhailov / Google), degree-6 polynomial approximation —
+// texture-free, blue (t=0) -> green (t=0.5) -> red (t=1). Output clamped to 0..1.
+fn turbo(t: f32) -> vec3<f32> {
+    let x = clamp(t, 0.0, 1.0);
+    let c0 = vec3<f32>(0.1140890109226559, 0.06288340699912215, 0.2248337216805064);
+    let c1 = vec3<f32>(6.716419496985708, 3.182286745507602, 7.571581586103393);
+    let c2 = vec3<f32>(-66.09402360453038, -4.9279827041226, -10.09439367561635);
+    let c3 = vec3<f32>(228.7660791526501, 25.04986699771073, -91.54105330182436);
+    let c4 = vec3<f32>(-334.8351565777451, -69.31749712757485, 288.5858850615712);
+    let c5 = vec3<f32>(218.7637218434795, 67.52150567819112, -305.2045772184957);
+    let c6 = vec3<f32>(-52.88903478218835, -21.54527364654712, 110.5174647748972);
+    let rgb = c0 + x * (c1 + x * (c2 + x * (c3 + x * (c4 + x * (c5 + x * c6)))));
+    return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Value-normalize: divide by the max channel so the palette supplies HUE only,
+// never brightness. Turbo's dark cool end (~(0.19,0.07,0.23)) becomes a bright
+// blue, so the star keeps supplying brightness and no particle crushes to dark.
+fn value_normalize(c: vec3<f32>) -> vec3<f32> {
+    let m = max(c.r, max(c.g, c.b));
+    return c / max(m, 1e-4);
 }
 
 @fragment
@@ -180,24 +193,22 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let img_base = mix(texel.rgb, texel.rgb * img_rgb, template_color.x);
     // Psychedelic palette (uniform-mode branch). palette_params is a uniform --
     // constant across the whole draw -- so every fragment takes the same branch
-    // (no warp divergence) and the Off case never runs the cos/fract math.
+    // (no warp divergence) and the Off case never runs the turbo math.
     var base = img_base;
     if (palette_params.x > 0.5) {
         let strength = palette_params.y;
-        let cycle = palette_params.z;
-        let scale = palette_params.w;
-        var driver_t: f32;
+        let spread = palette_params.z;
+        var t: f32;
         if (palette_params.x < 1.5) {
-            // Velocity: ~180 px/s spans one palette cycle at spread 1 (the wake band).
-            driver_t = in.speed * scale / 180.0;
+            // Velocity: clamped cool->hot; ~180/spread px/s maps to full hot.
+            t = clamp(in.speed * spread / 180.0, 0.0, 1.0);
         } else {
-            // Scatter: stable per-particle hash, repeated `scale` times across 0..1.
-            driver_t = in.scatter * scale;
+            // Spectrum: center-peak tent over creation index, sharpened by spread.
+            let tent = 1.0 - abs(2.0 * in.index_norm - 1.0);
+            t = pow(tent, spread);
         }
-        // fract wraps the ramp; globals.time * cycle scrolls the whole palette.
-        let t = fract(driver_t + globals.time * cycle);
-        let pal_base = texel.rgb * palette(t);
-        // Crossfade image-coloured -> palette by strength (0 = image, 1 = palette).
+        // Palette = hue only (value-normalized); star supplies brightness.
+        let pal_base = texel.rgb * value_normalize(turbo(t));
         base = mix(img_base, pal_base, strength);
     }
     // Attract-only velocity tint applies on top of the (palette-or-image) base.
