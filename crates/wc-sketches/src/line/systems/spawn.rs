@@ -30,8 +30,8 @@ use crate::line::heatmap::sample_from_heatmap;
 use crate::line::material::LineMaterial;
 use crate::line::particle::{Particle, SimParams};
 use crate::line::settings::LineSettings;
-use crate::line::systems::sim_params::LineSmearFocal;
 use crate::line::sim_cpu::LineCpuMirror;
+use crate::line::systems::sim_params::LineSmearFocal;
 
 /// Marker component placed on every entity owned by the Line sketch.
 ///

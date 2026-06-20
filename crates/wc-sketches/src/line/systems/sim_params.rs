@@ -359,8 +359,7 @@ pub fn update_sim_params(
         slot += 1;
         // Focal sample uses the RAW hand power (pre-`gravity_constant`), so the
         // center-bias weight stays decoupled from the gravity_constant knob.
-        focal_samples[focal_count] =
-            (hand_attractor.power, hand_attractor.position.to_array());
+        focal_samples[focal_count] = (hand_attractor.power, hand_attractor.position.to_array());
         focal_count += 1;
     }
 
@@ -454,16 +453,32 @@ mod tests {
         // One 16 ms step at τ = 0.25 s eases ~6% of the way from center toward
         // the (center-biased) mouse target — strictly between center and mouse.
         let focal = world.resource::<LineSmearFocal>().0;
-        assert!(focal.x > 0.0 && focal.x < 200.0, "x eased partway: {}", focal.x);
-        assert!(focal.y > 0.0 && focal.y < 100.0, "y eased partway: {}", focal.y);
+        assert!(
+            focal.x > 0.0 && focal.x < 200.0,
+            "x eased partway: {}",
+            focal.x
+        );
+        assert!(
+            focal.y > 0.0 && focal.y < 100.0,
+            "y eased partway: {}",
+            focal.y
+        );
 
         // The eased focal reaches the smear uniform: i_mouse is the focal in
         // window-pixel space (top-left origin, +y down) for a 1280x720 window,
         // so a positive-x/positive-y world focal shifts i_mouse right of and
         // above center (640, 360).
         let post = world.resource::<LinePostParams>();
-        assert!(post.i_mouse[0] > 640.0, "focal.x>0 shifts i_mouse right: {}", post.i_mouse[0]);
-        assert!(post.i_mouse[1] < 360.0, "focal.y>0 shifts i_mouse up: {}", post.i_mouse[1]);
+        assert!(
+            post.i_mouse[0] > 640.0,
+            "focal.x>0 shifts i_mouse right: {}",
+            post.i_mouse[0]
+        );
+        assert!(
+            post.i_mouse[1] < 360.0,
+            "focal.y>0 shifts i_mouse up: {}",
+            post.i_mouse[1]
+        );
     }
 
     #[test]
@@ -498,8 +513,16 @@ mod tests {
             .expect("update_sim_params run");
 
         let focal = world.resource::<LineSmearFocal>().0;
-        assert!(focal.x < 300.0 && focal.x > 0.0, "x relaxes toward center: {}", focal.x);
-        assert!(focal.y < 150.0 && focal.y > 0.0, "y relaxes toward center: {}", focal.y);
+        assert!(
+            focal.x < 300.0 && focal.x > 0.0,
+            "x relaxes toward center: {}",
+            focal.x
+        );
+        assert!(
+            focal.y < 150.0 && focal.y > 0.0,
+            "y relaxes toward center: {}",
+            focal.y
+        );
     }
 
     #[test]
@@ -592,13 +615,19 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "empty input: numerator is exactly 0.0, result is 0.0/center_weight = 0.0 — bit-exact")]
+    #[allow(
+        clippy::float_cmp,
+        reason = "empty input: numerator is exactly 0.0, result is 0.0/center_weight = 0.0 — bit-exact"
+    )]
     fn weighted_focal_empty_is_center() {
         assert_eq!(weighted_focal(&[], FOCAL_CENTER_WEIGHT), [0.0, 0.0]);
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "zero-weight sample: numerator stays exactly 0.0, result is 0.0/center_weight = 0.0 — bit-exact")]
+    #[allow(
+        clippy::float_cmp,
+        reason = "zero-weight sample: numerator stays exactly 0.0, result is 0.0/center_weight = 0.0 — bit-exact"
+    )]
     fn weighted_focal_zero_weight_is_center() {
         assert_eq!(
             weighted_focal(&[(0.0, [100.0, 50.0])], FOCAL_CENTER_WEIGHT),
@@ -635,7 +664,11 @@ mod tests {
     #[test]
     fn ease_focal_moves_toward_target() {
         let f = ease_focal([0.0, 0.0], [100.0, 0.0], 0.016, 0.25);
-        assert!(f[0] > 0.0 && f[0] < 100.0, "should ease partway, got {}", f[0]);
+        assert!(
+            f[0] > 0.0 && f[0] < 100.0,
+            "should ease partway, got {}",
+            f[0]
+        );
     }
 
     #[test]
