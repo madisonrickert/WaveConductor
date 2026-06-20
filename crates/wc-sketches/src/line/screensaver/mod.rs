@@ -65,7 +65,7 @@ use crate::line::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::sim_params::{
-    bake_post_base, bake_sim_params, AttractGate, Turbulence, WindowGeom,
+    bake_post_base, bake_sim_params, bake_smear_tints, AttractGate, Turbulence, WindowGeom,
 };
 use crate::line::LineRoot;
 
@@ -160,6 +160,7 @@ fn drive_line_attract(
         time.elapsed_secs(),
         settings.gamma,
     );
+    bake_smear_tints(&mut post, &settings);
     // The smear breathes EXACTLY like the live sketch at rest: the same
     // 5-second triangle wave the audio coupling drives, at the settled-field
     // baseline (`grouped_upness` = 0). An earlier design pinned a flat

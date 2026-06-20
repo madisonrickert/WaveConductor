@@ -75,6 +75,14 @@
 //!   `synth_full_volume_mm` plays at full drive, fading to silence at
 //!   `synth_silence_mm`. Kiosk-tuning knobs (a kiosk visitor stands ~0.5 m
 //!   out and should fade over several feet, not by 1 m). Dev-only knobs.
+//! - **`smear_outgoing_color`** — normalized hue for the cool-blue outgoing
+//!   trail fringe. Scaled by `smear_chroma_gain` into the HDR end-tint.
+//!   Default reproduces the legacy cool-blue trail.
+//! - **`smear_incoming_color`** — normalized hue for the warm-orange incoming
+//!   trail fringe. Default reproduces the legacy orange trail.
+//! - **`smear_chroma_gain`** — scales the fringe colors into HDR (>1 boosts
+//!   the dominant channel past 1 for the additive glow). `1.5667` reproduces
+//!   the legacy fringe intensity. User knob.
 //!
 //! ## Synth timing chain (for tuners)
 //!
@@ -217,6 +225,47 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_palette_scale")]
     pub palette_scale: f32,
+
+    /// Outgoing-trail smear fringe color (normalized hue/ratio). Scaled by
+    /// [`Self::smear_chroma_gain`] into the HDR end-tint the gravity-smear
+    /// ray-march compounds toward. Default reproduces the legacy cool-blue trail.
+    #[setting(
+        default = [0.4074_f32, 0.6383, 1.0, 1.0],
+        ty = Color,
+        label = "Smear outgoing color",
+        section = "Smear",
+        category = User
+    )]
+    #[serde(default = "default_smear_outgoing_color")]
+    pub smear_outgoing_color: [f32; 4],
+
+    /// Incoming-trail smear fringe color (normalized hue/ratio). Default
+    /// reproduces the legacy warm-orange trail.
+    #[setting(
+        default = [1.0_f32, 0.6383, 0.4074, 1.0],
+        ty = Color,
+        label = "Smear incoming color",
+        section = "Smear",
+        category = User
+    )]
+    #[serde(default = "default_smear_incoming_color")]
+    pub smear_incoming_color: [f32; 4],
+
+    /// Smear chromatic gain: scales the fringe colors into HDR (>1) so the
+    /// dominant channel boosts past 1 — the additive glow that makes the trails
+    /// luminous. `1.5667` reproduces the legacy fringe intensity. With both
+    /// colors white, gain `1.0` is a neutral (uncolored) smear.
+    #[setting(
+        default = 1.5667_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Smear chroma gain",
+        section = "Smear",
+        category = User
+    )]
+    #[serde(default = "default_smear_chroma_gain")]
+    pub smear_chroma_gain: f32,
 
     /// Path to a PNG file whose luminance × alpha drives particle spawn density.
     /// Empty string = use the default horizontal-line layout. Relative paths
@@ -463,6 +512,18 @@ fn default_palette_strength() -> f32 {
 
 fn default_palette_scale() -> f32 {
     1.0
+}
+
+fn default_smear_outgoing_color() -> [f32; 4] {
+    [0.4074, 0.6383, 1.0, 1.0]
+}
+
+fn default_smear_incoming_color() -> [f32; 4] {
+    [1.0, 0.6383, 0.4074, 1.0]
+}
+
+fn default_smear_chroma_gain() -> f32 {
+    1.5667
 }
 
 fn default_attract_particle_fraction() -> f32 {

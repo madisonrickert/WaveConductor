@@ -84,6 +84,16 @@ pub struct LinePostParams {
     pub g_constant: f32,
     /// Per-channel gamma curve applied as the final step of the post-process.
     pub gamma: f32,
+    /// Outgoing-trail smear HDR end-tint (`xyz`; `w` pad). The gravity smear
+    /// derives its per-step chromatic factor as `pow(this, 1/NUM_STEPS)`, so the
+    /// trail compounds toward this tint. Written each in-Line frame by
+    /// [`crate::line::systems::sim_params::bake_smear_tints`] from `LineSettings`
+    /// (`color × gain`). Default zero is inert: the smear is gated by
+    /// `g_constant` (also 0 by default), so an unwritten tint never renders.
+    pub smear_outgoing_tint: [f32; 4],
+    /// Incoming-trail smear HDR end-tint (`xyz`; `w` pad). See
+    /// [`Self::smear_outgoing_tint`].
+    pub smear_incoming_tint: [f32; 4],
 }
 
 /// Compile-time validated `LinePostParams` size for the uniform bind-group

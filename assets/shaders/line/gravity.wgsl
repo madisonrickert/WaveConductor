@@ -15,6 +15,8 @@ struct PostParams {
     iGlobalTime: f32,
     g_constant: f32,
     gamma: f32,
+    smear_outgoing_tint: vec4<f32>,
+    smear_incoming_tint: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: PostParams;
@@ -43,10 +45,12 @@ fn smear(uv_pixels: vec2<f32>, attraction_center: vec2<f32>) -> vec4<f32> {
     var outgoing_p = uv_pixels;
     var color = vec4<f32>(0.0);
 
-    // Chromatic shift factors. v4: outgoing = (0.96, 1.0, 1.0/0.96, 1.0);
-    //                            incoming = (1.0/0.96, 1.0, 0.96, 1.0).
-    let outgoing_factor = vec4<f32>(0.96, 1.0, 1.0 / 0.96, 1.0);
-    let incoming_factor = vec4<f32>(1.0 / 0.96, 1.0, 0.96, 1.0);
+    // Per-step chromatic factor derived from the configured HDR end-tint:
+    // accumulated over NUM_STEPS it compounds to the end-tint. max(_,0) guards
+    // pow of a negative. Defaults reproduce the legacy (0.96,1,1.042) trail.
+    let inv_steps = 1.0 / f32(NUM_STEPS);
+    let outgoing_factor = pow(max(params.smear_outgoing_tint.rgb, vec3<f32>(0.0)), vec3<f32>(inv_steps));
+    let incoming_factor = pow(max(params.smear_incoming_tint.rgb, vec3<f32>(0.0)), vec3<f32>(inv_steps));
 
     let v_mouse_pull = (params.iMouse - uv_pixels) * params.iMouseFactor;
 
@@ -65,10 +69,10 @@ fn smear(uv_pixels: vec2<f32>, attraction_center: vec2<f32>) -> vec4<f32> {
         let in_uv  = incoming_p / params.iResolution;
         let out_uv = outgoing_p / params.iResolution;
 
-        color = color + textureSample(scene_texture, scene_sampler, in_uv)
-                     * intensity * v_incoming_accum;
-        color = color + textureSample(scene_texture, scene_sampler, out_uv)
-                     * intensity * v_outgoing_accum;
+        let in_sample = textureSample(scene_texture, scene_sampler, in_uv) * intensity;
+        color = color + vec4<f32>(in_sample.rgb * v_incoming_accum, in_sample.a);
+        let out_sample = textureSample(scene_texture, scene_sampler, out_uv) * intensity;
+        color = color + vec4<f32>(out_sample.rgb * v_outgoing_accum, out_sample.a);
 
         v_incoming_accum = v_incoming_accum * incoming_factor;
         v_outgoing_accum = v_outgoing_accum * outgoing_factor;

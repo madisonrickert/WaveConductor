@@ -205,6 +205,18 @@ pub fn bake_post_base(
     post.gamma = gamma;
 }
 
+/// Write the configured smear fringe end-tints into [`LinePostParams`] from
+/// `LineSettings`: `end = color.rgb × gain` (HDR — the dominant channel boosts
+/// past 1 for the additive glow). Shared by the live (`update_sim_params`) and
+/// screensaver writers so the two cannot drift. `w` is padding (0).
+pub fn bake_smear_tints(post: &mut LinePostParams, settings: &LineSettings) {
+    let gain = settings.smear_chroma_gain.max(0.0);
+    let o = settings.smear_outgoing_color;
+    let i = settings.smear_incoming_color;
+    post.smear_outgoing_tint = [o[0] * gain, o[1] * gain, o[2] * gain, 0.0];
+    post.smear_incoming_tint = [i[0] * gain, i[1] * gain, i[2] * gain, 0.0];
+}
+
 /// `Update` — gated by `sketch_active(AppState::Line)`.
 ///
 /// Collects the live attractors (mouse + tracked hands), bakes them via the
@@ -288,6 +300,7 @@ pub fn update_sim_params(
         time.elapsed_secs(),
         settings.gamma,
     );
+    bake_smear_tints(&mut post, &settings);
     // Placeholder defaults for `i_mouse_factor` and `g_constant` — the
     // gated `Update` chain runs `audio_coupling::drive_audio_and_shader`
     // immediately after this system and overrides both fields with the
@@ -302,6 +315,43 @@ pub fn update_sim_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "test inputs are integer-valued and exactly representable; color × gain is bit-exact"
+    )]
+    fn bake_smear_tints_scales_color_by_gain() {
+        let mut post = LinePostParams::default();
+        let settings = LineSettings {
+            smear_chroma_gain: 2.0,
+            smear_outgoing_color: [0.5, 0.25, 1.0, 1.0],
+            smear_incoming_color: [1.0, 0.25, 0.5, 1.0],
+            ..LineSettings::default()
+        };
+        bake_smear_tints(&mut post, &settings);
+        assert_eq!(post.smear_outgoing_tint, [1.0, 0.5, 2.0, 0.0]);
+        assert_eq!(post.smear_incoming_tint, [2.0, 0.5, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn bake_smear_tints_default_reproduces_legacy_endtints() {
+        // Legacy gravity.wgsl compounded outgoing (0.96,1,1.042) and incoming
+        // (1.042,1,0.96) over 11 steps -> end-tints ~ (0.638,1,1.567) / (1.567,1,0.638).
+        let mut post = LinePostParams::default();
+        bake_smear_tints(&mut post, &LineSettings::default());
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-2;
+        assert!(
+            approx(post.smear_outgoing_tint[0], 0.638)
+                && approx(post.smear_outgoing_tint[2], 1.567),
+            "outgoing end-tint should reproduce the legacy blue-shifted trail"
+        );
+        assert!(
+            approx(post.smear_incoming_tint[0], 1.567)
+                && approx(post.smear_incoming_tint[2], 0.638),
+            "incoming end-tint should reproduce the legacy orange-shifted trail"
+        );
+    }
 
     #[test]
     #[allow(
