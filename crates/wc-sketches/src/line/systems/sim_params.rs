@@ -290,9 +290,12 @@ pub fn bake_smear_tints(post: &mut LinePostParams, settings: &LineSettings) {
 /// `Update` — gated by `sketch_active(AppState::Line)`.
 ///
 /// Collects the live attractors (mouse + tracked hands), bakes them via the
-/// shared [`bake_sim_params`] / [`bake_post_base`] (Condition A1), and writes
-/// placeholder `g_constant` / `i_mouse_factor` that `audio_coupling` overrides
-/// later in the same frame.
+/// shared [`bake_sim_params`] (Condition A1), eases the [`LineSmearFocal`]
+/// toward the center-biased attractor centroid (so the gravity smear tracks the
+/// user's pull without snapping), bakes the post-process base via
+/// [`bake_post_base`] with that eased focal, and writes placeholder
+/// `g_constant` / `i_mouse_factor` that `audio_coupling` overrides later in the
+/// same frame.
 pub fn update_sim_params(
     time: Res<'_, Time>,
     settings: Res<'_, LineSettings>,
@@ -301,10 +304,19 @@ pub fn update_sim_params(
     line_hands: Query<'_, '_, &LineHandAttractor, With<TrackedHand>>,
     mut sim: ResMut<'_, LineSimParams>,
     mut post: ResMut<'_, LinePostParams>,
+    mut focal: ResMut<'_, LineSmearFocal>,
 ) {
-    // --- Attractor list -------------------------------------------------
+    // --- Attractor list + smear-focal samples ---------------------------
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
     let mut attractor_count = 0_u32;
+
+    // Center-biased focal-centroid samples (raw source power pre-
+    // `gravity_constant`, world position). Fixed-size stack buffer sized to the
+    // worst case (mouse + every attractor slot) — no heap in this per-frame
+    // hot path. `focal_count` tracks the live entries.
+    let mut focal_samples = [(0.0_f32, [0.0_f32, 0.0_f32]); 1 + MAX_ATTRACTORS];
+    let mut focal_count = 0_usize;
+
     if mouse.power > 0.0 {
         attractors[0] = Attractor {
             position: mouse.position,
@@ -315,6 +327,9 @@ pub fn update_sim_params(
             radius: 0.0,
         };
         attractor_count = 1;
+        // Focal sample uses the RAW mouse power (pre-`gravity_constant`).
+        focal_samples[focal_count] = (mouse.power, mouse.position);
+        focal_count += 1;
     }
 
     // Append LineHandAttractor entries after the mouse attractor.
@@ -342,6 +357,11 @@ pub fn update_sim_params(
         };
         attractor_count += 1;
         slot += 1;
+        // Focal sample uses the RAW hand power (pre-`gravity_constant`), so the
+        // center-bias weight stays decoupled from the gravity_constant knob.
+        focal_samples[focal_count] =
+            (hand_attractor.power, hand_attractor.position.to_array());
+        focal_count += 1;
     }
 
     // --- Bake via the shared baker (Condition A1) -------------------------
@@ -357,16 +377,31 @@ pub fn update_sim_params(
         Turbulence::OFF,
     );
 
+    // --- Smear focal: ease toward the active-attractor centroid ---------
+    //
+    // Center-biased weighted centroid of the active attractors (relaxing to
+    // screen center as powers fade), then a frame-rate-independent exponential
+    // ease (τ = `smear_focal_smoothing`) so a moving or jittery hand can't snap
+    // the concentric rings. `smear_focal_smoothing = 0.0` recovers the old
+    // instant-snap-to-mouse feel.
+    let target = weighted_focal(&focal_samples[..focal_count], FOCAL_CENTER_WEIGHT);
+    focal.0 = Vec2::from(ease_focal(
+        focal.0.to_array(),
+        target,
+        time.delta_secs(),
+        settings.smear_focal_smoothing,
+    ));
+
     // --- Gravity-smear post-process uniforms ---------------------------
     //
     // The post-process shader works in window-pixel space (matches v4's
     // `gl_FragCoord.xy` reference). Particles live in world space centred at
-    // the origin (+y up) — `bake_post_base` converts the mouse position back
+    // the origin (+y up) — `bake_post_base` converts the eased smear focal back
     // to window-pixel coords (top-left origin, +y down) for `iMouse`.
     bake_post_base(
         &mut post,
         geom,
-        mouse.position,
+        focal.0.to_array(),
         time.elapsed_secs(),
         settings.gamma,
     );
@@ -385,6 +420,87 @@ pub fn update_sim_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::time::Duration;
+
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn update_sim_params_eases_focal_toward_active_mouse() {
+        let mut world = World::new();
+        world.insert_resource(LineSettings::default()); // smear_focal_smoothing = 0.25
+        world.insert_resource(MouseAttractorState {
+            power: 10.0,
+            position: [200.0, 100.0],
+        });
+        world.insert_resource(LineSimParams {
+            params: SimParams::default(),
+            particles_handle: Handle::default(),
+            particle_count: 0,
+        });
+        world.insert_resource(LinePostParams::default());
+        world.insert_resource(LineSmearFocal(Vec2::ZERO));
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_millis(16));
+        world.insert_resource(time);
+        world.spawn(Window::default()); // 1280x720 default resolution
+
+        world
+            .run_system_once(update_sim_params)
+            .expect("update_sim_params run");
+
+        // One 16 ms step at τ = 0.25 s eases ~6% of the way from center toward
+        // the (center-biased) mouse target — strictly between center and mouse.
+        let focal = world.resource::<LineSmearFocal>().0;
+        assert!(focal.x > 0.0 && focal.x < 200.0, "x eased partway: {}", focal.x);
+        assert!(focal.y > 0.0 && focal.y < 100.0, "y eased partway: {}", focal.y);
+
+        // The eased focal reaches the smear uniform: i_mouse is the focal in
+        // window-pixel space (top-left origin, +y down) for a 1280x720 window,
+        // so a positive-x/positive-y world focal shifts i_mouse right of and
+        // above center (640, 360).
+        let post = world.resource::<LinePostParams>();
+        assert!(post.i_mouse[0] > 640.0, "focal.x>0 shifts i_mouse right: {}", post.i_mouse[0]);
+        assert!(post.i_mouse[1] < 360.0, "focal.y>0 shifts i_mouse up: {}", post.i_mouse[1]);
+    }
+
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn update_sim_params_relaxes_focal_to_center_when_idle() {
+        let mut world = World::new();
+        world.insert_resource(LineSettings::default());
+        // No active attractors: mouse power 0, no tracked hands spawned.
+        world.insert_resource(MouseAttractorState {
+            power: 0.0,
+            position: [0.0, 0.0],
+        });
+        world.insert_resource(LineSimParams {
+            params: SimParams::default(),
+            particles_handle: Handle::default(),
+            particle_count: 0,
+        });
+        world.insert_resource(LinePostParams::default());
+        // Start off-center; with no attractors the target is center, so the
+        // eased focal must move back toward the origin (without overshooting).
+        world.insert_resource(LineSmearFocal(Vec2::new(300.0, 150.0)));
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_millis(16));
+        world.insert_resource(time);
+        world.spawn(Window::default());
+
+        world
+            .run_system_once(update_sim_params)
+            .expect("update_sim_params run");
+
+        let focal = world.resource::<LineSmearFocal>().0;
+        assert!(focal.x < 300.0 && focal.x > 0.0, "x relaxes toward center: {}", focal.x);
+        assert!(focal.y < 150.0 && focal.y > 0.0, "y relaxes toward center: {}", focal.y);
+    }
 
     #[test]
     #[allow(
