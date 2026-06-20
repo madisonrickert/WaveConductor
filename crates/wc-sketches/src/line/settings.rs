@@ -35,6 +35,13 @@
 //! - **`gravity_constant`** — strength of the pull toward attractors (v4
 //!   `GRAVITY_CONSTANT`, default 280).
 //! - **`gamma`** — per-channel gamma curve on the post-process pass.
+//! - **`palette_mode`** — psychedelic color-palette driver: `Off` / `Velocity`
+//!   / `Scatter`. `Off` is the bit-exact pre-palette path.
+//! - **`palette_strength`** — crossfade from the image-influence color (0) to the
+//!   full palette color (1). Ignored when the mode is `Off`.
+//! - **`palette_cycle`** — palette time-cycle rate (cycles/s); `0` = static.
+//! - **`palette_scale`** — how far the driving property spreads across the
+//!   palette. Dev knob.
 //! - **`spawn_template`** — optional PNG path whose luminance × alpha weights
 //!   the particle spawn density (empty = horizontal-line layout). Shown as a
 //!   Browse… file picker in the user panel (Plan 11 Phase C).
@@ -96,6 +103,42 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use wc_core_macros::SketchSettings;
 
+/// Which per-particle property drives the psychedelic color palette.
+///
+/// Unit variants only: the settings `ComboBox` writes a selection back through
+/// reflection as a payload-less `DynamicEnum`, which cannot construct a payload
+/// variant (see [`wc_core::settings::def::enum_variant_names`]). Mirrors the
+/// existing `HandProviderChoice` enum-setting pattern; no separate
+/// `register_type` is needed (`register_sketch_settings` registers the owning
+/// struct, exactly as for `HandProviderChoice`).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PaletteMode {
+    /// Palette off — particle color is exactly the pre-palette path (image
+    /// color-influence tint over the star sprite). The render shader's
+    /// uniform-mode branch is not taken, so this is a provable no-op.
+    #[default]
+    Off,
+    /// Hue keyed to `|velocity|`: calm particles sit at one end of the palette,
+    /// stirred-up particles sweep through it, so color traces motion/energy.
+    Velocity,
+    /// Hue keyed to the stable per-particle `spawn_hash` (`0..=1`): a static
+    /// rainbow-confetti scatter where each particle keeps its own color.
+    Scatter,
+}
+
+impl PaletteMode {
+    /// Encode the mode as the `palette_params.x` uniform channel the render
+    /// shader branches on: `Off → 0.0`, `Velocity → 1.0`, `Scatter → 2.0`.
+    #[must_use]
+    pub fn index(self) -> f32 {
+        match self {
+            PaletteMode::Off => 0.0,
+            PaletteMode::Velocity => 1.0,
+            PaletteMode::Scatter => 2.0,
+        }
+    }
+}
+
 /// User-tunable parameters for the Line sketch.
 #[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
@@ -138,6 +181,60 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_gamma")]
     pub gamma: f32,
+
+    /// Psychedelic color-palette mode: which per-particle property drives the
+    /// particle hue. `Off` (default) leaves color exactly as the pre-palette
+    /// path (image tint over the star sprite). See [`PaletteMode`].
+    #[setting(default = PaletteMode::Off, ty = Enum, section = "Palette", category = User)]
+    #[serde(default = "default_palette_mode")]
+    pub palette_mode: PaletteMode,
+
+    /// Palette crossfade strength: `0.0` keeps each particle's image-influence
+    /// color, `1.0` is the full palette color. Ignored when `palette_mode` is
+    /// `Off`. Defaults to `0.8` so enabling a mode immediately shows color.
+    #[setting(
+        default = 0.8_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Palette strength",
+        section = "Palette",
+        category = User
+    )]
+    #[serde(default = "default_palette_strength")]
+    pub palette_strength: f32,
+
+    /// Palette time-cycle rate (cycles per second): the whole palette scrolls
+    /// over time so the field slowly shifts hue. `0.0` = static. The shader
+    /// reads the phase from `globals.time`, so animating it costs no per-frame
+    /// uniform write. Ignored when `palette_mode` is `Off`.
+    #[setting(
+        default = 0.03_f32,
+        min = 0.0_f32,
+        max = 0.5_f32,
+        step = 0.01_f32,
+        label = "Palette cycle speed",
+        section = "Palette",
+        category = User
+    )]
+    #[serde(default = "default_palette_cycle")]
+    pub palette_cycle: f32,
+
+    /// Palette spread: how far the driving property stretches across the palette.
+    /// `Velocity` mode scales the speed→hue mapping (≈`180 / scale` px/s spans one
+    /// palette cycle); `Scatter` mode multiplies the per-particle hash so the
+    /// rainbow repeats more often across the field. Dev tuning knob. Ignored when
+    /// `palette_mode` is `Off`.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.1_f32,
+        max = 5.0_f32,
+        step = 0.1_f32,
+        label = "Palette spread",
+        category = Dev
+    )]
+    #[serde(default = "default_palette_scale")]
+    pub palette_scale: f32,
 
     /// Path to a PNG file whose luminance × alpha drives particle spawn density.
     /// Empty string = use the default horizontal-line layout. Relative paths
@@ -374,6 +471,22 @@ fn default_gamma() -> f32 {
     1.0
 }
 
+fn default_palette_mode() -> PaletteMode {
+    PaletteMode::Off
+}
+
+fn default_palette_strength() -> f32 {
+    0.8
+}
+
+fn default_palette_cycle() -> f32 {
+    0.03
+}
+
+fn default_palette_scale() -> f32 {
+    1.0
+}
+
 fn default_attract_particle_fraction() -> f32 {
     0.6
 }
@@ -464,5 +577,56 @@ mod tests {
             (parsed.attract_color_strength - 0.35).abs() < 1e-6,
             "attract_color_strength not default"
         );
+        assert_eq!(
+            parsed.palette_mode,
+            PaletteMode::Off,
+            "palette_mode not default"
+        );
+        assert!(
+            (parsed.palette_strength - 0.8).abs() < 1e-6,
+            "palette_strength not default"
+        );
+        assert!(
+            (parsed.palette_cycle - 0.03).abs() < 1e-6,
+            "palette_cycle not default"
+        );
+        assert!(
+            (parsed.palette_scale - 1.0).abs() < 1e-6,
+            "palette_scale not default"
+        );
+    }
+
+    #[test]
+    fn palette_mode_default_is_off() {
+        assert_eq!(PaletteMode::default(), PaletteMode::Off);
+    }
+
+    #[test]
+    fn palette_mode_index_encodes_uniform_channel() {
+        assert!((PaletteMode::Off.index() - 0.0).abs() < f32::EPSILON);
+        assert!((PaletteMode::Velocity.index() - 1.0).abs() < f32::EPSILON);
+        assert!((PaletteMode::Scatter.index() - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "test-only: panic on missing setting def or wrong kind is the intended failure mode"
+    )]
+    fn palette_mode_setting_is_enum_combobox() {
+        use wc_core::settings::{SettingKind, SettingsCategory, SketchSettings};
+        let defs = LineSettings::settings_def();
+        let def = defs
+            .iter()
+            .find(|d| d.field_name == "palette_mode")
+            .expect("palette_mode setting def must exist");
+        assert_eq!(def.category, SettingsCategory::User);
+        match &def.kind {
+            SettingKind::Enum { variants } => {
+                assert_eq!(*variants, &["Off", "Velocity", "Scatter"]);
+            }
+            other => panic!("expected Enum kind, got {other:?}"),
+        }
     }
 }
