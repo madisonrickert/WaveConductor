@@ -11,6 +11,8 @@
     reason = "expect, panic, and wildcard match are appropriate in test code"
 )]
 
+mod common;
+
 use bevy::input::InputPlugin;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
@@ -103,18 +105,17 @@ fn muted_applied_message_mirrors_state() {
     assert!(state.muted);
 }
 
-/// Inject a physical key press, run one update to process the press, then
-/// release and run another update to process the release.
+/// Inject a physical key press via the shared `common::input` helpers, run one
+/// update to process the press, then release and run another update so the
+/// next press starts clean.
 ///
-/// Uses `Buttonlike::press(world)` to inject a physical key event rather than
-/// directly mutating `ActionState`, which leafwing's systems would overwrite.
-/// Mirrors the pattern used in the lifecycle integration tests.
+/// The test app must have a `Window` entity spawned before this is called
+/// because `common::input::press_key` attaches the event to the first Window.
 fn press_key(app: &mut App, key: KeyCode) {
-    use leafwing_input_manager::user_input::Buttonlike;
-    key.press(app.world_mut());
+    common::input::press_key(app, key);
     app.update();
-    key.release(app.world_mut());
-    app.update(); // process the release so the next press starts clean
+    common::input::release_key(app, key);
+    app.update();
 }
 
 #[test]
@@ -124,6 +125,10 @@ fn toggle_volume_action_pushes_set_muted_command() {
     app.add_plugins(InputPlugin);
     app.add_plugins(StatesPlugin);
     app.add_plugins(wc_core::lifecycle::LifecyclePlugin);
+
+    // `common::input::press_key` attaches keyboard events to the first Window
+    // entity. Spawn one so the helper does not panic.
+    app.world_mut().spawn(Window::default());
 
     // Provide rings without a real stream; expose the command consumer locally
     // so the test can verify the action handler actually pushes.

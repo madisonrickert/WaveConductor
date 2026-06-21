@@ -86,14 +86,11 @@ impl Plugin for AudioPlugin {
             .init_resource::<AudioState>()
             .add_systems(Startup, engine::start_audio_engine)
             .add_systems(PreUpdate, state::pump_audio_messages)
-            // `V` must not toggle mute while an egui text field has keyboard
-            // focus; the condition fails open when the capture resource is
-            // absent (audio test harnesses without SettingsPlugin).
-            .add_systems(
-                Update,
-                nav::handle_volume_toggle
-                    .run_if(crate::settings::input_capture::egui_not_capturing_keyboard),
-            )
+            // The egui keyboard-capture gate lives in the `emit_action_input`
+            // producer (LifecyclePlugin / PreUpdate), so no `.run_if` is
+            // needed here — the handler never sees a message while egui owns
+            // the keyboard.
+            .add_systems(Update, nav::handle_volume_toggle)
             // Pause the cpal device callback on Home; resume when entering any
             // sketch. The stream is already paused at engine start, so this
             // system's primary role is runtime Home re-entry (not startup).
