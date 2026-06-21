@@ -194,6 +194,12 @@ mod nokhwa;
 
 #[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
 mod avfoundation;
+#[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
+#[allow(
+    unused_imports,
+    reason = "selected by open_camera_source on macOS in Task 7; exported now per the plan"
+)]
+pub use avfoundation::AvfFrameSource;
 // TODO(Task 7): gate to not(target_os = "macos") when the macOS backend lands
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 pub use nokhwa::NokhwaFrameSource;

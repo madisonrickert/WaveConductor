@@ -27,8 +27,20 @@ hand-tracking-gestures = ["dep:leaprs"]
 # the `-camera` sub-feature below so the base build never needs camera platform
 # libraries.
 hand-tracking-mediapipe = ["dep:ort", "dep:image"]
-# Adds the production webcam `FrameSource` (nokhwa) on top of the base feature.
-hand-tracking-mediapipe-camera = ["hand-tracking-mediapipe", "dep:nokhwa"]
+# Adds the production webcam `FrameSource` on top of the base feature. nokhwa
+# drives Linux/Windows; macOS uses the in-house `AvfFrameSource` on the
+# maintained `objc2` AVFoundation bindings (the `objc2-*`/`dispatch2` deps below
+# are macOS-target-gated, so this list naming them is a no-op off macOS).
+hand-tracking-mediapipe-camera = [
+    "hand-tracking-mediapipe",
+    "dep:nokhwa",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-video",
+    "dep:objc2-core-media",
+    "dep:dispatch2",
+]
 # Enables real OS temperature sensing for the screensaver's `ThermalState`
 # signal. On Linux this is a ZERO-DEPENDENCY `std::fs` reader of the kernel
 # `hwmon`/`thermal_zone` sysfs interface (see `lifecycle::thermal::platform::
@@ -90,6 +102,59 @@ nokhwa = { workspace = true, optional = true }
 # IOReport/IOKit APIs; construction/sampling errors are contained by
 # `platform::macos::MacmonSensor`.
 macmon = { version = "=0.7.0", optional = true }
+# macOS webcam capture via AVFoundation on the maintained `objc2` framework
+# bindings (replaces nokhwa's unmaintained `objc 0.2`/`core-video-sys` backend on
+# macOS). All optional + gated by `hand-tracking-mediapipe-camera`. The
+# per-framework crates expose one cargo feature per Objective-C class/constant,
+# so only the AVFoundation classes the capture backend touches are enabled.
+objc2 = { version = "0.6", optional = true }
+# `default-features = false` on every framework crate: the AVFoundation umbrella
+# default pulls the entire framework (AVAudio/AVAsset/...), a large needless
+# compile. Each `feature` below is one Objective-C class/constant module the
+# backend actually references, verified against the 0.3.2 generated bindings.
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSString",
+    "NSArray",
+    "NSDictionary",
+    "NSObject",
+    "NSValue",          # NSNumber, for the BGRA videoSettings value
+    "NSError",          # lockForConfiguration's Result error
+    "objc2-core-foundation", # CFString -> NSString bridge for the pixel-format key
+] }
+objc2-av-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-media", # CMSampleBuffer/CMTime in the delegate + throttle setters
+    "dispatch2",        # the sample-buffer callback DispatchQueue
+    "AVCaptureSession", # also provides AVCaptureConnection
+    "AVCaptureDevice",  # device, discovery session, format, frame-rate ranges
+    "AVCaptureInput",
+    "AVCaptureOutput",
+    "AVCaptureOutputBase", # required for the AVCaptureVideoDataOutput re-export
+    "AVCaptureVideoDataOutput",
+    "AVCaptureSessionPreset",
+    "AVMediaFormat",    # AVMediaTypeVideo constant
+] }
+objc2-core-video = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+objc2-core-media = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",            # CMTime Encode (passed through msg_send)
+    "objc2-core-video", # CMSampleBuffer::image_buffer
+    "CMBase",
+    "CMSampleBuffer",
+    "CMFormatDescription", # CMVideoFormatDescriptionGetDimensions
+    "CMTime",
+] }
+dispatch2 = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true

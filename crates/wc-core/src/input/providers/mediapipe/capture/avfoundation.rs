@@ -2,9 +2,49 @@
 //! crates. Replaces nokhwa's `core-video-sys`/`objc 0.2` backend on macOS while
 //! nokhwa keeps Linux/Windows. Frames arrive on a dispatch-queue delegate and
 //! are drained by the worker through a single-slot [`LatestFrame`].
-#![allow(dead_code)] // backend wired into `open_camera_source` in Task 7.
+//!
+//! Data flow: [`AvfFrameSource::open`] builds an `AVCaptureSession` (a camera
+//! `AVCaptureDeviceInput` plus an `AVCaptureVideoDataOutput` requesting
+//! `kCVPixelFormatType_32BGRA`) and installs a [`FrameDelegate`] on a serial
+//! dispatch queue. Each captured `CMSampleBuffer` is locked, its BGRA bytes
+//! copied into the shared [`LatestFrame`] slot, and unlocked — all on the
+//! capture queue. The worker thread (which owns the `!Send` [`AvfFrameSource`])
+//! drains that slot via [`FrameSource::next_frame`] / [`FrameSource::discard_frame`],
+//! and lowers the *hardware* capture rate to [`IDLE_INFERENCE_HZ`] during the
+//! idle throttle through [`FrameSource::set_capture_throttle`]. The only state
+//! shared across the thread boundary is the `Arc<Mutex<LatestFrame>>`.
+#![allow(dead_code)]
+// backend wired into `open_camera_source` in Task 7.
+// This file is the macOS AVFoundation FFI boundary: it is the one place in
+// `wc-core` (besides the LeapC `unsafe impl`s) where the workspace
+// `unsafe_code = "deny"` lint is lifted. Every `unsafe` block below carries an
+// inline `// SAFETY:` note naming the objc2/CoreVideo/CoreMedia invariant it
+// relies on.
+#![allow(unsafe_code)]
 
-use super::Frame;
+use std::sync::{Arc, Mutex};
+
+use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+use objc2_av_foundation::{
+    AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceInput,
+    AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
+    AVCaptureDeviceTypeExternal, AVCaptureOutput, AVCaptureSession, AVCaptureSessionPreset640x480,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+};
+use objc2_core_media::{CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetDimensions};
+use objc2_core_video::{
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA, kCVReturnSuccess, CVPixelBuffer,
+    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
+
+use super::super::worker::IDLE_INFERENCE_HZ;
+use super::{CaptureError, Frame, FrameSource};
 
 /// Single-slot latest-frame handoff: the `AVFoundation` delegate `store`s the
 /// newest BGRA frame; the worker drains it via `take_into`/`consume`. Behind an
@@ -102,7 +142,349 @@ pub(super) fn bgra_to_rgb(
     }
 }
 
+/// Instance variables for [`FrameDelegate`]: the single shared latest-frame
+/// slot the delegate writes into. The `Arc<Mutex<_>>` is the only state that
+/// crosses from the worker thread (which owns [`AvfFrameSource`]) to the
+/// delegate's serial dispatch queue, so it carries all the synchronization.
+struct FrameDelegateIvars {
+    latest: Arc<Mutex<LatestFrame>>,
+}
+
+define_class!(
+    // SAFETY:
+    // - The superclass `NSObject` has no subclassing requirements.
+    // - `FrameDelegate` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[name = "WCAvfFrameDelegate"]
+    #[ivars = FrameDelegateIvars]
+    struct FrameDelegate;
+
+    unsafe impl NSObjectProtocol for FrameDelegate {}
+
+    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for FrameDelegate {
+        // The capture queue calls this for every delivered video frame.
+        #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
+        fn capture_output_did_output_sample_buffer(
+            &self,
+            _output: &AVCaptureOutput,
+            sample_buffer: &CMSampleBuffer,
+            _connection: &AVCaptureConnection,
+        ) {
+            self.store_sample_buffer(sample_buffer);
+        }
+    }
+);
+
+impl FrameDelegate {
+    /// Build a delegate that writes into `latest`.
+    fn new(latest: Arc<Mutex<LatestFrame>>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(FrameDelegateIvars { latest });
+        // SAFETY: standard `NSObject` designated-initializer chain on a freshly
+        // allocated instance whose ivars were just initialized via `set_ivars`.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// Lock the sample buffer's BGRA pixel buffer, copy it into the shared
+    /// [`LatestFrame`] slot, and unlock. Runs on the capture dispatch queue (a
+    /// hot path): the only heap traffic is the slot's amortized `Vec` growth on
+    /// the first/larger frame ([`LatestFrame::store`] reuses capacity after).
+    fn store_sample_buffer(&self, sample_buffer: &CMSampleBuffer) {
+        // SAFETY: `sample_buffer` is the live buffer AVFoundation handed to this
+        // callback; `image_buffer()` borrows its `CVImageBuffer` (BGRA per our
+        // `videoSettings`), or `None` if the buffer carries no pixel data.
+        let Some(image_buffer) = (unsafe { sample_buffer.image_buffer() }) else {
+            return;
+        };
+        // `CVImageBuffer` is a type alias of `CVPixelBuffer`; the deref coercion
+        // from the retaining `CFRetained` wrapper yields the borrow we need.
+        let pixel_buffer: &CVPixelBuffer = &image_buffer;
+
+        // Guard against a non-BGRA buffer: `videoSettings` requests BGRA, but
+        // never mis-read a surprise YUV plane as packed BGRA. (The CoreVideo
+        // getters take `&CVPixelBuffer` and are safe wrappers, so no `unsafe`.)
+        let pixel_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
+        if pixel_format != kCVPixelFormatType_32BGRA {
+            return;
+        }
+
+        // SAFETY: lock the base address for read-only access before touching it;
+        // CoreVideo guarantees the base address and stride stay stable until the
+        // matching unlock below.
+        let lock =
+            unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) };
+        if lock != kCVReturnSuccess {
+            // A lock failure leaves the slot holding the previous frame; the
+            // worker simply sees no new generation this tick.
+            return;
+        }
+
+        // SAFETY: between the successful lock and the unlock below, the base
+        // address is a valid pointer to `bytes_per_row * height` bytes of BGRA
+        // pixel data (row-major, possibly stride-padded). Width, height, and
+        // stride are read from the same locked buffer, so the slice length is
+        // correct and the bytes stay valid for the `store` copy.
+        unsafe {
+            let base = CVPixelBufferGetBaseAddress(pixel_buffer).cast::<u8>();
+            let bytes_per_row = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            let width = CVPixelBufferGetWidth(pixel_buffer);
+            let height = CVPixelBufferGetHeight(pixel_buffer);
+            if !base.is_null() && bytes_per_row != 0 && width != 0 && height != 0 {
+                // `len` and the slice use the native `usize` dims (no `as` cast);
+                // only the `store` arguments narrow to `u32` via `try_from`.
+                let len = bytes_per_row.saturating_mul(height);
+                let bytes = std::slice::from_raw_parts(base, len);
+                if let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) {
+                    if let Ok(mut slot) = self.ivars().latest.lock() {
+                        slot.store(bytes, w, h, bytes_per_row);
+                    }
+                }
+            }
+        }
+
+        // SAFETY: balances the successful lock above with the same read-only
+        // flags; required once per successful `CVPixelBufferLockBaseAddress`.
+        unsafe { CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) };
+    }
+}
+
+/// macOS `AVFoundation` webcam backend. Holds the running `AVCaptureSession`
+/// and the device handle on the worker thread; the delegate copies frames into
+/// the shared [`LatestFrame`] slot from its dispatch queue.
+///
+/// `!Send` (it retains `!Send` `AVFoundation` objects), matching the
+/// [`FrameSource`] contract that a source lives entirely on the worker thread.
+/// Only `latest` crosses to the delegate queue.
+pub struct AvfFrameSource {
+    /// The running capture session (kept alive; stopped on drop).
+    session: Retained<AVCaptureSession>,
+    /// The capture device, locked/unlocked by [`Self::set_capture_throttle`].
+    device: Retained<AVCaptureDevice>,
+    /// The sample-buffer delegate; retained so it outlives the session.
+    _delegate: Retained<FrameDelegate>,
+    /// The serial callback queue; retained so it outlives the session.
+    _queue: DispatchRetained<DispatchQueue>,
+    /// Shared single-slot frame handoff, written by the delegate.
+    latest: Arc<Mutex<LatestFrame>>,
+    /// Last generation this source drained, advanced by `take_into`/`consume`.
+    last_generation: u64,
+    /// The device's active-format default min frame duration, cached so the
+    /// idle throttle can restore the full capture rate when it lifts.
+    full_rate_min_frame_duration: CMTime,
+    /// Cached human-readable capture-format label for diagnostics.
+    format: String,
+}
+
+impl AvfFrameSource {
+    /// Open `camera_index` (falling back to the system default video device when
+    /// the index is out of range), configure a 640x480 BGRA capture session, and
+    /// start streaming frames to the delegate.
+    ///
+    /// # Errors
+    /// Returns [`CaptureError::NoCamera`] when no camera matches / the device
+    /// cannot be opened or added to the session.
+    pub fn open(camera_index: u32) -> Result<Self, CaptureError> {
+        // SAFETY: `AVMediaTypeVideo` is a framework-provided constant `NSString`,
+        // valid for the process lifetime once AVFoundation is loaded.
+        let media_video = unsafe { AVMediaTypeVideo }
+            .ok_or_else(|| CaptureError::NoCamera("AVMediaTypeVideo unavailable".into()))?;
+
+        // Enumerate built-in wide-angle + external video devices, then map the
+        // requested index onto one (or fall back to the default video device).
+        // SAFETY: both are framework-provided constant device-type `NSString`s.
+        let device_types = NSArray::from_slice(&[
+            unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera },
+            unsafe { AVCaptureDeviceTypeExternal },
+        ]);
+        // SAFETY: discovery over a valid device-type array + video media type,
+        // any position.
+        let discovery = unsafe {
+            AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
+                &device_types,
+                Some(media_video),
+                AVCaptureDevicePosition::Unspecified,
+            )
+        };
+        // SAFETY: returns a retained array of the discovered devices.
+        let devices = unsafe { discovery.devices() };
+        let device = match select_device_index(devices.len(), camera_index) {
+            Some(idx) => devices.objectAtIndex(idx),
+            // SAFETY: framework default video device, or `None` if no camera.
+            None => unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media_video) }
+                .ok_or_else(|| CaptureError::NoCamera("no video capture device".into()))?,
+        };
+
+        // SAFETY: fresh capture session.
+        let session = unsafe { AVCaptureSession::new() };
+        // SAFETY: `AVCaptureSessionPreset640x480` is a framework constant; setting
+        // a supported preset on a not-yet-running session.
+        unsafe { session.setSessionPreset(AVCaptureSessionPreset640x480) };
+
+        // SAFETY: opens the device for capture; `Err(NSError)` if it cannot.
+        let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
+            .map_err(|e| CaptureError::NoCamera(format!("camera input: {e:?}")))?;
+        // SAFETY: querying/adding an input on a not-yet-running session.
+        if !unsafe { session.canAddInput(&input) } {
+            return Err(CaptureError::NoCamera(
+                "session rejects camera input".into(),
+            ));
+        }
+        // SAFETY: `canAddInput` returned true immediately above.
+        unsafe { session.addInput(&input) };
+
+        // SAFETY: fresh video data output.
+        let output = unsafe { AVCaptureVideoDataOutput::new() };
+        // videoSettings = { kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA }
+        let pixel_format = NSNumber::numberWithUnsignedInt(kCVPixelFormatType_32BGRA);
+        // SAFETY: `kCVPixelBufferPixelFormatTypeKey` is a framework constant
+        // `CFString`, toll-free bridged to `NSString` via the `AsRef` impl.
+        let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
+        let value: &AnyObject = &pixel_format;
+        let video_settings: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_slices(&[key], &[value]);
+        // SAFETY: BGRA is a supported `videoSettings` pixel format.
+        unsafe { output.setVideoSettings(Some(&video_settings)) };
+        // SAFETY: drop late frames rather than queue them while the worker drains
+        // newest-wins.
+        unsafe { output.setAlwaysDiscardsLateVideoFrames(true) };
+
+        let latest = Arc::new(Mutex::new(LatestFrame::default()));
+        let delegate = FrameDelegate::new(Arc::clone(&latest));
+        let queue = DispatchQueue::new("com.waveconductor.avf-capture", DispatchQueueAttr::SERIAL);
+        let delegate_proto = ProtocolObject::from_ref(&*delegate);
+        // SAFETY: `delegate` conforms to the sample-buffer delegate protocol; the
+        // serial queue guarantees in-order, non-overlapping callbacks (required
+        // for the single-slot handoff).
+        unsafe { output.setSampleBufferDelegate_queue(Some(delegate_proto), Some(&queue)) };
+        // SAFETY: querying/adding an output on a not-yet-running session.
+        if !unsafe { session.canAddOutput(&output) } {
+            return Err(CaptureError::NoCamera(
+                "session rejects video output".into(),
+            ));
+        }
+        // SAFETY: `canAddOutput` returned true immediately above.
+        unsafe { session.addOutput(&output) };
+
+        // Cache the active-format defaults for the format label and throttle.
+        // SAFETY: the opened device's current active format (retained).
+        let active_format = unsafe { device.activeFormat() };
+        // SAFETY: the active format's `CMFormatDescription` (a video format
+        // description, whose dimensions we read below).
+        let format_desc = unsafe { active_format.formatDescription() };
+        // SAFETY: `format_desc` is a valid video format description.
+        let dims = unsafe { CMVideoFormatDescriptionGetDimensions(&format_desc) };
+        let width = u32::try_from(dims.width).unwrap_or(0);
+        let height = u32::try_from(dims.height).unwrap_or(0);
+        // SAFETY: the active format's supported frame-rate ranges (retained).
+        let ranges = unsafe { active_format.videoSupportedFrameRateRanges() };
+        let fps = match ranges.len() {
+            0 => 0,
+            // SAFETY: index 0 is in range; `maxFrameRate` reads the range's cap.
+            _ => round_fps(unsafe { ranges.objectAtIndex(0).maxFrameRate() }),
+        };
+        // SAFETY: the device's current active min frame duration; cached so the
+        // throttle can restore the full capture rate when idle lifts.
+        let full_rate_min_frame_duration = unsafe { device.activeVideoMinFrameDuration() };
+        let format = format_label(width, height, fps);
+
+        // SAFETY: begin capture; frames now flow to the delegate queue.
+        unsafe { session.startRunning() };
+
+        Ok(Self {
+            session,
+            device,
+            _delegate: delegate,
+            _queue: queue,
+            latest,
+            last_generation: 0,
+            full_rate_min_frame_duration,
+            format,
+        })
+    }
+}
+
+impl FrameSource for AvfFrameSource {
+    fn format_label(&self) -> Option<&str> {
+        Some(&self.format)
+    }
+
+    fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError> {
+        let slot = self
+            .latest
+            .lock()
+            .map_err(|_| CaptureError::Read("frame slot poisoned".into()))?;
+        Ok(slot.take_into(&mut self.last_generation, out))
+    }
+
+    fn discard_frame(&mut self) -> Result<bool, CaptureError> {
+        let slot = self
+            .latest
+            .lock()
+            .map_err(|_| CaptureError::Read("frame slot poisoned".into()))?;
+        Ok(slot.consume(&mut self.last_generation))
+    }
+
+    fn set_capture_throttle(&mut self, throttled: bool) {
+        // Cap the *hardware* capture rate to `IDLE_INFERENCE_HZ` while idle (so
+        // the sensor/ISP shed work), restoring the cached full-rate duration when
+        // the throttle lifts.
+        let target = if throttled {
+            idle_min_frame_duration()
+        } else {
+            self.full_rate_min_frame_duration
+        };
+        // SAFETY: take exclusive configuration access before mutating a hardware
+        // property; `Err` if another client holds it.
+        if unsafe { self.device.lockForConfiguration() }.is_err() {
+            // Non-fatal: skip this throttle change rather than panic on the worker
+            // thread; the worker's decode-skipping still sheds most of the load.
+            tracing::warn!("avf: lockForConfiguration failed; skipping capture-throttle change");
+            return;
+        }
+        // SAFETY: the device is locked for configuration; `target` is either the
+        // cached active-format default or `1 / IDLE_INFERENCE_HZ`s, both within
+        // the active format's supported frame-duration range.
+        unsafe { self.device.setActiveVideoMinFrameDuration(target) };
+        // SAFETY: balances the successful lock above.
+        unsafe { self.device.unlockForConfiguration() };
+    }
+}
+
+impl Drop for AvfFrameSource {
+    fn drop(&mut self) {
+        // SAFETY: stop the running session on teardown to release the camera and
+        // halt delegate callbacks before the shared slot is dropped.
+        unsafe { self.session.stopRunning() };
+    }
+}
+
+/// Round a `CoreMedia` frame rate (frames/second as `f64`) to the nearest whole
+/// `u32` for the diagnostic format label. Non-finite or out-of-range rates clamp
+/// into `0..=u32::MAX`.
+fn round_fps(rate: f64) -> u32 {
+    #[allow(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rate is clamped to [0, u32::MAX] then rounded; f64 -> u32 has \
+                  no From/TryFrom"
+    )]
+    {
+        rate.clamp(0.0, f64::from(u32::MAX)).round() as u32
+    }
+}
+
+/// The idle capture cap as a `CMTime` min frame duration: `1 / IDLE_INFERENCE_HZ`
+/// seconds, so the hardware rate matches the worker's idle inference rate
+/// exactly (value `1` over timescale [`IDLE_INFERENCE_HZ`]).
+fn idle_min_frame_duration() -> CMTime {
+    let timescale = i32::try_from(IDLE_INFERENCE_HZ).unwrap_or(i32::MAX);
+    // SAFETY: `CMTime::new` is a pure value construction (sets the `Valid` flag);
+    // it touches no pointers or Objective-C objects.
+    unsafe { CMTime::new(1, timescale) }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
     use super::super::Frame;
     use super::*;
@@ -190,5 +572,39 @@ mod tests {
     #[test]
     fn format_label_reads_like_the_nokhwa_label() {
         assert_eq!(format_label(640, 480, 30), "640x480 BGRA @30");
+    }
+
+    #[test]
+    fn idle_min_frame_duration_matches_inference_cap() {
+        // The idle camera rate must provably equal the worker's idle cap: a
+        // 1 / IDLE_INFERENCE_HZ-second min frame duration is IDLE_INFERENCE_HZ fps.
+        let t = idle_min_frame_duration();
+        // `CMTime` is a packed struct; copy the Copy fields to locals before
+        // asserting so we never take a reference to a misaligned field.
+        let value = t.value;
+        let timescale = t.timescale;
+        assert_eq!(value, 1);
+        assert_eq!(
+            timescale,
+            i32::try_from(IDLE_INFERENCE_HZ).expect("IDLE_INFERENCE_HZ fits in i32")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real camera; run locally with --ignored on macOS"]
+    fn opens_default_camera_and_delivers_a_frame() {
+        let mut src = AvfFrameSource::open(0).expect("open default camera");
+        let mut out = Frame::default();
+        let mut got = false;
+        for _ in 0..200 {
+            if src.next_frame(&mut out).expect("frame read") {
+                got = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(got, "no frame within ~2s");
+        assert!(out.is_consistent() && out.width > 0);
+        assert!(src.format_label().is_some());
     }
 }
