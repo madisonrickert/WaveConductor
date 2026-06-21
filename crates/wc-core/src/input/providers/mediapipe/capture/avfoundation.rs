@@ -4,6 +4,56 @@
 //! are drained by the worker through a single-slot [`LatestFrame`].
 #![allow(dead_code)] // backend wired into `open_camera_source` in Task 7.
 
+use super::Frame;
+
+/// Single-slot latest-frame handoff: the `AVFoundation` delegate `store`s the
+/// newest BGRA frame; the worker drains it via `take_into`/`consume`. Behind an
+/// `Arc<Mutex<_>>` shared between the dispatch queue and the worker thread.
+#[derive(Default)]
+pub(super) struct LatestFrame {
+    bgra: Vec<u8>,
+    width: u32,
+    height: u32,
+    bytes_per_row: usize,
+    /// Monotonic counter; a reader advances its own `last_gen` to this.
+    generation: u64,
+}
+
+impl LatestFrame {
+    /// Copy the newest BGRA frame in, reusing capacity (no realloc at steady
+    /// size). Runs on the delegate's dispatch queue — a hot path; alloc-free.
+    pub(super) fn store(&mut self, bgra: &[u8], width: u32, height: u32, bytes_per_row: usize) {
+        self.bgra.clear();
+        self.bgra.extend_from_slice(bgra);
+        self.width = width;
+        self.height = height;
+        self.bytes_per_row = bytes_per_row;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// If a frame newer than `*last_gen` is present, repack it into `out`,
+    /// advance `*last_gen`, and return `true`. Else return `false`.
+    pub(super) fn take_into(&self, last_gen: &mut u64, out: &mut Frame) -> bool {
+        if self.generation == *last_gen {
+            return false;
+        }
+        out.width = self.width;
+        out.height = self.height;
+        bgra_to_rgb(&self.bgra, self.bytes_per_row, self.width, self.height, &mut out.rgb);
+        *last_gen = self.generation;
+        true
+    }
+
+    /// Like `take_into` but skips the repack — the worker's over-budget drain.
+    pub(super) fn consume(&self, last_gen: &mut u64) -> bool {
+        if self.generation == *last_gen {
+            return false;
+        }
+        *last_gen = self.generation;
+        true
+    }
+}
+
 /// Repack camera BGRA (byte order B,G,R,A, possibly row-padded so
 /// `bytes_per_row >= width*4`) into tightly-packed RGB8 in `out`.
 ///
@@ -36,6 +86,38 @@ pub(super) fn bgra_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::Frame;
+
+    #[test]
+    fn store_then_take_into_produces_rgb_once() {
+        let mut slot = LatestFrame::default();
+        slot.store(&[10, 20, 30, 255], 1, 1, 4);
+        let mut last = 0u64;
+        let mut out = Frame::default();
+        assert!(slot.take_into(&mut last, &mut out), "first take sees new frame");
+        assert_eq!(out.width, 1);
+        assert_eq!(out.rgb, vec![30, 20, 10]);
+        assert!(!slot.take_into(&mut last, &mut out), "no new frame since");
+    }
+
+    #[test]
+    fn consume_advances_without_repacking() {
+        let mut slot = LatestFrame::default();
+        slot.store(&[1, 2, 3, 255], 1, 1, 4);
+        let mut last = 0u64;
+        assert!(slot.consume(&mut last), "consume sees the stored frame");
+        let mut out = Frame::default();
+        assert!(!slot.take_into(&mut last, &mut out), "consume already advanced the generation");
+    }
+
+    #[test]
+    fn store_reuses_capacity() {
+        let mut slot = LatestFrame::default();
+        slot.store(&[1, 2, 3, 255], 1, 1, 4);
+        let ptr = slot.bgra.as_ptr();
+        slot.store(&[4, 5, 6, 255], 1, 1, 4);
+        assert_eq!(slot.bgra.as_ptr(), ptr, "same size must not reallocate");
+    }
 
     #[test]
     fn repacks_bgra_dropping_alpha_and_swapping_channels() {
