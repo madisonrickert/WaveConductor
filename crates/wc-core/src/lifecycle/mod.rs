@@ -71,13 +71,11 @@ impl Plugin for LifecyclePlugin {
             .add_systems(
                 Update,
                 (
-                    // Hotkeys must not fire while an egui text field has
-                    // keyboard focus (typing "2" into a dev-panel field would
-                    // otherwise switch sketches). The condition fails open
-                    // when the capture resource is absent (harnesses without
-                    // SettingsPlugin/EguiPlugin keep their hotkeys).
-                    nav::handle_navigation_actions
-                        .run_if(crate::settings::input_capture::egui_not_capturing_keyboard),
+                    // The egui keyboard-capture gate now lives on the
+                    // PreUpdate producer (`emit_action_input`), so nav reads
+                    // only actions that already passed the gate — no redundant
+                    // run_if needed here.
+                    nav::handle_navigation_actions,
                     idle::reset_on_interaction,
                     // Shift+S screensaver skip: MUST sit between
                     // reset_on_interaction (whose keyboard marks it overrides

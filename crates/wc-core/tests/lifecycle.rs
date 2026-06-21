@@ -16,21 +16,17 @@ use common::app::lifecycle_test_app;
 use common::lifecycle::arm_idle_timeline;
 
 use bevy::prelude::*;
-use leafwing_input_manager::prelude::*;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 
-/// Helper: inject a physical key press into the world, run one update tick,
-/// then inject a key release. This mirrors leafwing's own test patterns for
-/// driving `ActionState` through physical input rather than direct state mutation,
-/// which is required because leafwing's `update_action_state` system overwrites
-/// any direct `ActionState::press()` calls during the same frame.
-///
-/// Uses leafwing's `Buttonlike::press(world)` API which internally writes to
-/// `Messages<KeyboardInput>`.
+use common::input::press_key as send_press;
+use common::input::release_key as send_release;
+
+/// Inject a physical key press, run one update tick (so the PreUpdate producer
+/// emits the action and the Update consumers act), then release.
 fn press_key(app: &mut App, key: KeyCode) {
-    key.press(app.world_mut());
+    send_press(app, key);
     app.update();
-    key.release(app.world_mut());
+    send_release(app, key);
 }
 
 #[test]

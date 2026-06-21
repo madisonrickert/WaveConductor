@@ -102,11 +102,17 @@ pub fn default_bindings() -> InputBindings {
         (A::ToggleFullscreen, Key(KeyCode::F11)),
         (
             A::ToggleDevPanel,
-            Chord { modifier: Modifier::Shift, key: KeyCode::KeyD },
+            Chord {
+                modifier: Modifier::Shift,
+                key: KeyCode::KeyD,
+            },
         ),
         (
             A::StartScreensaver,
-            Chord { modifier: Modifier::Shift, key: KeyCode::KeyS },
+            Chord {
+                modifier: Modifier::Shift,
+                key: KeyCode::KeyS,
+            },
         ),
     ])
 }
@@ -155,10 +161,16 @@ pub fn emit_action_input(
             released |= binding.released(&keys);
         }
         if pressed {
-            writer.write(ActionInput { action, phase: ActionPhase::Pressed });
+            writer.write(ActionInput {
+                action,
+                phase: ActionPhase::Pressed,
+            });
         }
         if released {
-            writer.write(ActionInput { action, phase: ActionPhase::Released });
+            writer.write(ActionInput {
+                action,
+                phase: ActionPhase::Released,
+            });
         }
     }
 }
@@ -191,7 +203,10 @@ mod tests {
 
     #[test]
     fn chord_requires_modifier_held() {
-        let chord = Binding::Chord { modifier: Modifier::Shift, key: KeyCode::KeyD };
+        let chord = Binding::Chord {
+            modifier: Modifier::Shift,
+            key: KeyCode::KeyD,
+        };
         assert!(chord.pressed(&keys_with(&[KeyCode::ShiftLeft, KeyCode::KeyD])));
         assert!(!chord.pressed(&keys_with(&[KeyCode::KeyD])));
     }
@@ -244,16 +259,17 @@ mod tests {
     }
 
     fn send_key(app: &mut App, key: KeyCode, state: bevy::input::ButtonState) {
-        app.world_mut().write_message(bevy::input::keyboard::KeyboardInput {
-            key_code: key,
-            logical_key: bevy::input::keyboard::Key::Unidentified(
-                bevy::input::keyboard::NativeKey::Unidentified,
-            ),
-            state,
-            text: None,
-            repeat: false,
-            window: Entity::PLACEHOLDER,
-        });
+        app.world_mut()
+            .write_message(bevy::input::keyboard::KeyboardInput {
+                key_code: key,
+                logical_key: bevy::input::keyboard::Key::Unidentified(
+                    bevy::input::keyboard::NativeKey::Unidentified,
+                ),
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
     }
 
     #[test]
@@ -266,7 +282,10 @@ mod tests {
         let got = &app.world().resource::<Captured>().0;
         assert_eq!(
             got.as_slice(),
-            &[ActionInput { action: WaveConductorAction::SelectLine, phase: ActionPhase::Pressed }],
+            &[ActionInput {
+                action: WaveConductorAction::SelectLine,
+                phase: ActionPhase::Pressed
+            }],
         );
     }
 
@@ -278,16 +297,26 @@ mod tests {
         // Z and ArrowLeft both map to NavigatePrev; pressing both the same frame
         // must still yield exactly one Pressed message.
         send_key(&mut app, KeyCode::KeyZ, bevy::input::ButtonState::Pressed);
-        send_key(&mut app, KeyCode::ArrowLeft, bevy::input::ButtonState::Pressed);
+        send_key(
+            &mut app,
+            KeyCode::ArrowLeft,
+            bevy::input::ButtonState::Pressed,
+        );
         app.update();
         let prev: Vec<_> = app
             .world()
             .resource::<Captured>()
             .0
             .iter()
-            .filter(|e| e.action == WaveConductorAction::NavigatePrev && e.phase == ActionPhase::Pressed)
+            .filter(|e| {
+                e.action == WaveConductorAction::NavigatePrev && e.phase == ActionPhase::Pressed
+            })
             .collect();
-        assert_eq!(prev.len(), 1, "multi-binding action must de-dup to one message");
+        assert_eq!(
+            prev.len(),
+            1,
+            "multi-binding action must de-dup to one message"
+        );
     }
 
     #[test]
@@ -299,8 +328,11 @@ mod tests {
         send_key(&mut app, KeyCode::KeyD, bevy::input::ButtonState::Pressed);
         app.update();
         assert!(
-            !app.world().resource::<Captured>().0.iter().any(|e| e.action
-                == WaveConductorAction::ToggleDevPanel),
+            !app.world()
+                .resource::<Captured>()
+                .0
+                .iter()
+                .any(|e| e.action == WaveConductorAction::ToggleDevPanel),
             "chord must not fire without its modifier",
         );
     }

@@ -32,11 +32,19 @@ use bevy::state::app::StatesPlugin;
 /// `WaveConductorAction` map, `ActionState`, `InteractionTimer`,
 /// `IdleVetoes`, and `HandTrackingFrame` message — no caller-side setup
 /// needed.
+///
+/// A bare `Window` entity is spawned so `common::input` helpers (which call
+/// `primary_window`) work without a full `WindowPlugin`. The window field in
+/// synthetic `KeyboardInput` messages is only used for OS-level focus
+/// routing; Bevy's `keyboard_input_system` updates `ButtonInput<KeyCode>`
+/// from all events regardless of window.
 pub fn lifecycle_test_app() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::input::InputPlugin);
     app.add_plugins(StatesPlugin);
     app.add_plugins(wc_core::lifecycle::LifecyclePlugin);
+    // Satisfy `primary_window()` in `common::input` helpers.
+    app.world_mut().spawn(bevy::window::Window::default());
     app
 }
