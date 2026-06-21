@@ -191,6 +191,9 @@ impl FrameSource for MockFrameSource {
 // TODO(Task 7): gate to not(target_os = "macos") when the macOS backend lands
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 mod nokhwa;
+
+#[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
+mod avfoundation;
 // TODO(Task 7): gate to not(target_os = "macos") when the macOS backend lands
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 pub use nokhwa::NokhwaFrameSource;
