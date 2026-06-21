@@ -433,13 +433,15 @@ impl FrameSource for AvfFrameSource {
             // 30 fps webcam whose only range is 30..=30 fps). Setting an
             // out-of-range `activeVideoMinFrameDuration` raises an uncatchable
             // Objective-C exception (process abort) that the `lockForConfiguration`
-            // `Result` guard below does NOT catch, so clamp into range first.
-            // `None` => no usable range; skip the throttle and leave the camera at
-            // full rate rather than risk the abort.
-            if let Some(clamped) = self.clamped_idle_min_frame_duration() {
-                clamped
+            // `Result` guard below does NOT catch. `idle_target_frame_duration`
+            // resolves a value the device already declared supported (never a
+            // duration rebuilt from coarse `f64` seconds), or `None` when no
+            // usable range exists — in which case we skip the throttle and leave
+            // the camera at full rate rather than risk the abort.
+            if let Some(supported) = self.idle_target_frame_duration() {
+                supported
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     "avf: no usable supported frame-rate range; skipping capture throttle"
                 );
                 return;
@@ -455,11 +457,14 @@ impl FrameSource for AvfFrameSource {
             tracing::warn!("avf: lockForConfiguration failed; skipping capture-throttle change");
             return;
         }
-        // SAFETY: the device is locked for configuration. `target` is either the
-        // cached active-format default (restore path) or the idle target already
-        // clamped into the active format's supported frame-duration range by
-        // `clamped_idle_min_frame_duration` above, so the value is guaranteed in
-        // range and cannot trigger the out-of-range abort.
+        // SAFETY: the device is locked for configuration. `target` is one of three
+        // in-range values: the cached active-format default (restore path), the
+        // exact `CMTime::new(1, IDLE_INFERENCE_HZ)` idle duration when it lies
+        // within the active format's supported range, or a `CMTime` the device
+        // itself reported via `videoSupportedFrameRateRanges` (the clamp paths) —
+        // all resolved by `idle_target_frame_duration`. None of them is rebuilt
+        // from coarse `f64` seconds, so the value is always a declared-supported
+        // duration and cannot trigger the out-of-range abort.
         unsafe { self.device.setActiveVideoMinFrameDuration(target) };
         // SAFETY: balances the successful lock above.
         unsafe { self.device.unlockForConfiguration() };
@@ -467,17 +472,22 @@ impl FrameSource for AvfFrameSource {
 }
 
 impl AvfFrameSource {
-    /// Compute the idle min-frame-duration `CMTime` clamped into the device's
-    /// active-format supported range, or `None` when no usable range is available
-    /// (empty array or non-finite durations) — in which case the caller leaves the
-    /// camera at full rate rather than risk an out-of-range set.
+    /// Resolve the idle min-frame-duration `CMTime` to request while throttled,
+    /// or `None` when no usable supported range is available (empty array or a
+    /// non-finite duration) — in which case the caller leaves the camera at full
+    /// rate rather than risk an out-of-range set.
     ///
-    /// Reads the active format's `videoSupportedFrameRateRanges`, takes the union
-    /// `[min minFrameDuration, max maxFrameDuration]` across its ranges (in
-    /// seconds), clamps the `1 / IDLE_INFERENCE_HZ`s idle target into it via the
-    /// pure [`clamp_idle_frame_duration_secs`], and rebuilds the result as a
-    /// `CMTime` at the [`IDLE_INFERENCE_HZ`] timescale.
-    fn clamped_idle_min_frame_duration(&self) -> Option<CMTime> {
+    /// Scans the active format's `videoSupportedFrameRateRanges`, tracking both
+    /// the duration bounds in seconds *and* the device's own `CMTime`s for the
+    /// fastest supported rate (smallest `minFrameDuration`) and the slowest
+    /// supported rate (largest `maxFrameDuration`). The pure
+    /// [`choose_idle_frame_duration`] decides — from the seconds bounds — whether
+    /// the `1 / IDLE_INFERENCE_HZ`s idle target is in range or must clamp, and
+    /// each [`IdleDurationChoice`] maps to a value the device declared supported:
+    /// the exact [`idle_desired_frame_duration`] when in range, or a tracked
+    /// device `CMTime` when clamping. No clamped value is ever rebuilt from coarse
+    /// `f64` seconds, which would round back out of range at the idle timescale.
+    fn idle_target_frame_duration(&self) -> Option<CMTime> {
         // SAFETY: the device's current active format (retained); valid for the
         // life of the returned `Retained` handle.
         let active_format = unsafe { self.device.activeFormat() };
@@ -488,42 +498,52 @@ impl AvfFrameSource {
             return None;
         }
 
-        // Union of all supported ranges, in seconds: the shortest minFrameDuration
-        // (fastest rate) to the longest maxFrameDuration (slowest rate). Any
-        // non-finite CMTime (invalid/indefinite → NaN from `seconds`) poisons the
-        // bound and disqualifies the throttle.
+        // Union of all supported ranges. `min_supported`/`max_supported` are the
+        // seconds bounds (shortest `minFrameDuration` = fastest rate, longest
+        // `maxFrameDuration` = slowest rate) that drive the pure decision;
+        // `fastest_supported`/`slowest_supported` keep the device's own `CMTime`s
+        // for those extremes so a clamp maps to an exact declared-supported
+        // duration. Any non-finite `CMTime` (invalid/indefinite -> NaN from
+        // `seconds`) disqualifies the throttle.
         let mut min_supported = f64::INFINITY;
         let mut max_supported = f64::NEG_INFINITY;
+        let mut fastest_supported: Option<CMTime> = None;
+        let mut slowest_supported: Option<CMTime> = None;
         for range in &ranges {
             // SAFETY: `range` is a live `AVFrameRateRange`; `minFrameDuration` /
-            // `maxFrameDuration` are its immutable `CMTime` properties, and
-            // `CMTime::seconds` is a pure value conversion over a `Copy` struct
-            // (NaN for an invalid/indefinite time, handled by `is_finite` below).
-            let lo = unsafe { range.minFrameDuration().seconds() };
-            let hi = unsafe { range.maxFrameDuration().seconds() };
+            // `maxFrameDuration` are its immutable `CMTime` properties (`CMTime`
+            // is `Copy`, so the returned values outlive the borrow).
+            let min_dur = unsafe { range.minFrameDuration() };
+            let max_dur = unsafe { range.maxFrameDuration() };
+            // SAFETY: `CMTime::seconds` is a pure value conversion over a `Copy`
+            // struct (NaN for an invalid/indefinite time, guarded by `is_finite`).
+            let lo = unsafe { min_dur.seconds() };
+            let hi = unsafe { max_dur.seconds() };
             if !lo.is_finite() || !hi.is_finite() {
                 return None;
             }
-            min_supported = min_supported.min(lo);
-            max_supported = max_supported.max(hi);
-        }
-        if !min_supported.is_finite() || !max_supported.is_finite() {
-            return None;
+            if lo < min_supported {
+                min_supported = lo;
+                fastest_supported = Some(min_dur);
+            }
+            if hi > max_supported {
+                max_supported = hi;
+                slowest_supported = Some(max_dur);
+            }
         }
 
         let desired = 1.0 / f64::from(IDLE_INFERENCE_HZ);
-        let clamped = clamp_idle_frame_duration_secs(desired, min_supported, max_supported);
-        if !clamped.is_finite() || clamped <= 0.0 {
-            return None;
+        match choose_idle_frame_duration(desired, min_supported, max_supported)? {
+            // In range: use the exact 1 / IDLE_INFERENCE_HZ idle duration.
+            IdleDurationChoice::Desired => Some(idle_desired_frame_duration()),
+            // Idle target faster than the device supports: clamp up to the
+            // device's fastest supported (smallest) min frame duration.
+            IdleDurationChoice::ClampToMin => fastest_supported,
+            // Idle target slower than the device supports (the fixed-30fps abort
+            // case): clamp down to the device's slowest supported (largest) max
+            // frame duration.
+            IdleDurationChoice::ClampToMax => slowest_supported,
         }
-
-        let timescale = i32::try_from(IDLE_INFERENCE_HZ).unwrap_or(i32::MAX);
-        // SAFETY: `CMTime::with_seconds` (`CMTimeMakeWithSeconds`) is a pure value
-        // construction from a finite, positive seconds value and a positive
-        // timescale; it touches no pointers or Objective-C objects. The result is
-        // the clamped idle duration, guaranteed within the format's supported
-        // range by `clamp_idle_frame_duration_secs` above.
-        Some(unsafe { CMTime::with_seconds(clamped, timescale) })
     }
 }
 
@@ -551,34 +571,83 @@ fn round_fps(rate: f64) -> u32 {
     }
 }
 
-/// Clamp the idle min-frame-duration target (in seconds) into the active
-/// format's supported `[min_supported, max_supported]` duration range.
+/// The idle-throttle clamp decision: which supported frame duration to request
+/// given the desired idle duration and the active format's supported `[min, max]`
+/// bounds (all in seconds). See [`choose_idle_frame_duration`].
+///
+/// Returning a *decision* (not a rebuilt `CMTime`) is what fixes the timescale-4
+/// rounding bug: the caller maps each variant to a value the device already
+/// declared supported, instead of reconstructing a clamped duration from coarse
+/// `f64` seconds (which `CMTimeMakeWithSeconds` would round back out of range).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdleDurationChoice {
+    /// The desired idle duration is within the supported range; use the exact
+    /// `1 / IDLE_INFERENCE_HZ` idle duration ([`idle_desired_frame_duration`]).
+    Desired,
+    /// The desired duration is shorter (faster) than the fastest supported rate;
+    /// clamp up to the device's fastest supported (smallest) min frame duration.
+    ClampToMin,
+    /// The desired duration is longer (slower) than the slowest supported rate
+    /// (the fixed-30fps abort case); clamp down to the device's slowest
+    /// supported (largest) max frame duration.
+    ClampToMax,
+}
+
+/// Decide which supported frame duration the idle throttle should request.
 ///
 /// `AVFoundation` requires `activeVideoMinFrameDuration` to lie within the
 /// active format's `videoSupportedFrameRateRanges`; setting an out-of-range
 /// value raises an uncatchable Objective-C exception (process abort). This pure
-/// helper establishes the in-range invariant the setter relies on:
-/// - a `desired` longer than `max_supported` (the abort case — e.g. a 1/4s idle
-///   target on a fixed 30 fps camera whose max duration is 1/30s) clamps down to
-///   `max_supported`, making the idle throttle a no-op there rather than aborting;
-/// - a `desired` shorter than `min_supported` clamps up to `min_supported`;
-/// - a `desired` already inside the range passes through unchanged.
+/// helper returns a [`IdleDurationChoice`] the caller maps to a value the device
+/// declared supported, rather than rebuilding a duration from coarse `f64`
+/// seconds:
+/// - `desired_s` within `[min_supported_s, max_supported_s]` → [`IdleDurationChoice::Desired`];
+/// - `desired_s` longer (slower) than `max_supported_s` (the abort case — e.g. a
+///   1/4s idle target on a fixed 30 fps camera whose max duration is 1/30s) →
+///   [`IdleDurationChoice::ClampToMax`];
+/// - `desired_s` shorter (faster) than `min_supported_s` → [`IdleDurationChoice::ClampToMin`].
+///
+/// Returns `None` for degenerate input — an inverted range
+/// (`min_supported_s > max_supported_s`) or any non-finite or non-positive
+/// bound/target — so the caller skips the throttle (leaving full rate) rather
+/// than panicking. Returning a decision (not calling `f64::clamp` on the bounds)
+/// also sidesteps the inverted-range panic `f64::clamp` would raise.
 ///
 /// Note the duration/rate inversion: a *longer* min frame duration means a
-/// *lower* (slower) capture rate. The idle target wants a long duration; the
-/// clamp keeps it no longer than the slowest rate the format supports.
-pub(super) fn clamp_idle_frame_duration_secs(
-    desired: f64,
-    min_supported: f64,
-    max_supported: f64,
-) -> f64 {
-    desired.clamp(min_supported, max_supported)
+/// *lower* (slower) capture rate. The idle target wants a long duration; a
+/// [`IdleDurationChoice::ClampToMax`] keeps it no slower than the slowest rate
+/// the format supports.
+pub(super) fn choose_idle_frame_duration(
+    desired_s: f64,
+    min_supported_s: f64,
+    max_supported_s: f64,
+) -> Option<IdleDurationChoice> {
+    if !desired_s.is_finite()
+        || !min_supported_s.is_finite()
+        || !max_supported_s.is_finite()
+        || desired_s <= 0.0
+        || min_supported_s <= 0.0
+        || max_supported_s <= 0.0
+        || min_supported_s > max_supported_s
+    {
+        return None;
+    }
+    if desired_s > max_supported_s {
+        Some(IdleDurationChoice::ClampToMax)
+    } else if desired_s < min_supported_s {
+        Some(IdleDurationChoice::ClampToMin)
+    } else {
+        Some(IdleDurationChoice::Desired)
+    }
 }
 
-/// The idle capture cap as a `CMTime` min frame duration: `1 / IDLE_INFERENCE_HZ`
-/// seconds, so the hardware rate matches the worker's idle inference rate
-/// exactly (value `1` over timescale [`IDLE_INFERENCE_HZ`]).
-fn idle_min_frame_duration() -> CMTime {
+/// The idle capture cap as a `CMTime` min frame duration: the exact
+/// `1 / IDLE_INFERENCE_HZ` seconds (value `1` over timescale [`IDLE_INFERENCE_HZ`]),
+/// so the throttled hardware rate matches the worker's idle inference rate
+/// exactly. Backs the [`IdleDurationChoice::Desired`] decision; the clamp
+/// decisions instead reuse a device-reported `CMTime` so no clamped value is
+/// rebuilt from coarse `f64` seconds.
+fn idle_desired_frame_duration() -> CMTime {
     let timescale = i32::try_from(IDLE_INFERENCE_HZ).unwrap_or(i32::MAX);
     // SAFETY: `CMTime::new` is a pure value construction (sets the `Valid` flag);
     // it touches no pointers or Objective-C objects.
@@ -677,51 +746,72 @@ mod tests {
     }
 
     #[test]
-    fn clamp_idle_duration_within_range_is_unchanged() {
+    fn idle_choice_within_range_is_desired() {
         // A camera that supports the idle target (e.g. 1..=30 fps, i.e.
-        // durations 1/30s..=1s). The 1/4s idle target sits inside the range.
-        let desired = 0.25; // 1 / IDLE_INFERENCE_HZ at 4 Hz
-        let got = clamp_idle_frame_duration_secs(desired, 1.0 / 30.0, 1.0);
-        assert!(
-            (got - desired).abs() < f64::EPSILON,
-            "in-range target must pass through unchanged, got {got}"
+        // durations 1/30s..=1s). The 1/4s idle target sits inside the range, so
+        // the decision is to use the exact desired duration.
+        let desired = 1.0 / f64::from(IDLE_INFERENCE_HZ); // 0.25s at 4 Hz
+        assert_eq!(
+            choose_idle_frame_duration(desired, 1.0 / 30.0, 1.0),
+            Some(IdleDurationChoice::Desired),
         );
     }
 
     #[test]
-    fn clamp_idle_duration_longer_than_max_clamps_to_max() {
-        // The abort case: a fixed 30 fps camera reports a single 30..=30 range,
-        // so both supported durations are 1/30s. The 1/4s idle target is LONGER
-        // than the max supported duration (1/30s); an unclamped set would raise
-        // an uncatchable Objective-C exception. Clamp it back down to 1/30s.
+    fn idle_choice_slower_than_max_clamps_to_max() {
+        // The 30 fps abort case the timescale-4 rebuild got wrong: a fixed
+        // 30 fps camera reports a single 30..=30 range, so both supported
+        // durations are 1/30s. The 1/4s idle target is LONGER (slower) than the
+        // max supported duration (1/30s). Rebuilding it via
+        // `CMTime::with_seconds(_, IDLE_INFERENCE_HZ)` rounded 1/30s to 0s
+        // (out of range -> abort). The decision must clamp to the device's
+        // slowest supported duration instead.
         let desired = 0.25; // 1/4s
         let max_supported = 1.0 / 30.0;
-        let got = clamp_idle_frame_duration_secs(desired, max_supported, max_supported);
-        assert!(
-            (got - max_supported).abs() < f64::EPSILON,
-            "over-max target must clamp to the max supported duration, got {got}"
+        assert_eq!(
+            choose_idle_frame_duration(desired, max_supported, max_supported),
+            Some(IdleDurationChoice::ClampToMax),
         );
     }
 
     #[test]
-    fn clamp_idle_duration_shorter_than_min_clamps_to_min() {
-        // A camera whose slowest supported rate is faster than the idle target
-        // direction is the over-max case above; the symmetric guard is a target
-        // SHORTER than the min supported duration, which must clamp up to min.
-        let desired = 1.0 / 120.0; // very short duration (120 fps)
+    fn idle_choice_faster_than_min_clamps_to_min() {
+        // The symmetric guard: a target SHORTER (faster) than the fastest
+        // supported duration must clamp up to the device's fastest supported
+        // min frame duration.
+        let desired = 1.0 / 120.0; // 120 fps, faster than the min supported
         let min_supported = 1.0 / 30.0;
-        let got = clamp_idle_frame_duration_secs(desired, min_supported, 1.0);
-        assert!(
-            (got - min_supported).abs() < f64::EPSILON,
-            "under-min target must clamp to the min supported duration, got {got}"
+        assert_eq!(
+            choose_idle_frame_duration(desired, min_supported, 1.0),
+            Some(IdleDurationChoice::ClampToMin),
         );
     }
 
     #[test]
-    fn idle_min_frame_duration_matches_inference_cap() {
-        // The idle camera rate must provably equal the worker's idle cap: a
-        // 1 / IDLE_INFERENCE_HZ-second min frame duration is IDLE_INFERENCE_HZ fps.
-        let t = idle_min_frame_duration();
+    fn idle_choice_inverted_range_is_none() {
+        // Degenerate input: min > max. Must return `None` (caller skips the
+        // throttle, leaving full rate) rather than panic in `f64::clamp`.
+        assert_eq!(choose_idle_frame_duration(0.25, 1.0, 1.0 / 30.0), None);
+    }
+
+    #[test]
+    fn idle_choice_non_finite_or_zero_is_none() {
+        // Any non-finite or non-positive bound or target disqualifies the
+        // throttle: the caller leaves the camera at full rate.
+        assert_eq!(choose_idle_frame_duration(f64::NAN, 1.0 / 30.0, 1.0), None);
+        assert_eq!(choose_idle_frame_duration(0.25, f64::INFINITY, 1.0), None);
+        assert_eq!(choose_idle_frame_duration(0.25, 1.0 / 30.0, f64::NAN), None);
+        assert_eq!(choose_idle_frame_duration(0.0, 1.0 / 30.0, 1.0), None);
+        assert_eq!(choose_idle_frame_duration(0.25, 0.0, 1.0), None);
+    }
+
+    #[test]
+    fn idle_desired_frame_duration_matches_inference_cap() {
+        // The `Desired` choice maps to the exact 1 / IDLE_INFERENCE_HZ-second
+        // min frame duration (value 1 over timescale IDLE_INFERENCE_HZ), i.e.
+        // IDLE_INFERENCE_HZ fps (0.25s at 4 Hz) — a native `CMTime`, never
+        // rebuilt from coarse `f64` seconds.
+        let t = idle_desired_frame_duration();
         // `CMTime` is a packed struct; copy the Copy fields to locals before
         // asserting so we never take a reference to a misaligned field.
         let value = t.value;
