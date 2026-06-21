@@ -13,8 +13,6 @@ use wc_core::audio::background::BackgroundSampleAsset;
 use wc_core::CorePlugin;
 use wc_sketches::SketchesPlugin;
 
-#[cfg(debug_assertions)]
-mod console;
 mod hand_providers;
 
 /// Relative path to the Line sketch's background sample, resolved against
@@ -104,11 +102,6 @@ fn main() {
         )
             .chain(),
     );
-
-    // Developer command console (backtick to toggle), debug builds only — never
-    // in release/soak. Added after EguiPlugin, which it draws over.
-    #[cfg(debug_assertions)]
-    app.add_plugins(console::DevConsolePlugin);
 
     // OS display-sleep inhibitor, driven by the persisted "Keep display
     // awake" setting (default on). NonSend: the keepawake handle wraps

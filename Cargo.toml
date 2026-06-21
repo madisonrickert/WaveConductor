@@ -48,6 +48,12 @@ bevy = { version = "0.18", default-features = false, features = [
     # `BoneWireframeMaterial` (LineList wireframe bones — Metal-safe, unlike
     # `WireframePlugin`, which needs the unsupported `POLYGON_MODE_LINE`).
     "bevy_pbr",
+    # `bevy_log` provides `bevy::log::LogPlugin`, which `waveconductor`'s
+    # `main.rs` disables to install its own `tracing-subscriber`. This feature
+    # was previously enabled transitively by `bevy_console`'s default-featured
+    # `bevy`; declared explicitly here now that `bevy_console` is removed
+    # (2026-06-20) so the build no longer relies on a transitive feature leak.
+    "bevy_log",
     "x11",
     "wayland",
 ] }
