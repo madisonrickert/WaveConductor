@@ -39,7 +39,13 @@ impl LatestFrame {
         }
         out.width = self.width;
         out.height = self.height;
-        bgra_to_rgb(&self.bgra, self.bytes_per_row, self.width, self.height, &mut out.rgb);
+        bgra_to_rgb(
+            &self.bgra,
+            self.bytes_per_row,
+            self.width,
+            self.height,
+            &mut out.rgb,
+        );
         *last_gen = self.generation;
         true
     }
@@ -52,6 +58,19 @@ impl LatestFrame {
         *last_gen = self.generation;
         true
     }
+}
+
+/// Choose which enumerated capture device to open. Returns `Some(index)` when
+/// `requested` is in range, or `None` to fall back to the system default video
+/// device — parity with nokhwa's `open(camera_index)` graceful fallback.
+pub(super) fn select_device_index(device_count: usize, requested: u32) -> Option<usize> {
+    let idx = usize::try_from(requested).ok()?;
+    (idx < device_count).then_some(idx)
+}
+
+/// Human-readable label for the negotiated capture format (dev-panel diagnostics).
+pub(super) fn format_label(width: u32, height: u32, fps: u32) -> String {
+    format!("{width}x{height} BGRA @{fps}")
 }
 
 /// Repack camera BGRA (byte order B,G,R,A, possibly row-padded so
@@ -85,8 +104,8 @@ pub(super) fn bgra_to_rgb(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::Frame;
+    use super::*;
 
     #[test]
     fn store_then_take_into_produces_rgb_once() {
@@ -94,7 +113,10 @@ mod tests {
         slot.store(&[10, 20, 30, 255], 1, 1, 4);
         let mut last = 0u64;
         let mut out = Frame::default();
-        assert!(slot.take_into(&mut last, &mut out), "first take sees new frame");
+        assert!(
+            slot.take_into(&mut last, &mut out),
+            "first take sees new frame"
+        );
         assert_eq!(out.width, 1);
         assert_eq!(out.rgb, vec![30, 20, 10]);
         assert!(!slot.take_into(&mut last, &mut out), "no new frame since");
@@ -107,7 +129,10 @@ mod tests {
         let mut last = 0u64;
         assert!(slot.consume(&mut last), "consume sees the stored frame");
         let mut out = Frame::default();
-        assert!(!slot.take_into(&mut last, &mut out), "consume already advanced the generation");
+        assert!(
+            !slot.take_into(&mut last, &mut out),
+            "consume already advanced the generation"
+        );
     }
 
     #[test]
@@ -148,5 +173,22 @@ mod tests {
         let ptr = out.as_ptr();
         bgra_to_rgb(&bgra, 4, 1, 1, &mut out);
         assert_eq!(out.as_ptr(), ptr, "same dimensions must not reallocate");
+    }
+
+    #[test]
+    fn device_index_in_range_is_selected() {
+        assert_eq!(select_device_index(3, 0), Some(0));
+        assert_eq!(select_device_index(3, 2), Some(2));
+    }
+
+    #[test]
+    fn out_of_range_index_falls_back_to_default() {
+        assert_eq!(select_device_index(3, 3), None);
+        assert_eq!(select_device_index(0, 0), None);
+    }
+
+    #[test]
+    fn format_label_reads_like_the_nokhwa_label() {
+        assert_eq!(format_label(640, 480, 30), "640x480 BGRA @30");
     }
 }
