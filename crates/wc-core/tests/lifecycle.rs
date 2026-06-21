@@ -225,14 +225,17 @@ fn empty_leap_frames_do_not_reset_idle_timer() {
 /// This test bypasses `emit_action_input` to isolate whether
 /// `skip_to_screensaver` correctly reads `MessageReader<ActionInput>`.
 ///
-/// The clock is advanced to 65 s of virtual time before the chord so
-/// `rewind_past_screensaver` (which does `now.saturating_sub(threshold)`) has
-/// room to produce a non-zero `last_interaction` and `idle_for` can reach the
-/// 60 s total threshold.
+/// The timeline is built so the assertion genuinely depends on the rewind: the
+/// timer is marked fresh at ~61 s, then the clock advances only ~1 s while the
+/// action is processed (no keyboard input here, so `reset_on_interaction` never
+/// re-marks the timer). Absent the rewind, `idle_for` would be ~1 s, far below
+/// the 60 s total threshold; only `rewind_past_screensaver` can push it to
+/// exactly 60 s. (Confirmed by neutering the rewind and watching this fail.)
 ///
-/// Note: `Time<Virtual>` caps each tick at `max_delta = 250 ms` by default.
-/// We raise it to 70 s so `ManualDuration(65 s)` can advance the full amount
-/// in a single `app.update()`.
+/// Two timing quirks shape the setup: Bevy's first `app.update()` does not
+/// advance the clock (it only sets the baseline), so an extra settle tick is
+/// needed; and `Time<Virtual>` caps each tick at `max_delta = 250 ms` by
+/// default, so we raise it to 70 s to let one tick jump past 60 s.
 #[test]
 fn direct_action_input_rewinds_timer() {
     use bevy::time::{TimeUpdateStrategy, Virtual};
@@ -242,20 +245,42 @@ fn direct_action_input_rewinds_timer() {
     use wc_core::lifecycle::idle::InteractionTimer;
 
     let mut app = lifecycle_test_app();
-    // Raise the virtual-time max_delta cap so one tick can jump 65 s.
+    // Raise the virtual-time max_delta cap so a tick can jump past 60 s.
     app.world_mut()
         .resource_mut::<Time<Virtual>>()
         .set_max_delta(Duration::from_secs(70));
-    // Advance virtual clock to 65 s (Home state; advance_activity is a no-op).
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(65)));
-    app.update(); // time.elapsed() ≈ 65 s
+
+    // Bevy's first `app.update()` establishes the time baseline and does not
+    // advance the clock; ManualDuration only takes effect from the second tick.
+    // Tick once to settle (clock stays ~0), then tick to ~61 s so the clock is
+    // past the 60 s total threshold (otherwise `rewind_past_screensaver` would
+    // saturate `now - 60 s` to zero and the rewind would be unobservable).
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(61)));
+    app.update(); // settle: time.elapsed() ≈ 0 s
+    app.update(); // time.elapsed() ≈ 61 s
 
     {
         let now = app.world().resource::<Time>().elapsed();
         let mut timer = app.world_mut().resource_mut::<InteractionTimer>();
         timer.idle_threshold = Duration::from_secs(30);
         timer.screensaver_threshold = Duration::from_secs(30);
-        timer.mark(now); // freshly interacted at ~65 s
+        timer.mark(now); // freshly interacted at ~61 s
+    }
+
+    // From here advance only 1 s per tick. The timer marked at ~61 s therefore
+    // accrues just ~1 s of natural idle by the assertion (far under the 60 s
+    // threshold), so only the rewind can carry idle_for across the threshold.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+
+    // Precondition: before the action, the freshly-marked timer is well under
+    // the threshold. This is the state the rewind must overturn.
+    {
+        let now = app.world().resource::<Time>().elapsed();
+        let t = app.world().resource::<InteractionTimer>();
+        assert!(
+            t.idle_for(now) < t.idle_threshold + t.screensaver_threshold,
+            "precondition: timer must not already be past threshold"
+        );
     }
 
     // Inject ActionInput directly — no keyboard press, no producer needed.
@@ -263,7 +288,7 @@ fn direct_action_input_rewinds_timer() {
         action: WaveConductorAction::StartScreensaver,
         phase: ActionPhase::Pressed,
     });
-    app.update(); // time advances to ~130 s; skip_to_screensaver rewinds to ~70 s
+    app.update(); // time → ~62 s; skip_to_screensaver rewinds last_interaction to ~2 s
 
     let now = app.world().resource::<Time>().elapsed();
     let idle_time = app.world().resource::<InteractionTimer>().idle_for(now);
@@ -282,11 +307,15 @@ fn direct_action_input_rewinds_timer() {
 ///
 /// The `action_map` producer requires both `ShiftLeft` (held) and `KeyS`
 /// (just-pressed) to be observed in the same `PreUpdate` tick, so both
-/// `press_key` calls must precede the single `app.update()`.
+/// `press_key` calls must precede the single chord `app.update()`.
 ///
-/// The clock is advanced to 65 s of virtual time before the chord (raising
+/// This test is non-trivial without restructuring: the chord's key press makes
+/// `reset_on_interaction` mark the timer fresh (idle_for = 0) on the same frame,
+/// so only the rewind can carry idle_for to the threshold. Bevy's first
+/// `app.update()` only sets the time baseline (clock stays ~0); the chord update
+/// is the second tick, which jumps the clock to ~65 s (we raise
 /// `Time<Virtual>::max_delta` first, since the default cap is 250 ms) so
-/// `rewind_past_screensaver` has room to produce a non-zero `last_interaction`.
+/// `rewind_past_screensaver` produces a non-zero `last_interaction`.
 #[test]
 fn shift_s_chord_arms_screensaver_skip_and_rewinds_timer() {
     use bevy::time::{TimeUpdateStrategy, Virtual};
@@ -294,13 +323,14 @@ fn shift_s_chord_arms_screensaver_skip_and_rewinds_timer() {
     use wc_core::lifecycle::idle::InteractionTimer;
 
     let mut app = lifecycle_test_app();
-    // Raise virtual-time max_delta cap so one ManualDuration(65 s) tick fully advances.
+    // Raise virtual-time max_delta cap so the chord tick can jump past 60 s.
     app.world_mut()
         .resource_mut::<Time<Virtual>>()
         .set_max_delta(Duration::from_secs(70));
-    // Advance virtual clock to 65 s (Home state; advance_activity is a no-op).
+    // Settle tick: the first update only sets the time baseline, so the clock
+    // stays ~0 here; ManualDuration(65 s) takes effect on the next (chord) tick.
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(65)));
-    app.update(); // time.elapsed() ≈ 65 s
+    app.update(); // settle: time.elapsed() ≈ 0 s
 
     // Set generous thresholds and mark the timer fresh.
     {
@@ -326,10 +356,10 @@ fn shift_s_chord_arms_screensaver_skip_and_rewinds_timer() {
     // `emit_action_input` producer sees Shift held when S is just-pressed.
     send_press(&mut app, KeyCode::ShiftLeft);
     send_press(&mut app, KeyCode::KeyS);
-    app.update();
-    // After this frame: reset_on_interaction marks the timer at ~130 s, then
-    // skip_to_screensaver reads ActionInput{StartScreensaver, Pressed} and
-    // rewinds the timer to ~70 s so idle_for(130 s) = 60 s.
+    app.update(); // chord tick: clock jumps to ~65 s
+                  // After this frame: reset_on_interaction marks the timer at ~65 s, then
+                  // skip_to_screensaver reads ActionInput{StartScreensaver, Pressed} and
+                  // rewinds the timer to ~5 s so idle_for(65 s) = 60 s.
 
     let now = app.world().resource::<Time>().elapsed();
     let idle_time = app.world().resource::<InteractionTimer>().idle_for(now);
