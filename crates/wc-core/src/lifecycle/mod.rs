@@ -5,7 +5,7 @@
 //! ## Data flow
 //!
 //! 1. User presses a key bound by [`actions::WaveConductorAction`].
-//! 2. `leafwing-input-manager` updates `Res<ActionState<WaveConductorAction>>`.
+//! 2. `action_map::emit_action_input` reads `ButtonInput<KeyCode>` and emits `ActionInput` messages.
 //! 3. [`nav::handle_navigation_actions`] reads the action state and transitions
 //!    [`state::AppState`] via `NextState<AppState>`.
 //! 4. Any interaction (mouse, keyboard, future hand-tracking) resets
@@ -30,7 +30,6 @@ pub use reload::SketchReloadState;
 pub use thermal::{ThermalSource, ThermalState, ThermalTier};
 
 use bevy::prelude::*;
-use leafwing_input_manager::prelude::*;
 
 /// Single plugin that wires every lifecycle subsystem into the Bevy [`App`].
 ///
@@ -43,12 +42,7 @@ impl Plugin for LifecyclePlugin {
             // States machine
             .init_state::<state::AppState>()
             .add_sub_state::<state::SketchActivity>()
-            // Input action mapping (leafwing)
-            .add_plugins(InputManagerPlugin::<actions::WaveConductorAction>::default())
-            .insert_resource(actions::default_input_map())
-            .init_resource::<ActionState<actions::WaveConductorAction>>()
-            // In-house action input (replaces leafwing; see action_map). Runs
-            // alongside leafwing during migration.
+            // In-house action input (see action_map).
             .add_message::<action_map::ActionInput>()
             .insert_resource(action_map::default_bindings())
             .add_systems(

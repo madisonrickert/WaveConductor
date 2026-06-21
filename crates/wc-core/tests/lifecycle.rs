@@ -310,8 +310,8 @@ fn direct_action_input_rewinds_timer() {
 /// `press_key` calls must precede the single chord `app.update()`.
 ///
 /// This test is non-trivial without restructuring: the chord's key press makes
-/// `reset_on_interaction` mark the timer fresh (idle_for = 0) on the same frame,
-/// so only the rewind can carry idle_for to the threshold. Bevy's first
+/// `reset_on_interaction` mark the timer fresh (`idle_for` = 0) on the same frame,
+/// so only the rewind can carry `idle_for` to the threshold. Bevy's first
 /// `app.update()` only sets the time baseline (clock stays ~0); the chord update
 /// is the second tick, which jumps the clock to ~65 s (we raise
 /// `Time<Virtual>::max_delta` first, since the default cap is 250 ms) so
