@@ -53,7 +53,6 @@ bevy = { workspace = true }
 bitflags = { workspace = true }
 cpal = { workspace = true }
 fundsp = { workspace = true }
-leafwing-input-manager = { workspace = true }
 rtrb = { workspace = true }
 smallvec = { workspace = true }
 symphonia = { workspace = true }
