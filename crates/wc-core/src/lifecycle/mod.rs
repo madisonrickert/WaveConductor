@@ -6,8 +6,8 @@
 //!
 //! 1. User presses a key bound by [`actions::WaveConductorAction`].
 //! 2. `action_map::emit_action_input` reads `ButtonInput<KeyCode>` and emits `ActionInput` messages.
-//! 3. [`nav::handle_navigation_actions`] reads the action state and transitions
-//!    [`state::AppState`] via `NextState<AppState>`.
+//! 3. [`nav::handle_navigation_actions`] reads those `ActionInput` messages and
+//!    transitions [`state::AppState`] via `NextState<AppState>`.
 //! 4. Any interaction (mouse, keyboard, future hand-tracking) resets
 //!    [`idle::InteractionTimer`].
 //! 5. The idle system advances [`state::SketchActivity`] through Active → Idle →

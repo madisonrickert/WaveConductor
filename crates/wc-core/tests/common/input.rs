@@ -4,9 +4,9 @@
 //! winit integration. In tests, we synthesize the same messages directly,
 //! then advance one frame so `ButtonInput<MouseButton>`, `ButtonInput<KeyCode>`,
 //! and `Touches` reflect the synthesized state. Production input flows that
-//! consume those resources (leafwing's `ActionState` tracker, the project's
-//! `PointerState`, the Line sketch's mouse-attractor lifecycle) run end-to-end
-//! without poking their internal resources directly.
+//! consume those resources (the project's `PointerState`, the in-house
+//! `ActionInput` pipeline, the Line sketch's mouse-attractor lifecycle) run
+//! end-to-end without poking their internal resources directly.
 //!
 //! ## When to use what
 //!
@@ -14,7 +14,8 @@
 //!   [`move_pointer`]. Writes `MouseButtonInput` + `CursorMoved` so
 //!   `Res<ButtonInput<MouseButton>>` and `PointerState.primary` update.
 //! - **Keyboard navigation** — [`tap_key`], [`press_key`] /
-//!   [`release_key`]. Writes `KeyboardInput`; leafwing picks it up next frame.
+//!   [`release_key`]. Writes `KeyboardInput`; `emit_action_input` picks it up
+//!   next frame.
 //! - **Touch UIs** — [`touch_start`], [`touch_move`], [`touch_end`].
 //!
 //! All helpers take `&mut App` and only write messages. **Call
@@ -157,14 +158,13 @@ pub fn release_key(app: &mut App, key_code: KeyCode) {
 }
 
 /// Press + release a key, with one `app.update()` in between so the press is
-/// visible to consumers that observe `pressed` (or, downstream, leafwing's
-/// `CentralInputStore`, which records buttons from `ButtonInput::get_pressed()`
-/// — not `just_pressed`). Without the interleaved update, leafwing 0.20
-/// would see only the release.
+/// visible as a `ButtonInput<KeyCode>` `just_pressed` edge on the frame that
+/// `PreUpdate`'s `emit_action_input` producer runs. Without the interleaved
+/// update, the press and release collapse into a single frame; `just_pressed`
+/// is never true and no `ActionInput` is emitted.
 ///
 /// Caller is still responsible for calling `app.update()` once more afterward
-/// to let any system that runs after leafwing's `compute` observe the
-/// `just_pressed` action state.
+/// to let consumers that read `ActionInput` messages observe the result.
 pub fn tap_key(app: &mut App, key_code: KeyCode) {
     press_key(app, key_code);
     app.update();

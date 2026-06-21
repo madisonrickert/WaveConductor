@@ -41,11 +41,12 @@ use wc_sketches::line::systems::MouseAttractorState;
 /// `AppState::Line` assertion below will fail with a clear message.
 fn enter_line(app: &mut App) {
     tap_key(app, KeyCode::Digit1);
-    // leafwing + Bevy state propagation takes a few frames: one to fold the
-    // synthetic KeyboardInput into ButtonInput<KeyCode> + tick leafwing's
-    // ActionState, one for nav::handle_navigation_actions to set NextState,
-    // and one for the OnEnter(AppState::Line) schedule to fire. Three updates
-    // is sufficient (was four; trimmed in Plan 10 Phase 0).
+    // `KeyboardInput` → `ButtonInput<KeyCode>` → `emit_action_input` emits
+    // `ActionInput` → `NextState` takes a few frames: one to fold the synthetic
+    // key into `ButtonInput<KeyCode>` and let `emit_action_input` emit the
+    // action, one for `nav::handle_navigation_actions` to set `NextState`, and
+    // one for the `OnEnter(AppState::Line)` schedule to fire. Three updates is
+    // sufficient (was four; trimmed in Plan 10 Phase 0).
     for _ in 0..3 {
         app.update();
     }

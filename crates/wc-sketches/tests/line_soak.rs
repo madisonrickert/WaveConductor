@@ -82,9 +82,9 @@ fn line_soak_8h() {
     let mut app = sketches_test_app();
     app.update();
 
-    // Enter Line via Digit1 keyboard nav. Three updates is the minimum
-    // for leafwing's KeyboardInput → ActionState → NextState pipeline
-    // to settle (see `line_input.rs::enter_line`).
+    // Enter Line via Digit1 keyboard nav. Three updates is the minimum for
+    // `KeyboardInput` → `ButtonInput<KeyCode>` → `emit_action_input` emits
+    // `ActionInput` → `NextState` to settle (see `line_input.rs::enter_line`).
     tap_key(&mut app, KeyCode::Digit1);
     for _ in 0..3 {
         app.update();

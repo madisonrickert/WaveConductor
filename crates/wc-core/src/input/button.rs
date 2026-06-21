@@ -21,8 +21,11 @@ pub const RELEASE_THRESHOLD: f32 = 0.5;
 
 /// Discrete hand-derived buttons.
 ///
-/// Used as the key type for `Res<ButtonInput<HandButton>>` and as a binding
-/// source in leafwing `InputMap`s once future sketches need them.
+/// Exposed as `Res<ButtonInput<HandButton>>` so the gesture layer can use
+/// `pinch.just_pressed(HandButton::LeftPinch)` with the same idioms used for
+/// mouse buttons. Any future *action* binding (e.g., hand-gesture hotkeys)
+/// would extend the in-house `crate::lifecycle::action_map`, which is
+/// currently keyboard-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
 pub enum HandButton {
     /// Pinch gesture on the left hand (thumb–index proximity).
@@ -34,27 +37,3 @@ pub enum HandButton {
     /// Grab gesture on the right hand.
     RightGrab,
 }
-
-// leafwing 0.20 Buttonlike integration.
-//
-// leafwing-input-manager allows custom Buttonlike types to be bound in
-// `InputMap`s. The blessed pattern for "resource-backed" custom buttons in
-// 0.20 is to:
-//
-//   1. Register the type with `app.register_buttonlike_input::<HandButton>()`
-//      (or equivalent), so leafwing's `CentralInputStore` queries the right
-//      backing resource.
-//   2. Implement `Buttonlike` to look up the pressed-state via the registered
-//      input store.
-//
-// Plan 6 (Line sketch) will be the first consumer that needs leafwing
-// HandButton bindings, so the full integration is deferred there. For Plan 3
-// we only ensure `Res<ButtonInput<HandButton>>` is populated correctly — the
-// `Buttonlike` derivation can be added once leafwing 0.20's exact registration
-// API has been validated against a real binding.
-//
-// If you need to ship the Buttonlike impl in this plan, consult
-// `cargo doc -p leafwing-input-manager --open` and look for the
-// `register_buttonlike_input` or equivalent method on `App`, and the trait
-// requirements for `Buttonlike` (the exact method signatures changed between
-// 0.16 and 0.20).

@@ -372,3 +372,31 @@ fn shift_s_chord_arms_screensaver_skip_and_rewinds_timer() {
         "Shift+S must rewind the timer past both thresholds; idle_for={idle_time:?}, threshold={total_threshold:?}"
     );
 }
+
+/// When `Digit1` and `Digit2` are pressed in the same frame, the
+/// lower-numbered sketch (`Line`, bound to `Digit1`) wins.
+///
+/// Both keys are pressed before the single `app.update()` so that
+/// `emit_action_input` sees both `just_pressed` edges in the same `PreUpdate`
+/// tick and emits both `ActionInput::SelectLine` and `ActionInput::SelectFlame`.
+/// `handle_navigation_actions` processes them in action-order; because
+/// `SelectLine` sorts before `SelectFlame` in `WaveConductorAction::ALL`, the
+/// final `NextState` is `AppState::Line`.
+#[test]
+fn select_precedence_lower_sketch_wins_when_keys_same_frame() {
+    let mut app = lifecycle_test_app();
+    app.update();
+    // Both keys pressed before the update — same PreUpdate tick.
+    send_press(&mut app, KeyCode::Digit1);
+    send_press(&mut app, KeyCode::Digit2);
+    app.update(); // PreUpdate: both ActionInputs emitted; Update: NextState set
+    send_release(&mut app, KeyCode::Digit1);
+    send_release(&mut app, KeyCode::Digit2);
+    // Pending transition resolves on the next update tick.
+    app.update();
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line,
+        "when Digit1 and Digit2 are pressed in the same frame, Line (lower-numbered) must win"
+    );
+}

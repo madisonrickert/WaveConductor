@@ -24,6 +24,8 @@ pub fn handle_volume_toggle(
     state: Res<'_, AudioState>,
     mut sender: NonSendMut<'_, AudioCommandSender>,
 ) {
+    // `emit_action_input` emits at most one matching `(action, phase)` per frame,
+    // so `.any()` never leaves a relevant message unread.
     let toggled = actions
         .read()
         .any(|a| a.action == WaveConductorAction::ToggleVolume && a.phase == ActionPhase::Pressed);

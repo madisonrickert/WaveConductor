@@ -2,7 +2,7 @@
 //!
 //! Constructs the Bevy [`App`], registers core plugins, and runs the event loop.
 //! In Plan 2 this opens a window and exercises the lifecycle plugin (state
-//! machine + leafwing keyboard actions). Sketch plugins land in Plan 6 onward.
+//! machine + in-house keyboard actions). Sketch plugins land in Plan 6 onward.
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};

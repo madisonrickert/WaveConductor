@@ -315,9 +315,9 @@ fn settings_restart_cycles_back_to_line() {
 /// Transition to `AppState::Line` in a test app.
 ///
 /// Uses Digit1 keyboard nav — the same binding exercised in `line_input.rs`.
-/// Three updates are sufficient: one folds the synthetic key into
-/// `ButtonInput<KeyCode>` + ticks leafwing's `ActionState`, one runs
-/// `handle_navigation_actions` to set `NextState`, one runs the
+/// Three updates are sufficient: one folds the synthetic `KeyboardInput` into
+/// `ButtonInput<KeyCode>` and `emit_action_input` emits `ActionInput`, one
+/// runs `handle_navigation_actions` to set `NextState`, one runs the
 /// `OnEnter(AppState::Line)` schedule.
 fn enter_line(app: &mut App) {
     use bevy::input::keyboard::KeyCode;

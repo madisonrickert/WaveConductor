@@ -3,7 +3,8 @@
 //!
 //! Sketches consume pointer input directly via Bevy's
 //! `ButtonInput<MouseButton>` and `Touches` resources, and the app's global
-//! hotkeys run through `leafwing-input-manager` actions. Without
+//! hotkeys run through the in-house `action_map` (`ActionInput` messages
+//! emitted by `crate::lifecycle::action_map::emit_action_input`). Without
 //! coordination, input that lands inside an egui panel ALSO fires those
 //! handlers:
 //!
@@ -20,9 +21,12 @@
 //! - [`EguiPointerCaptured`] — `wants_any_pointer_input()`. Sketches read it
 //!   and suppress their press-edge handling when `true`.
 //! - [`EguiKeyboardCaptured`] — `wants_any_keyboard_input()` (a focused text
-//!   field, or an open popup). The keyboard-action consumer systems (nav,
-//!   volume toggle, dev-panel toggle) are gated on the
-//!   [`egui_not_capturing_keyboard`] run condition built on it.
+//!   field, or an open popup). The single `PreUpdate` producer,
+//!   `crate::lifecycle::action_map::emit_action_input`, carries
+//!   `.run_if(egui_not_capturing_keyboard)` — when egui owns the keyboard,
+//!   no `ActionInput` messages are emitted and every keyboard-action consumer
+//!   (nav, volume toggle, dev-panel toggle, screensaver-skip) is suppressed
+//!   uniformly without any per-consumer gating.
 //!
 //! [`update_egui_input_capture`] copies both values out of `bevy_egui`'s
 //! resource each frame. It uses `Option<Res<EguiWantsInput>>` so test
@@ -34,20 +38,17 @@
 //! ## Scheduling
 //!
 //! `bevy_egui` populates `EguiWantsInput` in `PostUpdate` (via
-//! `EguiPostUpdateSet::ProcessOutput::write_egui_wants_input_system`), so a
-//! mirror read in `Update` carries at least a one-frame lag against the
-//! on-screen UI. Only the settings-internal consumer
-//! (`handle_dev_panel_toggle`) is chained after [`update_egui_input_capture`]
-//! and sees a deterministic one-frame lag; the lifecycle (nav) and audio
-//! (volume) consumers have no ordering against the mirror system, so within
-//! a frame they may read the previous frame's mirror — their effective lag
-//! is nondeterministically one OR two frames. That ambiguity is accepted
-//! rather than cross-plugin-ordered away: focus is acquired by a click (or
-//! tab) well over two frames before any character is typed into a field, and
-//! on focus release the worst case is hotkeys staying suppressed for one
-//! extra ~16 ms frame. (The pointer mirror has the same property; the panel
-//! doesn't move between frames and the cursor must already be over it before
-//! the user can click.)
+//! `EguiPostUpdateSet::ProcessOutput::write_egui_wants_input_system`), so
+//! [`update_egui_input_capture`] reads a value written the previous frame
+//! when it runs in `Update`. The `emit_action_input` producer runs in
+//! `PreUpdate` — one schedule slot earlier than `Update` — and reads the
+//! `EguiKeyboardCaptured` mirror that `update_egui_input_capture` wrote
+//! during the prior frame's `Update`. All consumers therefore share the same
+//! 1–2 frame mirror-lag tolerance: focus is acquired well over two frames
+//! before any character is typed into a field, and on focus release the worst
+//! case is hotkeys staying suppressed for one extra ~16 ms frame. (The
+//! pointer mirror has the same property; the panel doesn't move between
+//! frames and the cursor must already be over it before the user can click.)
 //!
 //! ## What consumers do with it
 //!
@@ -55,11 +56,10 @@
 //! attractor") on `!EguiPointerCaptured.0`. Release events and continuous
 //! position updates still fire regardless, so an attractor that was activated
 //! outside the panel and then dragged over it still releases cleanly.
-//! Keyboard-action systems are gated wholesale with
-//! `.run_if(egui_not_capturing_keyboard)` — while a text field has focus
-//! there is no app hotkey that should still fire (and `just_pressed` edges
-//! belong to the frame they occur in, so a skipped frame cannot replay them
-//! later).
+//! Keyboard-action consumers read only `ActionInput` messages, which the
+//! producer never emits while a text field has focus — there is no app
+//! hotkey that should still fire then (and `just_pressed` edges belong to the
+//! frame they occur in, so a skipped frame cannot replay them later).
 
 use bevy::prelude::*;
 
