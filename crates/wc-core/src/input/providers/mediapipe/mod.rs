@@ -433,7 +433,13 @@ fn refill_metrics(d: &mut ProviderDiagnostics, worker_diag: &MediaPipeWorkerDiag
 /// Open a real webcam source on the calling (worker) thread, or error. Runs
 /// inside the worker so `!Send` camera backends never cross threads.
 fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, CaptureError> {
-    #[cfg(feature = "hand-tracking-mediapipe-camera")]
+    #[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
+    {
+        let source = capture::AvfFrameSource::open(camera_index)?;
+        let boxed: Box<dyn FrameSource> = Box::new(source);
+        Ok(boxed)
+    }
+    #[cfg(all(feature = "hand-tracking-mediapipe-camera", not(target_os = "macos")))]
     {
         let source = capture::NokhwaFrameSource::open(camera_index)?;
         let boxed: Box<dyn FrameSource> = Box::new(source);

@@ -88,7 +88,6 @@ leaprs = { workspace = true, optional = true }
 # the C++ ONNX Runtime, so it sits under the non-wasm target.
 ort = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
-nokhwa = { workspace = true, optional = true }
 # Linux temperature sensing (the `native::SysfsThermalSensor` reader) needs NO
 # dependency — it reads the kernel `hwmon`/`thermal_zone` sysfs files with
 # `std::fs`. We surveyed `sysinfo` (pulls ~30 crates for file reads we can do
@@ -96,6 +95,12 @@ nokhwa = { workspace = true, optional = true }
 # at build time — deploy friction on a fresh NUC); for a coarse "hottest CPU °C
 # every few seconds" on a known Linux box, zero deps is the most robust.
 #
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))'.dependencies]
+# nokhwa drives webcam capture on Linux and Windows. macOS uses the in-house
+# AvfFrameSource (objc2 AVFoundation) instead; nokhwa is excluded from macOS to
+# shed the stale `objc 0.2` / `core-video-sys` transitive chain.
+nokhwa = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Apple-Silicon temperature sensing. Pinned because `macmon` wraps private Apple
