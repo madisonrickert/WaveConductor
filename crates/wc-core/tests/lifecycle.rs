@@ -21,7 +21,7 @@ use wc_core::lifecycle::state::{AppState, SketchActivity};
 use common::input::press_key as send_press;
 use common::input::release_key as send_release;
 
-/// Inject a physical key press, run one update tick (so the PreUpdate producer
+/// Inject a physical key press, run one update tick (so the `PreUpdate` producer
 /// emits the action and the Update consumers act), then release.
 fn press_key(app: &mut App, key: KeyCode) {
     send_press(app, key);

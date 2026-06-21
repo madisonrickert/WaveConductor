@@ -21,8 +21,8 @@
 //! focus mirror to catch up.
 
 use bevy::prelude::*;
-use leafwing_input_manager::prelude::ActionState;
 
+use crate::lifecycle::action_map::{ActionInput, ActionPhase};
 use crate::lifecycle::actions::WaveConductorAction;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
@@ -34,13 +34,16 @@ use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DevPanelVisible(pub bool);
 
-/// System that listens for `WaveConductorAction::ToggleDevPanel` and flips
-/// [`DevPanelVisible`]. Scheduled in `Update` by `SettingsPlugin`.
+/// Listens for `ToggleDevPanel` presses and flips [`DevPanelVisible`].
+/// Scheduled in `Update` by `SettingsPlugin`.
 pub fn handle_dev_panel_toggle(
-    actions: Res<'_, ActionState<WaveConductorAction>>,
+    mut actions: MessageReader<'_, '_, ActionInput>,
     mut visible: ResMut<'_, DevPanelVisible>,
 ) {
-    if actions.just_pressed(&WaveConductorAction::ToggleDevPanel) {
+    let toggled = actions.read().any(|a| {
+        a.action == WaveConductorAction::ToggleDevPanel && a.phase == ActionPhase::Pressed
+    });
+    if toggled {
         visible.0 = !visible.0;
         tracing::debug!(visible = visible.0, "dev panel toggled");
     }
@@ -440,47 +443,34 @@ mod tests {
     use super::*;
 
     fn make_app() -> App {
-        // Deliberately omit `InputManagerPlugin` so `update_action_state` does not
-        // overwrite direct `ActionState::press()` calls each frame. We are testing
-        // only that `handle_dev_panel_toggle` reacts to a `just_pressed` state,
-        // not the full physical-input pipeline (which is covered by
-        // `tests/settings_plugin.rs`).
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.init_resource::<ActionState<WaveConductorAction>>();
+        app.add_message::<ActionInput>();
         app.init_resource::<DevPanelVisible>();
         app.add_systems(Update, handle_dev_panel_toggle);
         app
     }
 
+    fn fire_toggle(app: &mut App) {
+        app.world_mut().write_message(ActionInput {
+            action: WaveConductorAction::ToggleDevPanel,
+            phase: ActionPhase::Pressed,
+        });
+        app.update();
+    }
+
     #[test]
     fn toggle_flips_visibility() {
         let mut app = make_app();
-
-        // Press toggles on. Without `InputManagerPlugin`, `JustPressed` is not
-        // advanced to `Pressed` by a tick system, so `just_pressed()` returns true
-        // for every frame until `release()` is called.
-        app.world_mut()
-            .resource_mut::<ActionState<WaveConductorAction>>()
-            .press(&WaveConductorAction::ToggleDevPanel);
-        app.update();
+        fire_toggle(&mut app);
         assert!(
             app.world().resource::<DevPanelVisible>().0,
-            "first press should make panel visible"
+            "first press should make panel visible",
         );
-
-        // Release clears the just-pressed state. Then press again toggles off.
-        app.world_mut()
-            .resource_mut::<ActionState<WaveConductorAction>>()
-            .release(&WaveConductorAction::ToggleDevPanel);
-        app.update();
-        app.world_mut()
-            .resource_mut::<ActionState<WaveConductorAction>>()
-            .press(&WaveConductorAction::ToggleDevPanel);
-        app.update();
+        fire_toggle(&mut app);
         assert!(
             !app.world().resource::<DevPanelVisible>().0,
-            "second press should hide panel"
+            "second press should hide panel",
         );
     }
 }

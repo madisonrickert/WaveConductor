@@ -1,6 +1,6 @@
 //! In-house keyboard action mapping.
 //!
-//! Replaces `leafwing-input-manager` for WaveConductor's needs: keyboard
+//! Replaces `leafwing-input-manager` for `WaveConductor`'s needs: keyboard
 //! button actions with edge detection plus simple modifier chords. A
 //! `PreUpdate` producer ([`emit_action_input`]) reads `ButtonInput<KeyCode>`
 //! and the [`InputBindings`] table and emits one [`ActionInput`] message per

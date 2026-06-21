@@ -79,11 +79,12 @@ impl Plugin for SettingsPlugin {
                 Update,
                 (
                     input_capture::update_egui_input_capture,
-                    // Shift+D must not toggle the panel while a panel text
-                    // field has keyboard focus (a capital D would otherwise
-                    // both type AND dismiss the panel being typed into).
-                    panel_dev::handle_dev_panel_toggle
-                        .run_if(input_capture::egui_not_capturing_keyboard),
+                    // The egui_not_capturing_keyboard gate (Shift+D must not
+                    // toggle the panel while a panel text field has keyboard
+                    // focus) moved to the ActionInput producer in
+                    // LifecyclePlugin (PreUpdate), so it is no longer needed
+                    // here.
+                    panel_dev::handle_dev_panel_toggle,
                     registry::emit_restart_events,
                     autosave::detect_changes,
                     autosave::tick,

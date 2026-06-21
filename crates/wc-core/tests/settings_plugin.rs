@@ -35,14 +35,14 @@ fn make_app() -> App {
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::input::InputPlugin);
     app.add_plugins(StatesPlugin);
-    app.add_plugins(leafwing_input_manager::plugin::InputManagerPlugin::<
-        wc_core::lifecycle::actions::WaveConductorAction,
-    >::default());
-    // Insert the default input map so key presses can be translated to actions.
-    app.insert_resource(wc_core::lifecycle::actions::default_input_map());
-    app.init_resource::<leafwing_input_manager::prelude::ActionState<
-        wc_core::lifecycle::actions::WaveConductorAction,
-    >>();
+    app.add_message::<wc_core::lifecycle::action_map::ActionInput>();
+    app.insert_resource(wc_core::lifecycle::action_map::default_bindings());
+    app.add_systems(
+        bevy::app::PreUpdate,
+        wc_core::lifecycle::action_map::emit_action_input
+            .run_if(wc_core::settings::input_capture::egui_not_capturing_keyboard)
+            .after(bevy::input::InputSystems),
+    );
     // EguiPlugin is intentionally omitted. Both panel systems guard with
     // `World::contains_resource::<EguiUserTextures>()` and return early
     // before constructing the `SystemState` that would build `EguiContexts`,
@@ -148,18 +148,18 @@ fn second_register_with_different_type_lists_both() {
 
 #[test]
 fn toggling_dev_panel_via_action_updates_resource() {
-    use leafwing_input_manager::prelude::Buttonlike as _;
-
     let mut app = make_app();
+    // Window entity required: press_key writes KeyboardInput messages that
+    // reference a window entity, and primary_window() panics without one.
+    app.world_mut().spawn(Window::default());
     app.update();
     assert!(!app.world().resource::<DevPanelVisible>().0);
 
-    // Simulate Shift+D using leafwing's `Buttonlike::press(world)` which
-    // sends `KeyboardInput` messages that `keyboard_input_system` processes
-    // in `PreUpdate`, letting leafwing translate them to `ToggleDevPanel`
-    // before `handle_dev_panel_toggle` runs in `Update`.
-    bevy::prelude::KeyCode::ShiftLeft.press(app.world_mut());
-    bevy::prelude::KeyCode::KeyD.press(app.world_mut());
+    // Simulate Shift+D by writing KeyboardInput messages directly.
+    // The producer (emit_action_input in PreUpdate) translates them to
+    // ActionInput messages, which handle_dev_panel_toggle reads in Update.
+    common::input::press_key(&mut app, bevy::prelude::KeyCode::ShiftLeft);
+    common::input::press_key(&mut app, bevy::prelude::KeyCode::KeyD);
     app.update();
     assert!(
         app.world().resource::<DevPanelVisible>().0,
