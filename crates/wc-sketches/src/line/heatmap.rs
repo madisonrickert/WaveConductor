@@ -36,7 +36,9 @@
 use std::path::Path;
 
 use bevy::math::Vec2;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+// rand 0.10 moved the high-level sampling methods (`random`, `random_range`)
+// from `Rng` to `RngExt` (`Rng` is now the former `RngCore`).
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 
 use crate::line::template_adjustments::{remap_weight, transform_point, TemplateAdjustments};
 

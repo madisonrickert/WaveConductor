@@ -141,7 +141,7 @@ bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Random sampling (Plan 10 Phase A): CDF inversion sampler for the heatmap
 # spawn. Already a transitive dep; declared here for a direct dependency edge.
-rand = "0.9"
+rand = "0.10"
 # Native LeapC FFI wrapper for hand tracking. The crate's build.rs reads
 # `LEAPSDK_LIB_PATH` to locate libLeapC at link time — see `.cargo/config.toml`
 # for the relative path into `vendor/leapc/<platform>/`. Default features
