@@ -24,10 +24,14 @@ pub fn handle_volume_toggle(
     state: Res<'_, AudioState>,
     mut sender: NonSendMut<'_, AudioCommandSender>,
 ) {
-    let toggled = actions.read().any(|a| {
-        a.action == WaveConductorAction::ToggleVolume && a.phase == ActionPhase::Pressed
-    });
+    let toggled = actions
+        .read()
+        .any(|a| a.action == WaveConductorAction::ToggleVolume && a.phase == ActionPhase::Pressed);
     if toggled {
+        // `state.muted` is mirrored from the audio thread's echo, so a rapid
+        // double-press within the same echo-latency window (~1 frame) can push the
+        // same direction twice. Acceptable for a user-driven V key (worst case: one
+        // missed toggle the user re-presses).
         let new_muted = !state.muted;
         if let Err(_dropped) = sender.push(AudioCommand::SetMuted(new_muted)) {
             tracing::warn!("audio command ring full; dropping SetMuted command");
