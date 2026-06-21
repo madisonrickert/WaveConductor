@@ -204,20 +204,24 @@ pub fn reset_on_interaction(
 /// itself is harmlessly overwritten by the next interaction).
 pub fn skip_to_screensaver(
     time: Res<'_, Time>,
-    actions: Res<
-        '_,
-        leafwing_input_manager::prelude::ActionState<super::actions::WaveConductorAction>,
-    >,
+    mut actions: MessageReader<'_, '_, super::action_map::ActionInput>,
     keys: Res<'_, ButtonInput<KeyCode>>,
     captured: Option<Res<'_, crate::settings::input_capture::EguiKeyboardCaptured>>,
     mut armed: Local<'_, bool>,
     mut timer: ResMut<'_, InteractionTimer>,
 ) {
+    use super::action_map::ActionPhase;
+    use super::actions::WaveConductorAction;
     // Fail-open like egui_not_capturing_keyboard: absent resource (harnesses
     // without SettingsPlugin/EguiPlugin) = not capturing.
     let capturing = captured.is_some_and(|c| c.0);
-    let just_pressed =
-        !capturing && actions.just_pressed(&super::actions::WaveConductorAction::StartScreensaver);
+    // The producer is egui-capture-gated, so `StartScreensaver` never arrives
+    // while a text field has focus; the `!capturing` guard is kept for harnesses
+    // that run this system without the producer's gate.
+    let start_pressed = actions.read().any(|a| {
+        a.action == WaveConductorAction::StartScreensaver && a.phase == ActionPhase::Pressed
+    });
+    let just_pressed = !capturing && start_pressed;
     // "Keyboard active" = any key still held, or released this frame: both
     // produce events reset_on_interaction has already counted this frame.
     // While egui captures the keyboard this reads as quiet, so an armed skip

@@ -336,4 +336,26 @@ mod tests {
             "chord must not fire without its modifier",
         );
     }
+
+    #[test]
+    fn producer_chord_fires_with_modifier_held() {
+        let mut app = producer_app();
+        app.update();
+        app.world_mut().resource_mut::<Captured>().0.clear();
+        // Both Shift and KeyS must be pressed in the same frame for the chord to fire.
+        send_key(
+            &mut app,
+            KeyCode::ShiftLeft,
+            bevy::input::ButtonState::Pressed,
+        );
+        send_key(&mut app, KeyCode::KeyS, bevy::input::ButtonState::Pressed);
+        app.update();
+        let got = &app.world().resource::<Captured>().0;
+        assert!(
+            got.iter()
+                .any(|e| e.action == WaveConductorAction::StartScreensaver
+                    && e.phase == ActionPhase::Pressed),
+            "Shift+S chord must emit StartScreensaver Pressed; got: {got:?}",
+        );
+    }
 }
