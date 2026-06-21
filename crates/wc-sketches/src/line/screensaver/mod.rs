@@ -223,7 +223,7 @@ fn drive_attract_color(
         return;
     }
     for handle in &roots {
-        if let Some(material) = materials.get_mut(&handle.0) {
+        if let Some(mut material) = materials.get_mut(&handle.0) {
             material.attract_color = target;
             *last = target;
         }

@@ -3,16 +3,16 @@
 //! Architecture mirrors Bevy 0.18's `compute_shader_game_of_life` example:
 //!
 //! - [`LineComputePlugin`] extracts sim params into the render world and
-//!   inserts a render-graph node that dispatches the compute shader each frame.
+//!   registers a render system that dispatches the compute shader each frame.
 //! - [`LineSimParams`] is extracted from the main world via
 //!   [`ExtractResourcePlugin`] and carries the per-frame uniform + the
-//!   `ShaderStorageBuffer` handle for the particle array.
+//!   `ShaderBuffer` handle for the particle array.
 //! - [`LinePipeline`] is initialized in [`RenderStartup`] and caches the
 //!   `BindGroupLayoutDescriptor` + `CachedComputePipelineId`.
 //! - `prepare_bind_group` runs in [`RenderSystems::PrepareBindGroups`] and
 //!   builds the per-frame [`LineComputeBindGroup`].
-//! - `LineComputeNode` (private) dispatches the compute pass; it lives in the
-//!   main render graph and edges before [`bevy::render::graph::CameraDriverLabel`].
+//! - `line_compute` (private) dispatches the compute pass; it runs in the root
+//!   `RenderGraph` schedule, ordered before `camera_driver`.
 //!
 //! # Bind group layout (matches `simulate.wgsl`)
 //!
@@ -28,17 +28,17 @@
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 
+use bevy::core_pipeline::schedule::camera_driver;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{self, RenderGraph, RenderLabel};
 use bevy::render::render_resource::{
     BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
     Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CachedComputePipelineId,
     ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, ShaderStages,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::storage::{GpuShaderStorageBuffer, ShaderStorageBuffer};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
+use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::particle::SimParams;
@@ -61,13 +61,6 @@ const SIM_PARAMS_SIZE: NonZeroU64 = match NonZeroU64::new(std::mem::size_of::<Si
     None => panic!("SimParams must be non-zero-sized"),
 };
 
-/// Render-graph label for the Line compute node.
-///
-/// The node lives in the main (non-sub) render graph and runs before the
-/// camera driver so the buffer is updated before any 2D pass reads it.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct LineComputeLabel;
-
 /// Plugin that wires the compute pipeline into the render world.
 pub struct LineComputePlugin;
 
@@ -89,12 +82,12 @@ impl Plugin for LineComputePlugin {
                     .run_if(resource_exists::<LineSimParams>),
             );
 
-        // Add the compute node to the main render graph (not a sub-graph).
-        // Edge to CameraDriverLabel ensures the compute pass completes before
-        // the camera driver begins issuing 2D draw calls.
-        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
-        render_graph.add_node(LineComputeLabel, LineComputeNode);
-        render_graph.add_node_edge(LineComputeLabel, bevy::render::graph::CameraDriverLabel);
+        // Run the compute dispatch in the root `RenderGraph` schedule, before
+        // `camera_driver` runs the per-camera schedules — so the particle buffer
+        // is updated before any 2D pass reads it. (Bevy 0.19 replaced the
+        // trait-based render graph with systems; see the migration guide's
+        // "Render Graph as Systems".)
+        render_app.add_systems(RenderGraph, line_compute.before(camera_driver));
     }
 }
 
@@ -106,7 +99,7 @@ pub struct LineSimParams {
     /// Per-frame uniforms (dt, drag, attractor position, etc.).
     pub params: SimParams,
     /// Handle to the particle storage buffer (shared with `LineMaterial`).
-    pub particles_handle: Handle<ShaderStorageBuffer>,
+    pub particles_handle: Handle<ShaderBuffer>,
     /// Number of particles — determines dispatch size.
     pub particle_count: u32,
 }
@@ -129,7 +122,7 @@ pub struct LinePipeline {
 }
 
 /// Per-frame bind group built by the `prepare_bind_group` system (private to
-/// this module) and consumed by `LineComputeNode` during graph execution.
+/// this module) and consumed by `line_compute` during the render schedule.
 #[derive(Resource)]
 pub struct LineComputeBindGroup {
     /// Bind group with `SimParams` uniform (binding 0) and particle buffer (binding 1).
@@ -210,14 +203,14 @@ fn init_line_pipeline(
 ///
 /// Uploads [`SimParams`] into the persistent uniform buffer on
 /// [`LinePipeline`] via `queue.write_buffer` — no per-frame GPU allocation.
-/// Retrieves the GPU particle buffer via `RenderAssets<GpuShaderStorageBuffer>`.
+/// Retrieves the GPU particle buffer via `RenderAssets<GpuShaderBuffer>`.
 fn prepare_bind_group(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
     render_queue: Res<'_, RenderQueue>,
     pipeline_cache: Res<'_, PipelineCache>,
     sim: Res<'_, LineSimParams>,
-    buffers: Res<'_, RenderAssets<GpuShaderStorageBuffer>>,
+    buffers: Res<'_, RenderAssets<GpuShaderBuffer>>,
     pipeline: Option<Res<'_, LinePipeline>>,
 ) {
     let Some(pipeline) = pipeline else {
@@ -261,45 +254,35 @@ fn prepare_bind_group(
     });
 }
 
-/// Render-graph node that dispatches the Line compute shader each frame.
-#[derive(Default)]
-struct LineComputeNode;
+/// Render system that dispatches the Line compute shader each frame.
+///
+/// Runs in the root [`RenderGraph`] schedule before `camera_driver`, so the
+/// particle storage buffer is updated before any 2D pass reads it. A no-op when
+/// the bind group or pipeline isn't ready (sketch inactive / still compiling).
+fn line_compute(
+    bind_group: Option<Res<'_, LineComputeBindGroup>>,
+    pipeline_res: Option<Res<'_, LinePipeline>>,
+    pipeline_cache: Res<'_, PipelineCache>,
+    mut render_context: RenderContext<'_, '_>,
+) {
+    let Some(bg) = bind_group else {
+        return;
+    };
+    let Some(pipeline_res) = pipeline_res else {
+        return;
+    };
+    let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id)
+    else {
+        return;
+    };
 
-impl render_graph::Node for LineComputeNode {
-    fn run(
-        &self,
-        _graph: &mut render_graph::RenderGraphContext<'_>,
-        render_context: &mut RenderContext<'_>,
-        world: &World,
-    ) -> Result<(), render_graph::NodeRunError> {
-        let Some(bg) = world.get_resource::<LineComputeBindGroup>() else {
-            tracing::trace!(
-                node = "LineComputeNode",
-                "no bind group — sketch inactive or buffer not ready"
-            );
-            return Ok(());
-        };
-        let Some(pipeline_res) = world.get_resource::<LinePipeline>() else {
-            tracing::trace!(node = "LineComputeNode", "no LinePipeline resource");
-            return Ok(());
-        };
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id)
-        else {
-            tracing::trace!(node = "LineComputeNode", "pipeline still compiling");
-            return Ok(());
-        };
-
-        let mut pass =
-            render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("line_compute_pass"),
-                    timestamp_writes: None,
-                });
-        pass.set_pipeline(compute_pipeline);
-        pass.set_bind_group(0, &bg.bind_group, &[]);
-        pass.dispatch_workgroups(bg.dispatch_size, 1, 1);
-        Ok(())
-    }
+    let mut pass = render_context
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("line_compute_pass"),
+            timestamp_writes: None,
+        });
+    pass.set_pipeline(compute_pipeline);
+    pass.set_bind_group(0, &bg.bind_group, &[]);
+    pass.dispatch_workgroups(bg.dispatch_size, 1, 1);
 }

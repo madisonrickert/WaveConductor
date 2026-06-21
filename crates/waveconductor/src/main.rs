@@ -4,10 +4,11 @@
 //! In Plan 2 this opens a window and exercises the lifecycle plugin (state
 //! machine + in-house keyboard actions). Sketch plugins land in Plan 6 onward.
 
+use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
-use bevy::render::view::{Hdr, Msaa};
+use bevy::render::view::Msaa;
 use tracing_subscriber::EnvFilter;
 use wc_core::audio::background::BackgroundSampleAsset;
 use wc_core::CorePlugin;
@@ -106,7 +107,7 @@ fn main() {
     // OS display-sleep inhibitor, driven by the persisted "Keep display
     // awake" setting (default on). NonSend: the keepawake handle wraps
     // platform power APIs with no Send guarantee.
-    app.insert_non_send_resource(DisplayKeepAwake::default());
+    app.insert_non_send(DisplayKeepAwake::default());
     app.add_systems(Update, apply_display_keepawake);
 
     // Debug-only: `WC_DEBUG_DISABLE_BLOOM` zeroes the main camera bloom for

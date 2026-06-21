@@ -9,7 +9,7 @@
 //! `rtrb::Producer` and `rtrb::Consumer` are `Send` but not `Sync` — they use
 //! `Cell<usize>` for their head/tail indices. Bevy's `Resource` trait requires
 //! `Send + Sync`, so these wrappers are installed as **non-send resources**
-//! (via `World::insert_non_send_resource`) instead. Systems access them with
+//! (via `World::insert_non_send`) instead. Systems access them with
 //! `bevy::ecs::system::NonSendMut` rather than `ResMut`; this is correct
 //! because they should only ever be accessed from the main thread.
 

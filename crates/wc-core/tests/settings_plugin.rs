@@ -224,17 +224,31 @@ fn autosave_fires_after_debounce_window() {
 /// The outer `Mut` deref is what arms Bevy change detection — identical to
 /// `render_section_by_key` → `render_template_library`.
 fn mutate_string_via_reflect(app: &mut App, field_name: &str, set: impl FnOnce(&mut String)) {
-    use bevy::ecs::reflect::ReflectResource;
+    use bevy::ecs::reflect::ReflectComponent;
     use bevy::reflect::ReflectMut;
 
+    // Bevy 0.19 made `ReflectResource` a ZST; resources are reflected via
+    // `ReflectComponent` on their backing entity (mirrors the production
+    // `settings::registry::reflect_resource_mut` path).
+    let type_id = std::any::TypeId::of::<TestSketchSettings>();
     let registry = app.world().resource::<AppTypeRegistry>().clone();
-    let reflect_resource = registry
+    let reflect_component = registry
         .read()
-        .get_type_data::<ReflectResource>(std::any::TypeId::of::<TestSketchSettings>())
+        .get_type_data::<ReflectComponent>(type_id)
         .cloned()
-        .expect("ReflectResource registered for TestSketchSettings");
-    let mut reflect_mut = reflect_resource
-        .reflect_mut(app.world_mut())
+        .expect("ReflectComponent registered for TestSketchSettings");
+    let component_id = app
+        .world()
+        .components()
+        .get_id(type_id)
+        .expect("component id for TestSketchSettings");
+    let entity = app
+        .world()
+        .resource_entities()
+        .get(component_id)
+        .expect("backing entity for TestSketchSettings resource");
+    let mut reflect_mut = reflect_component
+        .reflect_mut(app.world_mut().entity_mut(entity))
         .expect("TestSketchSettings resource present");
     let reflect: &mut dyn bevy::reflect::Reflect = &mut *reflect_mut;
     match reflect.reflect_mut() {

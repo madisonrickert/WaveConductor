@@ -231,7 +231,7 @@ impl Plugin for ThermalMonitorPlugin {
         // readings are sent and the state simply holds Cool/Schedule forever.
         match sensor::spawn_sampler(SAMPLE_INTERVAL) {
             Some(receiver) => {
-                app.insert_non_send_resource(receiver);
+                app.insert_non_send(receiver);
                 app.add_systems(Update, drain_thermal_readings);
                 tracing::info!("thermal: sampler thread started");
             }

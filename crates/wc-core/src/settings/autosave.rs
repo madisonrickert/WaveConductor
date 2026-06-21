@@ -102,7 +102,9 @@ pub fn flush_on_exit(world: &mut World) {
     let mut state = bevy::ecs::system::SystemState::<
         bevy::prelude::MessageReader<'_, '_, bevy::app::AppExit>,
     >::new(world);
-    let mut reader = state.get_mut(world);
+    let Ok(mut reader) = state.get_mut(world) else {
+        return;
+    };
     let exiting = reader.read().next().is_some();
     state.apply(world);
     if !exiting {

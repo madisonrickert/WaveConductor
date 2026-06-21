@@ -29,7 +29,7 @@
 //!    vertex-index-driven `assets/shaders/line/render.wgsl`.
 //! 5. `OnExit(AppState::Line)` runs `despawn_with::<LineRoot>` and
 //!    `remove_sim_params` to free the entity tree and drop the
-//!    `LineSimParams` resource so its `Handle<ShaderStorageBuffer>` clone is
+//!    `LineSimParams` resource so its `Handle<ShaderBuffer>` clone is
 //!    released, allowing the GPU storage buffer ref-count to reach zero.
 
 pub mod attractor_visuals;
@@ -262,7 +262,7 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 
 /// `OnExit(AppState::Line)` companion to [`systems::spawn_line`].
 ///
-/// Drops the `LineSimParams` resource so its `Handle<ShaderStorageBuffer>`
+/// Drops the `LineSimParams` resource so its `Handle<ShaderBuffer>`
 /// clone is freed and the GPU storage buffer's ref-count reaches zero,
 /// releasing VRAM on each Enter/Exit cycle. Also drops the CPU mirror so its
 /// per-particle `Vec` is freed; `spawn_line` re-inserts a fresh snapshot on

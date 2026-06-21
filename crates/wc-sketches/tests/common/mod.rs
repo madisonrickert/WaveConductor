@@ -29,7 +29,7 @@ pub use lifecycle::arm_idle_timeline;
 use bevy::asset::AssetPlugin;
 use bevy::image::Image;
 use bevy::prelude::*;
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 use bevy::sprite_render::ColorMaterial;
 use bevy::state::app::StatesPlugin;
 use wc_core::input::pointer::{pointer_merge_system, PointerState};
@@ -37,7 +37,7 @@ use wc_core::input::state::HandTrackingState;
 use wc_sketches::line::LinePlugin;
 
 /// Build a sketches-test app: standard wc-core lifecycle harness plus
-/// `AssetPlugin`, `MeshPlugin`, `ShaderStorageBuffer` registration,
+/// `AssetPlugin`, `MeshPlugin`, `ShaderBuffer` registration,
 /// `PointerState`, `SettingsPlugin`, `LinePlugin`, and a synthetic Window
 /// entity at 1280x720 (so `Single<&Window>` system params resolve).
 ///
@@ -69,11 +69,11 @@ pub fn sketches_test_app() -> App {
     // continuing to satisfy the other tests' resource expectations.
     app.add_plugins(wc_core::lifecycle::LifecyclePlugin);
 
-    // Register Mesh as an asset (MeshPlugin) and ShaderStorageBuffer
+    // Register Mesh as an asset (MeshPlugin) and ShaderBuffer
     // so spawn_line can call `meshes.add(...)` / `buffers.add(...)`.
     // The render-world uploads are no-ops without RenderApp.
     app.add_plugins(bevy::mesh::MeshPlugin);
-    app.init_asset::<ShaderStorageBuffer>();
+    app.init_asset::<ShaderBuffer>();
 
     // Plan 8 Phase A: `spawn_line` now loads `star.png` via `AssetServer`.
     // `ImagePlugin` is provided by `DefaultPlugins` in production; the

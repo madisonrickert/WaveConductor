@@ -21,7 +21,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 use bytemuck::cast_slice;
 
 use crate::line::compute::LineSimParams;
@@ -128,7 +128,7 @@ pub fn spawn_line(
     settings: Res<'_, LineSettings>,
     window: Single<'_, '_, &Window>,
     asset_server: Res<'_, AssetServer>,
-    mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
+    mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
     mut materials: ResMut<'_, Assets<LineMaterial>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
     // The active image's per-image adjustments (templates feature only). Absent
@@ -210,9 +210,9 @@ pub fn spawn_line(
     };
 
     // Upload particle data to a GPU storage buffer.
-    // `ShaderStorageBuffer::new` takes raw bytes + usage flags.
+    // `ShaderBuffer::new` takes raw bytes + usage flags.
     let particle_bytes = cast_slice::<Particle, u8>(&initial);
-    let particles_handle = buffers.add(ShaderStorageBuffer::new(
+    let particles_handle = buffers.add(ShaderBuffer::new(
         particle_bytes,
         RenderAssetUsages::RENDER_WORLD,
     ));

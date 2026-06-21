@@ -14,7 +14,7 @@
 //! **private off-screen `Rgba16Float` image** ([`super::bone_composite::HandMeshTarget`])
 //! — emissive bones (`> 1.0`, their colour × [`BONE_GLOW_INTENSITY`]) on a black
 //! background, with **no bloom and no tonemapping**, so the image holds raw
-//! linear-HDR light. [`super::bone_composite::LineBoneCompositeNode`] then
+//! linear-HDR light. [`super::bone_composite::line_bone_composite`] then
 //! **additively adds** that image into the main `Camera2d`'s HDR view target, in
 //! the Core2d graph *after* the gravity smear ([`super::post_process`]) and
 //! *before* `Node2d::Bloom`.
@@ -79,19 +79,19 @@
 //! 3. Every `Update`: [`update_bone_transforms`] writes the projected
 //!    bone-center world coords to each sphere's `Transform`.
 //! 4. Each frame the bone camera (`order = -1`) fills the off-screen image, then
-//!    [`super::bone_composite::LineBoneCompositeNode`] adds it into the main
+//!    [`super::bone_composite::line_bone_composite`] adds it into the main
 //!    camera's HDR target before bloom.
 //! 5. `OnExit(AppState::Line)`: [`despawn_hand_mesh_camera`] tears down the bone
 //!    camera and drops the target image; [`despawn_all_bone_children`] removes
 //!    the bones.
 
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{RenderTarget, ScalingMode};
+use bevy::camera::{Hdr, RenderTarget, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureFormat};
-use bevy::render::view::{Hdr, Msaa};
+use bevy::render::view::Msaa;
 use bevy::window::WindowResized;
 use wc_core::input::entity::{BoneCenters, TrackedHand, BONE_COUNT};
 use wc_core::input::projection::palm_to_world;
@@ -133,7 +133,7 @@ fn hand_mesh_color() -> Color {
 
 /// Marker for the off-screen `Camera3d` that rasterizes the wireframe bones into
 /// the [`super::bone_composite::HandMeshTarget`] image (raw linear HDR, no bloom,
-/// no tonemap). The [`super::bone_composite::LineBoneCompositeNode`] adds that
+/// no tonemap). The [`super::bone_composite::line_bone_composite`] adds that
 /// image into the main scene before bloom.
 #[derive(Component)]
 pub struct HandMeshCamera3d;
@@ -201,7 +201,7 @@ impl Plugin for LineHandMeshPlugin {
 /// into an `Rgba16Float` image: no bloom, no tonemapping, `order = -1` (so the
 /// image is populated before the main camera's Core2d graph samples it). The
 /// glow and tonemap happen later, on the *main* camera, after
-/// [`super::bone_composite::LineBoneCompositeNode`] adds this image into the
+/// [`super::bone_composite::line_bone_composite`] adds this image into the
 /// scene (see the module docs). `Msaa::Sample4` anti-aliases the wireframe
 /// lines; since this camera owns a private off-screen target it can no longer
 /// collide with the main camera's intermediate, so the MSAA value is now a free
@@ -291,7 +291,7 @@ fn resize_bone_target(
     let Some(target) = target else {
         return;
     };
-    if let Some(image) = images.get_mut(&target.image) {
+    if let Some(mut image) = images.get_mut(&target.image) {
         image.resize(Extent3d {
             width: window.physical_width().max(1),
             height: window.physical_height().max(1),

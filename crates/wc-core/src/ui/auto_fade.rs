@@ -310,7 +310,9 @@ mod tests {
             Res<'_, OverlayUiSettings>,
             ResMut<'_, UiOpacity>,
         )> = bevy::ecs::system::SystemState::new(app.world_mut());
-        let (time, settings, opacity) = state.get_mut(app.world_mut());
+        let Ok((time, settings, opacity)) = state.get_mut(app.world_mut()) else {
+            unreachable!("test SystemState params are always present");
+        };
         lerp_opacity(time, settings, opacity);
         state.apply(app.world_mut());
 

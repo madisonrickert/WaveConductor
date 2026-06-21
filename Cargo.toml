@@ -20,7 +20,7 @@ rust-version = "1.96"
 # Core engine. Note: bevy_audio is deliberately omitted (spec §5.4 says we use
 # cpal+fundsp directly, not bevy_audio). DefaultPlugins gracefully
 # skips AudioPlugin when the feature is absent.
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "bevy_state",
     "bevy_winit",
     "bevy_render",
@@ -33,6 +33,13 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_post_process",
     "bevy_sprite",
     "bevy_sprite_render",
+    # `bevy_text` registers `Assets<Font>` and the text2d layout plugin. We draw
+    # all UI text through egui, but Bevy 0.19's `bevy_sprite_render` pulls in the
+    # `update_text2d_layout` system transitively, and 0.19's strict system-param
+    # validation *panics* when `Assets<Font>` is absent (it was tolerated in
+    # 0.18). Enabling this feature makes DefaultPlugins add the font-asset plugin
+    # so that system validates cleanly. (Discovered via `cargo xtask capture`.)
+    "bevy_text",
     "bevy_mesh",
     "bevy_asset",
     "png",
@@ -58,9 +65,9 @@ bevy = { version = "0.18", default-features = false, features = [
     "wayland",
 ] }
 # UI
-bevy_egui = "0.39"
-bevy-inspector-egui = "0.36"
-egui-phosphor = "0.11"
+bevy_egui = "0.40"
+bevy-inspector-egui = "0.37"
+egui-phosphor = "0.12"
 # (bevy_mod_debugdump removed 2026-05-25 — declared but never consumed by any
 # crate. If we need schedule inspection during debug, add it temporarily then
 # remove again rather than carrying the dep year-round.)

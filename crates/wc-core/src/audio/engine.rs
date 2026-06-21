@@ -85,9 +85,9 @@ pub fn start_audio_engine(world: &mut World) {
         Ok(built) => {
             // sender and receiver wrap rtrb::Producer/Consumer which are Send
             // but not Sync, so they are installed as non-send resources.
-            world.insert_non_send_resource(built.sender);
-            world.insert_non_send_resource(built.receiver);
-            world.insert_non_send_resource(built.stream);
+            world.insert_non_send(built.sender);
+            world.insert_non_send(built.receiver);
+            world.insert_non_send(built.stream);
             world.resource_mut::<AudioState>().sample_rate = built.sample_rate;
             world.resource_mut::<AudioState>().channels = built.channels;
             // AudioState.status remains `NotStarted` until the audio thread

@@ -62,7 +62,7 @@ pub fn drive_palette(
             .get(&handle.0)
             .is_some_and(|m| m.palette_params != target);
         if differs {
-            if let Some(material) = materials.get_mut(&handle.0) {
+            if let Some(mut material) = materials.get_mut(&handle.0) {
                 material.palette_params = target;
             }
         }

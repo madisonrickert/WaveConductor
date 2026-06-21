@@ -2,7 +2,7 @@
 //!
 //! These tests exercise [`BackdropBlurTexture`] allocation in the render world
 //! and the [`BlurNodeRunCount`] proxy that indicates whether the
-//! [`BackdropBlurNode`] would have executed its Kawase passes.
+//! [`backdrop_blur`] would have executed its Kawase passes.
 //!
 //! ## Why these tests are `#[ignore]`
 //!
@@ -17,7 +17,7 @@
 //! cargo run -p waveconductor   # observe no shader errors in the log
 //! ```
 //!
-//! [`BackdropBlurNode`]: wc_core::ui::blur::node::BackdropBlurNode
+//! [`backdrop_blur`]: wc_core::ui::blur::node::backdrop_blur
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(
@@ -68,7 +68,7 @@ fn backdrop_blur_texture_is_allocated_after_first_frame() {
 /// [`BackdropBlurEnabled`] is `false`.
 ///
 /// The run-count proxy in [`prepare_blur_run_count`] mirrors the same skip
-/// condition as [`BackdropBlurNode::run`], so asserting `counter == 0`
+/// condition as [`backdrop_blur`], so asserting `counter == 0`
 /// confirms the node logic would be skipped without requiring a real GPU.
 ///
 /// Ignored: same `winit` / main-thread constraint as
@@ -96,7 +96,7 @@ fn backdrop_blur_node_skips_when_disabled() {
 /// [`ExtractedUiOpacity`] is at the default (1.0).
 ///
 /// The run-count proxy in [`prepare_blur_run_count`] mirrors the same run
-/// condition as [`BackdropBlurNode::run`], so asserting `counter >= 1`
+/// condition as [`backdrop_blur`], so asserting `counter >= 1`
 /// confirms the node logic would execute without requiring a real GPU.
 ///
 /// Ignored: same `winit` / main-thread constraint as
@@ -104,7 +104,7 @@ fn backdrop_blur_node_skips_when_disabled() {
 ///
 /// [`ExtractedUiOpacity`]: wc_core::ui::blur::node::ExtractedUiOpacity
 /// [`prepare_blur_run_count`]: wc_core::ui::blur::node::prepare_blur_run_count
-/// [`BackdropBlurNode::run`]: wc_core::ui::blur::node::BackdropBlurNode
+/// [`backdrop_blur`]: wc_core::ui::blur::node::backdrop_blur
 #[test]
 #[ignore = "winit requires the main thread on macOS; verify by running the app"]
 fn backdrop_blur_node_runs_when_enabled() {

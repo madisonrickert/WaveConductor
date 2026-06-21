@@ -76,7 +76,8 @@ pub enum SettingKind {
 /// write-back time (logged, value unchanged).
 #[must_use]
 pub fn enum_variant_names<T: bevy::reflect::Typed>() -> &'static [&'static str] {
-    use bevy::reflect::{TypeInfo, VariantInfo};
+    use bevy::reflect::enums::VariantInfo;
+    use bevy::reflect::TypeInfo;
     match T::type_info() {
         TypeInfo::Enum(info) => {
             debug_assert!(

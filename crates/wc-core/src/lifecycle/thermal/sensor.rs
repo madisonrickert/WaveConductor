@@ -87,7 +87,7 @@ pub(crate) fn drain_latest(
     latest
 }
 
-// `ThermalReadingReceiver` is held via `App::insert_non_send_resource`, not the
+// `ThermalReadingReceiver` is held via `App::insert_non_send`, not the
 // `Resource` derive: the inner `Receiver` is `!Sync`, which the `Resource`
 // derive forbids. Bevy's non-send resource storage requires no trait impl. Do
 // NOT add `#[derive(Resource)]` here — it will not compile against the `!Sync`

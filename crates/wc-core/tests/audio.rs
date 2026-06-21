@@ -37,8 +37,8 @@ fn test_app_with_audio_rings() -> (App, rtrb::Producer<AudioMessage>) {
 
     app.init_resource::<AudioState>();
     // sender/receiver are non-send resources (rtrb is Send but not Sync)
-    app.insert_non_send_resource(AudioCommandSender::new(cmd_producer));
-    app.insert_non_send_resource(AudioMessageReceiver::new(msg_consumer));
+    app.insert_non_send(AudioCommandSender::new(cmd_producer));
+    app.insert_non_send(AudioMessageReceiver::new(msg_consumer));
     app.add_systems(PreUpdate, pump_audio_messages);
     app.add_systems(Update, wc_core::audio::nav::handle_volume_toggle);
 
@@ -135,8 +135,8 @@ fn toggle_volume_action_pushes_set_muted_command() {
     let (cmd_producer, mut cmd_consumer) = rtrb::RingBuffer::<AudioCommand>::new(RING_CAPACITY);
     let (_msg_producer, msg_consumer) = rtrb::RingBuffer::<AudioMessage>::new(RING_CAPACITY);
     app.init_resource::<AudioState>();
-    app.insert_non_send_resource(AudioCommandSender::new(cmd_producer));
-    app.insert_non_send_resource(AudioMessageReceiver::new(msg_consumer));
+    app.insert_non_send(AudioCommandSender::new(cmd_producer));
+    app.insert_non_send(AudioMessageReceiver::new(msg_consumer));
     app.add_systems(Update, wc_core::audio::nav::handle_volume_toggle);
 
     app.update();

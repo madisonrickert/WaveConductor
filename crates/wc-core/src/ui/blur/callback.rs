@@ -151,7 +151,7 @@ impl FromWorld for CompositePipeline {
                 .queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some("backdrop_blur_composite".into()),
                     layout: vec![bind_group_layout_descriptor.clone()],
-                    push_constant_ranges: vec![],
+                    immediate_size: 0,
                     vertex: VertexState {
                         shader: shader.clone(),
                         shader_defs: vec![],
@@ -224,7 +224,7 @@ pub struct BackdropBlurPaintCallback {
 
 impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
     /// No per-frame update needed. The blur texture is produced by
-    /// [`super::node::BackdropBlurNode`] in a separate render-graph node that
+    /// [`super::node::backdrop_blur`] in a separate render system that
     /// runs before the egui pass.
     fn update(
         &self,

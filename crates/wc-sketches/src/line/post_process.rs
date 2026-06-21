@@ -1,12 +1,15 @@
 //! Gravity-smear post-process pipeline for the Line sketch.
 //!
-//! ## Render graph
+//! ## Render schedule
 //!
-//! [`LinePostProcessNode`] is inserted into the Core2d sub-graph immediately
-//! after [`Node2d::MainTransparentPass`] and before [`Node2d::EndMainPass`].
-//! It reads the camera's view target as input and writes back to the same
-//! target's swap texture (Bevy's [`ViewTarget::post_process_write`] rotates
-//! between two textures so a node can sample its own input).
+//! [`line_post_process`] is a render system in the Core2d schedule's
+//! [`Core2dSystems::EarlyPostProcess`] set: after the main pass (so the scene
+//! texture is ready) and before bloom/tonemapping run in `PostProcess`. It
+//! reads the camera's view target as input and writes back to the same target's
+//! swap texture (Bevy's [`ViewTarget::post_process_write`] rotates between two
+//! textures so a system can sample its own input).
+//!
+//! [`Core2dSystems::EarlyPostProcess`]: bevy::core_pipeline::Core2dSystems::EarlyPostProcess
 //!
 //! ## Uniforms
 //!
@@ -32,13 +35,10 @@
 
 use std::num::NonZeroU64;
 
-use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::{Core2d, Core2dSystems};
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::{
     binding_types::{sampler, texture_2d, uniform_buffer_sized},
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferDescriptor,
@@ -47,8 +47,8 @@ use bevy::render::render_resource::{
     RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
     ShaderStages, StoreOp, TextureFormat, TextureSampleType, VertexState,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::view::{Hdr, ViewTarget};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
+use bevy::render::view::ViewTarget;
 use bevy::render::RenderApp;
 use bevy::shader::Shader;
 use bytemuck::{Pod, Zeroable};
@@ -121,19 +121,13 @@ impl Plugin for LinePostProcessPlugin {
             return;
         };
 
-        render_app
-            .add_render_graph_node::<ViewNodeRunner<LinePostProcessNode>>(
-                Core2d,
-                LinePostProcessLabel,
-            )
-            .add_render_graph_edges(
-                Core2d,
-                (
-                    Node2d::MainTransparentPass,
-                    LinePostProcessLabel,
-                    Node2d::EndMainPass,
-                ),
-            );
+        // Run in EarlyPostProcess: after the main pass (scene texture holds the
+        // rendered particles + rings) and before `PostProcess`, where bloom and
+        // tonemapping read the smeared HDR result.
+        render_app.add_systems(
+            Core2d,
+            line_post_process.in_set(Core2dSystems::EarlyPostProcess),
+        );
     }
 
     fn finish(&self, app: &mut App) {
@@ -144,17 +138,13 @@ impl Plugin for LinePostProcessPlugin {
     }
 }
 
-/// Render-graph label for the gravity-smear post-process node.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct LinePostProcessLabel;
-
 /// Cached render-pipeline state for the post-process. Initialised once in
 /// [`LinePostProcessPlugin::finish`] (which runs after the render sub-app is
 /// fully set up so `AssetServer`, `PipelineCache`, and `RenderDevice` are all
 /// available).
 #[derive(Resource)]
 pub struct PostProcessPipeline {
-    /// Bind-group layout descriptor retained so [`LinePostProcessNode::run`]
+    /// Bind-group layout descriptor retained so [`line_post_process`]
     /// can fetch the cached `BindGroupLayout` from the
     /// [`PipelineCache`] without storing the layout object separately.
     pub bind_group_layout_descriptor: BindGroupLayoutDescriptor,
@@ -165,7 +155,7 @@ pub struct PostProcessPipeline {
     /// Persistent uniform buffer for [`LinePostParams`].
     ///
     /// Allocated once with `UNIFORM | COPY_DST` and updated each frame via
-    /// `queue.write_buffer` in [`LinePostProcessNode::run`] — avoids a GPU
+    /// `queue.write_buffer` in [`line_post_process`] — avoids a GPU
     /// buffer allocation every frame that `create_buffer_with_data` would
     /// incur. Mirrors `LinePipeline::sim_params_buffer` in
     /// [`crate::line::compute`].
@@ -212,7 +202,7 @@ impl FromWorld for PostProcessPipeline {
                 .queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some("line_post_process_pipeline".into()),
                     layout: vec![bind_group_layout_descriptor.clone()],
-                    push_constant_ranges: vec![],
+                    immediate_size: 0,
                     vertex: VertexState {
                         shader: shader.clone(),
                         shader_defs: vec![],
@@ -256,104 +246,95 @@ impl FromWorld for PostProcessPipeline {
     }
 }
 
-/// Render-graph node that draws the gravity-smear post-process pass.
+/// Render system that draws the gravity-smear post-process pass.
 ///
-/// Runs after [`Node2d::MainTransparentPass`] (so the scene texture contains
-/// the rendered particles + attractor rings) and before [`Node2d::EndMainPass`].
-/// Uploads [`LinePostParams`] into the persistent uniform buffer on
-/// [`PostProcessPipeline`] via `queue.write_buffer`, builds a fresh bind
-/// group, then issues a 3-vertex fullscreen-triangle draw.
-#[derive(Default)]
-pub struct LinePostProcessNode;
-
-impl ViewNode for LinePostProcessNode {
-    // `&'static Hdr` here is a query filter, not a payload — Bevy's view-node
-    // runner skips any Core2d camera that lacks `Hdr`, so the pipeline (which
-    // targets `Rgba16Float`) only ever runs against an HDR camera's
-    // intermediate. The main Line `Camera2d` is the only Core2d camera, so this
-    // matches just it. (The hand-mesh overlay is a `Camera3d` on the Core3d
-    // graph — see `crate::line::hand_mesh` — so it never reaches this Core2d
-    // node regardless of its HDR setting.) The gate is kept defensively: an
-    // earlier Plan 11.6 design added a second, non-HDR `Camera2d` to composite
-    // the overlay; without this filter that camera was also dispatched through
-    // Core2d and wgpu panicked on the `Rgba8UnormSrgb` ↔ `Rgba16Float`
-    // attachment mismatch. The filter stays so any future non-HDR `Camera2d`
-    // can coexist safely.
-    type ViewQuery = (&'static ViewTarget, &'static Hdr);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext<'_>,
-        render_context: &mut RenderContext<'w>,
-        view_target: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let (view_target, _hdr) = view_target;
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(pipeline_res) = world.get_resource::<PostProcessPipeline>() else {
-            tracing::trace!(
-                node = "LinePostProcessNode",
-                "no PostProcessPipeline resource"
-            );
-            return Ok(());
-        };
-        let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.pipeline_id) else {
-            tracing::trace!(node = "LinePostProcessNode", "pipeline still compiling");
-            return Ok(());
-        };
-        let Some(post_params) = world.get_resource::<LinePostParams>() else {
-            tracing::trace!(node = "LinePostProcessNode", "no LinePostParams resource");
-            return Ok(());
-        };
-
-        // Upload current LinePostParams into the persistent uniform buffer.
-        // `write_buffer` is a staged copy — no allocation after init.
-        // `RenderQueue` is fetched from the render world (Bevy 0.18 does not
-        // expose a `render_queue()` accessor on `RenderContext`).
-        let render_queue = world.resource::<RenderQueue>();
-        render_queue.0.write_buffer(
-            &pipeline_res.post_params_buffer,
-            0,
-            bytemuck::bytes_of(post_params),
-        );
-
-        let post_process_write = view_target.post_process_write();
-        let source = post_process_write.source;
-        let destination = post_process_write.destination;
-
-        let layout =
-            pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
-
-        let bind_group = render_context.render_device().create_bind_group(
-            "line_post_bind_group",
-            &layout,
-            &BindGroupEntries::sequential((
-                pipeline_res.post_params_buffer.as_entire_binding(),
-                source,
-                &pipeline_res.sampler,
-            )),
-        );
-
-        let mut pass = render_context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("line_post_pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Load,
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..3, 0..1);
-        Ok(())
+/// Added to the [`Core2d`] schedule in [`Core2dSystems::EarlyPostProcess`] (so
+/// the scene texture holds the rendered particles + rings, and the smear runs in
+/// HDR before bloom/tonemapping). Uploads [`LinePostParams`] into the persistent
+/// uniform buffer via `queue.write_buffer`, builds a fresh bind group, then
+/// issues a 3-vertex fullscreen-triangle draw.
+///
+/// We read HDR-ness from [`ExtractedCamera::hdr`] rather than querying the `Hdr`
+/// marker: as of Bevy 0.19 `Hdr` is no longer extracted to the render world, so
+/// a `&'static Hdr` `ViewQuery` would silently never match and this pass would
+/// stop running. The pipeline targets `Rgba16Float`, so it must only run against
+/// an HDR camera's intermediate; the body early-returns for any non-HDR camera.
+/// The main Line `Camera2d` is the only Core2d camera, so this matches just it.
+/// (The hand-mesh overlay is a `Camera3d` on the Core3d graph — see
+/// `crate::line::hand_mesh` — so it never reaches this Core2d system regardless
+/// of its HDR setting.) The gate is kept defensively: an earlier Plan 11.6
+/// design added a second, non-HDR `Camera2d`; without it wgpu panicked on the
+/// `Rgba8UnormSrgb` ↔ `Rgba16Float` attachment mismatch.
+///
+/// [`Core2d`]: bevy::core_pipeline::Core2d
+/// [`Core2dSystems`]: bevy::core_pipeline::Core2dSystems
+pub fn line_post_process(
+    view: ViewQuery<'_, '_, (&'static ViewTarget, &'static ExtractedCamera)>,
+    post_params: Option<Res<'_, LinePostParams>>,
+    pipeline_res: Option<Res<'_, PostProcessPipeline>>,
+    pipeline_cache: Res<'_, PipelineCache>,
+    render_queue: Res<'_, RenderQueue>,
+    mut render_context: RenderContext<'_, '_>,
+) {
+    let (view_target, camera) = view.into_inner();
+    // Skip non-HDR Core2d cameras: this pass targets `Rgba16Float` and would
+    // mismatch an `Rgba8UnormSrgb` attachment (see the doc note above).
+    if !camera.hdr {
+        return;
     }
+    let Some(pipeline_res) = pipeline_res else {
+        return;
+    };
+    let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.pipeline_id) else {
+        return;
+    };
+    let Some(post_params) = post_params else {
+        return;
+    };
+
+    // Upload current LinePostParams into the persistent uniform buffer.
+    // `write_buffer` is a staged copy — no allocation after init.
+    render_queue.0.write_buffer(
+        &pipeline_res.post_params_buffer,
+        0,
+        bytemuck::bytes_of(&*post_params),
+    );
+
+    let post_process_write = view_target.post_process_write();
+    let source = post_process_write.source;
+    let destination = post_process_write.destination;
+
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
+
+    let bind_group = render_context.render_device().create_bind_group(
+        "line_post_bind_group",
+        &layout,
+        &BindGroupEntries::sequential((
+            pipeline_res.post_params_buffer.as_entire_binding(),
+            source,
+            &pipeline_res.sampler,
+        )),
+    );
+
+    let mut pass = render_context
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("line_post_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.draw(0..3, 0..1);
 }

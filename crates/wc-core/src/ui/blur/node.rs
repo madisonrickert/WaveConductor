@@ -2,8 +2,8 @@
 //!
 //! ## Source strategy
 //!
-//! [`BackdropBlurNode`] is implemented as a [`ViewNode`] so it receives the
-//! primary camera's [`ViewTarget`] directly from the render graph. It calls
+//! [`backdrop_blur`] is a render system in the `Core2d` schedule. It reads the
+//! primary camera's [`ViewTarget`] via a [`ViewQuery`] and calls
 //! [`ViewTarget::post_process_write`] to get a ping-pong write token whose
 //! `source` field is the post-tonemap LDR colour attachment for the current
 //! frame — no separate extraction or one-frame lag.
@@ -30,14 +30,14 @@
 //!
 //! ## Run conditions
 //!
-//! The node's `run` method returns `Ok(())` immediately when any of:
+//! The system returns early (no passes) when any of:
 //! - [`BackdropBlurEnabled`]`.0 == false`
 //! - [`ExtractedUiOpacity`]`.0 < 0.01` (chrome is fully faded)
 //! - [`BackdropBlurTexture`] or [`BackdropBlurScratch`] not yet allocated
 //! - Pipelines still compiling (first few frames)
 //!
-//! [`ViewNode`]: bevy::render::render_graph::ViewNode
 //! [`ViewTarget`]: bevy::render::view::ViewTarget
+//! [`ViewQuery`]: bevy::render::renderer::ViewQuery
 
 #![allow(
     clippy::as_conversions,
@@ -46,11 +46,7 @@
     reason = "u32/u64 ↔ usize/f32 casts for GPU buffer sizes and texel computations are intentional"
 )]
 
-use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
     BufferBindingType, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
@@ -59,7 +55,7 @@ use bevy::render::render_resource::{
     ShaderStages, ShaderType, StoreOp, TextureFormat, TextureSampleType, TextureView,
     TextureViewDimension, VertexState,
 };
-use bevy::render::renderer::{RenderContext, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderQueue, ViewQuery};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderSystems};
 
@@ -185,7 +181,7 @@ impl FromWorld for BackdropBlurPipeline {
             RenderPipelineDescriptor {
                 label: Some(label.into()),
                 layout: vec![bind_group_layout_descriptor.clone()],
-                push_constant_ranges: vec![],
+                immediate_size: 0,
                 vertex: VertexState {
                     shader: shader.clone(),
                     shader_defs: vec![],
@@ -263,239 +259,215 @@ pub struct BlurNodeRunCount(pub u32);
 #[derive(Resource, Default)]
 pub struct ExtractedUiOpacity(pub f32);
 
-/// Render-graph label for the backdrop-blur node.
+/// Render system that runs the dual-Kawase backdrop-blur chain.
 ///
-/// Inserted between [`Node2d::Tonemapping`] and [`Node2d::EndMainPassPostProcessing`]
-/// in the Core2d render graph.
+/// Added to the `Core2d` schedule (after the `PostProcess` set, before
+/// `bevy_egui`'s pass). Reads the primary camera's [`ViewTarget`] via a
+/// [`ViewQuery`], samples `view_target.post_process_write().source` (the
+/// post-tonemap LDR colour) and writes the blurred result into
+/// [`BackdropBlurTexture`].
 ///
-/// [`Node2d::Tonemapping`]: bevy::core_pipeline::core_2d::graph::Node2d::Tonemapping
-/// [`Node2d::EndMainPassPostProcessing`]: bevy::core_pipeline::core_2d::graph::Node2d::EndMainPassPostProcessing
-#[derive(RenderLabel, Debug, PartialEq, Eq, Clone, Hash)]
-pub struct BackdropBlurLabel;
-
-/// Render-graph node that runs the dual-Kawase backdrop-blur chain.
+/// A no-op (returns early) when [`BackdropBlurEnabled`] is `false`, when
+/// [`ExtractedUiOpacity`] is below 1 %, or when any required resource is absent.
 ///
-/// Implements [`ViewNode`] so Bevy automatically provides the current
-/// camera's [`ViewTarget`] as a parameter to [`run`](ViewNode::run). The node
-/// reads from `view_target.post_process_write().source` (the post-tonemap
-/// LDR colour) and writes the blurred result into [`BackdropBlurTexture`].
+/// # Panics
 ///
-/// The node is a no-op (returns `Ok(())`) when [`BackdropBlurEnabled`] is
-/// `false`, when [`ExtractedUiOpacity`] is below 1 %, or when any required
-/// resource is absent.
-#[derive(Default)]
-pub struct BackdropBlurNode;
+/// Panics only on an internal invariant violation: `BlurUniforms` is sized via
+/// `min_size()`, so the per-pass staging-buffer write cannot fail.
+///
+/// [`ViewQuery`]: bevy::render::renderer::ViewQuery
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "six-pass Kawase chain (lines) + Bevy render-system params (arguments)"
+)]
+pub fn backdrop_blur(
+    view: ViewQuery<'_, '_, &'static ViewTarget>,
+    enabled: Option<Res<'_, BackdropBlurEnabled>>,
+    opacity: Option<Res<'_, ExtractedUiOpacity>>,
+    blur_texture: Option<Res<'_, BackdropBlurTexture>>,
+    scratch: Option<Res<'_, BackdropBlurScratch>>,
+    pipeline_res: Option<Res<'_, BackdropBlurPipeline>>,
+    pipeline_cache: Res<'_, PipelineCache>,
+    render_queue: Res<'_, RenderQueue>,
+    mut render_context: RenderContext<'_, '_>,
+) {
+    // --- Run conditions ---
 
-impl ViewNode for BackdropBlurNode {
-    type ViewQuery = &'static ViewTarget;
-
-    #[allow(
-        clippy::too_many_lines,
-        reason = "six-pass Kawase chain is linear and shouldn't be split"
-    )]
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext<'_>,
-        render_context: &mut RenderContext<'w>,
-        view_target: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        // --- Run conditions ---
-
-        let enabled = world
-            .get_resource::<BackdropBlurEnabled>()
-            .is_some_and(|e| e.0);
-        let opacity = world
-            .get_resource::<ExtractedUiOpacity>()
-            .map_or(0.0, |o| o.0);
-
-        if !enabled || opacity < 0.01 {
-            return Ok(());
-        }
-
-        let Some(blur_texture) = world.get_resource::<BackdropBlurTexture>() else {
-            return Ok(());
-        };
-        let Some(scratch) = world.get_resource::<BackdropBlurScratch>() else {
-            return Ok(());
-        };
-        let Some(pipeline_res) = world.get_resource::<BackdropBlurPipeline>() else {
-            return Ok(());
-        };
-
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(down_pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.downsample)
-        else {
-            return Ok(());
-        };
-        let Some(up_pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.upsample) else {
-            return Ok(());
-        };
-
-        // --- Source ---
-        //
-        // `post_process_write` gives us access to the post-tonemap colour via
-        // a ping-pong token. We only read `source`; we do NOT write back via
-        // the token (the blur output goes to `BackdropBlurTexture`, a
-        // separate texture). The token is therefore dropped unused at the end
-        // of this scope, which is safe — no write-back methods are called.
-        let post_process = view_target.post_process_write();
-        let source_view: &TextureView = post_process.source;
-
-        // Source full resolution (derived from scratch.half_extent * 2).
-        let full_res = UVec2::new(scratch.half_extent.x * 2, scratch.half_extent.y * 2);
-
-        // --- Helpers ---
-
-        // `RenderQueue` is fetched from the world; `RenderDevice` is obtained
-        // per-pass from the render context to avoid an immutable borrow that
-        // would conflict with the mutable `command_encoder()` calls below.
-        let render_queue = world.resource::<RenderQueue>();
-        let layout =
-            pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
-
-        // Upload a per-pass uniform buffer with the input-texture texel size.
-        // Allocation per-pass is acceptable: this node runs once per frame and
-        // the buffers are small (16 bytes each). A future optimisation could
-        // pre-allocate persistent buffers in `BackdropBlurPipeline`.
-        //
-        // `device` is a cloned `Arc`-backed handle — cheap to clone.
-        let device = render_context.render_device().clone();
-
-        let make_uniform_buffer = |texel: Vec2| -> bevy::render::render_resource::Buffer {
-            use bevy::render::render_resource::encase;
-
-            let uniforms = BlurUniforms {
-                texel_size: texel,
-                _pad: Vec2::ZERO,
-            };
-            let buf = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-                label: Some("backdrop_blur_uniforms"),
-                size: BlurUniforms::min_size().get(),
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut staging = encase::UniformBuffer::new(Vec::<u8>::with_capacity(
-                BlurUniforms::min_size().get() as usize,
-            ));
-            // `write` fails only if the buffer is too small; we sized it via
-            // `BlurUniforms::min_size()`, so this is an invariant violation and a
-            // panic is correct.
-            #[allow(clippy::expect_used)]
-            staging
-                .write(&uniforms)
-                .expect("BlurUniforms: write to staging buffer");
-            render_queue.write_buffer(&buf, 0, staging.as_ref());
-            buf
-        };
-
-        // Encode one Kawase pass. Builds a transient bind group, begins a render
-        // pass, draws a fullscreen triangle, and drops the pass encoder.
-        // `device` is captured by ref; `layout`, `blur_texture.sampler` are
-        // borrowed from outer scope. `render_context` is passed in mutably so
-        // the closure does not need to capture it (avoids the simultaneous
-        // borrow conflict with `make_uniform_buffer`).
-        let encode_pass = |render_context: &mut RenderContext<'w>,
-                           input_view: &TextureView,
-                           output_view: &TextureView,
-                           pipeline: &bevy::render::render_resource::RenderPipeline,
-                           input_size: UVec2,
-                           pass_label: &'static str| {
-            let texel = Vec2::new(
-                1.0 / input_size.x.max(1) as f32,
-                1.0 / input_size.y.max(1) as f32,
-            );
-            let uniform_buf = make_uniform_buffer(texel);
-            let bind_group = device.create_bind_group(
-                Some(pass_label),
-                &layout,
-                &BindGroupEntries::sequential((
-                    input_view,
-                    &blur_texture.sampler,
-                    uniform_buf.as_entire_binding(),
-                )),
-            );
-            let mut pass =
-                render_context
-                    .command_encoder()
-                    .begin_render_pass(&RenderPassDescriptor {
-                        label: Some(pass_label),
-                        color_attachments: &[Some(RenderPassColorAttachment {
-                            view: output_view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: Operations {
-                                // Clear to transparent black (`wgpu::Color::default()`).
-                                #[allow(clippy::default_trait_access)]
-                                load: LoadOp::Clear(Default::default()),
-                                store: StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        };
-
-        // --- Six-pass Kawase chain (3 down + 3 up) ---
-        //
-        // Downsample: source(full) → half → quarter → eighth
-        encode_pass(
-            render_context,
-            source_view,
-            &scratch.half_view,
-            down_pipeline,
-            full_res,
-            "backdrop_blur_down_half",
-        );
-        encode_pass(
-            render_context,
-            &scratch.half_view,
-            &scratch.quarter_view,
-            down_pipeline,
-            scratch.half_extent,
-            "backdrop_blur_down_quarter",
-        );
-        encode_pass(
-            render_context,
-            &scratch.quarter_view,
-            &scratch.eighth_view,
-            down_pipeline,
-            scratch.quarter_extent,
-            "backdrop_blur_down_eighth",
-        );
-
-        // Upsample: eighth → quarter → half → BackdropBlurTexture
-        encode_pass(
-            render_context,
-            &scratch.eighth_view,
-            &scratch.quarter_view,
-            up_pipeline,
-            scratch.eighth_extent,
-            "backdrop_blur_up_quarter",
-        );
-        encode_pass(
-            render_context,
-            &scratch.quarter_view,
-            &scratch.half_view,
-            up_pipeline,
-            scratch.quarter_extent,
-            "backdrop_blur_up_half",
-        );
-        encode_pass(
-            render_context,
-            &scratch.half_view,
-            &blur_texture.view,
-            up_pipeline,
-            scratch.half_extent,
-            "backdrop_blur_up_final",
-        );
-
-        Ok(())
+    if !enabled.is_some_and(|e| e.0) {
+        return;
     }
+    if opacity.map_or(0.0, |o| o.0) < 0.01 {
+        return;
+    }
+
+    let (Some(blur_texture), Some(scratch), Some(pipeline_res)) =
+        (blur_texture, scratch, pipeline_res)
+    else {
+        return;
+    };
+
+    let Some(down_pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.downsample) else {
+        return;
+    };
+    let Some(up_pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.upsample) else {
+        return;
+    };
+
+    // --- Source ---
+    //
+    // `post_process_write` gives access to the post-tonemap colour via a
+    // ping-pong token. We only read `source`; we do NOT write back via the
+    // token (the blur output goes to `BackdropBlurTexture`, a separate
+    // texture). The token is dropped unused — safe, no write-back is called.
+    let view_target = view.into_inner();
+    let post_process = view_target.post_process_write();
+    let source_view: &TextureView = post_process.source;
+
+    // Source full resolution (derived from scratch.half_extent * 2).
+    let full_res = UVec2::new(scratch.half_extent.x * 2, scratch.half_extent.y * 2);
+
+    // --- Helpers ---
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
+
+    // `RenderDevice` is cloned (cheap Arc handle) so the per-pass closures can
+    // build buffers/bind groups while `render_context` is borrowed mutably for
+    // `command_encoder()`. Reborrowing it as `&mut` lets each `encode_pass`
+    // call auto-reborrow instead of moving it.
+    let device = render_context.render_device().clone();
+    let render_context = &mut render_context;
+
+    let make_uniform_buffer = |texel: Vec2| -> bevy::render::render_resource::Buffer {
+        use bevy::render::render_resource::encase;
+
+        let uniforms = BlurUniforms {
+            texel_size: texel,
+            _pad: Vec2::ZERO,
+        };
+        let buf = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("backdrop_blur_uniforms"),
+            size: BlurUniforms::min_size().get(),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut staging = encase::UniformBuffer::new(Vec::<u8>::with_capacity(
+            BlurUniforms::min_size().get() as usize,
+        ));
+        // `write` fails only if the buffer is too small; we sized it via
+        // `BlurUniforms::min_size()`, so this is an invariant violation and a
+        // panic is correct.
+        #[allow(clippy::expect_used)]
+        staging
+            .write(&uniforms)
+            .expect("BlurUniforms: write to staging buffer");
+        render_queue.write_buffer(&buf, 0, staging.as_ref());
+        buf
+    };
+
+    // Encode one Kawase pass. Builds a transient bind group, begins a render
+    // pass, draws a fullscreen triangle, and drops the pass encoder.
+    // `device` is captured by ref; `layout`, `blur_texture.sampler` are
+    // borrowed from outer scope. `render_context` is passed in mutably so
+    // the closure does not need to capture it (avoids the simultaneous
+    // borrow conflict with `make_uniform_buffer`).
+    let encode_pass = |render_context: &mut RenderContext<'_, '_>,
+                       input_view: &TextureView,
+                       output_view: &TextureView,
+                       pipeline: &bevy::render::render_resource::RenderPipeline,
+                       input_size: UVec2,
+                       pass_label: &'static str| {
+        let texel = Vec2::new(
+            1.0 / input_size.x.max(1) as f32,
+            1.0 / input_size.y.max(1) as f32,
+        );
+        let uniform_buf = make_uniform_buffer(texel);
+        let bind_group = device.create_bind_group(
+            Some(pass_label),
+            &layout,
+            &BindGroupEntries::sequential((
+                input_view,
+                &blur_texture.sampler,
+                uniform_buf.as_entire_binding(),
+            )),
+        );
+        let mut pass = render_context
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some(pass_label),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: output_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        // Clear to transparent black (`wgpu::Color::default()`).
+                        #[allow(clippy::default_trait_access)]
+                        load: LoadOp::Clear(Default::default()),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    };
+
+    // --- Six-pass Kawase chain (3 down + 3 up) ---
+    //
+    // Downsample: source(full) → half → quarter → eighth
+    encode_pass(
+        render_context,
+        source_view,
+        &scratch.half_view,
+        down_pipeline,
+        full_res,
+        "backdrop_blur_down_half",
+    );
+    encode_pass(
+        render_context,
+        &scratch.half_view,
+        &scratch.quarter_view,
+        down_pipeline,
+        scratch.half_extent,
+        "backdrop_blur_down_quarter",
+    );
+    encode_pass(
+        render_context,
+        &scratch.quarter_view,
+        &scratch.eighth_view,
+        down_pipeline,
+        scratch.quarter_extent,
+        "backdrop_blur_down_eighth",
+    );
+
+    // Upsample: eighth → quarter → half → BackdropBlurTexture
+    encode_pass(
+        render_context,
+        &scratch.eighth_view,
+        &scratch.quarter_view,
+        up_pipeline,
+        scratch.eighth_extent,
+        "backdrop_blur_up_quarter",
+    );
+    encode_pass(
+        render_context,
+        &scratch.quarter_view,
+        &scratch.half_view,
+        up_pipeline,
+        scratch.quarter_extent,
+        "backdrop_blur_up_half",
+    );
+    encode_pass(
+        render_context,
+        &scratch.half_view,
+        &blur_texture.view,
+        up_pipeline,
+        scratch.half_extent,
+        "backdrop_blur_up_final",
+    );
 }
 
 /// Extract `UiOpacity::current` from the main world into [`ExtractedUiOpacity`]
@@ -526,35 +498,25 @@ pub fn prepare_blur_run_count(
     }
 }
 
-/// Wire the blur node into the Core2d render graph and register extraction +
+/// Add the blur system to the `Core2d` schedule and register extraction +
 /// prepare systems.
 ///
-/// Called from [`BackdropBlurPlugin::setup_render_app`]. The node is placed
-/// between [`Node2d::Tonemapping`] and [`Node2d::EndMainPassPostProcessing`]
-/// so it runs after tonemapping has written the final LDR colour but before
-/// the egui pass reads it.
+/// Called from [`BackdropBlurPlugin::setup_render_app`]. Ordered after
+/// [`Core2dSystems::PostProcess`] (so it reads the post-tonemap LDR colour) and
+/// before `bevy_egui`'s pass (so panels composite over the fresh blur with no
+/// one-frame lag). The blur writes only to [`BackdropBlurTexture`]; the view
+/// target is left untouched.
 ///
-/// The exact edge list from the `bevy_egui` 0.39.1 source:
-/// - `EndMainPass` → `NodeEgui::EguiPass`
-/// - `EndMainPassPostProcessing` → `NodeEgui::EguiPass`
-/// - `NodeEgui::EguiPass` → `Upscaling`
-///
-/// Inserting between `Tonemapping` and `EndMainPassPostProcessing` ensures
-/// the blur finishes before egui renders its panels on top.
+/// [`Core2dSystems::PostProcess`]: bevy::core_pipeline::Core2dSystems::PostProcess
 pub(super) fn setup_render_graph(render_app: &mut bevy::app::SubApp) {
-    use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
-    use bevy::render::render_graph::RenderGraphExt;
+    use bevy::core_pipeline::{Core2d, Core2dSystems};
 
-    render_app
-        .add_render_graph_node::<ViewNodeRunner<BackdropBlurNode>>(Core2d, BackdropBlurLabel)
-        .add_render_graph_edges(
-            Core2d,
-            (
-                Node2d::Tonemapping,
-                BackdropBlurLabel,
-                Node2d::EndMainPassPostProcessing,
-            ),
-        );
+    render_app.add_systems(
+        Core2d,
+        backdrop_blur
+            .after(Core2dSystems::PostProcess)
+            .before(bevy_egui::render::egui_pass),
+    );
 }
 
 /// Register the extraction and prepare systems in the given render sub-app.

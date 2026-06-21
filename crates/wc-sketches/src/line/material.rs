@@ -1,7 +1,7 @@
 //! `Material2d` implementation that binds the particle storage buffer for the
 //! render shader.
 //!
-//! The same `ShaderStorageBuffer` handle owned by the sketch root entity is
+//! The same `ShaderBuffer` handle owned by the sketch root entity is
 //! fed to both `LineMaterial` (for rendering, read-only) and the compute
 //! pipeline node (for simulation, read-write). Bevy reference-counts the
 //! buffer; the data lives in one place on the GPU.
@@ -21,7 +21,7 @@ use bevy::asset::Asset;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d};
 
@@ -36,7 +36,7 @@ use bevy::sprite_render::{AlphaMode2d, Material2d};
 pub struct LineMaterial {
     /// Particle storage buffer, read-only from the vertex shader.
     #[storage(0, read_only)]
-    pub particles: Handle<ShaderStorageBuffer>,
+    pub particles: Handle<ShaderBuffer>,
     /// Star sprite texture sampled in the fragment shader. The texture's
     /// alpha modulates each particle's final alpha so quads render as soft
     /// star points instead of flat-color rectangles.

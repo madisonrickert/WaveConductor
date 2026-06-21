@@ -94,7 +94,9 @@ fn draw_dev_panel(world: &mut World) {
 
     let mut state: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
-    let mut contexts = state.get_mut(world);
+    let Ok(mut contexts) = state.get_mut(world) else {
+        return;
+    };
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };

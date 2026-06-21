@@ -2,7 +2,7 @@
 //!
 //! ## Pipeline
 //!
-//! 1. Once per frame, [`node::BackdropBlurNode`] samples the camera's
+//! 1. Once per frame, [`node::backdrop_blur`] samples the camera's
 //!    post-tonemap colour attachment, runs 3 downsample passes
 //!    (1/2 → 1/4 → 1/8) and 3 upsample passes back to 1/2
 //!    resolution using the dual-Kawase shaders with a 1.0× texel offset,
@@ -23,8 +23,9 @@ use bevy::math::UVec2;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::{
-    AddressMode, Extent3d, FilterMode, Sampler, SamplerDescriptor, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+    TextureViewDescriptor,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::render::view::ExtractedWindows;
@@ -276,7 +277,7 @@ pub(super) fn ensure_blur_texture(
         address_mode_w: AddressMode::ClampToEdge,
         mag_filter: FilterMode::Linear,
         min_filter: FilterMode::Linear,
-        mipmap_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
         ..default()
     });
 

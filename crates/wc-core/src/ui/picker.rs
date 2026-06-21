@@ -86,7 +86,9 @@ pub fn draw_sketch_picker(world: &mut World) {
     // borrow before entering the CentralPanel closure.
     let mut state_param: bevy::ecs::system::SystemState<bevy_egui::EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
-    let mut contexts = state_param.get_mut(world);
+    let Ok(mut contexts) = state_param.get_mut(world) else {
+        return;
+    };
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -128,6 +130,11 @@ pub fn draw_sketch_picker(world: &mut World) {
 
     let mut clicked_state: Option<AppState> = None;
 
+    // egui 0.34 deprecated the `Context`-based `CentralPanel::show` in favor of
+    // `show_inside(ui)`, but bevy_egui only hands us a `Context` (not a `Ui`),
+    // so the Context-based show is the only top-level path here (bevy_egui's own
+    // examples use it). Revisit if bevy_egui exposes a root `Ui`.
+    #[allow(deprecated)]
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(PICKER_BACKGROUND))
         .show(&ctx, |ui| {

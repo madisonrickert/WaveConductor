@@ -170,6 +170,10 @@ fn settings_panel_visible(
 /// the selection persists in [`SettingsDockTab`]. Only runs when
 /// [`SettingsPanelVisible`] is `true` (gated by the `settings_panel_visible`
 /// run condition in [`add_systems`]).
+#[allow(
+    clippy::too_many_lines,
+    reason = "settings dock UI is one cohesive panel; splitting harms readability"
+)]
 fn draw_user_panel(world: &mut World) {
     // Skip when no egui context is up (e.g., MinimalPlugins test harness).
     if !world.contains_resource::<bevy_egui::EguiUserTextures>() {
@@ -223,7 +227,9 @@ fn draw_user_panel(world: &mut World) {
 
     let mut state: bevy::ecs::system::SystemState<EguiContexts<'_, '_>> =
         bevy::ecs::system::SystemState::new(world);
-    let mut contexts = state.get_mut(world);
+    let Ok(mut contexts) = state.get_mut(world) else {
+        return;
+    };
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -455,24 +461,17 @@ fn render_section_by_key(
     // guard doesn't borrow `world`; build the default while the guard is alive
     // so the owned `Box` outlives the `drop` below.
     let registry = world.resource::<AppTypeRegistry>().clone();
-    let registry_read = registry.read();
-    let Some(type_data) =
-        registry_read.get_type_data::<bevy::ecs::reflect::ReflectResource>(type_id)
-    else {
-        ui.label("(no ReflectResource on settings type)");
-        return;
-    };
     // A fresh default instance, available when the type registered
     // `#[reflect(Default)]`. Absent → rows degrade to no bold / no reset glyph,
-    // never a hard failure.
-    let default_instance: Option<Box<dyn Reflect>> = registry_read
+    // never a hard failure. Built while the read guard is alive so the owned
+    // `Box` outlives it.
+    let default_instance: Option<Box<dyn Reflect>> = registry
+        .read()
         .get_type_data::<bevy::reflect::std_traits::ReflectDefault>(type_id)
         .map(bevy::reflect::std_traits::ReflectDefault::default);
-    // `&mut World` implements `Into<FilteredResourcesMut>`, so this is
-    // safe to call without any unsafe code.
-    let reflect_result = type_data.reflect_mut(world);
-    drop(registry_read);
-    let Ok(mut reflect_mut) = reflect_result else {
+    // Bevy 0.19 made `ReflectResource` a ZST; resources are now reflected via
+    // `ReflectComponent` on their backing entity (see `reflect_resource_mut`).
+    let Some(mut reflect_mut) = super::registry::reflect_resource_mut(world, type_id) else {
         ui.label("(resource not present)");
         return;
     };
@@ -1326,8 +1325,12 @@ fn render_template_library(
     // Persist the confirm state for next frame, after the scope releases its
     // borrow of `confirm`.
     ui.memory_mut(|m| match &confirm {
-        Some(h) => m.data.insert_temp(confirm_id, h.clone()),
-        None => m.data.remove::<String>(confirm_id),
+        Some(h) => {
+            m.data.insert_temp(confirm_id, h.clone());
+        }
+        None => {
+            m.data.remove::<String>(confirm_id);
+        }
     });
 }
 
@@ -1494,7 +1497,7 @@ fn set_enum_variant(
     field_name: &str,
     variant: &str,
 ) -> bool {
-    use bevy::reflect::{DynamicEnum, DynamicVariant};
+    use bevy::reflect::enums::{DynamicEnum, DynamicVariant};
 
     let dynamic = DynamicEnum::new(variant, DynamicVariant::Unit);
     match field.try_apply(&dynamic) {
@@ -1685,19 +1688,17 @@ mod tests {
     fn reset_cell_unmodified_branch_is_grid_safe() {
         let ctx = egui::Context::default();
         let style = OverlayStyle::default();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                egui::Grid::new("reset_cell_test")
-                    .num_columns(3)
-                    .show(ui, |ui| {
-                        let mut field: f32 = 0.5;
-                        ui.label("label");
-                        ui.label("widget");
-                        // Unmodified → the empty-cell branch (the crash path).
-                        render_reset_cell(ui, &mut field, None, false, &style);
-                        ui.end_row();
-                    });
-            });
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::Grid::new("reset_cell_test")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    let mut field: f32 = 0.5;
+                    ui.label("label");
+                    ui.label("widget");
+                    // Unmodified → the empty-cell branch (the crash path).
+                    render_reset_cell(ui, &mut field, None, false, &style);
+                    ui.end_row();
+                });
         });
         // Reaching here without a panic is the assertion.
     }

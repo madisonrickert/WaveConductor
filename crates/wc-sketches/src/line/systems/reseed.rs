@@ -28,7 +28,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::storage::ShaderBuffer;
 use bevy::sprite_render::MeshMaterial2d;
 use bytemuck::cast_slice;
 
@@ -77,8 +77,8 @@ pub fn reseed_on_adjustments_change(
     settings: Res<'_, LineSettings>,
     sim: Option<Res<'_, LineSimParams>>,
     window: Single<'_, '_, &Window>,
-    mut buffers: ResMut<'_, Assets<ShaderStorageBuffer>>,
-    // The render buffer is *recreated* on re-upload (Bevy's ShaderStorageBuffer
+    mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
+    // The render buffer is *recreated* on re-upload (Bevy's ShaderBuffer
     // prepare does `create_buffer_with_data`), which invalidates the material's
     // cached bind group; touch the material so it rebinds to the new buffer.
     roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
@@ -142,10 +142,13 @@ pub fn reseed_on_adjustments_change(
 
     // Re-upload: setting the asset's bytes via `get_mut` marks it changed, so the
     // render world re-extracts and re-creates the GPU buffer.
-    if buffers.get_mut(&sim.particles_handle).is_some_and(|buf| {
-        buf.data = Some(cast_slice::<Particle, u8>(&particles).to_vec());
-        true
-    }) {
+    if buffers
+        .get_mut(&sim.particles_handle)
+        .is_some_and(|mut buf| {
+            buf.data = Some(cast_slice::<Particle, u8>(&particles).to_vec());
+            true
+        })
+    {
         // The buffer was recreated (new GpuBuffer), so the material's cached bind
         // group now points at the freed buffer. Touch the material to force a
         // bind-group rebind — without this the render stays frozen on the stale

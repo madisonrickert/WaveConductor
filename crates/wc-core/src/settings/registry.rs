@@ -5,8 +5,10 @@
 //! pointers. The panels and persistence systems iterate the list and call
 //! through the pointers without knowing the concrete type.
 
+use std::any::TypeId;
 use std::sync::Arc;
 
+use bevy::ecs::reflect::ReflectComponent;
 use bevy::prelude::*;
 use bevy::reflect::{FromType, GetTypeRegistration, TypePath};
 
@@ -14,6 +16,31 @@ use super::def::SettingDef;
 use super::event::SketchRestart;
 use super::persistence;
 use super::trait_def::SketchSettings;
+
+/// Reflectively borrow a registered resource as `&mut dyn Reflect`.
+///
+/// Bevy 0.19 made `ReflectResource` a ZST and stores resources as components on
+/// a backing entity (the 0.18->0.19 "Resources as Components" change), so the
+/// reflected mutation path is now [`ReflectComponent`] on that entity. Returns
+/// `None` if the type isn't registered with `#[reflect(Resource)]` or the
+/// resource isn't currently present. Centralized here so the console
+/// (`commands.rs`) and the settings panel (`panel_user.rs`) share one path.
+pub(crate) fn reflect_resource_mut(
+    world: &mut World,
+    type_id: TypeId,
+) -> Option<Mut<'_, dyn Reflect>> {
+    // Clone the registry handle so the read guard borrows the clone, leaving
+    // `world` free for the entity lookup + `reflect_mut` below. `ReflectComponent`
+    // is `Clone` (type-erased fn pointers), so it outlives the dropped guard.
+    let registry = world.resource::<AppTypeRegistry>().clone();
+    let reflect_component = registry
+        .read()
+        .get_type_data::<ReflectComponent>(type_id)?
+        .clone();
+    let component_id = world.components().get_id(type_id)?;
+    let entity = world.resource_entities().get(component_id)?;
+    reflect_component.reflect_mut(world.entity_mut(entity))
+}
 
 /// Per-registered-type entry stored in [`SettingsRegistry`].
 #[derive(Clone)]

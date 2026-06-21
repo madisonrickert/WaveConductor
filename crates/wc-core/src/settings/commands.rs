@@ -17,12 +17,12 @@
 
 use std::any::TypeId;
 
-use bevy::ecs::reflect::ReflectResource;
 use bevy::prelude::*;
-use bevy::reflect::{DynamicEnum, DynamicVariant, PartialReflect, ReflectMut};
+use bevy::reflect::enums::{DynamicEnum, DynamicVariant};
+use bevy::reflect::{PartialReflect, ReflectMut};
 
 use super::def::{NumberRange, SettingKind};
-use super::registry::{SettingsRegistry, SettingsTypeKey};
+use super::registry::{reflect_resource_mut, SettingsRegistry, SettingsTypeKey};
 
 /// Set `storage_key.field` to `value` (parsed against the field's kind) via
 /// reflection. Returns a human-readable confirmation, or an error message
@@ -48,17 +48,10 @@ pub fn set_setting(
     let type_id = type_id_for_key(world, storage_key)
         .ok_or_else(|| format!("settings type `{storage_key}` is not registered"))?;
 
-    // Clone the registry handle so its read guard borrows the clone, not
-    // `world` — leaving `world` free for `reflect_mut` while the guard is held
-    // (mirrors the user panel's reflection path).
-    let app_registry = world.resource::<AppTypeRegistry>().clone();
-    let reg_read = app_registry.read();
-    let Some(reflect_resource) = reg_read.get_type_data::<ReflectResource>(type_id) else {
-        return Err(format!("`{storage_key}` has no ReflectResource"));
-    };
-    let reflect_result = reflect_resource.reflect_mut(world);
-    drop(reg_read);
-    let mut reflect_mut = reflect_result.map_err(|_| format!("`{storage_key}` not present"))?;
+    // Bevy 0.19 made `ReflectResource` a ZST; resources are now reflected via
+    // `ReflectComponent` on their backing entity (see `reflect_resource_mut`).
+    let mut reflect_mut = reflect_resource_mut(world, type_id)
+        .ok_or_else(|| format!("`{storage_key}` is not registered or not present"))?;
 
     let ReflectMut::Struct(struct_mut) = reflect_mut.reflect_mut() else {
         return Err(format!("`{storage_key}` is not a struct"));

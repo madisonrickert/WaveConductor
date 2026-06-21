@@ -4,10 +4,11 @@
 //!
 //! The hand-mesh wireframe bones are rendered by [`crate::line::hand_mesh`]'s
 //! `HandMeshCamera3d` into an off-screen HDR image (emissive bones on black, no
-//! bloom, no tonemapping). [`LineBoneCompositeNode`] then **adds** that image
-//! into the main camera's HDR view target, inserted into the Core2d graph
-//! *after* the gravity smear ([`crate::line::post_process`]) and *before*
-//! [`Node2d::Bloom`].
+//! bloom, no tonemapping). [`line_bone_composite`] then **adds** that image into
+//! the main camera's HDR view target. It runs in the Core2d schedule's
+//! `EarlyPostProcess` set *after* the gravity smear
+//! ([`crate::line::post_process`]) and *before* bloom/tonemapping in
+//! `PostProcess`.
 //!
 //! Because the add happens in linear HDR before the main camera's `Bloom` +
 //! `AgX` tonemap, the bones are glowed and tonemapped together with the scene —
@@ -32,14 +33,11 @@
     reason = "u32 ↔ usize casts for GPU draw counts are intentional"
 )]
 
-use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::{Core2d, Core2dSystems};
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::{
     binding_types::{sampler, texture_2d},
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId,
@@ -48,9 +46,9 @@ use bevy::render::render_resource::{
     Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, StoreOp, TextureFormat,
     TextureSampleType, VertexState,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::texture::GpuImage;
-use bevy::render::view::{Hdr, ViewTarget};
+use bevy::render::view::ViewTarget;
 use bevy::render::RenderApp;
 use bevy::shader::Shader;
 
@@ -58,7 +56,7 @@ use bevy::shader::Shader;
 ///
 /// `Rgba16Float` so the emissive bones (`> 1.0`) survive un-clamped. Created on
 /// `OnEnter(AppState::Line)` and removed on exit; [`ExtractResource`] mirrors it
-/// into the render world where [`LineBoneCompositeNode`] samples it. When absent
+/// into the render world where [`line_bone_composite`] samples it. When absent
 /// (every non-Line state) the composite node is a clean no-op.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct HandMeshTarget {
@@ -78,22 +76,15 @@ impl Plugin for LineBoneCompositePlugin {
             return;
         };
 
-        render_app
-            .add_render_graph_node::<ViewNodeRunner<LineBoneCompositeNode>>(
-                Core2d,
-                LineBoneCompositeLabel,
-            )
-            // After the scene's main pass (which includes the gravity-smear node,
-            // edged before `EndMainPass`) and before `Bloom`, so the main camera's
-            // bloom + tonemap process the scene *with the bones added*.
-            .add_render_graph_edges(
-                Core2d,
-                (
-                    Node2d::EndMainPass,
-                    LineBoneCompositeLabel,
-                    Node2d::Bloom,
-                ),
-            );
+        // Run in EarlyPostProcess after the gravity smear and before bloom +
+        // tonemapping (`PostProcess`), so the main camera's bloom/tonemap process
+        // the scene *with the bones added*.
+        render_app.add_systems(
+            Core2d,
+            line_bone_composite
+                .in_set(Core2dSystems::EarlyPostProcess)
+                .after(super::post_process::line_post_process),
+        );
     }
 
     fn finish(&self, app: &mut App) {
@@ -103,10 +94,6 @@ impl Plugin for LineBoneCompositePlugin {
         render_app.init_resource::<BoneCompositePipeline>();
     }
 }
-
-/// Render-graph label for the additive bone-glow composite node.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct LineBoneCompositeLabel;
 
 /// Cached pipeline state for the composite. Initialised once in
 /// [`LineBoneCompositePlugin::finish`].
@@ -148,7 +135,7 @@ impl FromWorld for BoneCompositePipeline {
                 .queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some("line_bone_composite_pipeline".into()),
                     layout: vec![bind_group_layout_descriptor.clone()],
-                    push_constant_ranges: vec![],
+                    immediate_size: 0,
                     vertex: VertexState {
                         shader: shader.clone(),
                         shader_defs: vec![],
@@ -182,82 +169,82 @@ impl FromWorld for BoneCompositePipeline {
     }
 }
 
-/// Render-graph node that adds the off-screen bone image into the main view
-/// target. Runs after the gravity smear and before `Bloom`.
-#[derive(Default)]
-pub struct LineBoneCompositeNode;
-
-impl ViewNode for LineBoneCompositeNode {
-    // Gate on `Hdr`: the main Line `Camera2d` is the only Core2d camera and it is
-    // HDR, so this matches just it. (The bone `Camera3d` is on the Core3d graph,
-    // so it never reaches this node.)
-    type ViewQuery = (&'static ViewTarget, &'static Hdr);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext<'_>,
-        render_context: &mut RenderContext<'w>,
-        view_target: QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let (view_target, _hdr) = view_target;
-
-        // No bone target this frame (not in Line, or image not yet uploaded) →
-        // clean no-op. Return BEFORE `post_process_write` so the view target is
-        // left untouched.
-        let Some(target) = world.get_resource::<HandMeshTarget>() else {
-            return Ok(());
-        };
-        let gpu_images = world.resource::<RenderAssets<GpuImage>>();
-        let Some(bone_image) = gpu_images.get(&target.image) else {
-            return Ok(());
-        };
-
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(pipeline_res) = world.get_resource::<BoneCompositePipeline>() else {
-            return Ok(());
-        };
-        let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.pipeline_id) else {
-            return Ok(());
-        };
-
-        let post_process = view_target.post_process_write();
-        let layout =
-            pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
-
-        let bind_group = render_context.render_device().create_bind_group(
-            "line_bone_composite_bind_group",
-            &layout,
-            &BindGroupEntries::sequential((
-                post_process.source,
-                &pipeline_res.sampler,
-                &bone_image.texture_view,
-            )),
-        );
-
-        let mut pass = render_context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("line_bone_composite_pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: post_process.destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    // The fullscreen triangle writes every pixel (scene + bones),
-                    // so the loaded contents are immaterial; `Load` avoids a
-                    // clear and matches the gravity-smear node's pattern.
-                    ops: Operations {
-                        load: LoadOp::Load,
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..3, 0..1);
-        Ok(())
+/// Render system that adds the off-screen bone image into the main view target.
+///
+/// Runs in [`Core2dSystems::EarlyPostProcess`] after the gravity smear and
+/// before bloom. Gates on [`ExtractedCamera::hdr`]: the main Line `Camera2d` is
+/// the only Core2d camera and it is HDR, so this matches just it. (The bone
+/// `Camera3d` is on the Core3d graph, so it never reaches this system.) As of
+/// Bevy 0.19 the `Hdr` marker is no longer extracted to the render world, so we
+/// read HDR-ness from the extracted camera; a `&'static Hdr` `ViewQuery` would
+/// silently never match.
+///
+/// [`Core2dSystems::EarlyPostProcess`]: bevy::core_pipeline::Core2dSystems::EarlyPostProcess
+pub fn line_bone_composite(
+    view: ViewQuery<'_, '_, (&'static ViewTarget, &'static ExtractedCamera)>,
+    target: Option<Res<'_, HandMeshTarget>>,
+    gpu_images: Res<'_, RenderAssets<GpuImage>>,
+    pipeline_res: Option<Res<'_, BoneCompositePipeline>>,
+    pipeline_cache: Res<'_, PipelineCache>,
+    mut render_context: RenderContext<'_, '_>,
+) {
+    let (view_target, camera) = view.into_inner();
+    // Skip non-HDR Core2d cameras (see the doc note above).
+    if !camera.hdr {
+        return;
     }
+
+    // No bone target this frame (not in Line, or image not yet uploaded) → clean
+    // no-op. Return BEFORE `post_process_write` so the view target is untouched.
+    let Some(target) = target else {
+        return;
+    };
+    let Some(bone_image) = gpu_images.get(&target.image) else {
+        return;
+    };
+
+    let Some(pipeline_res) = pipeline_res else {
+        return;
+    };
+    let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_res.pipeline_id) else {
+        return;
+    };
+
+    let post_process = view_target.post_process_write();
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
+
+    let bind_group = render_context.render_device().create_bind_group(
+        "line_bone_composite_bind_group",
+        &layout,
+        &BindGroupEntries::sequential((
+            post_process.source,
+            &pipeline_res.sampler,
+            &bone_image.texture_view,
+        )),
+    );
+
+    let mut pass = render_context
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("line_bone_composite_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: post_process.destination,
+                depth_slice: None,
+                resolve_target: None,
+                // The fullscreen triangle writes every pixel (scene + bones), so
+                // the loaded contents are immaterial; `Load` avoids a clear and
+                // matches the gravity-smear pass's pattern.
+                ops: Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.draw(0..3, 0..1);
 }

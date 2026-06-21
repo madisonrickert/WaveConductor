@@ -41,7 +41,7 @@ pub fn drive_color_influence(
             .get(&handle.0)
             .is_some_and(|m| (m.template_color.x - target).abs() > f32::EPSILON);
         if differs {
-            if let Some(material) = materials.get_mut(&handle.0) {
+            if let Some(mut material) = materials.get_mut(&handle.0) {
                 material.template_color = Vec4::new(target, 0.0, 0.0, 0.0);
             }
         }

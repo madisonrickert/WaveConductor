@@ -62,7 +62,9 @@ mod tests {
             Res<'_, State<AppState>>,
             Option<Res<'_, State<SketchActivity>>>,
         )> = SystemState::new(app.world_mut());
-        let (app_state, activity) = state.get(app.world());
+        let Ok((app_state, activity)) = state.get(app.world()) else {
+            unreachable!("test SystemState params are always present");
+        };
         cond(app_state, activity)
     }
 
