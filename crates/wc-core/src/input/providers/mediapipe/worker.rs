@@ -127,6 +127,12 @@ impl Drop for WorkerHandle {
 /// idle threshold that entry latency is imperceptible, while the sustained
 /// load drop (30 Hz → 4 Hz of capture-decode + palm inference) is the bulk of
 /// the multi-hour idle thermal win.
+///
+/// On backends that honor [`FrameSource::set_capture_throttle`] (macOS
+/// `AVFoundation`), the *camera* drops to this same rate while idle, so the
+/// freshest frame is at most one period (250 ms) old when processed — the
+/// identical staleness bound the inference cap already imposes. No added wake
+/// latency; the sensor/ISP simply do less work.
 pub const IDLE_INFERENCE_HZ: u32 = 4;
 
 /// Spawn the worker thread. It runs until [`WorkerHandle::stop`] (or the handle
@@ -195,6 +201,10 @@ fn run_worker_loop(
     // Computed once: the idle cap can only ever *lower* the rate (a configured
     // active cap slower than IDLE_INFERENCE_HZ stays authoritative).
     let idle_inference_interval = idle_capped_interval(min_inference_interval);
+    // Edge-triggered hardware-throttle dispatch: tell the source when the idle
+    // flag flips so a capable backend (macOS AVFoundation) drops its hardware
+    // capture rate. `None` forces a sync call on the first iteration.
+    let mut last_throttle: Option<bool> = None;
     announce_source(source.as_ref(), &mut producer, &mut dropped_frames);
 
     while !stop.load(Ordering::Relaxed) {
@@ -204,6 +214,10 @@ fn run_worker_loop(
         // budget honors the new rate (lock-free, Relaxed — a one-iteration
         // stale read is harmless).
         let idle_throttled = tuning.idle_throttle();
+        if last_throttle != Some(idle_throttled) {
+            source.set_capture_throttle(idle_throttled);
+            last_throttle = Some(idle_throttled);
+        }
         let min_interval = if idle_throttled {
             idle_inference_interval
         } else {
@@ -734,6 +748,75 @@ mod tests {
         assert!(
             saw_hand,
             "throttled worker never emitted a hand-bearing frame; wake-from-idle would be broken"
+        );
+    }
+
+    /// Test source that serves looping solid frames and records throttle toggles.
+    struct ThrottleRecordingSource {
+        inner: MockFrameSource,
+        log: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl FrameSource for ThrottleRecordingSource {
+        fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError> {
+            self.inner.next_frame(out)
+        }
+        fn discard_frame(&mut self) -> Result<bool, CaptureError> {
+            self.inner.discard_frame()
+        }
+        fn set_capture_throttle(&mut self, throttled: bool) {
+            self.log
+                .lock()
+                .expect("throttle log poisoned")
+                .push(throttled);
+        }
+    }
+
+    fn throttle_recording_source(log: Arc<std::sync::Mutex<Vec<bool>>>) -> SourceFactory {
+        Box::new(move || {
+            let mut f = Frame::default();
+            f.fit_to(64, 48);
+            let src: Box<dyn FrameSource> = Box::new(ThrottleRecordingSource {
+                inner: MockFrameSource::looping(vec![f]),
+                log,
+            });
+            Ok(src)
+        })
+    }
+
+    #[test]
+    fn worker_edge_triggers_capture_throttle_on_idle_change() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let cell = tuning(false);
+        let (producer, _consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
+        let mut handle = spawn_worker(
+            throttle_recording_source(Arc::clone(&log)),
+            empty_pipeline(),
+            30,
+            Arc::clone(&cell),
+            producer,
+        );
+
+        // Wait for the initial sync call (false), then flip to idle, then back.
+        let wait_len = |n: usize| {
+            for _ in 0..200 {
+                if log.lock().expect("throttle log poisoned").len() >= n {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        };
+        assert!(wait_len(1), "no initial throttle sync");
+        cell.set_idle_throttle(true);
+        assert!(wait_len(2), "idle transition not dispatched");
+        cell.set_idle_throttle(false);
+        assert!(wait_len(3), "active transition not dispatched");
+        handle.stop();
+
+        assert_eq!(
+            *log.lock().expect("throttle log poisoned"),
+            vec![false, true, false]
         );
     }
 

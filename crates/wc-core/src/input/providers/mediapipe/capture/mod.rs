@@ -100,6 +100,15 @@ pub trait FrameSource {
     fn format_label(&self) -> Option<&str> {
         None
     }
+
+    /// Hint that the app entered (`true`) or left (`false`) the idle/screensaver
+    /// throttle. Backends that can lower the *hardware* capture rate do so here,
+    /// shedding sensor/ISP work beyond the worker's decode-skipping. Called by
+    /// the worker only on transitions (edge-triggered), never per frame.
+    ///
+    /// Default: no-op. Implemented by [`AvfFrameSource`] on macOS; a documented
+    /// follow-up for the nokhwa V4L2/MediaFoundation backends.
+    fn set_capture_throttle(&mut self, _throttled: bool) {}
 }
 
 /// A test/replay frame source: serves a fixed list of frames, optionally
