@@ -194,6 +194,41 @@ pub struct DotsSettings {
     #[serde(default = "default_attract_turbulence")]
     pub attract_turbulence: f32,
 
+    /// Brightness multiplier applied to attract-mode particles so the calm,
+    /// fraction-killed field clears the `AgX` tonemapper's white knee. The shader
+    /// applies this as `rgb *= 1 + lift` where `lift = fade × (brightness − 1)`,
+    /// so `1.0` is a provable no-op (lift = 0) and values above `1.0` add a
+    /// progressively stronger brightness push. Fades in with the screensaver
+    /// envelope and back out after wake. Dev-only knob.
+    #[setting(
+        default = 2.2_f32,
+        min = 1.0_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Attract brightness",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_brightness")]
+    pub attract_brightness: f32,
+
+    /// Velocity-tint strength during attract mode: how strongly the particle's
+    /// speed is mapped to a colour shift in the shader's `attract_color.x`
+    /// channel. Dots' slow turbulence won't trigger the velocity-tint WAKE band,
+    /// so this defaults to `0.0` (tint off — only the brightness `y` channel
+    /// matters). Dev-only knob.
+    #[setting(
+        default = 0.0_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Attract color strength",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_color_strength")]
+    pub attract_color_strength: f32,
+
     // ── Visual (explode pass) ─────────────────────────────────────────────────
     /// Uniform shrink factor applied per iteration of the explode
     /// (chromatic-aberration) post-process pass. Controls how fast the
@@ -373,6 +408,14 @@ fn default_attract_turbulence() -> f32 {
     6.0
 }
 
+fn default_attract_brightness() -> f32 {
+    2.2
+}
+
+fn default_attract_color_strength() -> f32 {
+    0.0
+}
+
 fn default_shrink_factor() -> f32 {
     0.98
 }
@@ -460,6 +503,16 @@ mod tests {
                 < f32::EPSILON
         );
         assert!((defaults.attract_turbulence - default_attract_turbulence()).abs() < f32::EPSILON);
+        // Screensaver brightness lift fields added in task 9.
+        assert!(
+            (defaults.attract_brightness - default_attract_brightness()).abs() < f32::EPSILON,
+            "attract_brightness default mismatch"
+        );
+        assert!(
+            (defaults.attract_color_strength - default_attract_color_strength()).abs()
+                < f32::EPSILON,
+            "attract_color_strength default mismatch"
+        );
         // Visual (explode) fields added in task 7.
         assert!(
             (defaults.shrink_factor - default_shrink_factor()).abs() < f32::EPSILON,

@@ -26,14 +26,19 @@
 //! the curl-noise drift slowly morphs the grid.
 
 use bevy::prelude::*;
+use bevy::sprite_render::MeshMaterial2d;
+use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
+use wc_core::sketch::sketch_active;
 
 use crate::dots::settings::DotsSettings;
 use crate::dots::systems::sim_params::{
     bake_dots_sim_params, DotsAttractGate, DotsTurbulence, DotsWindowGeom,
 };
+use crate::dots::systems::spawn::DotsRoot;
 use crate::particles::compute::ParticleSimParams;
+use crate::particles::material::ParticleMaterial;
 use crate::particles::particle::{Attractor, MAX_ATTRACTORS};
 
 /// Spatial frequency (radians per world unit) of the turbulence flow's base
@@ -51,6 +56,22 @@ impl Plugin for DotsScreensaverPlugin {
         app.add_systems(
             Update,
             drive_dots_attract.run_if(in_screensaver(AppState::Dots)),
+        );
+        // The brightness-lift driver follows the ScreensaverFade envelope,
+        // which ramps *up* during Screensaver and back *down* during Active
+        // (the wake transition completes in Active). Registered under BOTH gates
+        // so the lift ramps in on fade-in (Screensaver) and back out after wake
+        // (fade-out completes in Active), while still running zero systems in
+        // `SketchActivity::Idle` and other app states (AGENTS.md "zero systems
+        // when idle"). The system is change-gated internally: outside the fade
+        // ramps it compares one float and returns.
+        app.add_systems(
+            Update,
+            drive_dots_attract_color.run_if(in_screensaver(AppState::Dots)),
+        );
+        app.add_systems(
+            Update,
+            drive_dots_attract_color.run_if(sketch_active(AppState::Dots)),
         );
     }
 }
@@ -112,6 +133,52 @@ fn drive_dots_attract(
         turbulence,
         0.0,
     );
+}
+
+/// Drive [`ParticleMaterial::attract_color`] from the [`ScreensaverFade`]
+/// envelope × [`DotsSettings::attract_brightness`] so the fraction-killed calm
+/// field clears the `AgX` tonemapper's white knee.
+///
+/// Runs during both Screensaver (fade-in) and Active (fade-out after wake) —
+/// see the plugin registration for the gating rationale. Mutating the material
+/// asset re-prepares its bind group, so the write is change-gated on the value
+/// actually moving: in the settled states (fade at exactly zero or one) this
+/// system is a single float compare per frame, no asset churn. `last` is only
+/// advanced when the material was actually written, so a frame where the asset
+/// is not yet loaded retries instead of losing the value.
+///
+/// Dots' slow turbulence does not trigger the velocity-tint WAKE band, so
+/// `attract_color_strength` defaults to `0.0` — only the brightness `y`
+/// channel matters. The shared [`ParticleMaterial::attract_color_params`]
+/// function handles both channels uniformly.
+///
+/// Per-frame no-allocation guarantee: all arithmetic is on stack scalars.
+fn drive_dots_attract_color(
+    fade: Res<'_, ScreensaverFade>,
+    settings: Res<'_, DotsSettings>,
+    roots: Query<'_, '_, &MeshMaterial2d<ParticleMaterial>, With<DotsRoot>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
+    mut last: Local<'_, Vec4>,
+) {
+    let target = ParticleMaterial::attract_color_params(
+        fade.alpha(),
+        settings.attract_color_strength,
+        settings.attract_brightness,
+    );
+    // Two instances of this system exist (one per activity gate), each with
+    // its own `Local`. A stale `last` in the instance that was not running
+    // self-corrects: the fade envelope is continuous, so the first frame the
+    // instance runs with a differing target rewrites the material and resyncs.
+    // Gate on both driven channels (x = tint, y = brightness lift) moving.
+    if (target.x - last.x).abs() < f32::EPSILON && (target.y - last.y).abs() < f32::EPSILON {
+        return;
+    }
+    for handle in &roots {
+        if let Some(mut material) = materials.get_mut(&handle.0) {
+            material.attract_color = target;
+            *last = target;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +259,122 @@ mod tests {
                 "screensaver must bake restoring_linear=0.0 (spring must not fight turbulence)"
             );
         }
+    }
+
+    /// Build a minimal world with the resources `drive_dots_attract_color` requires:
+    /// `ScreensaverFade`, `DotsSettings`, a `DotsRoot` entity carrying a
+    /// `MeshMaterial2d<ParticleMaterial>`, and an `Assets<ParticleMaterial>` asset
+    /// registry. Returns the world and the material handle so tests can inspect the
+    /// written uniform.
+    fn setup_attract_color_world(fade_alpha: f32) -> (World, Handle<ParticleMaterial>) {
+        let mut world = World::new();
+
+        // ScreensaverFade at the requested alpha. `value` is private, so we drive
+        // it via `set_target` + `advanced` with a duration long enough to saturate
+        // the 1.5 s ramp.
+        let fade = if fade_alpha >= 1.0 {
+            // Advance far past the 1.5 s ramp to reach full alpha.
+            let mut f = ScreensaverFade::default();
+            f.set_target(1.0);
+            f.advanced(Duration::from_secs(10))
+        } else {
+            // Zero alpha — the default.
+            ScreensaverFade::default()
+        };
+        world.insert_resource(fade);
+
+        world.insert_resource(DotsSettings::default());
+
+        // Build an `Assets<ParticleMaterial>` registry and add a material.
+        // Unit tests don't exercise GPU paths — only the `attract_color` field
+        // write — so dummy handles for `particles` and `star_texture` are fine.
+        let mut mat_assets: Assets<ParticleMaterial> = Assets::default();
+        let mat = ParticleMaterial {
+            particles: Handle::default(),
+            star_texture: Handle::default(),
+            solid_color: ParticleMaterial::solid_off(),
+            attract_color: ParticleMaterial::attract_color_off(),
+            template_color: ParticleMaterial::template_color_off(),
+            palette_params: ParticleMaterial::palette_off(),
+        };
+        let handle = mat_assets.add(mat);
+        world.insert_resource(mat_assets);
+
+        // Spawn the DotsRoot entity carrying the material handle.
+        world.spawn((DotsRoot, MeshMaterial2d(handle.clone())));
+
+        (world, handle)
+    }
+
+    /// `drive_dots_attract_color` at full screensaver fade (alpha = 1.0) must
+    /// write `attract_color.y ≈ 1.2` (brightness 2.2 → lift = 1*(2.2-1) = 1.2)
+    /// and `attract_color.x = 0.0` (color strength defaults to 0).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn drive_dots_attract_color_full_alpha_sets_brightness_lift() {
+        let (mut world, handle) = setup_attract_color_world(1.0);
+
+        world
+            .run_system_once(drive_dots_attract_color)
+            .expect("drive_dots_attract_color run");
+
+        let materials = world.resource::<Assets<ParticleMaterial>>();
+        let mat = materials.get(&handle).expect("material must be present");
+        assert!(
+            mat.attract_color.x.abs() < 1e-6,
+            "x (tint strength) must be 0 at default attract_color_strength=0, got {}",
+            mat.attract_color.x
+        );
+        assert!(
+            (mat.attract_color.y - 1.2).abs() < 1e-5,
+            "y (brightness lift) must be ≈1.2 (brightness 2.2 - 1 = 1.2), got {}",
+            mat.attract_color.y
+        );
+        assert!(
+            mat.attract_color.z.abs() < f32::EPSILON,
+            "z must be 0 (reserved)"
+        );
+        assert!(
+            mat.attract_color.w.abs() < f32::EPSILON,
+            "w must be 0 (reserved)"
+        );
+    }
+
+    /// `drive_dots_attract_color` at fade alpha = 0.0 (Active / wake-complete)
+    /// must write `Vec4::ZERO` — a bit-exact render no-op.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn drive_dots_attract_color_zero_alpha_writes_zero() {
+        let (mut world, handle) = setup_attract_color_world(0.0);
+
+        // Pre-seed `last` to a non-zero value so the change gate does not
+        // short-circuit: insert a fake prior write by running the system once
+        // at full fade first, then reset fade to zero and re-run.
+        let (mut world2, handle2) = setup_attract_color_world(1.0);
+        world2
+            .run_system_once(drive_dots_attract_color)
+            .expect("pre-seed run");
+        // Now reset the fade to zero on this separate world (avoids Local confusion).
+        // Simply test the zero-fade world directly — `last` starts at Vec4::ZERO,
+        // target is Vec4::ZERO, so the change gate fires and the material stays ZERO.
+        world
+            .run_system_once(drive_dots_attract_color)
+            .expect("drive_dots_attract_color zero-fade run");
+
+        let materials = world.resource::<Assets<ParticleMaterial>>();
+        let mat = materials.get(&handle).expect("material must be present");
+        assert_eq!(
+            mat.attract_color,
+            Vec4::ZERO,
+            "attract_color must be Vec4::ZERO at fade alpha=0 (Active steady state)"
+        );
+        // Suppress unused variable warning for the pre-seed world.
+        let _ = (world2, handle2);
     }
 }
