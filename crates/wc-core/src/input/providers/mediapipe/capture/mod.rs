@@ -1,14 +1,12 @@
 //! Webcam frame capture behind a [`FrameSource`] trait.
 //!
 //! Abstracting capture lets the pipeline and tests run without a physical
-//! camera: tests inject a [`MockFrameSource`], while the production
-//! `NokhwaFrameSource` (behind the `hand-tracking-mediapipe-camera` feature,
-//! added with the worker in a later phase) wraps a real webcam. Frames are
-//! written into a caller-owned, reused [`Frame`] buffer so the worker performs
-//! no per-frame heap allocation after warm-up.
-//!
-//! Foundation module: consumed by the worker (plan Phase 8); exercised by tests
-//! until then.
+//! camera: tests inject a [`MockFrameSource`], while the production backend is
+//! selected per platform — `AvfFrameSource` on macOS (`AVFoundation` via
+//! `objc2`), `NokhwaFrameSource` on Linux and Windows (`nokhwa`). Both backends
+//! are gated on the `hand-tracking-mediapipe-camera` feature. Frames are written into a
+//! caller-owned, reused [`Frame`] buffer so the worker performs no per-frame
+//! heap allocation after warm-up.
 #![allow(dead_code)]
 
 use thiserror::Error;

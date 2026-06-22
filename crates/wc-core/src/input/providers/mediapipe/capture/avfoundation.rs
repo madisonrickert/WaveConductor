@@ -13,8 +13,6 @@
 //! and lowers the *hardware* capture rate to [`IDLE_INFERENCE_HZ`] during the
 //! idle throttle through [`FrameSource::set_capture_throttle`]. The only state
 //! shared across the thread boundary is the `Arc<Mutex<LatestFrame>>`.
-#![allow(dead_code)]
-// backend wired into `open_camera_source` in Task 7.
 // This file is the macOS AVFoundation FFI boundary: it is the one place in
 // `wc-core` (besides the LeapC `unsafe impl`s) where the workspace
 // `unsafe_code = "deny"` lint is lifted. Every `unsafe` block below carries an
@@ -47,7 +45,7 @@ use super::super::worker::IDLE_INFERENCE_HZ;
 use super::{CaptureError, Frame, FrameSource};
 
 /// Single-slot latest-frame handoff: the `AVFoundation` delegate `store`s the
-/// newest BGRA frame; the worker drains it via `take_into`/`consume`. Behind an
+/// newest BGRA frame; the worker drains it via `take_raw`/`consume`. Behind an
 /// `Arc<Mutex<_>>` shared between the dispatch queue and the worker thread.
 #[derive(Default)]
 pub(super) struct LatestFrame {
@@ -71,23 +69,25 @@ impl LatestFrame {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// If a frame newer than `*last_gen` is present, repack it into `out`,
-    /// advance `*last_gen`, and return `true`. Else return `false`.
-    pub(super) fn take_into(&self, last_gen: &mut u64, out: &mut Frame) -> bool {
+    /// If a frame newer than `*last_gen` is present, swap its raw BGRA bytes
+    /// into `scratch` (reusing capacity), advance `*last_gen`, and return its
+    /// `(width, height, bytes_per_row)`. The caller repacks outside the lock.
+    ///
+    /// After the swap, `self.bgra` holds the old scratch buffer contents — the
+    /// next [`Self::store`] call does `clear()`+`extend_from_slice`, refilling
+    /// it with the new frame, so capacity is preserved on both sides. Returns
+    /// `None` (and leaves `scratch` unchanged) when no new frame is available.
+    pub(super) fn take_raw(
+        &mut self,
+        last_gen: &mut u64,
+        scratch: &mut Vec<u8>,
+    ) -> Option<(u32, u32, usize)> {
         if self.generation == *last_gen {
-            return false;
+            return None;
         }
-        out.width = self.width;
-        out.height = self.height;
-        bgra_to_rgb(
-            &self.bgra,
-            self.bytes_per_row,
-            self.width,
-            self.height,
-            &mut out.rgb,
-        );
+        std::mem::swap(&mut self.bgra, scratch);
         *last_gen = self.generation;
-        true
+        Some((self.width, self.height, self.bytes_per_row))
     }
 
     /// Like `take_into` but skips the repack — the worker's over-budget drain.
@@ -265,8 +265,11 @@ pub struct AvfFrameSource {
     _queue: DispatchRetained<DispatchQueue>,
     /// Shared single-slot frame handoff, written by the delegate.
     latest: Arc<Mutex<LatestFrame>>,
-    /// Last generation this source drained, advanced by `take_into`/`consume`.
+    /// Last generation this source drained, advanced by `take_raw`/`consume`.
     last_generation: u64,
+    /// Worker-owned scratch buffer for the raw BGRA swap; capacity is reused
+    /// across frames so the BGRA→RGB repack runs outside the lock.
+    scratch: Vec<u8>,
     /// The device's active-format default min frame duration, cached so the
     /// idle throttle can restore the full capture rate when it lifts.
     full_rate_min_frame_duration: CMTime,
@@ -398,6 +401,7 @@ impl AvfFrameSource {
             last_generation: 0,
             full_rate_min_frame_duration,
             format,
+            scratch: Vec::new(),
         })
     }
 }
@@ -408,11 +412,25 @@ impl FrameSource for AvfFrameSource {
     }
 
     fn next_frame(&mut self, out: &mut Frame) -> Result<bool, CaptureError> {
-        let slot = self
-            .latest
-            .lock()
-            .map_err(|_| CaptureError::Read("frame slot poisoned".into()))?;
-        Ok(slot.take_into(&mut self.last_generation, out))
+        // Lock held only for the raw-byte swap + dimension reads (a memcpy-
+        // equivalent). BGRA→RGB repack happens outside the lock so the
+        // delegate's capture queue is never blocked by the ~1 ms repack.
+        let dims = {
+            let mut slot = self
+                .latest
+                .lock()
+                .map_err(|_| CaptureError::Read("frame slot poisoned".into()))?;
+            slot.take_raw(&mut self.last_generation, &mut self.scratch)
+        };
+        match dims {
+            Some((w, h, bpr)) => {
+                out.width = w;
+                out.height = h;
+                bgra_to_rgb(&self.scratch, bpr, w, h, &mut out.rgb);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     fn discard_frame(&mut self) -> Result<bool, CaptureError> {
@@ -661,18 +679,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn store_then_take_into_produces_rgb_once() {
+    fn store_then_take_raw_produces_rgb_once() {
         let mut slot = LatestFrame::default();
         slot.store(&[10, 20, 30, 255], 1, 1, 4);
         let mut last = 0u64;
+        let mut scratch = Vec::new();
         let mut out = Frame::default();
-        assert!(
-            slot.take_into(&mut last, &mut out),
-            "first take sees new frame"
-        );
+        let dims = slot.take_raw(&mut last, &mut scratch);
+        assert!(dims.is_some(), "first take sees new frame");
+        let (w, h, bpr) = dims.expect("dims present");
+        out.width = w;
+        out.height = h;
+        bgra_to_rgb(&scratch, bpr, w, h, &mut out.rgb);
         assert_eq!(out.width, 1);
         assert_eq!(out.rgb, vec![30, 20, 10]);
-        assert!(!slot.take_into(&mut last, &mut out), "no new frame since");
+        // No new store: take_raw returns None.
+        assert!(
+            slot.take_raw(&mut last, &mut scratch).is_none(),
+            "no new frame since"
+        );
     }
 
     #[test]
@@ -681,9 +706,9 @@ mod tests {
         slot.store(&[1, 2, 3, 255], 1, 1, 4);
         let mut last = 0u64;
         assert!(slot.consume(&mut last), "consume sees the stored frame");
-        let mut out = Frame::default();
+        let mut scratch = Vec::new();
         assert!(
-            !slot.take_into(&mut last, &mut out),
+            slot.take_raw(&mut last, &mut scratch).is_none(),
             "consume already advanced the generation"
         );
     }
