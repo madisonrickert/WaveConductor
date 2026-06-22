@@ -31,6 +31,9 @@
 //!    `remove_sim_params` to free the entity tree and drop the
 //!    `ParticleSimParams` resource so its `Handle<ShaderBuffer>` clone is
 //!    released, allowing the GPU storage buffer ref-count to reach zero.
+//!    `LinePostParams` is also removed so the gravity-smear render system
+//!    no-ops outside Line (re-inserted by `insert_line_post_params` on
+//!    the next `OnEnter`).
 
 pub mod attractor_visuals;
 pub mod audio_coupling;
@@ -139,9 +142,17 @@ impl Plugin for LinePlugin {
         // (project performance rule: per-sketch resources are owned by an
         // entity tagged with the sketch's marker component, despawned on
         // `OnExit` to release resources).
+        //
+        // `insert_line_post_params` runs on `OnEnter` so the gravity-smear
+        // post-process shader uniforms exist while Line is active. Mirrors the
+        // `insert_dots_post_params` pattern in `crate::dots`.
         app.add_systems(
             OnEnter(AppState::Line),
-            (systems::spawn_line, enter_line_audio),
+            (
+                systems::spawn_line,
+                insert_line_post_params,
+                enter_line_audio,
+            ),
         );
         app.add_systems(
             OnExit(AppState::Line),
@@ -266,17 +277,16 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 /// Also drops [`systems::sim_params::LineSmearFocal`] so the next `OnEnter`
 /// re-seeds a centered focal instead of inheriting the last in-Line value.
 ///
-/// Resets [`post_process::LinePostParams`] to its `Default` (which has
-/// `g_constant = 0.0`) so the gravity-smear post-process is visually no-op
-/// outside `AppState::Line`. The `update_sim_params` system that writes the
-/// real per-frame uniform is gated by `sketch_active(AppState::Line)`, so
-/// without this reset the resource would retain its last in-Line value and
-/// the post-process would keep applying smear after leaving Line.
+/// Drops [`post_process::LinePostParams`] so the gravity-smear render system
+/// no-ops outside `AppState::Line` (the `Option<Res<LinePostParams>>` gate
+/// returns `None`). The resource is re-inserted by `insert_line_post_params`
+/// on the next `OnEnter(AppState::Line)`. Mirrors the `remove_dots_sim_params`
+/// pattern in `crate::dots`.
 fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::compute::ParticleSimParams>();
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<systems::sim_params::LineSmearFocal>();
-    commands.insert_resource(post_process::LinePostParams::default());
+    commands.remove_resource::<post_process::LinePostParams>();
 }
 
 /// How long the user must stop adjusting a `requires_restart` setting before
@@ -411,6 +421,19 @@ fn exit_line_audio(
     }
 }
 
+/// `OnEnter(AppState::Line)` -- insert [`post_process::LinePostParams`] with
+/// zeroed defaults. [`systems::update_sim_params`] and
+/// [`audio_coupling::drive_audio_and_shader`] overwrite all fields with live
+/// values on the first `Update` frame; the zeroed seed is only visible for one
+/// render frame before the Update chain runs.
+///
+/// The resource is removed on `OnExit(AppState::Line)` by `remove_sim_params`
+/// so the render system no-ops outside Line. Mirrors the
+/// `insert_dots_post_params` pattern in [`crate::dots`].
+fn insert_line_post_params(mut commands: Commands<'_, '_>) {
+    commands.insert_resource(post_process::LinePostParams::default());
+}
+
 /// Whether to register the gravity-smear post-process node. On unless
 /// `WC_DEBUG_DISABLE_SMEAR` is set. Always on in release (no [`DebugToggles`]).
 #[cfg(debug_assertions)]
@@ -465,14 +488,17 @@ mod tests {
         assert!(!should_register_bone_composite(Some(&no_comp)));
     }
 
-    /// `remove_sim_params` must drop `LineSmearFocal` on Line exit so a
-    /// re-entry's `spawn_line` re-seeds a fresh centered focal rather than
-    /// inheriting a stale off-center one (the resource-not-Local guarantee).
+    /// `remove_sim_params` must drop `LineSmearFocal` and `LinePostParams` on
+    /// Line exit so a re-entry's `spawn_line` re-seeds a fresh centered focal
+    /// rather than inheriting a stale off-center one (the resource-not-Local
+    /// guarantee), and so the gravity-smear render system no-ops outside
+    /// `AppState::Line` (the `Option<Res<LinePostParams>>` gate returns `None`).
     #[test]
-    fn remove_sim_params_drops_smear_focal() {
+    fn remove_sim_params_drops_smear_focal_and_post_params() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.insert_resource(systems::sim_params::LineSmearFocal(Vec2::new(123.0, 45.0)));
+        world.insert_resource(post_process::LinePostParams::default());
         world
             .run_system_once(remove_sim_params)
             .expect("remove_sim_params run");
@@ -481,6 +507,12 @@ mod tests {
                 .get_resource::<systems::sim_params::LineSmearFocal>()
                 .is_none(),
             "LineSmearFocal must be removed on Line exit"
+        );
+        assert!(
+            world
+                .get_resource::<post_process::LinePostParams>()
+                .is_none(),
+            "LinePostParams must be removed on Line exit so the render system no-ops outside AppState::Line"
         );
     }
 

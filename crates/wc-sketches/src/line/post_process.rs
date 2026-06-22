@@ -13,13 +13,15 @@
 //!
 //! ## Uniforms
 //!
-//! [`LinePostParams`] is populated each frame on the main thread by
-//! [`crate::line::systems::update_sim_params`] (which also writes the compute
-//! sim params). [`ExtractResourcePlugin`] mirrors it into the render world.
-//! A persistent uniform buffer is allocated once in
-//! [`PostProcessPipeline::from_world`]; each frame the node uploads the
-//! latest snapshot via `queue.write_buffer` — no per-frame GPU allocation.
-//! Mirrors the [`crate::particles::compute`] sim-params-buffer pattern.
+//! [`LinePostParams`] is inserted `OnEnter(AppState::Line)` by
+//! [`crate::line`] and removed `OnExit`. [`ExtractResourcePlugin`] mirrors it
+//! into the render world each frame. [`line_post_process`] takes
+//! `Option<Res<LinePostParams>>` and early-returns when the resource is absent,
+//! so the pass is a true no-op outside `AppState::Line`. A persistent uniform
+//! buffer is allocated once in [`PostProcessPipeline::from_world`]; each frame
+//! the node uploads the latest snapshot via `queue.write_buffer` -- no
+//! per-frame GPU allocation. Mirrors the [`crate::particles::compute`]
+//! sim-params-buffer pattern.
 //!
 //! ## Shader
 //!
@@ -73,14 +75,14 @@ pub struct LinePostParams {
     pub i_global_time: f32,
     /// Gravity constant `G` used by the smear ray-march. Modulated each
     /// frame in Line by [`crate::line::audio_coupling::drive_audio_and_shader`]
-    /// with a triangle-wave envelope × `(groupedUpness + 0.5) × 15000`.
+    /// with a triangle-wave envelope x `(groupedUpness + 0.5) x 15000`.
     ///
-    /// Default is `0.0` so the post-process is visually no-op outside
-    /// `AppState::Line`. `update_sim_params` (gated by `sketch_active(Line)`)
-    /// writes a placeholder value each frame; `drive_audio_and_shader`
-    /// overrides it with the ParticleStats-driven envelope.
-    /// `remove_sim_params` resets to default on `OnExit(Line)` so the next
-    /// state doesn't inherit the last in-Line value.
+    /// `update_sim_params` (gated by `sketch_active(Line)`) writes a
+    /// placeholder value each frame; `drive_audio_and_shader` overrides it
+    /// with the ParticleStats-driven envelope. The entire resource is absent
+    /// outside `AppState::Line` (removed by `remove_sim_params` on
+    /// `OnExit(Line)` and re-inserted by `insert_line_post_params` on
+    /// `OnEnter(Line)`), so the render system no-ops when not in Line.
     pub g_constant: f32,
     /// Per-channel gamma curve applied as the final step of the post-process.
     pub gamma: f32,
@@ -110,11 +112,17 @@ const POST_PARAMS_SIZE: NonZeroU64 =
 /// Plugin that registers the gravity-smear post-process node and its uniform
 /// resource. Adds [`ExtractResourcePlugin<LinePostParams>`] so the render
 /// world sees the latest uniforms each frame.
+///
+/// [`LinePostParams`] itself is **not** initialised globally by this plugin --
+/// it is inserted `OnEnter(AppState::Line)` and removed `OnExit` in
+/// [`crate::line`], so the render system no-ops outside Line (the
+/// `Option<Res<LinePostParams>>` gate returns `None`).
 pub struct LinePostProcessPlugin;
 
 impl Plugin for LinePostProcessPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LinePostParams>();
+        // The resource is NOT init'd here -- it is inserted per-sketch in
+        // line/mod.rs so the render system no-ops outside AppState::Line.
         app.add_plugins(ExtractResourcePlugin::<LinePostParams>::default());
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
