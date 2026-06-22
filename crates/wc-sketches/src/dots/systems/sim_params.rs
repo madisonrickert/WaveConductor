@@ -127,11 +127,6 @@ pub fn update_dots_sim_params(
     // hot path. Both advance in lockstep and are capped at MAX_ATTRACTORS (=8),
     // which fits in both types. Mirrors Line's `update_sim_params` loop exactly
     // (same threshold, same gravity bake, same cap).
-    #[allow(
-        clippy::as_conversions,
-        clippy::cast_possible_truncation,
-        reason = "slot/attractor_count are bounded by MAX_ATTRACTORS (=8); cast is provably lossless"
-    )]
     let mut slot = attractor_count as usize;
     for hand_attractor in &dots_hands {
         if hand_attractor.power.abs() <= 1e-2 {
@@ -148,15 +143,8 @@ pub fn update_dots_sim_params(
             // Unbounded pull (v4 parity).
             radius: 0.0,
         };
-        #[allow(
-            clippy::as_conversions,
-            clippy::cast_possible_truncation,
-            reason = "slot is bounded by MAX_ATTRACTORS (=8) before this point; cast is provably lossless"
-        )]
-        {
-            attractor_count += 1;
-            slot += 1;
-        }
+        attractor_count += 1;
+        slot += 1;
     }
 
     sim.params = SimParams {
@@ -457,6 +445,40 @@ mod tests {
         assert_eq!(
             sim.params.attractor_count, 0,
             "hand with power=0.005 (below 1e-2 threshold) must be skipped"
+        );
+    }
+
+    /// Spawning more than `MAX_ATTRACTORS` (8) active hands must clamp
+    /// `attractor_count` to exactly `MAX_ATTRACTORS` with no panic or
+    /// out-of-bounds write. Exercises the `if slot >= MAX_ATTRACTORS { break; }`
+    /// guard in the hand-append loop.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn hand_attractor_count_clamped_at_max_attractors() {
+        let mut world = setup_world(0.0, [0.0, 0.0]);
+        // Spawn MAX_ATTRACTORS + 2 hands (10 total) all above the power threshold.
+        for i in 0..=(MAX_ATTRACTORS + 1) {
+            world.spawn((
+                TrackedHand,
+                DotsHandAttractor {
+                    power: 0.5,
+                    position: Vec2::new(i as f32 * 10.0, 0.0),
+                },
+            ));
+        }
+
+        world
+            .run_system_once(update_dots_sim_params)
+            .expect("update_dots_sim_params run");
+
+        let sim = world.resource::<ParticleSimParams>();
+        assert_eq!(
+            sim.params.attractor_count, MAX_ATTRACTORS as u32,
+            "attractor_count must be clamped to MAX_ATTRACTORS={MAX_ATTRACTORS}, got {}",
+            sim.params.attractor_count
         );
     }
 }

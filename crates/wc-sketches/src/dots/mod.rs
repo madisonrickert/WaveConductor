@@ -29,7 +29,7 @@
 //!
 //! Mouse interaction (pointer/touch attractor) is wired in
 //! [`systems::update_dots_mouse_attractor`] / [`systems::decay_dots_mouse_attractor`]
-//! (Task 3). Hand attractors are wired in Plan D3.
+//! (Task 3). Hand attractors are wired in Plan D5.
 //!
 //! Audio coupling is wired in [`audio_coupling::drive_dots_audio`]: an
 //! attack/release activity envelope driven by [`systems::DotsMouseAttractorState::power`]

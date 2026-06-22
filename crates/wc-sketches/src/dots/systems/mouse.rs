@@ -75,7 +75,7 @@ pub const DOTS_MOUSE_POWER_PRESS: f32 = 1.0;
 /// fire so an attractor activated outside the panel and dragged over it still
 /// releases cleanly.
 ///
-/// Hand attractors for Dots are handled in Plan D3 (a separate system and
+/// Hand attractors for Dots are handled in Plan D5 (a separate system and
 /// attractor slot).
 pub fn update_dots_mouse_attractor(
     pointer: Res<'_, PointerState>,
