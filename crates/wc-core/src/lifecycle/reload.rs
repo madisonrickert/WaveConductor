@@ -1,9 +1,10 @@
 //! Sketch reload fade-overlay state machine.
 //!
-//! When a sketch needs to restart (e.g., `particle_density` changed via the
-//! settings panel), this module mediates the `Line → Home → Line` round-trip so
-//! the picker page is never visible and the transition is blacked-out with a
-//! smooth audio fade.
+//! When a sketch needs to restart (e.g., `particle_density` or `dot_spacing`
+//! changed via the settings panel), this module mediates the `sketch → Home →
+//! sketch` round-trip so the picker page is never visible and the transition is
+//! blacked-out with a smooth audio fade. The sketch to return to is carried in
+//! [`SketchReloadState::return_state`], so any sketch (not just Line) can drive it.
 //!
 //! ## Phases
 //!
@@ -16,19 +17,22 @@
 //!   each frame via `AudioCommand::SetMasterVolume`. After 200 ms the caller
 //!   triggers `NextState::set(Home)` and advances to `Switch`.
 //! - **Switch**: one frame in `Home` state. The picker is hidden (gated on
-//!   `phase == Idle`). The caller triggers `NextState::set(Line)` and advances
-//!   to `FadeIn`, recording a fresh `started_at`.
+//!   `phase == Idle`). The driver triggers `NextState::set(return_state)` (the
+//!   sketch that requested the restart) and advances to `FadeIn`, recording a
+//!   fresh `started_at`.
 //! - **`FadeIn`**: visual alpha lerps 1 → 0 over 200 ms; audio volume 0 → 1
 //!   each frame. After 200 ms phase returns to `Idle` and volume is restored
 //!   to `pre_fade_volume`.
 //!
 //! ## Data flow
 //!
-//! `restart_on_settings_change` (in `wc-sketches/src/line/mod.rs`):
-//! - Previously: `next.set(Home)` + `insert_resource(LineRestartPending)`.
-//! - Now: `reload_state.begin_fade_out(time, pre_fade_volume)` — stores
-//!   current master volume and starts the `FadeOut` phase. The `drive_reload_state`
-//!   system drives all subsequent phase transitions.
+//! Each sketch's `restart_on_*_settings_change` listener (e.g.
+//! `restart_on_settings_change` in `wc-sketches/src/line/mod.rs`,
+//! `restart_on_dots_settings_change` in `wc-sketches/src/dots/mod.rs`):
+//! - Calls `reload_state.begin_fade_out(time, pre_fade_volume, return_state)` —
+//!   stores the current master volume and the sketch to return to, and starts
+//!   the `FadeOut` phase. The `drive_reload_state` system drives all subsequent
+//!   phase transitions.
 //!
 //! `drive_reload_state` (registered by [`ReloadOverlayPlugin`]):
 //! - Runs each `Update` frame.
@@ -56,7 +60,7 @@ pub enum ReloadPhase {
     Idle,
     /// Fading to black + silencing audio. Duration: [`FADE_DURATION`].
     FadeOut,
-    /// One-frame pause in `Home` state while `NextState::Line` is armed.
+    /// One-frame pause in `Home` state while `NextState(return_state)` is armed.
     Switch,
     /// Fading back in from black + restoring audio. Duration: [`FADE_DURATION`].
     FadeIn,
