@@ -176,22 +176,6 @@ fn drive_line_attract(
     post.i_mouse_factor = 1.0 / 15.0;
 }
 
-/// Map the screensaver fade envelope, the velocity-tint strength knob, and the
-/// brightness-lift knob onto the material's `attract_color` uniform value
-/// (`x` = velocity-tint strength, `y` = brightness lift `mult − 1`, rest
-/// reserved). Both ride the fade so they ramp in/out with attract mode and are
-/// exactly zero (provable no-op) when hidden. Pure helper so the mapping is
-/// unit-testable without assets.
-#[must_use]
-fn attract_color_params(fade_alpha: f32, strength: f32, brightness: f32) -> Vec4 {
-    let fade = fade_alpha.clamp(0.0, 1.0);
-    // The shader applies `rgb *= 1.0 + y`, so the lift amount is `mult − 1`,
-    // ramped by the fade. `brightness <= 1.0` (or fade 0) leaves `y == 0`,
-    // a bit-exact no-op.
-    let lift = fade * (brightness.max(1.0) - 1.0);
-    Vec4::new(fade * strength.max(0.0), lift, 0.0, 0.0)
-}
-
 /// Drive [`ParticleMaterial::attract_color`] from the [`ScreensaverFade`]
 /// envelope × [`LineSettings::attract_color_strength`].
 ///
@@ -209,7 +193,7 @@ fn drive_attract_color(
     mut materials: ResMut<'_, Assets<ParticleMaterial>>,
     mut last: Local<'_, Vec4>,
 ) {
-    let target = attract_color_params(
+    let target = ParticleMaterial::attract_color_params(
         fade.alpha(),
         settings.attract_color_strength,
         settings.attract_brightness,
@@ -275,23 +259,42 @@ mod tests {
     fn attract_color_params_scales_and_clamps() {
         // Hidden (Active steady state): fade 0 → both channels exactly zero, so
         // the shader tint AND the brightness lift are provably inert.
-        assert_eq!(attract_color_params(0.0, 0.35, 2.2), Vec4::ZERO);
+        assert_eq!(
+            ParticleMaterial::attract_color_params(0.0, 0.35, 2.2),
+            Vec4::ZERO
+        );
         // Fully shown: x = the tint knob; y = brightness lift (mult − 1).
-        let full = attract_color_params(1.0, 0.35, 2.2);
+        let full = ParticleMaterial::attract_color_params(1.0, 0.35, 2.2);
         assert!((full.x - 0.35).abs() < 1e-6);
         assert!((full.y - 1.2).abs() < 1e-6, "lift should be brightness − 1");
         assert_eq!((full.z, full.w), (0.0, 0.0));
         // Mid-fade: both channels linear in the envelope.
-        let mid = attract_color_params(0.5, 0.35, 2.2);
+        let mid = ParticleMaterial::attract_color_params(0.5, 0.35, 2.2);
         assert!((mid.x - 0.175).abs() < 1e-6);
         assert!((mid.y - 0.6).abs() < 1e-6);
         // brightness 1.0 (lift off) → y is exactly zero even fully shown.
-        assert!(attract_color_params(1.0, 0.35, 1.0).y.abs() < 1e-6);
+        assert!(
+            ParticleMaterial::attract_color_params(1.0, 0.35, 1.0)
+                .y
+                .abs()
+                < 1e-6
+        );
         // brightness below 1.0 clamps to the no-op (never darkens).
-        assert!(attract_color_params(1.0, 0.35, 0.5).y.abs() < 1e-6);
+        assert!(
+            ParticleMaterial::attract_color_params(1.0, 0.35, 0.5)
+                .y
+                .abs()
+                < 1e-6
+        );
         // Out-of-range inputs clamp instead of inverting the tint/lift.
-        assert_eq!(attract_color_params(-1.0, 0.35, 2.2), Vec4::ZERO);
-        assert_eq!(attract_color_params(0.5, -2.0, 1.0), Vec4::ZERO);
+        assert_eq!(
+            ParticleMaterial::attract_color_params(-1.0, 0.35, 2.2),
+            Vec4::ZERO
+        );
+        assert_eq!(
+            ParticleMaterial::attract_color_params(0.5, -2.0, 1.0),
+            Vec4::ZERO
+        );
     }
 
     #[test]
