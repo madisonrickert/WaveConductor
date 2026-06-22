@@ -63,9 +63,10 @@ fn vertex(@builtin(vertex_index) idx: u32) -> VertexOutput {
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.uv;
 
-    // Spiral rotation matrix from v4: mat2(1.6,-1.2,1.2,1.6).
-    // Column-major in WGSL: mat2x2(col0, col1) = mat2x2(vec2(1.6,1.2), vec2(-1.2,1.6)).
-    let m2 = mat2x2<f32>(vec2<f32>(1.6, 1.2), vec2<f32>(-1.2, 1.6));
+    // Spiral rotation matrix from v4: GLSL mat2(1.6,-1.2,1.2,1.6) is column-major,
+    // so col0=(1.6,-1.2), col1=(1.2,1.6). WGSL mat2x2(col0, col1) is also
+    // column-major, so the faithful encoding matches v4 column-for-column.
+    let m2 = mat2x2<f32>(vec2<f32>(1.6, -1.2), vec2<f32>(1.2, 1.6));
 
     var center = params.i_mouse;
     let original = textureSampleLevel(scene_tex, scene_sampler, uv, 0.0);
