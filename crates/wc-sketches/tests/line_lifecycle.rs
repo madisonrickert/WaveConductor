@@ -111,12 +111,12 @@ fn exit_line_despawns_root_marker() {
 
 #[test]
 fn update_sim_params_does_not_run_when_idle() {
-    use wc_sketches::line::compute::LineSimParams;
+    use wc_sketches::particles::compute::ParticleSimParams;
 
     let mut app = sketches_test_app();
     app.update();
 
-    // Enter Line and let a couple frames run so LineSimParams is populated.
+    // Enter Line and let a couple frames run so ParticleSimParams is populated.
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Line);
@@ -153,7 +153,7 @@ fn update_sim_params_does_not_run_when_idle() {
     // settle-frame and verify it doesn't change on subsequent idle frames.
     let dt_before = app
         .world()
-        .get_resource::<LineSimParams>()
+        .get_resource::<ParticleSimParams>()
         .map_or(0.0_f32, |p| p.params.dt);
 
     // One more update once we're firmly in Idle. This is the frame where
@@ -162,7 +162,7 @@ fn update_sim_params_does_not_run_when_idle() {
 
     let dt_after = app
         .world()
-        .get_resource::<LineSimParams>()
+        .get_resource::<ParticleSimParams>()
         .map_or(0.0_f32, |p| p.params.dt);
 
     // Intentional bit-for-bit equality: if the system did not run, the value
@@ -225,7 +225,7 @@ fn idle_veto_keeps_line_active_during_attractor_decay() {
 
 #[test]
 fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
-    use wc_sketches::line::compute::LineSimParams;
+    use wc_sketches::particles::compute::ParticleSimParams;
     use wc_sketches::line::settings::LineSettings;
     use wc_sketches::line::systems::MouseAttractorState;
 
@@ -259,8 +259,8 @@ fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
 
     let sim = app
         .world()
-        .get_resource::<LineSimParams>()
-        .expect("LineSimParams should be inserted by spawn_line");
+        .get_resource::<ParticleSimParams>()
+        .expect("ParticleSimParams should be inserted by spawn_line");
     assert_eq!(
         sim.params.attractor_count, 1,
         "active mouse should populate one attractor slot"

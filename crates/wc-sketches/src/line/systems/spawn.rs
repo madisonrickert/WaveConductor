@@ -5,7 +5,7 @@
 //! [`crate::line::settings::LineSettings::spawn_template`] is non-empty),
 //! builds a flat quad mesh (`count × 6` vertices for the vertex-index-driven
 //! render shader), spawns the render entity under [`LineRoot`], inserts
-//! [`crate::line::compute::LineSimParams`] for the render world, and seeds
+//! [`crate::particles::compute::ParticleSimParams`] for the render world, and seeds
 //! the CPU mirror with the same particle state for Plan 9's `ParticleStats`.
 
 #![allow(
@@ -24,7 +24,7 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bytemuck::cast_slice;
 
-use crate::line::compute::LineSimParams;
+use crate::particles::compute::ParticleSimParams;
 use crate::line::hash::{hash_to_unit, wang_hash};
 use crate::line::heatmap::sample_from_heatmap;
 use crate::line::material::LineMaterial;
@@ -102,7 +102,7 @@ pub(crate) fn make_particle(index: u32, x: f32, y: f32, spawn_color: f32) -> Par
 ///
 /// Allocates the particle storage buffer, constructs a flat quad mesh
 /// (`count × 6` vertices for the vertex-index-driven render shader), spawns
-/// the render entity under [`LineRoot`], inserts [`LineSimParams`] for the
+/// the render entity under [`LineRoot`], inserts [`ParticleSimParams`] for the
 /// render world to extract each frame, and seeds the CPU mirror with the
 /// same particle state.
 ///
@@ -282,8 +282,8 @@ pub fn spawn_line(
         particles: initial.clone(),
     });
 
-    // Install LineSimParams — the render world extracts this each frame.
-    commands.insert_resource(LineSimParams {
+    // Install ParticleSimParams — the render world extracts this each frame.
+    commands.insert_resource(ParticleSimParams {
         params: SimParams::default(),
         particles_handle,
         particle_count: count,

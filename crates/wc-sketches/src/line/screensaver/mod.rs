@@ -8,7 +8,7 @@
 //!
 //! ## What it writes
 //!
-//! 1. **`LineSimParams.params`** — the normal `update_sim_params` writer is
+//! 1. **`ParticleSimParams.params`** — the normal `update_sim_params` writer is
 //!    gated on `Active` and does not run here, so this is the param *producer*
 //!    during attract. It builds the attractor array from
 //!    [`choreography::attract_frame`] (the "Wandering Pulses" composition: three
@@ -59,7 +59,7 @@ use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
 
-use crate::line::compute::LineSimParams;
+use crate::particles::compute::ParticleSimParams;
 use crate::line::material::LineMaterial;
 use crate::particles::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
@@ -103,7 +103,7 @@ impl Plugin for LineScreensaverPlugin {
     }
 }
 
-/// Drive `LineSimParams.params` + `LinePostParams` from the choreography frame.
+/// Drive `ParticleSimParams.params` + `LinePostParams` from the choreography frame.
 ///
 /// Builds the attractor array (the wandering pulse points) plus the noise
 /// turbulence, bakes the sim params via the shared baker (A1), and writes the
@@ -116,7 +116,7 @@ fn drive_line_attract(
     time: Res<'_, Time>,
     settings: Res<'_, LineSettings>,
     window: Single<'_, '_, &Window>,
-    mut sim: ResMut<'_, LineSimParams>,
+    mut sim: ResMut<'_, ParticleSimParams>,
     mut post: ResMut<'_, LinePostParams>,
 ) {
     let geom = WindowGeom::from_window(&window);

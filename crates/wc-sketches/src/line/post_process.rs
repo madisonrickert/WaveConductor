@@ -19,7 +19,7 @@
 //! A persistent uniform buffer is allocated once in
 //! [`PostProcessPipeline::from_world`]; each frame the node uploads the
 //! latest snapshot via `queue.write_buffer` — no per-frame GPU allocation.
-//! Mirrors the [`crate::line::compute`] sim-params-buffer pattern.
+//! Mirrors the [`crate::particles::compute`] sim-params-buffer pattern.
 //!
 //! ## Shader
 //!
@@ -98,7 +98,7 @@ pub struct LinePostParams {
 
 /// Compile-time validated `LinePostParams` size for the uniform bind-group
 /// entry — mirrors the `SIM_PARAMS_SIZE` pattern in
-/// [`crate::line::compute`]. Since `LinePostParams` has fields it is
+/// [`crate::particles::compute`]. Since `LinePostParams` has fields it is
 /// non-zero-sized; the `panic!` branch is unreachable at runtime because it
 /// lives inside a `const` block.
 const POST_PARAMS_SIZE: NonZeroU64 =
@@ -157,8 +157,8 @@ pub struct PostProcessPipeline {
     /// Allocated once with `UNIFORM | COPY_DST` and updated each frame via
     /// `queue.write_buffer` in [`line_post_process`] — avoids a GPU
     /// buffer allocation every frame that `create_buffer_with_data` would
-    /// incur. Mirrors `LinePipeline::sim_params_buffer` in
-    /// [`crate::line::compute`].
+    /// incur. Mirrors `ParticlePipeline::sim_params_buffer` in
+    /// [`crate::particles::compute`].
     pub post_params_buffer: Buffer,
 }
 

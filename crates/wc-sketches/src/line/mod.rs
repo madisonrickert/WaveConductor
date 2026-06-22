@@ -4,11 +4,11 @@
 //!
 //! 1. `OnEnter(AppState::Line)` runs [`systems::spawn_line`]: allocates the
 //!    particle storage buffer, spawns the render entity under [`LineRoot`],
-//!    installs [`compute::LineSimParams`], and seeds [`sim_cpu::LineCpuMirror`]
+//!    installs [`crate::particles::compute::ParticleSimParams`], and seeds [`sim_cpu::LineCpuMirror`]
 //!    with the initial particle layout (spawn-time snapshot for heatmap tests).
 //! 2. Every `Update` while `sketch_active(AppState::Line)` is true:
 //!    - a. [`systems::update_sim_params`] writes the current pointer position +
-//!      `LineSettings` values into `LineSimParams`.
+//!      `LineSettings` values into `ParticleSimParams`.
 //!    - b. [`particle_stats::update_particle_stats`] reads
 //!      [`systems::MouseAttractorState`] and [`Time`], populating
 //!      [`particle_stats::ParticleStats`] via smoothed CPU envelopes (Plan 11
@@ -21,22 +21,21 @@
 //!      to full; after any release (click or grab) the tail decays through
 //!      both the drive and the `grouped_upness` envelope — a deliberately
 //!      somewhat faster post-release tail than the envelope alone.
-//! 3. The render world extracts `LineSimParams` and dispatches the compute
-//!    pipeline (`assets/shaders/line/simulate.wgsl`) which updates the
+//! 3. The render world extracts `ParticleSimParams` and dispatches the compute
+//!    pipeline (`assets/shaders/particles/simulate.wgsl`) which updates the
 //!    storage buffer in place.
 //! 4. Bevy's 2D render path consumes the same storage buffer through
 //!    [`material::LineMaterial`] and draws a quad per particle via the
 //!    vertex-index-driven `assets/shaders/line/render.wgsl`.
 //! 5. `OnExit(AppState::Line)` runs `despawn_with::<LineRoot>` and
 //!    `remove_sim_params` to free the entity tree and drop the
-//!    `LineSimParams` resource so its `Handle<ShaderBuffer>` clone is
+//!    `ParticleSimParams` resource so its `Handle<ShaderBuffer>` clone is
 //!    released, allowing the GPU storage buffer ref-count to reach zero.
 
 pub mod attractor_visuals;
 pub mod audio_coupling;
 pub mod bone_composite;
 pub mod bone_wireframe;
-pub mod compute;
 pub mod hand_mesh;
 pub mod hash;
 pub mod heatmap;
@@ -96,7 +95,7 @@ impl Plugin for LinePlugin {
         app.add_plugins(Material2dPlugin::<material::LineMaterial>::default());
 
         // Wire the compute pipeline.
-        app.add_plugins(compute::LineComputePlugin);
+        app.add_plugins(crate::particles::compute::ParticleComputePlugin);
 
         // Wire the gravity-smear post-process render-graph node. In debug
         // builds, `WC_DEBUG_DISABLE_SMEAR` skips it for render-stage isolation.
@@ -237,7 +236,7 @@ impl Plugin for LinePlugin {
 ///
 /// Factored out of [`LinePlugin::build`] so it is independently unit-testable
 /// without `LinePlugin`'s rendering dependencies (`Material2dPlugin`,
-/// `LineComputePlugin`, `LinePostProcessPlugin` all require a full `RenderApp`
+/// `ParticleComputePlugin`, `LinePostProcessPlugin` all require a full `RenderApp`
 /// that `MinimalPlugins` does not provide).
 ///
 /// The `AssetServer` load is async; the picker renders the tile as soon as the
@@ -261,7 +260,7 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 
 /// `OnExit(AppState::Line)` companion to [`systems::spawn_line`].
 ///
-/// Drops the `LineSimParams` resource so its `Handle<ShaderBuffer>`
+/// Drops the `ParticleSimParams` resource so its `Handle<ShaderBuffer>`
 /// clone is freed and the GPU storage buffer's ref-count reaches zero,
 /// releasing VRAM on each Enter/Exit cycle. Also drops the CPU mirror so its
 /// per-particle `Vec` is freed; `spawn_line` re-inserts a fresh snapshot on
@@ -278,7 +277,7 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 /// without this reset the resource would retain its last in-Line value and
 /// the post-process would keep applying smear after leaving Line.
 fn remove_sim_params(mut commands: Commands<'_, '_>) {
-    commands.remove_resource::<compute::LineSimParams>();
+    commands.remove_resource::<crate::particles::compute::ParticleSimParams>();
     commands.remove_resource::<sim_cpu::LineCpuMirror>();
     commands.remove_resource::<systems::sim_params::LineSmearFocal>();
     commands.insert_resource(post_process::LinePostParams::default());

@@ -1,11 +1,11 @@
-//! Per-frame writer for [`crate::line::compute::LineSimParams`].
+//! Per-frame writer for [`crate::particles::compute::ParticleSimParams`].
 //!
 //! Populates the attractor array (mouse at index 0 when active), bakes the
 //! pulling/inertial drag constants against the v4 fixed-dt, derives the
 //! size-scaled gravity multiplier from the window width, and writes the
 //! constrain-to-box bounds. The render world extracts
-//! [`crate::line::compute::LineSimParams`] each frame so the compute shader
-//! sees up-to-date values.
+//! [`crate::particles::compute::ParticleSimParams`] each frame so the compute
+//! shader sees up-to-date values.
 
 #![allow(
     clippy::as_conversions,
@@ -17,7 +17,7 @@
 use bevy::prelude::*;
 use wc_core::input::entity::TrackedHand;
 
-use crate::line::compute::LineSimParams;
+use crate::particles::compute::ParticleSimParams;
 use crate::line::leap_attractors::LineHandAttractor;
 use crate::particles::particle::{Attractor, SimParams, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
@@ -306,7 +306,7 @@ pub fn update_sim_params(
     window: Single<'_, '_, &Window>,
     mouse: Res<'_, MouseAttractorState>,
     line_hands: Query<'_, '_, &LineHandAttractor, With<TrackedHand>>,
-    mut sim: ResMut<'_, LineSimParams>,
+    mut sim: ResMut<'_, ParticleSimParams>,
     mut post: ResMut<'_, LinePostParams>,
     mut focal: ResMut<'_, LineSmearFocal>,
 ) {
@@ -451,7 +451,7 @@ mod tests {
             power: 0.0,
             position: [200.0, 100.0],
         });
-        world.insert_resource(LineSimParams {
+        world.insert_resource(ParticleSimParams {
             params: SimParams::default(),
             particles_handle: Handle::default(),
             particle_count: 0,
@@ -494,7 +494,7 @@ mod tests {
             power: 0.0,
             position: [0.0, 0.0],
         });
-        world.insert_resource(LineSimParams {
+        world.insert_resource(ParticleSimParams {
             params: SimParams::default(),
             particles_handle: Handle::default(),
             particle_count: 0,

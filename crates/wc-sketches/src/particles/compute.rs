@@ -1,18 +1,18 @@
-//! Compute pipeline for Line particle simulation.
+//! Shared compute pipeline for particle simulation.
 //!
 //! Architecture mirrors Bevy 0.18's `compute_shader_game_of_life` example:
 //!
-//! - [`LineComputePlugin`] extracts sim params into the render world and
+//! - [`ParticleComputePlugin`] extracts sim params into the render world and
 //!   registers a render system that dispatches the compute shader each frame.
-//! - [`LineSimParams`] is extracted from the main world via
+//! - [`ParticleSimParams`] is extracted from the main world via
 //!   [`ExtractResourcePlugin`] and carries the per-frame uniform + the
 //!   `ShaderBuffer` handle for the particle array.
-//! - [`LinePipeline`] is initialized in [`RenderStartup`] and caches the
+//! - [`ParticlePipeline`] is initialized in [`RenderStartup`] and caches the
 //!   `BindGroupLayoutDescriptor` + `CachedComputePipelineId`.
 //! - `prepare_bind_group` runs in [`RenderSystems::PrepareBindGroups`] and
-//!   builds the per-frame [`LineComputeBindGroup`].
-//! - `line_compute` (private) dispatches the compute pass; it runs in the root
-//!   `RenderGraph` schedule, ordered before `camera_driver`.
+//!   builds the per-frame [`ParticleComputeBindGroup`].
+//! - `particle_compute` (private) dispatches the compute pass; it runs in the
+//!   root `RenderGraph` schedule, ordered before `camera_driver`.
 //!
 //! # Bind group layout (matches `simulate.wgsl`)
 //!
@@ -41,7 +41,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQue
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use crate::particles::particle::SimParams;
+use super::particle::SimParams;
 
 /// Workgroup size must match `@workgroup_size(64)` in `simulate.wgsl`.
 const WORKGROUP_SIZE: u32 = 64;
@@ -61,25 +61,25 @@ const SIM_PARAMS_SIZE: NonZeroU64 = match NonZeroU64::new(std::mem::size_of::<Si
     None => panic!("SimParams must be non-zero-sized"),
 };
 
-/// Plugin that wires the compute pipeline into the render world.
-pub struct LineComputePlugin;
+/// Plugin that wires the shared particle compute pipeline into the render world.
+pub struct ParticleComputePlugin;
 
-impl Plugin for LineComputePlugin {
+impl Plugin for ParticleComputePlugin {
     fn build(&self, app: &mut App) {
-        // Extract LineSimParams from the main world into the render world each frame.
-        app.add_plugins(ExtractResourcePlugin::<LineSimParams>::default());
+        // Extract ParticleSimParams from the main world into the render world each frame.
+        app.add_plugins(ExtractResourcePlugin::<ParticleSimParams>::default());
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
         render_app
-            .add_systems(RenderStartup, init_line_pipeline)
+            .add_systems(RenderStartup, init_particle_pipeline)
             .add_systems(
                 Render,
                 prepare_bind_group
                     .in_set(RenderSystems::PrepareBindGroups)
-                    .run_if(resource_exists::<LineSimParams>),
+                    .run_if(resource_exists::<ParticleSimParams>),
             );
 
         // Run the compute dispatch in the root `RenderGraph` schedule, before
@@ -87,7 +87,7 @@ impl Plugin for LineComputePlugin {
         // is updated before any 2D pass reads it. (Bevy 0.19 replaced the
         // trait-based render graph with systems; see the migration guide's
         // "Render Graph as Systems".)
-        render_app.add_systems(RenderGraph, line_compute.before(camera_driver));
+        render_app.add_systems(RenderGraph, particle_compute.before(camera_driver));
     }
 }
 
@@ -95,7 +95,7 @@ impl Plugin for LineComputePlugin {
 ///
 /// Carries the per-frame simulation parameters and the GPU buffer handle.
 #[derive(Resource, Clone, ExtractResource)]
-pub struct LineSimParams {
+pub struct ParticleSimParams {
     /// Per-frame uniforms (dt, drag, attractor position, etc.).
     pub params: SimParams,
     /// Handle to the particle storage buffer (shared with `LineMaterial`).
@@ -106,7 +106,7 @@ pub struct LineSimParams {
 
 /// Cached compute pipeline state. Initialized once in [`RenderStartup`].
 #[derive(Resource)]
-pub struct LinePipeline {
+pub struct ParticlePipeline {
     /// Descriptor retained so `prepare_bind_group` can retrieve the
     /// `BindGroupLayout` from the `PipelineCache` without storing the layout
     /// object separately.
@@ -122,21 +122,21 @@ pub struct LinePipeline {
 }
 
 /// Per-frame bind group built by the `prepare_bind_group` system (private to
-/// this module) and consumed by `line_compute` during the render schedule.
+/// this module) and consumed by `particle_compute` during the render schedule.
 #[derive(Resource)]
-pub struct LineComputeBindGroup {
+pub struct ParticleComputeBindGroup {
     /// Bind group with `SimParams` uniform (binding 0) and particle buffer (binding 1).
     pub bind_group: bevy::render::render_resource::BindGroup,
     /// Workgroup count: `ceil(particle_count / WORKGROUP_SIZE)`.
     pub dispatch_size: u32,
 }
 
-/// Initializes [`LinePipeline`] in the render world startup schedule.
+/// Initializes [`ParticlePipeline`] in the render world startup schedule.
 ///
 /// This runs once when the render world is first set up. Runs in
 /// [`RenderStartup`] rather than via `FromWorld` because it needs
 /// `AssetServer`, `PipelineCache`, and `RenderDevice` as system params.
-fn init_line_pipeline(
+fn init_particle_pipeline(
     mut commands: Commands<'_, '_>,
     asset_server: Res<'_, AssetServer>,
     pipeline_cache: Res<'_, PipelineCache>,
@@ -146,7 +146,7 @@ fn init_line_pipeline(
     // don't depend on encase::ShaderType for SimParams (we use bytemuck instead).
     // SIM_PARAMS_SIZE is validated at compile time, so no runtime branch.
     let bind_group_layout_descriptor = BindGroupLayoutDescriptor::new(
-        "line_compute_bgl",
+        "particle_compute_bgl",
         &[
             // binding 0 — SimParams uniform buffer
             BindGroupLayoutEntry {
@@ -173,10 +173,10 @@ fn init_line_pipeline(
         ],
     );
 
-    let shader = asset_server.load::<bevy::shader::Shader>("shaders/line/simulate.wgsl");
+    let shader = asset_server.load::<bevy::shader::Shader>("shaders/particles/simulate.wgsl");
 
     let pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some(Cow::from("line_compute_pipeline")),
+        label: Some(Cow::from("particle_compute_pipeline")),
         layout: vec![bind_group_layout_descriptor.clone()],
         shader,
         entry_point: Some(Cow::from("main")),
@@ -186,13 +186,13 @@ fn init_line_pipeline(
     // Allocate the SimParams uniform buffer once. Each frame `prepare_bind_group`
     // uploads new data via `queue.write_buffer` — no per-frame allocation.
     let sim_params_buffer = render_device.create_buffer(&BufferDescriptor {
-        label: Some("line_sim_params_uniform"),
-        size: std::mem::size_of::<crate::particles::particle::SimParams>() as u64,
+        label: Some("particle_sim_params_uniform"),
+        size: std::mem::size_of::<super::particle::SimParams>() as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    commands.insert_resource(LinePipeline {
+    commands.insert_resource(ParticlePipeline {
         bind_group_layout_descriptor,
         pipeline_id,
         sim_params_buffer,
@@ -202,16 +202,16 @@ fn init_line_pipeline(
 /// Builds the per-frame bind group for the compute dispatch.
 ///
 /// Uploads [`SimParams`] into the persistent uniform buffer on
-/// [`LinePipeline`] via `queue.write_buffer` — no per-frame GPU allocation.
+/// [`ParticlePipeline`] via `queue.write_buffer` — no per-frame GPU allocation.
 /// Retrieves the GPU particle buffer via `RenderAssets<GpuShaderBuffer>`.
 fn prepare_bind_group(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
     render_queue: Res<'_, RenderQueue>,
     pipeline_cache: Res<'_, PipelineCache>,
-    sim: Res<'_, LineSimParams>,
+    sim: Res<'_, ParticleSimParams>,
     buffers: Res<'_, RenderAssets<GpuShaderBuffer>>,
-    pipeline: Option<Res<'_, LinePipeline>>,
+    pipeline: Option<Res<'_, ParticlePipeline>>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
@@ -233,7 +233,7 @@ fn prepare_bind_group(
         pipeline_cache.get_bind_group_layout(&pipeline.bind_group_layout_descriptor);
 
     let bind_group = render_device.create_bind_group(
-        "line_compute_bind_group",
+        "particle_compute_bind_group",
         &layout,
         &[
             BindGroupEntry {
@@ -248,20 +248,20 @@ fn prepare_bind_group(
     );
 
     let dispatch_size = sim.particle_count.div_ceil(WORKGROUP_SIZE);
-    commands.insert_resource(LineComputeBindGroup {
+    commands.insert_resource(ParticleComputeBindGroup {
         bind_group,
         dispatch_size,
     });
 }
 
-/// Render system that dispatches the Line compute shader each frame.
+/// Render system that dispatches the particle compute shader each frame.
 ///
 /// Runs in the root [`RenderGraph`] schedule before `camera_driver`, so the
 /// particle storage buffer is updated before any 2D pass reads it. A no-op when
 /// the bind group or pipeline isn't ready (sketch inactive / still compiling).
-fn line_compute(
-    bind_group: Option<Res<'_, LineComputeBindGroup>>,
-    pipeline_res: Option<Res<'_, LinePipeline>>,
+fn particle_compute(
+    bind_group: Option<Res<'_, ParticleComputeBindGroup>>,
+    pipeline_res: Option<Res<'_, ParticlePipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
     mut render_context: RenderContext<'_, '_>,
 ) {
@@ -279,7 +279,7 @@ fn line_compute(
     let mut pass = render_context
         .command_encoder()
         .begin_compute_pass(&ComputePassDescriptor {
-            label: Some("line_compute_pass"),
+            label: Some("particle_compute_pass"),
             timestamp_writes: None,
         });
     pass.set_pipeline(compute_pipeline);

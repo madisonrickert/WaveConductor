@@ -32,7 +32,7 @@ use bevy::render::storage::ShaderBuffer;
 use bevy::sprite_render::MeshMaterial2d;
 use bytemuck::cast_slice;
 
-use crate::line::compute::LineSimParams;
+use crate::particles::compute::ParticleSimParams;
 use crate::line::heatmap::sample_from_heatmap;
 use crate::line::material::LineMaterial;
 use crate::particles::particle::Particle;
@@ -75,7 +75,7 @@ pub fn position_fields_changed(a: &TemplateAdjustments, b: &TemplateAdjustments)
 pub fn reseed_on_adjustments_change(
     adjustments: Res<'_, LineTemplateAdjustments>,
     settings: Res<'_, LineSettings>,
-    sim: Option<Res<'_, LineSimParams>>,
+    sim: Option<Res<'_, ParticleSimParams>>,
     window: Single<'_, '_, &Window>,
     mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
     // The render buffer is *recreated* on re-upload (Bevy's ShaderBuffer

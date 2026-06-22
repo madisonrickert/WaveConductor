@@ -5,12 +5,12 @@
 //!
 //! - [`spawn`] — `OnEnter(AppState::Line)` spawn system plus the [`LineRoot`]
 //!   marker component. Allocates the particle storage buffer, builds the quad
-//!   mesh, installs [`crate::line::compute::LineSimParams`] for the render
-//!   world, and seeds the CPU mirror.
+//!   mesh, installs [`crate::particles::compute::ParticleSimParams`] for the
+//!   render world, and seeds the CPU mirror.
 //! - [`mouse`] — Pointer-driven attractor lifecycle. Tracks button transitions,
 //!   updates [`mouse::MouseAttractorState`], and decays the attractor's power
 //!   each frame so the pull fades smoothly after release.
-//! - [`sim_params`] — Per-frame writer for [`crate::line::compute::LineSimParams`].
+//! - [`sim_params`] — Per-frame writer for [`crate::particles::compute::ParticleSimParams`].
 //!   Bakes the v4-parity drag constants, derives the size-scaled gravity
 //!   multiplier from the window width, and publishes the attractor array
 //!   alongside the constrain-to-box bounds. The param-baking core is factored

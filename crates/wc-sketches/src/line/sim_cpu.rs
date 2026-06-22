@@ -46,7 +46,7 @@ pub struct LineCpuMirror {
 /// in their own `App` builder.
 pub fn step_cpu_mirror(
     mut mirror: ResMut<'_, LineCpuMirror>,
-    sim: Res<'_, super::compute::LineSimParams>,
+    sim: Res<'_, crate::particles::compute::ParticleSimParams>,
 ) {
     let params = sim.params;
     for p in &mut mirror.particles {

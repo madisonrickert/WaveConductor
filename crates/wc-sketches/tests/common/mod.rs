@@ -133,7 +133,7 @@ pub fn sketches_test_app() -> App {
     app.add_plugins(wc_core::settings::SettingsPlugin);
 
     // LinePlugin registers LineSettings, Material2dPlugin (gracefully no-ops
-    // render setup without RenderApp), LineComputePlugin (same), and wires
+    // render setup without RenderApp), ParticleComputePlugin (same), and wires
     // OnEnter / OnExit systems.
     app.add_plugins(LinePlugin);
 

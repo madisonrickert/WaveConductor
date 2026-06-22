@@ -29,7 +29,7 @@ use wc_core::input::providers::mock::MockProvider;
 use wc_core::input::state::{FusedHandFrame, HandTrackingFrame};
 use wc_core::input::systems::{fuse_hand_frames, poll_all_providers, sync_hand_entities};
 use wc_core::lifecycle::state::{AppState, SketchActivity};
-use wc_sketches::line::compute::LineSimParams;
+use wc_sketches::particles::compute::ParticleSimParams;
 use wc_sketches::line::leap_attractors::{LineHandAttractor, LINE_HAND_DECAY_SPEED};
 use wc_sketches::line::systems::MouseAttractorState;
 
@@ -102,8 +102,8 @@ fn sim_params_records_one_attractor_after_press() {
 
     let sim = app
         .world()
-        .get_resource::<LineSimParams>()
-        .expect("LineSimParams should exist after entering Line");
+        .get_resource::<ParticleSimParams>()
+        .expect("ParticleSimParams should exist after entering Line");
     assert_eq!(
         sim.params.attractor_count, 1,
         "one mouse attractor should be active immediately after press"
