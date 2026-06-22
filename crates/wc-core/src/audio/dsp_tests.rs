@@ -312,3 +312,106 @@ fn background_volume_key_works_with_no_active_synth() {
     host.render(&mut buffer);
     assert!(buffer.iter().all(|s| s.abs() < f32::EPSILON));
 }
+
+// ----- Dots synth dispatch tests -----
+
+#[test]
+fn add_dots_synth_activates() {
+    let mut host = DspHost::new(48_000, 2, Vec::new());
+    assert!(!host.dots_synth_active());
+    host.apply(AudioCommand::AddDotsSynth);
+    assert!(host.dots_synth_active());
+}
+
+#[test]
+fn add_dots_synth_is_idempotent() {
+    let mut host = DspHost::new(48_000, 2, Vec::new());
+    host.apply(AudioCommand::AddDotsSynth);
+    // Set a param so we can detect whether the synth was replaced
+    // (a replacement resets params to defaults).
+    host.apply(AudioCommand::SetDotsParam {
+        key: "bandpass_freq",
+        value: 4242.0,
+    });
+    // Second add must be a no-op; the slot must still be active.
+    host.apply(AudioCommand::AddDotsSynth);
+    assert!(host.dots_synth_active());
+}
+
+#[test]
+fn remove_dots_synth_is_idempotent() {
+    let mut host = DspHost::new(48_000, 2, Vec::new());
+    // Remove with nothing active should be a no-op.
+    host.apply(AudioCommand::RemoveDotsSynth);
+    assert!(!host.dots_synth_active());
+    host.apply(AudioCommand::AddDotsSynth);
+    host.apply(AudioCommand::RemoveDotsSynth);
+    host.apply(AudioCommand::RemoveDotsSynth);
+    assert!(!host.dots_synth_active());
+}
+
+#[test]
+fn add_dots_then_set_param_then_remove_sequence() {
+    let mut host = DspHost::new(48_000, 2, Vec::new());
+    host.apply(AudioCommand::AddDotsSynth);
+    assert!(host.dots_synth_active());
+    // SetDotsParam must not panic with an active synth.
+    host.apply(AudioCommand::SetDotsParam {
+        key: "volume",
+        value: 0.5,
+    });
+    host.apply(AudioCommand::SetDotsParam {
+        key: "bandpass_freq",
+        value: 300.0,
+    });
+    host.apply(AudioCommand::SetDotsParam {
+        key: "lfo_depth",
+        value: 18.0,
+    });
+    // Render a buffer to exercise the render path.
+    let mut buf = vec![0.0_f32; 256];
+    host.render(&mut buf);
+    host.apply(AudioCommand::RemoveDotsSynth);
+    assert!(!host.dots_synth_active());
+    // After removal the render path must produce silence.
+    let mut silent = vec![1.0_f32; 64];
+    host.render(&mut silent);
+    assert!(
+        silent.iter().all(|s| s.abs() < f32::EPSILON),
+        "expected silence after RemoveDotsSynth"
+    );
+}
+
+#[test]
+fn set_dots_param_with_no_synth_does_not_panic() {
+    let mut host = DspHost::new(48_000, 2, Vec::new());
+    // No synth active; SetDotsParam should warn-and-drop, never panic.
+    host.apply(AudioCommand::SetDotsParam {
+        key: "volume",
+        value: 1.0,
+    });
+    assert!(!host.dots_synth_active());
+}
+
+#[test]
+fn dots_synth_produces_audio_after_volume_set() {
+    let mut host = DspHost::new(48_000, 2, Vec::new());
+    host.apply(AudioCommand::AddDotsSynth);
+    host.apply(AudioCommand::SetDotsParam {
+        key: "volume",
+        value: 1.0,
+    });
+    host.apply(AudioCommand::SetDotsParam {
+        key: "bandpass_freq",
+        value: 300.0,
+    });
+    // Render enough samples for the follow(0.016) smoothers to ramp up.
+    // 48 000 × 0.05 s = 2 400 samples; use stereo (× 2).
+    let mut buffer = vec![0.0_f32; 2_400 * 2];
+    host.render(&mut buffer);
+    let max_abs = buffer.iter().fold(0.0_f32, |a, b| a.max(b.abs()));
+    assert!(
+        max_abs > 1e-4,
+        "expected audible output after AddDotsSynth + volume ramp, max_abs = {max_abs}"
+    );
+}

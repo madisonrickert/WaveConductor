@@ -8,12 +8,13 @@
 //! ## Real-time invariants
 //!
 //! - `render` is allocation-free.
-//! - `apply` is allocation-free **except** for `AddLineSynth`, which boxes a
-//!   new voice graph exactly once per sketch activation. This is a one-shot
-//!   cost on the audio thread that callers tolerate at sketch boundaries.
-//! - `RemoveLineSynth` drops the boxed graph on the audio thread; the
-//!   deallocation is bounded (a handful of `Arc` and `Box` frees, no
-//!   recursive structure that could surprise us).
+//! - `apply` is allocation-free **except** for `AddLineSynth` and
+//!   `AddDotsSynth`, each of which boxes a new voice graph exactly once per
+//!   sketch activation. This is a one-shot cost at sketch boundaries, not a
+//!   per-buffer allocation.
+//! - `RemoveLineSynth` / `RemoveDotsSynth` drop their boxed graphs on the
+//!   audio thread; the deallocation is bounded (a handful of `Arc` and `Box`
+//!   frees, no recursive structure that could surprise us).
 //!
 //! Plan 9 Phase A wires the Line synth voice graph; Phase B adds background
 //! sample mixing; Phase C/D wire reactivity from `ParticleStats`.
@@ -40,6 +41,7 @@
 use fundsp::shared::Shared;
 
 use super::command::AudioCommand;
+use super::dots_synth::DotsSynth;
 use super::line_synth::LineSynth;
 
 /// Default amplitude scalar applied to the background sample. Matches v4
@@ -72,6 +74,10 @@ pub struct DspHost {
     /// Active Line voice graph, if any. `None` means the sketch is not
     /// loaded and the synth contributes nothing to the output mix.
     line_synth: Option<LineSynth>,
+    /// Active Dots voice graph, if any. Independent of `line_synth`; in
+    /// practice only one is active at a time, but both slots are summed
+    /// when both happen to be present.
+    dots_synth: Option<DotsSynth>,
     /// Pre-decoded, pre-resampled interleaved PCM for the background
     /// sample. Layout is `[L, R, L, R, ...]` for stereo, or `[M, M, ...]`
     /// for mono — channel count always equals `self.channels`. Empty when
@@ -104,6 +110,7 @@ impl DspHost {
             volume: 1.0,
             muted: false,
             line_synth: None,
+            dots_synth: None,
             background_pcm,
             playhead: 0,
             background_volume: Shared::new(DEFAULT_BACKGROUND_VOLUME),
@@ -151,6 +158,25 @@ impl DspHost {
                     );
                 }
             }
+            AudioCommand::AddDotsSynth => {
+                if self.dots_synth.is_none() {
+                    self.dots_synth = Some(DotsSynth::new(f64::from(self.sample_rate)));
+                }
+            }
+            AudioCommand::RemoveDotsSynth => {
+                self.dots_synth = None;
+            }
+            AudioCommand::SetDotsParam { key, value } => {
+                if let Some(synth) = &self.dots_synth {
+                    synth.set_param(key, value);
+                } else {
+                    tracing::warn!(
+                        key,
+                        value,
+                        "SetDotsParam received with no active DotsSynth; dropping"
+                    );
+                }
+            }
         }
     }
 
@@ -170,6 +196,12 @@ impl DspHost {
     #[must_use]
     pub fn line_synth_active(&self) -> bool {
         self.line_synth.is_some()
+    }
+
+    /// True if a Dots voice graph is currently active.
+    #[must_use]
+    pub fn dots_synth_active(&self) -> bool {
+        self.dots_synth.is_some()
     }
 
     /// Current background-sample amplitude scalar. Reflects the most
@@ -223,11 +255,19 @@ impl DspHost {
         let bg_volume = self.background_volume.value();
 
         for frame in output.chunks_mut(channels) {
-            // Synth contribution (broadcast across all channels).
-            let synth_sample = match self.line_synth.as_mut() {
+            // Synth contributions — each sketch occupies its own slot; sum
+            // them here. In normal operation only one slot is active at a
+            // time, but the slots are independent and both contribute when
+            // both are present (the final clamp prevents overflow).
+            let line_sample = match self.line_synth.as_mut() {
                 Some(synth) => synth.tick_mono(),
                 None => 0.0,
             };
+            let dots_sample = match self.dots_synth.as_mut() {
+                Some(synth) => synth.tick_mono(),
+                None => 0.0,
+            };
+            let synth_sample = line_sample + dots_sample;
 
             // Background contribution, per channel. Read the current
             // frame at `playhead` then advance + wrap.
@@ -267,6 +307,7 @@ impl core::fmt::Debug for DspHost {
             .field("volume", &self.volume)
             .field("muted", &self.muted)
             .field("line_synth_active", &self.line_synth.is_some())
+            .field("dots_synth_active", &self.dots_synth.is_some())
             .field(
                 "background_frames",
                 &(self.background_pcm.len() / usize::from(self.channels.max(1))),

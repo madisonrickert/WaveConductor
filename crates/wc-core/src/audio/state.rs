@@ -47,6 +47,9 @@ pub struct AudioState {
     /// Whether the Line synth is currently active on the audio thread.
     /// Mirrors `LineSynthActivated` / `LineSynthDeactivated` messages.
     pub line_synth_active: bool,
+    /// Whether the Dots synth is currently active on the audio thread.
+    /// Mirrors `DotsSynthActivated` / `DotsSynthDeactivated` messages.
+    pub dots_synth_active: bool,
     /// Most recent error from the audio thread, if any.
     pub last_error: Option<String>,
 }
@@ -60,6 +63,7 @@ impl Default for AudioState {
             volume: 1.0,
             muted: false,
             line_synth_active: false,
+            dots_synth_active: false,
             last_error: None,
         }
     }
@@ -103,6 +107,12 @@ pub fn pump_audio_messages(
             }
             AudioMessage::LineSynthDeactivated => {
                 state.line_synth_active = false;
+            }
+            AudioMessage::DotsSynthActivated => {
+                state.dots_synth_active = true;
+            }
+            AudioMessage::DotsSynthDeactivated => {
+                state.dots_synth_active = false;
             }
         }
     }

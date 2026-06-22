@@ -201,9 +201,9 @@ fn build_engine(encoded_background: &[u8]) -> Result<BuiltEngine, EngineBuildErr
             // Drain commands.
             while let Ok(cmd) = cmd_consumer.pop() {
                 dsp.apply(cmd);
-                // Plan 9 SetLineParam is fire-and-forget on the main side; we
-                // omit an echo to keep per-frame param sweeps off the message
-                // ring (which is bounded and would otherwise drop them).
+                // SetLineParam / SetDotsParam are fire-and-forget on the main
+                // side; omit echoes to keep per-frame param sweeps off the
+                // bounded message ring (which would otherwise drop them).
                 let echo = match cmd {
                     AudioCommand::SetMasterVolume(_) => {
                         Some(AudioMessage::VolumeApplied(dsp.volume()))
@@ -211,7 +211,11 @@ fn build_engine(encoded_background: &[u8]) -> Result<BuiltEngine, EngineBuildErr
                     AudioCommand::SetMuted(m) => Some(AudioMessage::MutedApplied(m)),
                     AudioCommand::AddLineSynth => Some(AudioMessage::LineSynthActivated),
                     AudioCommand::RemoveLineSynth => Some(AudioMessage::LineSynthDeactivated),
-                    AudioCommand::SetLineParam { .. } => None,
+                    // Per-param sweeps are fire-and-forget; omit echoes to
+                    // keep the bounded message ring from dropping them.
+                    AudioCommand::SetLineParam { .. } | AudioCommand::SetDotsParam { .. } => None,
+                    AudioCommand::AddDotsSynth => Some(AudioMessage::DotsSynthActivated),
+                    AudioCommand::RemoveDotsSynth => Some(AudioMessage::DotsSynthDeactivated),
                 };
                 if let Some(msg) = echo {
                     let _ = msg_producer.push(msg);

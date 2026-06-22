@@ -5,10 +5,11 @@
 //! possible (`AudioMessage::Errored` carries a `String` because errors are rare
 //! and we accept the allocation when they occur).
 //!
-//! Note on `SetLineParam`'s `&'static str`: keeping the enum `Copy` requires
-//! the parameter key to be `Copy`. A `&'static str` (string literal) is `Copy`
-//! and zero-allocation; senders write keys like `"volume"` or `"bandpass_freq"`
-//! directly. See [`super::line_synth::LineSynth`] for the legal key set.
+//! Note on `SetLineParam`/`SetDotsParam` `&'static str`: keeping the enum
+//! `Copy` requires the parameter key to be `Copy`. A `&'static str` (string
+//! literal) is `Copy` and zero-allocation; senders write keys like `"volume"`
+//! or `"bandpass_freq"` directly. See [`super::line_synth::LineSynth`] and
+//! [`super::dots_synth::DotsSynth`] for the legal key sets.
 
 /// Commands the main thread sends to the audio thread.
 ///
@@ -38,6 +39,24 @@ pub enum AudioCommand {
     /// for the legal set. Unknown keys are logged via `tracing::warn!` and
     /// dropped silently — the DSP host must never panic on a stale key.
     SetLineParam {
+        /// Parameter identifier. Must be a `'static` string literal.
+        key: &'static str,
+        /// New target value. Range and meaning depend on `key`.
+        value: f32,
+    },
+    /// Build and activate the Dots sketch's synth voice graph. Idempotent: a
+    /// second `AddDotsSynth` while one is active is a no-op.
+    ///
+    /// Construction allocates (boxed graph nodes, parameter `Arc`s) on the
+    /// audio thread exactly once per sketch activation, not per buffer.
+    AddDotsSynth,
+    /// Stop the Dots synth. Idempotent: a second `RemoveDotsSynth` while no
+    /// synth is active is a no-op. Drops the graph and its allocations.
+    RemoveDotsSynth,
+    /// Set a named parameter on the Dots synth. `key` is `&'static str` to
+    /// keep this variant `Copy`; see [`super::dots_synth::DotsSynth`] for the
+    /// legal set. Unknown keys are logged and dropped silently.
+    SetDotsParam {
         /// Parameter identifier. Must be a `'static` string literal.
         key: &'static str,
         /// New target value. Range and meaning depend on `key`.
@@ -73,4 +92,9 @@ pub enum AudioMessage {
     LineSynthActivated,
     /// Sent after the audio thread applies a `RemoveLineSynth` command.
     LineSynthDeactivated,
+    /// Sent after the audio thread applies an `AddDotsSynth` command and
+    /// successfully constructed the Dots synth graph.
+    DotsSynthActivated,
+    /// Sent after the audio thread applies a `RemoveDotsSynth` command.
+    DotsSynthDeactivated,
 }
