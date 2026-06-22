@@ -12,6 +12,9 @@
 //!    - a. [`systems::update_dots_sim_params`] writes the current
 //!      [`DotsSettings`] values into `ParticleSimParams` (drag, stationary
 //!      spring, size scale — no attractor in D2).
+//!    - b. [`systems::update_dots_post_params`] writes [`post_process::DotsPostParams`]
+//!      from the live cursor (v4 UV convention), window resolution, and
+//!      [`settings::DotsSettings::gamma`].
 //! 3. The render world extracts `ParticleSimParams` and dispatches the compute
 //!    pipeline (`assets/shaders/particles/simulate.wgsl`), which updates the
 //!    storage buffer in place.
@@ -81,8 +84,13 @@ impl Plugin for DotsPlugin {
 
         // Per-frame: update mouse state, decay the attractor, then write sim
         // params (sim-params reads the mouse state, so ordering is required).
-        // All three systems run inside the `sketch_active` gate so they do not
+        // All four systems run inside the `sketch_active` gate so they do not
         // execute while Dots is idle.
+        //
+        // `update_dots_post_params` writes DotsPostParams (cursor → UV, window
+        // resolution, gamma). It only writes a resource that the render world
+        // extracts; it has no ordering dependency on the mouse/sim chain, so it
+        // runs as an independent system in the same gate.
         app.add_systems(
             Update,
             (
@@ -92,6 +100,10 @@ impl Plugin for DotsPlugin {
             )
                 .chain()
                 .run_if(sketch_active(AppState::Dots)),
+        );
+        app.add_systems(
+            Update,
+            systems::update_dots_post_params.run_if(sketch_active(AppState::Dots)),
         );
 
         // Hand attractors (D3) and screensaver (D6) will be added here.
@@ -136,18 +148,17 @@ fn dots_idle_veto(world: &World) -> bool {
 }
 
 /// `OnEnter(AppState::Dots)` — insert [`post_process::DotsPostParams`] with
-/// static defaults (Task 1). Task 2 will drive `i_mouse` and `i_resolution`
-/// from the live cursor and window each frame via `update_dots_sim_params`.
+/// static seed values. [`systems::update_dots_post_params`] overwrites these
+/// every frame with live cursor, resolution, and gamma; the values here are
+/// only visible on the first frame before the `Update` systems run.
 ///
-/// Static values:
+/// Seed values:
 /// - `shrink_factor = 0.98` — v4 default.
-/// - `gamma = 1.0` — identity; Task 2 can read `DotsSettings` here.
-/// - `i_mouse = [0.5, 0.5]` — screen centre (normalised UV).
+/// - `gamma = 1.0` — identity; the Update driver reads `DotsSettings` each frame.
+/// - `i_mouse = [0.5, 0.5]` — screen centre (normalised UV); prevents a corner
+///   explode on the first frame before any cursor is known.
 /// - `i_resolution` — from the primary window; falls back to `[1920.0, 1080.0]`.
-fn insert_dots_post_params(
-    mut commands: Commands<'_, '_>,
-    window: Query<'_, '_, &Window>,
-) {
+fn insert_dots_post_params(mut commands: Commands<'_, '_>, window: Query<'_, '_, &Window>) {
     let (w, h) = window
         .single()
         .map_or((1920.0, 1080.0), |win| (win.width(), win.height()));
