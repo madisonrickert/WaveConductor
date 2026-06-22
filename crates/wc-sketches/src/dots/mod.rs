@@ -31,10 +31,17 @@
 //! [`systems::update_dots_mouse_attractor`] / [`systems::decay_dots_mouse_attractor`]
 //! (Task 3). Hand attractors are wired in Plan D3.
 //!
+//! Audio coupling is wired in [`audio_coupling::drive_dots_audio`]: an
+//! attack/release activity envelope driven by [`systems::DotsMouseAttractorState::power`]
+//! maps to [`wc_core::audio::dots_synth::DotsSynth`] volume and filter cutoff each frame (ENVELOPE-PRIMARY
+//! approach; no GPU readback or CPU particle mirror). See [`audio_coupling`]
+//! for the approximation rationale, param mapping, and known gap (LFO rate).
+//!
 //! The shared [`crate::particles::compute::ParticleComputePlugin`] and
 //! [`crate::particles::material::ParticleMaterial`] are registered once by
 //! the [`crate::SketchesPlugin`] umbrella, not here.
 
+pub mod audio_coupling;
 pub mod post_process;
 pub mod settings;
 pub mod systems;
@@ -62,13 +69,28 @@ impl Plugin for DotsPlugin {
         register_dots_manifest(app);
 
         // Lifecycle: spawn the grid on enter, despawn and release VRAM on exit.
+        // Audio lifecycle joins the same schedules — `enter_dots_audio` builds
+        // the synth voice graph on the audio thread; `exit_dots_audio` tears it
+        // down so audio resources are released between sketch entries (project
+        // performance rule: per-sketch resources despawned on `OnExit` to
+        // release resources). v4 Dots has NO background OGG, so only the synth
+        // voice itself is managed here (no background mixer command).
         app.add_systems(
             OnEnter(AppState::Dots),
-            (systems::spawn_dots, insert_dots_post_params).chain(),
+            (
+                systems::spawn_dots,
+                insert_dots_post_params,
+                enter_dots_audio,
+            )
+                .chain(),
         );
         app.add_systems(
             OnExit(AppState::Dots),
-            (despawn_with::<DotsRoot>, remove_dots_sim_params),
+            (
+                despawn_with::<DotsRoot>,
+                remove_dots_sim_params,
+                exit_dots_audio,
+            ),
         );
 
         // Mouse attractor state (persists across frames; updated each frame in
@@ -82,10 +104,15 @@ impl Plugin for DotsPlugin {
         // never finish releasing the pull.
         app.register_idle_veto(dots_idle_veto);
 
-        // Per-frame: update mouse state, decay the attractor, then write sim
-        // params (sim-params reads the mouse state, so ordering is required).
-        // All four systems run inside the `sketch_active` gate so they do not
-        // execute while Dots is idle.
+        // Activity envelope resource (ENVELOPE-PRIMARY audio coupling). Starts
+        // at 0.0 and is advanced each frame by `drive_dots_audio`. Persists
+        // across enter/exit cycles (see `DotsAudioEnvelope` docs).
+        app.init_resource::<audio_coupling::DotsAudioEnvelope>();
+
+        // Per-frame: update mouse state, decay the attractor, write sim params,
+        // then drive the audio envelope (audio reads the attractor state, so it
+        // comes after the mouse/decay step). All systems run inside the
+        // `sketch_active` gate so they do not execute while Dots is idle.
         //
         // `update_dots_post_params` writes DotsPostParams (cursor → UV, window
         // resolution, gamma). It only writes a resource that the render world
@@ -97,6 +124,7 @@ impl Plugin for DotsPlugin {
                 systems::update_dots_mouse_attractor,
                 systems::decay_dots_mouse_attractor,
                 systems::update_dots_sim_params,
+                audio_coupling::drive_dots_audio,
             )
                 .chain()
                 .run_if(sketch_active(AppState::Dots)),
@@ -145,6 +173,50 @@ fn dots_idle_veto(world: &World) -> bool {
     world
         .get_resource::<systems::DotsMouseAttractorState>()
         .is_some_and(|s| s.power > 0.0)
+}
+
+/// `OnEnter(AppState::Dots)` — push `AddDotsSynth` to build the Dots synth
+/// voice graph on the audio thread.
+///
+/// v4 Dots has NO background OGG sample, so only the synth voice itself is
+/// started here (no background-volume restore, unlike `enter_line_audio`).
+///
+/// Drops the command silently with a `warn` if the ring is full — the synth
+/// will be set up correctly on the next successful command delivery.
+///
+/// Early-returns cleanly when `AudioCommandSender` is absent (headless tests:
+/// no cpal device). Mirrors [`crate::line::enter_line_audio`].
+fn enter_dots_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    // The audio engine is not started in headless integration tests (no cpal
+    // device). Skip cleanly when the sender is not present.
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::AddDotsSynth) {
+        tracing::warn!("audio command ring full on Dots entry; AddDotsSynth dropped");
+    }
+}
+
+/// `OnExit(AppState::Dots)` — push `RemoveDotsSynth` to tear down the Dots
+/// synth voice graph and release its audio allocations.
+///
+/// Idempotent: a second `RemoveDotsSynth` while no synth is active is a no-op
+/// (handled by the audio engine). Ring-full failures are logged as warnings and
+/// dropped — the synth will be cleaned up on the next successful command.
+///
+/// Early-returns cleanly when `AudioCommandSender` is absent (headless tests).
+/// Mirrors [`crate::line::exit_line_audio`].
+fn exit_dots_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::RemoveDotsSynth) {
+        tracing::warn!("audio command ring full on Dots exit; RemoveDotsSynth dropped");
+    }
 }
 
 /// `OnEnter(AppState::Dots)` — insert [`post_process::DotsPostParams`] with
