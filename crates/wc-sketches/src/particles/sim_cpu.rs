@@ -1,11 +1,17 @@
-//! CPU-side particle integrator — parallel implementation of the WGSL kernel
-//! in `assets/shaders/line/simulate.wgsl`.
+//! Shared CPU-side particle integrator — kernel-parity reference and
+//! spawn-snapshot test fixture used by particle sketches' integration tests.
+//! Not registered in any production schedule.
+//!
+//! This module is the CPU mirror of the WGSL compute kernel in
+//! `assets/shaders/particles/simulate.wgsl`. Relocated from
+//! `crate::line::sim_cpu` to this shared location so multiple particle sketches
+//! can share the reference integrator and test fixture without duplicating code.
 //!
 //! Plan 11 Phase F removed the per-frame CPU-mirror step from the production
 //! `LinePlugin` schedule. [`step_cpu_mirror`] is no longer registered as a
 //! production system. The CPU mirror's role narrowed to:
 //!
-//! - **Spawn snapshot**: `spawn_line` still inserts [`LineCpuMirror`] with the
+//! - **Spawn snapshot**: `spawn_line` still inserts [`CpuMirror`] with the
 //!   initial particle layout so tests can read the spawn positions (used by
 //!   `crates/wc-sketches/tests/line_heatmap_e2e.rs` to verify the heatmap
 //!   sampler's output).
@@ -21,8 +27,8 @@
 use bevy::prelude::*;
 
 #[cfg(test)]
-use crate::particles::particle::Attractor;
-use crate::particles::particle::{Particle, SimParams, MAX_ATTRACTORS};
+use super::particle::Attractor;
+use super::particle::{Particle, SimParams, MAX_ATTRACTORS};
 
 /// CPU mirror of the particle storage buffer.
 ///
@@ -33,7 +39,7 @@ use crate::particles::particle::{Particle, SimParams, MAX_ATTRACTORS};
 /// (`crates/wc-sketches/tests/line_heatmap_e2e.rs`). Tests that need a
 /// stepped mirror can register [`step_cpu_mirror`] in their own app builder.
 #[derive(Resource, Default)]
-pub struct LineCpuMirror {
+pub struct CpuMirror {
     /// Particle state in the same layout as the GPU buffer.
     pub particles: Vec<Particle>,
 }
@@ -45,8 +51,8 @@ pub struct LineCpuMirror {
 /// Tests that want to advance the mirror can register this system explicitly
 /// in their own `App` builder.
 pub fn step_cpu_mirror(
-    mut mirror: ResMut<'_, LineCpuMirror>,
-    sim: Res<'_, crate::particles::compute::ParticleSimParams>,
+    mut mirror: ResMut<'_, CpuMirror>,
+    sim: Res<'_, super::compute::ParticleSimParams>,
 ) {
     let params = sim.params;
     for p in &mut mirror.particles {

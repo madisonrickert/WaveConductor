@@ -3,3 +3,4 @@
 pub mod compute;
 pub mod material;
 pub mod particle;
+pub mod sim_cpu;

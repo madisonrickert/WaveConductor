@@ -4,7 +4,7 @@
 //!
 //! 1. `OnEnter(AppState::Line)` runs [`systems::spawn_line`]: allocates the
 //!    particle storage buffer, spawns the render entity under [`LineRoot`],
-//!    installs [`crate::particles::compute::ParticleSimParams`], and seeds [`sim_cpu::LineCpuMirror`]
+//!    installs [`crate::particles::compute::ParticleSimParams`], and seeds [`crate::particles::sim_cpu::CpuMirror`]
 //!    with the initial particle layout (spawn-time snapshot for heatmap tests).
 //! 2. Every `Update` while `sketch_active(AppState::Line)` is true:
 //!    - a. [`systems::update_sim_params`] writes the current pointer position +
@@ -44,7 +44,6 @@ pub mod particle_stats;
 pub mod post_process;
 pub mod screensaver;
 pub mod settings;
-pub mod sim_cpu;
 pub mod systems;
 pub mod template_adjustments;
 #[cfg(feature = "templates")]
@@ -277,7 +276,7 @@ pub(crate) fn register_line_manifest(app: &mut App) {
 /// the post-process would keep applying smear after leaving Line.
 fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::compute::ParticleSimParams>();
-    commands.remove_resource::<sim_cpu::LineCpuMirror>();
+    commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<systems::sim_params::LineSmearFocal>();
     commands.insert_resource(post_process::LinePostParams::default());
 }

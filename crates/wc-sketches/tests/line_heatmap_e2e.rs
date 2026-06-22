@@ -20,7 +20,7 @@ use bevy::input::keyboard::KeyCode;
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
 use wc_sketches::line::settings::LineSettings;
-use wc_sketches::line::sim_cpu::LineCpuMirror;
+use wc_sketches::particles::sim_cpu::CpuMirror;
 
 /// Mirror of `line_input.rs::enter_line` — three updates suffice (one fold,
 /// one nav handler, one `OnEnter`). Inlined here rather than imported because
@@ -68,7 +68,7 @@ fn heatmap_spawn_clusters_particles_near_bright_pixels() {
     // center (and not be uniformly distributed like the fallback layout).
     let app = app_with_template(STAR_PNG_PATH);
 
-    let mirror = app.world().resource::<LineCpuMirror>();
+    let mirror = app.world().resource::<CpuMirror>();
     let particles = &mirror.particles;
     assert!(
         particles.len() >= 100,
@@ -110,7 +110,7 @@ fn heatmap_spawn_clusters_particles_near_bright_pixels() {
 #[test]
 fn missing_template_falls_back_to_horizontal_layout() {
     let app = app_with_template("/this/path/does/not/exist.png");
-    let mirror = app.world().resource::<LineCpuMirror>();
+    let mirror = app.world().resource::<CpuMirror>();
     let particles = &mirror.particles;
     assert!(
         !particles.is_empty(),

@@ -30,7 +30,7 @@ use crate::line::heatmap::sample_from_heatmap;
 use crate::particles::material::ParticleMaterial;
 use crate::particles::particle::{Particle, SimParams};
 use crate::line::settings::LineSettings;
-use crate::line::sim_cpu::LineCpuMirror;
+use crate::particles::sim_cpu::CpuMirror;
 use crate::line::systems::sim_params::LineSmearFocal;
 
 /// Marker component placed on every entity owned by the Line sketch.
@@ -278,7 +278,7 @@ pub fn spawn_line(
     // Seed the CPU mirror with the same particle state. The `clone()` here is a
     // one-shot allocation at sketch entry — not per-frame — so the
     // no-allocations-in-hot-paths rule still holds.
-    commands.insert_resource(LineCpuMirror {
+    commands.insert_resource(CpuMirror {
         particles: initial.clone(),
     });
 
