@@ -214,6 +214,39 @@ and CoreML beats CPU at 6 partitions, so chasing the last few is not worth it.
 
 ---
 
+## Evaluated alternatives (measured, not adopted)
+
+Several "optimize the ONNX" tools were tried and measured against the CoreML
+partition count. None beat the targeted PReLU reshape:
+
+- **`onnxsim` (onnx-simplifier):** no-op here. It removes graph *redundancy*
+  (constant-folds shapes, prunes dead nodes), but these converted models have
+  none, and it does not touch op attributes. Measured: upstream stays 30
+  partitions, our model stays 6, PReLU slope shape unchanged. It cannot make the
+  EP-compatibility edit we need.
+- **Re-deriving from Google's `.tflite` with modern `tf2onnx` (opset 17):**
+  *worse.* The fresh conversion produced 144 nodes / **35 partitions** (vs the
+  OpenCV-Zoo upstream's 124 / 30), still emitted `[1,C,1,1]` PReLU slopes (so it
+  would need the same reshape), and hit the identical Pad/Resize/Concat floor.
+  The 2023 OpenCV-Zoo conversion is the cleaner one.
+- **Transformer optimizer** (`onnxruntime/tools/transformers`): N/A — it fuses
+  attention/LayerNorm/GELU, which BlazePalm (a CNN) does not contain.
+- **A newer model:** none exists. The Hand Landmarker still ships the Feb-2023
+  BlazePalm + 21-landmark bundle (architecture from the 2020 paper); Google
+  repackaged it (Tasks API) without retraining.
+
+The throughline: the residual floor (channel-`Pad`, `half_pixel`-`Resize`, 3-D
+`Concat`) is **model-inherent** — real operations any faithful converter must
+preserve — so no conversion or simplification tool removes it without changing
+what the model computes. The only converter-free variable is the PReLU slope
+*shape*, which our reshape already handles.
+
+Runtime-side, `ort` I/O binding buys nothing extra on Apple Silicon (unified
+memory: no host/device copy to eliminate). The per-frame input *clone* is instead
+removed with a borrowed `TensorRef::from_array_view` over the pipeline's reused
+buffer; the remaining output copy is forced by the `HandInference` trait's owned
+`Vec<Tensor>` return and left as a profiling-gated follow-up.
+
 ## Bit-exact edit + verify recipe
 
 The pattern for every safe edit: change metadata only, then prove the output did
