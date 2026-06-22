@@ -30,9 +30,9 @@ impl Plugin for SketchesPlugin {
         // unique-plugin panic. `Material2dPlugin` and `ParticleComputePlugin`
         // are both `Plugin` singletons — adding them more than once would
         // panic at startup.
-        app.add_plugins(
-            Material2dPlugin::<crate::particles::material::ParticleMaterial>::default(),
-        );
+        app.add_plugins(Material2dPlugin::<
+            crate::particles::material::ParticleMaterial,
+        >::default());
         app.add_plugins(crate::particles::compute::ParticleComputePlugin);
 
         // Concrete sketch plugins.

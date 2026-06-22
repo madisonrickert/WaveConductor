@@ -24,7 +24,9 @@
 //!    `ParticleSimParams` (releases the GPU buffer ref-count), and drop
 //!    `CpuMirror` (frees the per-particle `Vec`).
 //!
-//! Mouse and hand interaction will be wired in Task 3.
+//! Mouse interaction (pointer/touch attractor) is wired in
+//! [`systems::update_dots_mouse_attractor`] / [`systems::decay_dots_mouse_attractor`]
+//! (Task 3). Hand attractors are wired in Plan D3.
 //!
 //! The shared [`crate::particles::compute::ParticleComputePlugin`] and
 //! [`crate::particles::material::ParticleMaterial`] are registered once by
@@ -37,6 +39,7 @@ pub use systems::DotsRoot;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
+use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::RegisterSketchSettingsExt;
 use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
 
@@ -52,22 +55,39 @@ impl Plugin for DotsPlugin {
         register_dots_manifest(app);
 
         // Lifecycle: spawn the grid on enter, despawn and release VRAM on exit.
-        app.add_systems(
-            OnEnter(AppState::Dots),
-            systems::spawn_dots,
-        );
+        app.add_systems(OnEnter(AppState::Dots), systems::spawn_dots);
         app.add_systems(
             OnExit(AppState::Dots),
             (despawn_with::<DotsRoot>, remove_dots_sim_params),
         );
 
-        // Per-frame: write updated sim params while the Dots sketch is active.
+        // Mouse attractor state (persists across frames; updated each frame in
+        // the `Update` chain below). The idle veto below keeps Dots `Active`
+        // while the attractor has non-zero power so the decay system continues
+        // to fire until the pull fully releases.
+        app.init_resource::<systems::DotsMouseAttractorState>();
+        // Register an idle veto that keeps Dots `Active` while the mouse
+        // attractor's power is still decaying — otherwise the sketch would
+        // transition to `Idle` mid-decay and the (gated) decay system would
+        // never finish releasing the pull.
+        app.register_idle_veto(dots_idle_veto);
+
+        // Per-frame: update mouse state, decay the attractor, then write sim
+        // params (sim-params reads the mouse state, so ordering is required).
+        // All three systems run inside the `sketch_active` gate so they do not
+        // execute while Dots is idle.
         app.add_systems(
             Update,
-            systems::update_dots_sim_params.run_if(sketch_active(AppState::Dots)),
+            (
+                systems::update_dots_mouse_attractor,
+                systems::decay_dots_mouse_attractor,
+                systems::update_dots_sim_params,
+            )
+                .chain()
+                .run_if(sketch_active(AppState::Dots)),
         );
 
-        // TODO(Task 3): wire mouse and hand interaction systems.
+        // Hand attractors (D3) and screensaver (D6) will be added here.
     }
 }
 
@@ -94,6 +114,18 @@ pub(crate) fn register_dots_manifest(app: &mut App) {
         display_name: "Fabric",
         screenshot,
     });
+}
+
+/// Idle veto for the Dots sketch. Returns `true` while the mouse attractor's
+/// power is non-zero (i.e., active or still decaying) — keeps the sketch in
+/// `SketchActivity::Active` so [`systems::decay_dots_mouse_attractor`] continues
+/// to fire until the attractor is fully released.
+///
+/// Mirrors [`crate::line::line_idle_veto`] for the Line sketch.
+fn dots_idle_veto(world: &World) -> bool {
+    world
+        .get_resource::<systems::DotsMouseAttractorState>()
+        .is_some_and(|s| s.power > 0.0)
 }
 
 /// `OnExit(AppState::Dots)` companion to [`systems::spawn_dots`].
@@ -138,6 +170,39 @@ mod tests {
             .get(AppState::Dots)
             .expect("Dots manifest entry should be registered");
         assert_eq!(entry.display_name, "Fabric");
+    }
+
+    /// `dots_idle_veto` returns `true` while power > 0 and `false` when power
+    /// is zero — ensures the sketch stays `Active` during attractor decay.
+    /// Mirrors `line_idle_veto` behavior.
+    #[test]
+    fn dots_idle_veto_true_while_power_nonzero() {
+        use systems::DotsMouseAttractorState;
+
+        let mut world = World::new();
+
+        // No resource at all → veto returns false (no attractor in flight).
+        assert!(
+            !dots_idle_veto(&world),
+            "veto must be false when DotsMouseAttractorState is absent"
+        );
+
+        // Power = 0.0 → veto false.
+        world.insert_resource(DotsMouseAttractorState {
+            power: 0.0,
+            position: [0.0, 0.0],
+        });
+        assert!(
+            !dots_idle_veto(&world),
+            "veto must be false when power == 0.0"
+        );
+
+        // Power > 0.0 → veto true (attractor still active or decaying).
+        world.insert_resource(DotsMouseAttractorState {
+            power: 1.0,
+            position: [0.0, 0.0],
+        });
+        assert!(dots_idle_veto(&world), "veto must be true when power > 0.0");
     }
 
     /// `remove_dots_sim_params` must drop `ParticleSimParams` and `CpuMirror`

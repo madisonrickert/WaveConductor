@@ -226,7 +226,10 @@ mod tests {
     #[test]
     fn grid_produces_nonzero_count() {
         let particles = build_grid_particles(TEST_W, TEST_H, TEST_SPACING);
-        assert!(!particles.is_empty(), "grid must produce at least one particle");
+        assert!(
+            !particles.is_empty(),
+            "grid must produce at least one particle"
+        );
         assert!(
             particles.len() <= 200_000,
             "count {} must not exceed clamp upper bound",
