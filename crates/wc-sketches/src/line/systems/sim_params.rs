@@ -190,6 +190,9 @@ pub fn bake_sim_params(
         turbulence_scale: turbulence.scale,
         turbulence_time: turbulence.time,
         stationary_constant: 0.0,
+        // Linear restoring term: 0.0 for Line (no-op, matching stationary_constant).
+        restoring_linear: 0.0,
+        _spring_pad: [0.0; 3],
         attractors,
     }
 }

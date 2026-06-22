@@ -58,11 +58,16 @@ struct SimParams {
     // Attract-mode noise turbulence: amplitude (0 = off), spatial frequency, and
     // animation phase. stationary_constant (v4 home-spring strength; 0 = off)
     // occupies the same slot as the former _turb_pad to keep `attractors` 16-byte
-    // aligned. Renamed in lockstep with the Rust SimParams field (Task 5).
+    // aligned. restoring_linear + three pad floats grow the scalar header from
+    // 64 → 80 bytes (still a 16-byte multiple, so attractors stays aligned).
     turbulence_amp: f32,
     turbulence_scale: f32,
     turbulence_time: f32,
     stationary_constant: f32,
+    restoring_linear: f32,
+    _spring_pad0: f32,
+    _spring_pad1: f32,
+    _spring_pad2: f32,
     attractors: array<Attractor, MAX_ATTRACTORS>,
 };
 
@@ -151,14 +156,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         accel = accel + dir * force_mag;
     }
 
-    // v4 stationary spring (gated; stationary_constant == 0 -> no-op = Line parity).
-    if (params.stationary_constant > 0.0) {
+    // Home spring (gated; Line passes 0/0 -> full no-op). Quadratic term is v4's
+    // STATIONARY_CONSTANT (big-displacement snap); the linear term gives a
+    // graceful, complete return toward the immutable home (fabric tension).
+    // original_xy is never written here — it is a true immutable home.
+    if (params.stationary_constant > 0.0 || params.restoring_linear > 0.0) {
         let home = p.original_xy - p.position;
         let home_len = length(home);
-        accel = accel + params.stationary_constant * home * home_len;
-        if (params.attractor_count == 0u) {
-            p.original_xy = p.original_xy - home * 0.05;
-        }
+        accel = accel + params.stationary_constant * home * home_len
+                      + params.restoring_linear * home;
     }
 
     p.velocity = p.velocity + accel * params.dt;

@@ -193,9 +193,14 @@ pub(crate) fn bake_dots_sim_params(
         turbulence_scale: turbulence.scale,
         turbulence_time: turbulence.time,
         // v4 STATIONARY_CONSTANT = 0.01. Each particle is pulled toward its
-        // original_xy home. Line passes 0.0 (provable no-op); Dots needs 0.01
-        // so the grid stays anchored and returns home after interaction.
+        // immutable original_xy home. Line passes 0.0 (provable no-op); Dots
+        // needs 0.01 so the grid stays anchored and returns home after interaction.
         stationary_constant: 0.01,
+        // Linear (Hookean) fabric-tension coefficient. Task 6 wires the knob;
+        // baked at 0.0 here so the layout lands with no behavior change beyond
+        // the immutable-home fix (drift removal) from Task 5.
+        restoring_linear: 0.0,
+        _spring_pad: [0.0; 3],
         attractors,
     }
 }

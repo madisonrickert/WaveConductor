@@ -135,20 +135,16 @@ pub fn step_one(p: &mut Particle, params: &SimParams) {
         accel[1] += dy * inv_dist * force_mag;
     }
 
-    // v4 stationary spring: pull each particle toward its spawn home with a
-    // length-scaled (nonlinear) force, and ease home toward the particle when no
-    // attractor is active (idle drift). Gated on stationary_constant > 0.0 so
-    // Line (which passes 0.0) is provably unchanged. Dots passes 0.01.
-    if params.stationary_constant > 0.0 {
+    // Home spring (gated; Line passes 0/0 -> full no-op). Quadratic term is v4's
+    // STATIONARY_CONSTANT (big-displacement snap); the linear term gives a
+    // graceful, complete return toward the immutable home (fabric tension).
+    // original_xy is never written here — it is a true immutable home.
+    if params.stationary_constant > 0.0 || params.restoring_linear > 0.0 {
         let hx = p.original_xy[0] - p.position[0];
         let hy = p.original_xy[1] - p.position[1];
         let home_len = (hx * hx + hy * hy).sqrt();
-        accel[0] += params.stationary_constant * hx * home_len;
-        accel[1] += params.stationary_constant * hy * home_len;
-        if params.attractor_count == 0 {
-            p.original_xy[0] -= hx * 0.05;
-            p.original_xy[1] -= hy * 0.05;
-        }
+        accel[0] += params.stationary_constant * hx * home_len + params.restoring_linear * hx;
+        accel[1] += params.stationary_constant * hy * home_len + params.restoring_linear * hy;
     }
 
     // Attract-mode noise turbulence (off — and provably inert — during Active,
@@ -227,6 +223,8 @@ mod tests {
             turbulence_scale: 0.0,
             turbulence_time: 0.0,
             stationary_constant: 0.0,
+            restoring_linear: 0.0,
+            _spring_pad: [0.0; 3],
             attractors: [Attractor::default(); MAX_ATTRACTORS],
         }
     }
@@ -591,6 +589,90 @@ mod tests {
             active.position,
             [123.0, 45.0],
             "turbulence is inert when the attract gate is off"
+        );
+    }
+
+    /// Immutable-home guarantee + linear restoring convergence.
+    ///
+    /// Asserts two properties:
+    /// 1. With `restoring_linear > 0` a displaced particle converges toward
+    ///    `original_xy` over many steps, AND `original_xy` never changes
+    ///    (the immutable-home guarantee — the permanent-tangle bug fix).
+    /// 2. With both spring coefficients at `0.0` a displaced particle does NOT
+    ///    move toward home (Line no-op).
+    ///
+    /// Parameter rationale: `restoring_linear = 5.0` and `inertial_drag_baked = 0.9`
+    /// at `dt = 0.016` put the oscillator in the overdamped regime with a slow
+    /// eigenvalue ≈ 0.76 s⁻¹ (time constant ≈ 1.3 s ≈ 82 steps). After 1000
+    /// steps (16 s ≈ 12 time constants), the residual displacement is ≈ e⁻¹² ×
+    /// initial ≈ 0.0003 × 10 = 0.003 units — well within the `< 1.0` threshold.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "original_xy and position checks here are 'was not modified' \
+                  bit-exact guards; the values are identity-copied from literals \
+                  and should never be rounded or computed"
+    )]
+    fn restoring_linear_converges_to_home_and_home_is_immutable() {
+        // --- Part 1: convergence + immutable home ---
+        // Spring strong enough (5.0) + moderate drag (0.9) to critically overdamp
+        // and converge within 1000 steps.
+        let mut params = unbounded_box_params();
+        params.restoring_linear = 5.0;
+        params.inertial_drag_baked = 0.9;
+        // Simple 1-D displacement: home at [10, 0], start at [20, 0], dist = 10.
+        let home = [10.0_f32, 0.0_f32];
+        let mut p = Particle {
+            position: [20.0, 0.0],
+            velocity: [0.0, 0.0],
+            original_xy: home,
+            alpha: 1.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            spawn_color: f32::from_bits(0x00FF_FFFF),
+            _pad: 0.0,
+        };
+        for _ in 0..1_000 {
+            step_one(&mut p, &params);
+            // Immutable-home guarantee: original_xy must not change, ever.
+            assert_eq!(
+                p.original_xy, home,
+                "original_xy must not change during spring iterations"
+            );
+        }
+        // After 1000 steps, particle must be close to home.
+        let dist = (p.position[0] - home[0]).abs() + (p.position[1] - home[1]).abs();
+        assert!(
+            dist < 1.0,
+            "particle must converge close to home after 1000 steps; dist = {dist:.4}"
+        );
+
+        // --- Part 2: both spring coefficients zero → Line no-op ---
+        // With no spring force and zero initial velocity the displaced particle
+        // must not move at all (drag on zero velocity is still zero).
+        let noop_params = unbounded_box_params(); // stationary_constant = 0, restoring_linear = 0
+        let mut q = Particle {
+            position: [50.0, 30.0],
+            velocity: [0.0, 0.0],
+            original_xy: [0.0, 0.0],
+            alpha: 1.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            spawn_color: f32::from_bits(0x00FF_FFFF),
+            _pad: 0.0,
+        };
+        step_one(&mut q, &noop_params);
+        assert_eq!(
+            q.position,
+            [50.0, 30.0],
+            "with both spring coefficients zero, position must not change (Line no-op)"
+        );
+        assert_eq!(
+            q.original_xy,
+            [0.0, 0.0],
+            "original_xy must not change in the no-spring path either"
         );
     }
 }

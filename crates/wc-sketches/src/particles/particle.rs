@@ -137,13 +137,29 @@ pub struct SimParams {
     /// Animation phase for the turbulence flow (seconds of elapsed wall-clock).
     /// Advancing it scrolls the divergence-free flow field so the drift evolves.
     pub turbulence_time: f32,
-    /// v4 `STATIONARY_CONSTANT` — the home-spring strength. Each particle is
-    /// pulled toward its `original_xy` with a length-scaled force, and when no
-    /// attractor is active its home eases toward it (idle drift). `0.0` is a
-    /// provable no-op (Line passes 0.0); Dots passes `0.01`. Occupies the slot
-    /// formerly held by `_turb_pad`, so the scalar header stays 64 bytes and the
-    /// `attractors` array remains 16-byte aligned — struct size is unchanged.
+    /// v4 `STATIONARY_CONSTANT` — the quadratic home-spring strength. Pulls each
+    /// particle toward its immutable `original_xy` with a length-scaled force
+    /// (big-displacement snap). `0.0` is a provable no-op (Line passes 0.0);
+    /// Dots passes `0.01`. Occupies the slot formerly held by `_turb_pad`. The
+    /// scalar header now totals 80 bytes (with `restoring_linear` + `_spring_pad`
+    /// added in Task 5), still a 16-byte multiple so the `attractors` array
+    /// remains 16-byte aligned.
     pub stationary_constant: f32,
+    /// Linear (Hookean) home-spring coefficient — the "fabric tension" that eases
+    /// each particle all the way back to its immutable `original_xy`, not just most
+    /// of the way (the quadratic `stationary_constant` term goes soft near home).
+    /// Baked from `DotsSettings::fabric_tension` during live play and `0.0` during
+    /// the screensaver (so the turbulence morph is unimpeded). `0.0` is a no-op
+    /// (Line passes 0.0). Added with three pad floats so the scalar header stays a
+    /// 16-byte multiple (64 → 80) and the `attractors` array remains 16-byte aligned.
+    pub restoring_linear: f32,
+    /// Padding to restore 16-byte alignment for the `attractors` array after
+    /// adding `restoring_linear`. Never read by the kernel.
+    #[allow(
+        clippy::pub_underscore_fields,
+        reason = "GPU struct layout padding must be pub for bytemuck"
+    )]
+    pub _spring_pad: [f32; 3],
     /// Attractor list. Entries `[0..attractor_count]` are live; the rest are
     /// zero-power and ignored.
     pub attractors: [Attractor; MAX_ATTRACTORS],
