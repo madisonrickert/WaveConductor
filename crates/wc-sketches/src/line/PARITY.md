@@ -145,6 +145,9 @@ without duplication.
 
 Line's behavior is **unchanged**: it passes `stationary_constant = 0.0` to the
 shared `SimParams`, which makes the new spring/stationary kernel term a no-op
-(`accel += 0.0 * home * |home|`). The full verification gate (clippy, nextest,
-doctests, `cargo doc`, `cargo xtask capture`) passed without new warnings or
-regressions after the move.
+(`accel += 0.0 * home * |home|`). The clippy, nextest, doctest, and `cargo doc` gates passed cleanly after the
+move. `cargo xtask capture` ran without error, but no visual-diff comparison
+was performed — Line has no committed baselines for the `line-synthetic` and
+`line-synthetic-no-bloom` scenarios, and the `line-screensaver` baselines are
+stale (frame numbers predate commit e8239e4e). Line baselines should be
+regenerated before D2 touches the shared render path.

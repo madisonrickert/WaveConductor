@@ -2,7 +2,7 @@
 //!
 //! Both structs are `#[repr(C)]` and `Pod + Zeroable` so they can be uploaded
 //! verbatim to a WGSL storage buffer / uniform buffer. The layouts MUST stay
-//! in sync with `assets/shaders/line/simulate.wgsl` and `assets/shaders/line/render.wgsl`.
+//! in sync with `assets/shaders/particles/simulate.wgsl` and `assets/shaders/particles/render.wgsl`.
 
 use bytemuck::{Pod, Zeroable};
 

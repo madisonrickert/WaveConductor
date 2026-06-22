@@ -24,7 +24,7 @@ struct Particle {
 @group(2) @binding(1) var star_texture: texture_2d<f32>;
 @group(2) @binding(2) var star_sampler: sampler;
 // Debug solid-particle override (linear RGBA). a > 0 => return the flat colour
-// instead of the star texel. Set from `LineMaterial.solid_color`
+// instead of the star texel. Set from `ParticleMaterial.solid_color`
 // (WC_DEBUG_SOLID_PARTICLES). Vec4(0) means "off" in normal runs and release.
 @group(2) @binding(3) var<uniform> solid_color: vec4<f32>;
 // Attract-mode velocity-color params. x = tint strength 0..1; y = brightness
@@ -39,7 +39,7 @@ struct Particle {
 // reserved. Strength 0 makes the per-particle image tint a bit-exact no-op:
 // mix(rgb, rgb*img, 0.0) == rgb.
 @group(2) @binding(5) var<uniform> template_color: vec4<f32>;
-// Psychedelic palette params (LineMaterial::palette_params). x = mode index
+// Psychedelic palette params (ParticleMaterial::palette_params). x = mode index
 // (0 Off / 1 Velocity / 2 Spectrum); y = crossfade strength 0..1; z = spread
 // (controls heatmap width for Velocity, peak sharpness for Spectrum); w unused.
 // x = 0 (Vec4(0), the Active/no-palette value) skips the palette branch below,

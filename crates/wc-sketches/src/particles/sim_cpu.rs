@@ -20,9 +20,13 @@
 //!   the existing pattern in `crates/wc-sketches/tests/line_lifecycle.rs`
 //!   if any tests still use it post-Phase F.
 //!
-//! The two integrators (WGSL kernel + Rust [`step_one`]) remain
-//! mathematically equivalent to ≤1% float-op drift, documented in
-//! `crates/wc-sketches/src/line/PARITY.md`.
+//! The two integrators (WGSL kernel + Rust [`step_one`]) are ≤1% equivalent
+//! for gravity, spring, drag, fade, constrain, and lifetime — documented in
+//! `crates/wc-sketches/src/line/PARITY.md`. **Turbulence is a structural
+//! divergence, not sub-1% drift**: `step_one` adds the turbulence force into
+//! `accel` before Euler velocity integration, while `simulate.wgsl` advects
+//! `position` directly after integration. Do NOT use the CPU mirror as a
+//! turbulence-mode oracle until the two are reconciled (tracked carry-forward).
 
 use bevy::prelude::*;
 
@@ -32,10 +36,11 @@ use super::particle::{Particle, SimParams, MAX_ATTRACTORS};
 
 /// CPU mirror of the particle storage buffer.
 ///
-/// Populated by [`crate::line::systems::spawn_line`] with the initial
-/// particle layout (spawn-time snapshot). In production (Plan 11 Phase F),
-/// this resource is no longer stepped each frame — it serves as a read-only
-/// snapshot for heatmap integration tests
+/// Populated by the active particle sketch's spawn system (currently
+/// [`crate::line::systems::spawn_line`]; Dots will add its own) with the
+/// initial particle layout (spawn-time snapshot). In production
+/// (Plan 11 Phase F), this resource is no longer stepped each frame — it
+/// serves as a read-only snapshot for heatmap integration tests
 /// (`crates/wc-sketches/tests/line_heatmap_e2e.rs`). Tests that need a
 /// stepped mirror can register [`step_cpu_mirror`] in their own app builder.
 #[derive(Resource, Default)]
