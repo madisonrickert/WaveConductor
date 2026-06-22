@@ -43,6 +43,8 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
+use super::state::AppState;
+
 /// Duration of each fade leg (`FadeOut` and `FadeIn`).
 pub const FADE_DURATION: Duration = Duration::from_millis(200);
 
@@ -62,8 +64,8 @@ pub enum ReloadPhase {
 
 /// Resource tracking the current sketch-reload overlay state.
 ///
-/// Updated by `restart_on_settings_change` (in `wc-sketches`) and driven
-/// frame-by-frame by [`drive_reload_state`].
+/// Updated by each sketch's `restart_on_*_settings_change` system (in
+/// `wc-sketches`) and driven frame-by-frame by [`drive_reload_state`].
 #[derive(Resource, Debug, Default)]
 pub struct SketchReloadState {
     /// Current phase of the reload transition.
@@ -72,6 +74,12 @@ pub struct SketchReloadState {
     pub started_at: Duration,
     /// Master volume to restore after the reload completes.
     pub pre_fade_volume: f32,
+    /// The [`AppState`] to navigate back to after the `Switch` phase completes.
+    ///
+    /// Set by [`SketchReloadState::begin_fade_out`] before `FadeOut` starts;
+    /// consumed by [`drive_reload_state`] in the `Switch` phase. Defaults to
+    /// [`AppState::Home`] but is always overwritten before `Switch` fires.
+    pub return_state: AppState,
 }
 
 impl SketchReloadState {
@@ -82,15 +90,20 @@ impl SketchReloadState {
         self.phase == ReloadPhase::Idle
     }
 
-    /// Start the `FadeOut` phase. Stores the current master volume so it can be
-    /// restored at the end of `FadeIn`.
+    /// Start the `FadeOut` phase. Stores the current master volume and the
+    /// sketch state to return to after the cycle completes.
     ///
-    /// Called by `restart_on_settings_change` instead of the old
-    /// `NextState::Home` + `LineRestartPending` approach.
-    pub fn begin_fade_out(&mut self, now: Duration, pre_fade_volume: f32) {
+    /// Called by each sketch's `restart_on_*_settings_change` system instead
+    /// of the old `NextState::Home` + `*RestartPending` approach.
+    ///
+    /// `return_state` must be the currently active sketch state (e.g.
+    /// `AppState::Line`, `AppState::Dots`) so that [`drive_reload_state`]
+    /// navigates back to the correct sketch in its `Switch` phase.
+    pub fn begin_fade_out(&mut self, now: Duration, pre_fade_volume: f32, return_state: AppState) {
         self.phase = ReloadPhase::FadeOut;
         self.started_at = now;
         self.pre_fade_volume = pre_fade_volume;
+        self.return_state = return_state;
     }
 
     /// Compute the current overlay alpha (0.0 = transparent, 1.0 = opaque).
@@ -154,11 +167,13 @@ pub fn drive_reload_state(
             }
         }
         ReloadPhase::Switch => {
-            // One frame in Home; arm the re-entry into Line.
-            next_app.set(super::state::AppState::Line);
+            // One frame in Home; arm the re-entry into the sketch that
+            // triggered the restart (set by `begin_fade_out`).
+            let return_to = state.return_state;
+            next_app.set(return_to);
             state.phase = ReloadPhase::FadeIn;
             state.started_at = now;
-            tracing::debug!("reload overlay: Switch → FadeIn (Line)");
+            tracing::debug!("reload overlay: Switch → FadeIn ({:?})", return_to);
         }
         ReloadPhase::FadeIn => {
             if now.saturating_sub(state.started_at) >= FADE_DURATION {
@@ -196,7 +211,7 @@ mod tests {
     #[test]
     fn fade_out_ramps_zero_to_one() {
         let mut s = SketchReloadState::default();
-        s.begin_fade_out(Duration::ZERO, 1.0);
+        s.begin_fade_out(Duration::ZERO, 1.0, AppState::Line);
         // At start of FadeOut: alpha should be 0.
         assert!(s.overlay_alpha(Duration::ZERO) < 0.01);
         // At end of FadeOut: alpha should be ≥ 1.

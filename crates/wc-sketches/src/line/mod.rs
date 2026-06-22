@@ -340,7 +340,7 @@ fn restart_on_settings_change(
             // started — headless tests and early startup before the cpal
             // stream is active.
             let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
-            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume);
+            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, AppState::Line);
             *last_change_at = None;
             tracing::debug!("LineSettings debounce elapsed — beginning reload FadeOut");
         }

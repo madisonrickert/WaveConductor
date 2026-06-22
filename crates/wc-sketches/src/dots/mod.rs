@@ -55,9 +55,11 @@ pub mod systems;
 pub use systems::DotsRoot;
 
 use bevy::prelude::*;
+use wc_core::audio::state::AudioState;
+use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;
-use wc_core::settings::RegisterSketchSettingsExt;
+use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
 use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
 
 /// Plugin that registers the Dots (Fabric) sketch.
@@ -154,6 +156,13 @@ impl Plugin for DotsPlugin {
         // gate here (mirroring Line's `should_register_bone_composite`) if Dots
         // needs per-stage render isolation in debug builds.
         app.add_plugins(bone_composite::DotsBoneCompositePlugin);
+
+        // Restart listener: begins the FadeOut phase of the reload overlay when
+        // a requires_restart setting changes (e.g. `dot_spacing`, which sizes
+        // the compute storage buffer at spawn). The overlay's `drive_reload_state`
+        // system (in wc-core) drives the full FadeOut → Switch → FadeIn cycle.
+        // Mirrors `LinePlugin`'s `restart_on_settings_change` registration.
+        app.add_systems(Update, restart_on_dots_settings_change);
     }
 }
 
@@ -273,6 +282,66 @@ fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::compute::ParticleSimParams>();
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<post_process::DotsPostParams>();
+}
+
+/// How long the user must stop adjusting a `requires_restart` setting before
+/// the sketch restarts. 500 ms quiescence prevents mid-drag sketch kills when
+/// the user is still adjusting a slider. Mirrors [`crate::line`]'s debounce.
+const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Listens for [`wc_core::settings::SketchRestart`] events targeted at
+/// [`settings::DotsSettings::STORAGE_KEY`] ("dots") and begins the reload
+/// fade-overlay transition so the `Dots → Home → Dots` cycle is blacked out
+/// rather than flashing the picker page.
+///
+/// A 500 ms debounce prevents the restart from firing while the user is still
+/// dragging a slider. The debounce timestamp is tracked in a
+/// `Local<Option<Duration>>` that is updated on every matching message and
+/// checked each frame against `Time::elapsed`.
+///
+/// After the debounce window closes, calls [`SketchReloadState::begin_fade_out`]
+/// which sets `phase = FadeOut`. The `drive_reload_state` system (registered in
+/// `wc-core`'s `LifecyclePlugin`) owns all subsequent phase transitions:
+/// `FadeOut` → Switch (sets `NextState::Home`) → `FadeIn` (sets
+/// `NextState::Dots`). Mirrors [`crate::line::restart_on_settings_change`].
+fn restart_on_dots_settings_change(
+    mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
+    time: Res<'_, Time>,
+    current: Res<'_, State<AppState>>,
+    mut reload_state: ResMut<'_, SketchReloadState>,
+    // Optional: not present in headless (MinimalPlugins) test harnesses.
+    audio_state: Option<Res<'_, AudioState>>,
+    // Tracks the `Time::elapsed` of the last received restart message.
+    // `None` means no message has been received since the last restart.
+    mut last_change_at: Local<'_, Option<std::time::Duration>>,
+) {
+    // Absorb any new restart messages, updating the debounce timestamp.
+    // Only arm when in Dots (not during the Home/FadeIn return leg) and when
+    // no reload is already in progress.
+    let got_message = events
+        .read()
+        .any(|e| e.storage_key == settings::DotsSettings::STORAGE_KEY);
+    if got_message && **current == AppState::Dots && reload_state.is_idle() {
+        *last_change_at = Some(time.elapsed());
+        tracing::debug!("DotsSettings changed — debounce timer reset (500 ms)");
+    }
+
+    // Fire the FadeOut only after 500 ms of no further changes.
+    if let Some(last) = *last_change_at {
+        let elapsed_since = time.elapsed().saturating_sub(last);
+        if elapsed_since >= RESTART_DEBOUNCE
+            && **current == AppState::Dots
+            && reload_state.is_idle()
+        {
+            // Fall back to full volume (1.0) when the audio engine hasn't
+            // started — headless tests and early startup before the cpal
+            // stream is active.
+            let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
+            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, AppState::Dots);
+            *last_change_at = None;
+            tracing::debug!("DotsSettings debounce elapsed — beginning reload FadeOut");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +478,127 @@ mod tests {
             params.i_resolution,
             [1920.0, 1080.0],
             "i_resolution must fall back to [1920, 1080] when no window"
+        );
+    }
+
+    /// `restart_on_dots_settings_change` must transition `SketchReloadState`
+    /// to `FadeOut` after a `SketchRestart { storage_key: "dots" }` event
+    /// arrives and the 500 ms debounce elapses while in `AppState::Dots`.
+    ///
+    /// This is the primary behavioral assertion for the Dots restart listener.
+    /// It exercises the system end-to-end: event receipt, debounce arming,
+    /// debounce expiry, and `begin_fade_out` invocation.
+    #[test]
+    fn restart_listener_begins_fade_out_on_dots_key() {
+        use std::time::Duration;
+
+        use bevy::state::app::StatesPlugin;
+        use wc_core::lifecycle::reload::{ReloadPhase, SketchReloadState};
+        use wc_core::settings::SketchRestart;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.insert_resource(SketchReloadState::default());
+        // Register the SketchRestart message type so `MessageReader` resolves.
+        app.add_message::<SketchRestart>();
+        app.add_systems(Update, restart_on_dots_settings_change);
+
+        // Transition to AppState::Dots so the listener gates correctly.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Dots);
+        app.update(); // Apply state transition.
+
+        // Send a SketchRestart event for "dots".
+        app.world_mut()
+            .resource_mut::<Messages<SketchRestart>>()
+            .write(SketchRestart {
+                storage_key: "dots",
+            });
+        // First update: listener reads the message and arms the debounce timer.
+        app.update();
+
+        // Immediately after receipt the reload must still be idle (500 ms
+        // debounce has not elapsed yet).
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle,
+            "reload must remain idle while debounce window is open"
+        );
+
+        // Advance time past the 500 ms debounce in 100 ms chunks.
+        // `ManualDuration` advances `Time<()>.delta_secs()` by the given amount
+        // each `app.update()`, which accumulates in `Time::elapsed()`.
+        // 7 steps × 100 ms = 700 ms — ample headroom past the 500 ms window.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(100),
+        ));
+        for _ in 0..7_u32 {
+            app.update();
+        }
+
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::FadeOut,
+            "reload must transition to FadeOut after debounce elapses"
+        );
+        // Confirm the return_state was set to Dots so the fade cycle navigates
+        // back to the correct sketch.
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().return_state,
+            AppState::Dots,
+            "return_state must be Dots so drive_reload_state navigates back correctly"
+        );
+    }
+
+    /// `restart_on_dots_settings_change` must ignore `SketchRestart` events
+    /// whose `storage_key` does not match `DotsSettings::STORAGE_KEY` ("dots").
+    ///
+    /// Verifies the filter predicate: a "line" event (wrong key) must leave
+    /// `SketchReloadState` in `Idle` even after the debounce window passes.
+    #[test]
+    fn restart_listener_ignores_non_dots_key() {
+        use std::time::Duration;
+
+        use bevy::state::app::StatesPlugin;
+        use wc_core::lifecycle::reload::{ReloadPhase, SketchReloadState};
+        use wc_core::settings::SketchRestart;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.insert_resource(SketchReloadState::default());
+        app.add_message::<SketchRestart>();
+        app.add_systems(Update, restart_on_dots_settings_change);
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Dots);
+        app.update();
+
+        // Send a restart event for a different sketch key ("line").
+        app.world_mut()
+            .resource_mut::<Messages<SketchRestart>>()
+            .write(SketchRestart {
+                storage_key: "line",
+            });
+
+        // Advance time past the debounce window in 100 ms chunks.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(100),
+        ));
+        for _ in 0..7_u32 {
+            app.update();
+        }
+
+        // Reload state must remain idle: the "line" key was filtered out.
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle,
+            "listener must not fire for events targeting other sketches"
         );
     }
 }
