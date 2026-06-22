@@ -345,36 +345,58 @@ mod tests {
 
     /// `drive_dots_attract_color` at fade alpha = 0.0 (Active / wake-complete)
     /// must write `Vec4::ZERO` — a bit-exact render no-op.
+    ///
+    /// Uses `register_system` + `run_system` so the `Local<Vec4>` gate persists
+    /// across calls (unlike `run_system_once`, which creates a fresh `SystemState`
+    /// each invocation). The test:
+    /// 1. Primes the gate at full alpha and asserts `y ≈ 1.2` (so the next step
+    ///    has a non-zero value to revert — otherwise the test is still trivial).
+    /// 2. Resets the fade to alpha = 0.0 on the same world.
+    /// 3. Re-runs — now `last ≠ ZERO`, so the change gate fires and drives the
+    ///    material back to `ZERO`.
     #[test]
     #[allow(
         clippy::expect_used,
         reason = "test-only: panic on system-run failure is the intended failure mode"
     )]
     fn drive_dots_attract_color_zero_alpha_writes_zero() {
-        let (mut world, handle) = setup_attract_color_world(0.0);
+        // Single world starting at full alpha so the first run primes the Local gate.
+        let (mut world, handle) = setup_attract_color_world(1.0);
 
-        // Pre-seed `last` to a non-zero value so the change gate does not
-        // short-circuit: insert a fake prior write by running the system once
-        // at full fade first, then reset fade to zero and re-run.
-        let (mut world2, handle2) = setup_attract_color_world(1.0);
-        world2
-            .run_system_once(drive_dots_attract_color)
-            .expect("pre-seed run");
-        // Now reset the fade to zero on this separate world (avoids Local confusion).
-        // Simply test the zero-fade world directly — `last` starts at Vec4::ZERO,
-        // target is Vec4::ZERO, so the change gate fires and the material stays ZERO.
-        world
-            .run_system_once(drive_dots_attract_color)
-            .expect("drive_dots_attract_color zero-fade run");
+        // Register the system; the `Local<Vec4>` state survives across `run_system` calls.
+        let id = world.register_system(drive_dots_attract_color);
+
+        // ── Run 1: full alpha — primes `last` and writes the brightness lift. ──
+        world.run_system(id).expect("prime run at full alpha");
+
+        {
+            let materials = world.resource::<Assets<ParticleMaterial>>();
+            let mat = materials
+                .get(&handle)
+                .expect("material must be present after prime run");
+            assert!(
+                (mat.attract_color.y - 1.2).abs() < 1e-5,
+                "prime run must write brightness lift ≈1.2, got {}; \
+                 otherwise the revert step is trivial",
+                mat.attract_color.y
+            );
+        }
+
+        // ── Transition to alpha = 0.0 (Active / wake-complete). ──
+        world.insert_resource(ScreensaverFade::default());
+
+        // ── Run 2: zero alpha — `last ≠ ZERO`, so the change gate fires and
+        //    the system must drive the material back to ZERO. ──
+        world.run_system(id).expect("zero-fade run");
 
         let materials = world.resource::<Assets<ParticleMaterial>>();
-        let mat = materials.get(&handle).expect("material must be present");
+        let mat = materials
+            .get(&handle)
+            .expect("material must be present after zero-fade run");
         assert_eq!(
             mat.attract_color,
             Vec4::ZERO,
             "attract_color must be Vec4::ZERO at fade alpha=0 (Active steady state)"
         );
-        // Suppress unused variable warning for the pre-seed world.
-        let _ = (world2, handle2);
     }
 }
