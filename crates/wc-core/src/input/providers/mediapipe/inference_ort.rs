@@ -161,9 +161,9 @@ fn run_err<R>(e: ort::Error<R>) -> InferenceError {
 ///
 /// ONNX Runtime's `CoreML` EP names its compiled-artifact subdirectory by a
 /// model hash that does **not** change when only our model's initializers change:
-/// an unused-initializer strip and the `PReLU` slope reshape (`[1,C,1,1]` →
-/// `[C,1,1]`, which moves `PReLU` onto `CoreML` and collapses the palm graph from
-/// 30 partitions to 6) both leave that EP-side key identical. Without our own
+/// the palm model's `PReLU` slope reshape (`[1,C,1,1]` → `[C,1,1]`, which moves
+/// `PReLU` onto `CoreML` and collapses the graph from 30 partitions to 6) leaves
+/// that EP-side key identical to the pre-reshape model's. Without our own
 /// namespacing, a model update therefore loads the *previous* model's stale
 /// compiled partition and fails at inference with `output_features has no value`.
 /// Hashing the model bytes here lands every distinct model in its own directory,

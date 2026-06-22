@@ -48,10 +48,14 @@ behaviour — see the cache gotcha below.
 
 ---
 
-## Provenance and full surgery history
+## Provenance and surgery history
 
-The vendored `palm_detection.onnx` is the tail of a chain that begins at Google
-MediaPipe and has been edited several times. Trace it before re-vendoring, and
+The vendored `palm_detection.onnx` derives from Google MediaPipe and today carries
+exactly **one** modification (the PReLU reshape, Surgery 2). Two earlier edits
+(Surgeries 0 and 1) were applied for the `tract` runtime and then **reverted** once
+the project settled on ONNX Runtime; they are kept in this history so the model's
+shape reads straight and the tract workaround is not reintroduced by reflex.
+Reproduce the vendored model with `tools/handtrack-oracle/graph_surgery.py`, and
 record any new edit + SHA in `assets/models/hand/ATTRIBUTION.md`.
 
 **Lineage at a glance:**
@@ -65,30 +69,34 @@ record any new edit + SHA in `assets/models/hand/ATTRIBUTION.md`.
    `…/FusedBatchNormV3;…/depthwise_conv2d_3/depthwise;…/conv2d/Conv2D1__60`) are
    fingerprints of this step. It emits raw `[1,2016,18]` box/keypoint regressions
    + `[1,2016,1]` scores; anchor decode + NMS are left to the consumer (done in
-   Rust here, so the graph carries no decode/NMS tail).
-3. **Surgery 0 — Resize `sizes`→`scales`** (commit `cb69ecf4`, 2026-06-04).
+   Rust here, so the graph carries no decode/NMS tail). **This is the upstream the
+   tool downloads and surgeries from.**
+3. **Surgery 0 — Resize `sizes`→`scales`** (commit `cb69ecf4`) — *reverted*.
 4. **Runtime switch: tract → ort (ONNX Runtime).**
-5. **Surgery 1 — strip 2 unused initializers** (commit `16dd90f`).
-6. **Surgery 2 — reshape 26 PReLU slopes + cache fixes** (commit `d2369f4f`).
+5. **Surgery 1 — strip 2 unused initializers** (commit `16dd90f`) — *reverted with Surgery 0*.
+6. **Surgery 2 — reshape 26 PReLU slopes + cache fixes** (commit `d2369f4f`) — the only edit in the current model.
 
 `hand_landmark.onnx` (the second stage) is the OpenCV-Zoo
 `handpose_estimation_mediapipe` ONNX, vendored **as-is, no surgery** — tract
 matched onnxruntime to ~1e-4 on it in the spike, and it has no PReLU, so CoreML
 takes it cleanly.
 
-### Surgery 0 — Resize `sizes`→`scales`, for tract (commit `cb69ecf4`)
+### Surgery 0 — Resize `sizes`→`scales`, for tract (commit `cb69ecf4`) — reverted
 
 The OpenCV-Zoo ONNX expresses its two FPN upsamples as `Resize` nodes that pass
-the target size via the **`sizes`** input (empty `scales`). The runtime chosen in
-the Phase-0 spike, **tract 0.21**, does not honour `sizes` and left the feature
-map un-resized, failing at `Resize__235`.
-`tools/handtrack-oracle/graph_surgery.py` rewrites both nodes to an explicit
-`scales=[1,1,2,2]` (clean 2× NCHW upsample), **bit-exact under onnxruntime**
-(max-abs-err 0.0). That tool downloads the upstream model and re-verifies, so it
-is the reproducible source of the vendored asset. The rewrite changed only the
-`Resize` *inputs*; it did **not** touch `coordinate_transformation_mode` (still
-`half_pixel`), which is why those same two nodes remain a CoreML partition
-boundary today (see the floor section).
+the target size via the **`sizes`** input (a static constant — `Concat__234:0` /
+`Concat__263:0`). The Phase-0 runtime, **tract 0.21**, does not honour `sizes` and
+left the feature map un-resized, failing at `Resize__235`. The fix rewrote both
+nodes to an explicit `scales=[1,1,2,2]` (clean 2× NCHW upsample), bit-exact under
+onnxruntime.
+
+**Reverted** once the runtime moved to ort, which honours the upstream `sizes`
+form. Before reverting it was confirmed both **bit-exact** *and*
+**CoreML-partition-neutral**: 6 partitions either way, because the CoreML blocker
+on those nodes is the untouched `half_pixel` `coordinate_transformation_mode`, not
+the `sizes`/`scales` form (see the floor section). With nothing to gain on CoreML
+and `sizes` being the more upstream-faithful artifact, the workaround was dropped
+once tract was gone.
 
 ### Runtime switch: tract → ort
 
@@ -97,17 +105,17 @@ extrapolates at feature-map edges where onnxruntime clamps (a real-hand ROI
 accuracy risk). The provider later moved to **ort / ONNX Runtime** with the
 CoreML EP (the "ort-only" mediapipe merge; backend in `inference_ort.rs`). That
 switch dissolved the tract-era Resize concern (we *are* onnxruntime now) and is
-what made CoreML acceleration — and therefore Surgeries 1 and 2 — relevant. The
-Surgery-0 `scales` rewrite is now harmless rather than required (ort honours
-`sizes` too), so it stays for reproducibility.
+what made CoreML acceleration — and therefore the PReLU reshape — relevant.
 
-### Surgery 1 — strip 2 unused initializers (commit `16dd90f`)
+### Surgery 1 — strip 2 unused initializers (commit `16dd90f`) — reverted
 
-Symptom: two startup `WARN Removing initializer 'Concat__234:0' … not used by any
-node` lines — orphaned constant tensors carried in from the conversion lineage
-(dead `Concat` outputs that no node consumes). ORT strips them at every load and
-warns. Removing them offline is **bit-exact** (ORT discarded them anyway). 124
-nodes unchanged, initializers 122 → 120.
+Surgery 0's rewrite *dropped* the `Resize` `sizes` inputs, which orphaned the two
+constants that had fed them (`Concat__234:0`, `Concat__263:0`); ORT then logged
+two `Removing initializer … not used by any node` warnings at load. Stripping the
+orphans offline silenced the warnings (bit-exact). This surgery existed **only** as
+cleanup for Surgery 0, so reverting Surgery 0 dissolved it too: with the upstream
+`sizes` form restored, those two initializers are live again and there is nothing
+to strip.
 
 ### Surgery 2 — reshape 26 PReLU slopes + cache fixes (commit `d2369f4f`)
 
@@ -260,9 +268,10 @@ initializer, will read `0.0`. Anything non-zero means you changed the computatio
 
 - Backend + cache code: `inference_ort.rs` (`model_cache_key`, `coreml_cache_dir`,
   the `load` doc comment on NeuralNetwork vs MLProgram).
-- Surgery-0 tool (Resize rewrite, re-vendoring source of truth):
+- Re-vendoring tool (applies the PReLU reshape; the asset's source of truth):
   `tools/handtrack-oracle/graph_surgery.py` (+ `README.md`, `spike_io.py`).
 - Phase-0 spike + tract decision: `docs/superpowers/specs/2026-06-04-mediapipe-webcam-hand-tracking-design.md`.
 - Commits: `cb69ecf4` (vendor + Resize surgery, tract), `16dd90f` (strip),
-  `d2369f4f` (PReLU reshape + cache fixes + ort rc.12).
+  `d2369f4f` (PReLU reshape + cache fixes + ort rc.12); Surgeries 0 and 1 later
+  reverted by re-deriving the model from upstream + the PReLU reshape only.
 - Model provenance + SHAs: `assets/models/hand/ATTRIBUTION.md`.

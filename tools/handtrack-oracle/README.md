@@ -4,16 +4,18 @@ Local-only Python helpers for the MediaPipe webcam hand-tracking provider. **Not
 shipped, not a build/CI runtime dependency, no API spend.** Managed with `uv`.
 
 These exist to (a) decide and de-risk the Rust ONNX runtime (the *verification
-spike*), and (b) regenerate the vendored, tract-compatible model assets when the
-upstream models are re-vendored.
+spike*), and (b) regenerate the vendored model assets when the upstream models
+are re-vendored.
 
 ## Scripts
 
-### `graph_surgery.py` — produce the tract-ready palm model
-Downloads the OpenCV-Zoo MediaPipe palm detector and rewrites its two FPN
-`Resize` nodes from the `sizes` form (which tract 0.21 ignores) to an explicit
-`scales=[1,1,2,2]` 2× upsample — **bit-exact under onnxruntime**. Writes
-`assets/models/hand/palm_detection.onnx` (committed, shipped).
+### `graph_surgery.py` — produce the CoreML-accelerated palm model
+Downloads the OpenCV-Zoo MediaPipe palm detector and reshapes its 26 `PReLU`
+slope initializers `[1,C,1,1]` → `[C,1,1]` so ONNX Runtime's CoreML EP accepts
+them (palm graph 30 → 6 partitions) — **bit-exact under onnxruntime**. Writes
+`assets/models/hand/palm_detection.onnx` (committed, shipped). (Earlier this tool
+did a `tract`-era `Resize` `sizes`→`scales` rewrite, since reverted; see
+`docs/runbooks/onnx-coreml-model-surgery.md`.)
 
 ```bash
 uv run --with onnx --with numpy --with onnxruntime tools/handtrack-oracle/graph_surgery.py

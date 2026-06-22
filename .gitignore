@@ -34,6 +34,10 @@ Thumbs.db
 # Perf audit outputs (Plan 6) — keep reports, ignore intermediate raw data
 /perf-harness/raw/
 
+# Upstream model downloaded by tools/handtrack-oracle/graph_surgery.py (the
+# vendored, surgeried palm_detection.onnx is committed; the raw upstream is not).
+/assets/models/hand/palm_detection_original.onnx
+
 # Misc
 *.log
 
