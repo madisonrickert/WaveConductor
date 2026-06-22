@@ -11,17 +11,21 @@
 //!   never reaches zero. Only an explicit release event (from
 //!   `update_dots_mouse_attractor`) can zero the power.
 //!
-//! Faithful-to-v4 note: `DOTS_MOUSE_POWER_PRESS = 1.0 < DOTS_MOUSE_POWER_FLOOR
-//! = 2.0`, so a held attractor's power RISES asymptotically toward 2 rather than
-//! falling. This matches v4 Dots behavior exactly (v4 `createAttractor` sets
-//! `power = 1`; `ATTRACTOR_POWER_DECAY_FLOOR = 2`). Do not "fix" it.
+//! Faithful-to-v4 note: the press/decay math mirrors v4 exactly — `createAttractor`
+//! sets `power = 1`, `ATTRACTOR_POWER_DECAY_FLOOR = 2`, so a held attractor's power
+//! RISES asymptotically toward 2 rather than falling. Do not "fix" it.
+//! The idle-veto keep-awake-while-held behavior is a v5 choice: v4's sleep gate
+//! (`hasActiveAttractors` requires `power > 2.01`) is never triggered by the mouse
+//! attractor (which asymptotes to 2.0 from below), so a held mouse does NOT block
+//! v4's screensaver. This gating difference will be revisited in D6's screensaver
+//! work.
 
 use bevy::prelude::*;
 use wc_core::input::pointer::PointerState;
 use wc_core::settings::EguiPointerCaptured;
 
 /// Lifecycle state for the Dots mouse attractor — power that activates on click
-/// and evolves geometrically while held. Matches v4 Dots behavior: `power = 1`
+/// and evolves geometrically while held. The decay math mirrors v4: `power = 1`
 /// on press (below floor); each frame `power = floor + (power - floor) * 0.9`,
 /// which causes a held attractor to RISE asymptotically to floor (2.0). Power
 /// becomes exactly zero only on explicit release.
@@ -217,5 +221,101 @@ mod tests {
             power, 0.0,
             "decay must be a no-op when power is already 0.0 (released)"
         );
+    }
+
+    /// Drives [`update_dots_mouse_attractor`] through a press then a release,
+    /// actually running the system via [`RunSystemOnce`] (not just asserting on
+    /// a constant). Covers the input-gating path: a valid cursor + `just_pressed`
+    /// sets power and records the world-space position; `just_released` zeros
+    /// power regardless of prior state.
+    ///
+    /// Mirrors the approach of `tests/line_input.rs::left_press_activates_mouse_attractor`
+    /// but uses a bare `World` + `RunSystemOnce` instead of the full
+    /// `sketches_test_app()` harness (which requires render plugins unavailable
+    /// in unit tests).
+    #[test]
+    fn press_sets_power_and_position_then_release_zeros_power() {
+        use bevy::input::mouse::MouseButton;
+        use bevy::input::touch::Touches;
+        use bevy::input::ButtonInput;
+        use bevy::math::Vec2;
+        use bevy::window::Window;
+        use wc_core::input::pointer::PointerState;
+
+        let mut world = World::new();
+
+        // Cursor at the center of a 1280×720 window → world-space (0.0, 0.0).
+        world.insert_resource(PointerState {
+            cursor: Some(Vec2::new(640.0, 360.0)),
+            ..Default::default()
+        });
+
+        // Left button just pressed this tick.
+        let mut mouse_buttons = ButtonInput::<MouseButton>::default();
+        mouse_buttons.press(MouseButton::Left);
+        world.insert_resource(mouse_buttons);
+
+        // No touch input active.
+        world.insert_resource(Touches::default());
+        // EguiPointerCaptured absent → Option<Res<_>> is None (no egui capture).
+
+        world.insert_resource(DotsMouseAttractorState::default());
+
+        // Single<_, _, &Window> requires exactly one Window entity.
+        world.spawn(Window {
+            resolution: (1280_u32, 720_u32).into(),
+            ..Default::default()
+        });
+
+        // --- Press: system must set power = DOTS_MOUSE_POWER_PRESS and record
+        // the cursor's world-space coordinates.
+        world
+            .run_system_once(update_dots_mouse_attractor)
+            .expect("update_dots_mouse_attractor (press) run");
+
+        let state = *world.resource::<DotsMouseAttractorState>();
+        #[allow(
+            clippy::float_cmp,
+            reason = "DOTS_MOUSE_POWER_PRESS is literal 1.0; the assignment is bit-exact"
+        )]
+        {
+            assert_eq!(
+                state.power, DOTS_MOUSE_POWER_PRESS,
+                "press must set power to DOTS_MOUSE_POWER_PRESS ({DOTS_MOUSE_POWER_PRESS})"
+            );
+        }
+        // Cursor at (640, 360) on a 1280×720 window → world-space origin (0, 0).
+        assert!(
+            state.position[0].abs() < 0.5,
+            "world-space x should be ≈ 0 (cursor at horizontal center), got {}",
+            state.position[0]
+        );
+        assert!(
+            state.position[1].abs() < 0.5,
+            "world-space y should be ≈ 0 (cursor at vertical center), got {}",
+            state.position[1]
+        );
+
+        // --- Release: replace ButtonInput with just_released active, just_pressed
+        // cleared. `press` then `release` on a fresh ButtonInput yields both edges;
+        // `clear_just_pressed` removes the press edge so only just_released fires.
+        let mut mouse_buttons = ButtonInput::<MouseButton>::default();
+        mouse_buttons.press(MouseButton::Left);
+        mouse_buttons.release(MouseButton::Left);
+        mouse_buttons.clear_just_pressed(MouseButton::Left);
+        world.insert_resource(mouse_buttons);
+
+        world
+            .run_system_once(update_dots_mouse_attractor)
+            .expect("update_dots_mouse_attractor (release) run");
+
+        let power = world.resource::<DotsMouseAttractorState>().power;
+        #[allow(
+            clippy::float_cmp,
+            reason = "release path writes literal 0.0 — bit-exact zero comparison is correct"
+        )]
+        {
+            assert_eq!(power, 0.0, "release must zero power immediately");
+        }
     }
 }

@@ -86,7 +86,11 @@ pub fn build_grid_particles(w: f32, h: f32, spacing: f32) -> Vec<Particle> {
     let rows = ((y_end - y_start) / spacing).ceil() as usize;
 
     // Clamp particle count. Dense grids on wide canvases (e.g. spacing=4 at 4K)
-    // can exceed 200 k; very small windows clamp to at least 100.
+    // can exceed 200 k; the upper bound is the live cap. The lower bound of 100
+    // is currently unreachable (with EXTENT=10 the grid is always ≥ ~400 cells)
+    // and is a `with_capacity` floor, NOT a fill guarantee — the loop only pushes
+    // `cols*rows` particles, so if EXTENT ever shrank below the floor, the
+    // returned Vec could be shorter than 100.
     let count = cols.saturating_mul(rows).clamp(100, 200_000);
 
     let mut particles = Vec::with_capacity(count);
@@ -333,9 +337,9 @@ mod tests {
     }
 
     #[test]
-    fn small_window_clamps_to_minimum_count() {
-        // Extremely small spacing on a normal window should clamp at lower bound.
-        // (Very large grid — would be > 200_000.)
+    fn dense_grid_clamps_to_maximum_count() {
+        // Extremely small spacing on a normal window produces a very dense grid
+        // (>> 200_000 cells). The upper clamp caps output at exactly 200_000.
         let particles = build_grid_particles(1280.0, 720.0, 1.0);
         assert_eq!(
             particles.len(),
