@@ -120,9 +120,13 @@ fn drive_dots_attract(
     // `count = 0` puts the kernel in inertial-drag mode; the turbulence drift
     // is the only force moving particles.
     //
-    // restoring_linear = 0.0: the fabric-tension spring must NOT fight the
-    // turbulence morph during attract mode. The live writer passes
-    // `settings.fabric_tension` instead; here we always suppress it.
+    // restoring_linear = 0.0: the LINEAR fabric-tension spring must NOT fight
+    // the turbulence morph during attract mode (the live writer passes
+    // `settings.fabric_tension` instead; here we always suppress it). Note the
+    // quadratic home-spring (stationary_constant = 0.01, baked unconditionally)
+    // still runs in attract: with the idle home-drift removed in Task 5 it now
+    // gently anchors the drifting field toward the immutable spawn grid — the
+    // intended self-heal. Watch its feel in the deferred screensaver soak.
     let attractors = [Attractor::default(); MAX_ATTRACTORS];
     sim.params = bake_dots_sim_params(
         time.delta_secs(),

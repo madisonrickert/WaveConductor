@@ -46,12 +46,15 @@
 //!
 //! ## Known gap: LFO rate
 //!
-//! v4's `flatRatio` (cloud aspect ratio) drove the LFO oscillator rate so the
-//! LFO would breathe faster mid-press when the cloud was circular and slower
-//! during the elongated post-release tail. Without particle stats this term is
-//! **not synthesized** — the [`DotsSynth`]'s LFO rate is fixed at the
-//! hardcoded 8.66 Hz. This is a known perceptual deviation from v4; accepted
-//! as the ENVELOPE-PRIMARY tradeoff (no GPU readback, no CPU mirror).
+//! v4's `flatRatio` (cloud aspect ratio) drove the filter-LFO oscillator rate
+//! so the wobble would speed up mid-press when the cloud was circular and slow
+//! during the elongated post-release tail. Without particle stats that
+//! continuous rate is **not synthesized** — the [`DotsSynth`]'s filter LFO runs
+//! at a fixed warm ~1.5 Hz (8.66 Hz was v4's construction-time placeholder, not
+//! its running rate). The in-out swell v4 got from `flatRatio` is instead
+//! recreated by the modeled breath above, so the residual is only the *rate
+//! variation* of the filter wobble — accepted as the ENVELOPE-PRIMARY tradeoff
+//! (no GPU readback, no CPU mirror).
 //!
 //! ## Ring-full handling
 //!
@@ -222,8 +225,9 @@ pub(crate) fn dots_lfo_depth(bandpass_freq: f32) -> f32 {
 ///
 /// ## LFO rate gap
 ///
-/// See module-level docs. The LFO oscillator rate is **not** driven here; it
-/// stays fixed at `DotsSynth`'s hardcoded 8.66 Hz. This is a deliberate
+/// See module-level docs. The filter-LFO oscillator rate is **not** driven
+/// here; it stays fixed at `DotsSynth`'s warm ~1.5 Hz. The in-out swell is
+/// instead recreated by the modeled breath. This is a deliberate
 /// ENVELOPE-PRIMARY tradeoff.
 pub fn drive_dots_audio(
     mouse: Res<'_, DotsMouseAttractorState>,

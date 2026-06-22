@@ -57,6 +57,28 @@ Internal name: `Dots`. Display name: "Fabric".
   (`Handle<Image>` clone keeps GPU texture alive after `OnExit`) fixed for both Line and Dots via
   `remove_*_hand_mesh_target_if_absent` in `ExtractSchedule`.
 
+- **Perceptual parity fixes (shipped 2026-06-22, plan `2026-06-22-dots-perceptual-parity-fixes.md`)** —
+  nine tasks closing five gaps Madison found in `cargo rund` testing, settings-panel-first:
+  - **Settings panel**: an active-sketch settings tab (the dock shows a **FABRIC** tab in Dots, routed
+    by `AppState`) + a Dots restart listener so `dot_spacing` rebuilds the grid (generalized
+    `SketchReloadState` with a `return_state`, fixing a latent `AppState::Line` hardcode so any sketch
+    returns to itself). ~14 live `DotsSettings` knobs added across Particles/Visual/Audio/Screensaver.
+  - **Audio warmth + pulse**: filter LFO slowed 8.66→1.5 Hz (8.66 was a v4 construction-time
+    placeholder, overwritten every frame in v4); the bandpass window warmed (≈2000→≈390 Hz at full
+    press) and made settings-driven; a **modeled in-out breath** (activity-gated slow sine on volume +
+    cutoff) recreates v4's low warm pulse without GPU field stats.
+  - **Fabric return**: removed the idle home-drift that permanently slid each particle's home onto the
+    deformed shape (the real permanent-tangle bug — `original_xy` is now an immutable home) and added a
+    linear restoring spring exposed as a live `fabric_tension` knob, so the field gracefully returns to
+    the original grid. `SimParams` scalar header grew 64→80 bytes (`restoring_linear` + pad, still
+    16-byte aligned; verified Rust↔WGSL offset-by-offset).
+  - **Hand calibration + hue-split**: hand grab power scaled down toward the mouse's calibration
+    (`hand_power_scale`, default 0.3); grabbing hands now rotate the explode hue-split center via Line's
+    eased focal (`ease_focal`/`weighted_focal`), exactly like the mouse.
+  - **Attract dimming**: promoted `attract_color_params` to a shared `ParticleMaterial` helper and drove
+    the Dots attract-mode AgX brightness lift (×2.2, `attract_brightness`), matching Line — the
+    fraction-killed calm field no longer reads dim grey.
+
 **Approved deviations from v4:**
 
 - **WGSL compute kernel replaces CPU `particleSystem.ts`**: The particle simulation runs in a WGSL
@@ -66,9 +88,12 @@ Internal name: `Dots`. Display name: "Fabric".
 - **Envelope-primary audio (flatRatio / variance gap)**: v4's `DotsSynth` in `audio.ts` read
   per-frame `computeStats`-derived `flatRatio` (particle distribution flatness) and `variance` to
   modulate LFO rate and cutoff shape. v5 replaces this with a smooth attack/release envelope keyed
-  on attractor presence. The musical shape (rising on press, sustained during hold, decaying after
-  release) is perceptually equivalent; the `flatRatio` LFO-rate and `variance`-shape subtleties are
-  accepted perceptual gaps. Tuning constants in `audio_coupling.rs` shape the response.
+  on attractor presence, plus a **modeled in-out breath** (activity-gated slow sine on volume +
+  cutoff, `breath_rate_hz`/`breath_depth`) that recreates v4's in-out swell without GPU field stats.
+  After the 2026-06-22 audio pass the residual gap is narrow: only the *rate variation* of the filter
+  wobble is unsynthesized (the LFO runs at a fixed warm ~1.5 Hz rather than tracking `flatRatio`).
+  All response shaping is now live `DotsSettings` knobs (see the Audio section of the FABRIC panel),
+  not compile-time constants.
 
 - **Screensaver is a v5 addition**: v4 Dots had no idle attract-mode. The `DotsScreensaverPlugin`
   is a v5 kiosk-specific feature; no v4 baseline exists for screensaver output.
@@ -89,9 +114,11 @@ Internal name: `Dots`. Display name: "Fabric".
 
 D1–D6b delivered the full implementation: shared particle foundation (D1), grid physics + mouse
 attractor (D2), explode post-process (D3), audio synthesis + envelope coupling (D4), hand attractors
-+ hand audio (D5), screensaver attract-mode (D6a), bone-wireframe skeletons (D6b). Automated tests
-cover plumbing, math, and lifecycle; visual and hardware verification are operator-deferred per the
-checklist below.
++ hand audio (D5), screensaver attract-mode (D6a), bone-wireframe skeletons (D6b). The 2026-06-22
+perceptual parity sprint then closed five gaps found in live testing (settings panel, audio warmth +
+breath, immutable-home fabric return, hand power/hue-split, attract dimming) — see the dedicated
+"Perceptual parity fixes" entries above. Automated tests cover plumbing, math, and lifecycle; visual,
+ear, and hardware verification are operator-deferred per the checklist below.
 
 ## Operator pre-tag checklist
 
@@ -114,12 +141,14 @@ Complete each item on the deployment machine (`cargo rund`) before creating the 
 ### Audio (`cargo rund` — ear tuning)
 
 - [ ] **D4 synth character**: confirm the DotsSynth voice has the right warm bandpass + LFO
-  character (matches v4 `audio.ts` by ear). Reference constants in
-  `crates/wc-sketches/src/dots/audio_coupling.rs`: `BANDPASS_BASE_HZ`, `BANDPASS_RANGE_HZ`,
-  `ENVELOPE_ATTACK_RATE`, `ENVELOPE_RELEASE_RATE`. Tune as needed.
-- [ ] **D4 envelope shape**: confirm the sound rises on click, sustains during hold, and decays
-  smoothly after release. The `flatRatio` LFO-rate modulation and `variance`-shape subtleties are
-  an accepted gap (see Approved Deviations above).
+  character (matches v4 `audio.ts` by ear). Tune live in the **FABRIC → Audio** panel (flip ADVANCED
+  for the Dev knobs): `bandpass_base_hz` / `bandpass_range_hz` for warmth, `breath_rate_hz` /
+  `breath_depth` for the in-out pulse, `synth_attack_ms` / `synth_release_ms` / `synth_volume_scale`
+  for feel. If the fixed 1.5 Hz filter wobble still reads wrong after tuning, the documented fallback
+  is to drive the LFO rate from a `Shared` (audio_coupling.rs module docs).
+- [ ] **D4 envelope shape + breath**: confirm the sound rises on click, sustains during hold, decays
+  smoothly after release, and has a low warm in-out pulse (the modeled breath) rather than a steady
+  bright tone. The `flatRatio` LFO-*rate* variation remains an accepted gap (see Approved Deviations).
 
 ### Hardware hand-tracking (`cargo rund` + Leap/MediaPipe)
 
@@ -138,12 +167,37 @@ Complete each item on the deployment machine (`cargo rund`) before creating the 
 - [ ] **D6a screensaver feel**: leave Dots idle past the screensaver timeout — confirm the grid
   morphs slowly and continuously (curl-noise turbulence), the field self-heals as particles respawn
   to their home positions, and the visual reads as calm and alive (not frozen, not frantic).
-- [ ] **D6a soak-watch (idle grid drift)**: during the 8-hour soak below, observe whether the idle
-  grid holds its general layout or drifts/loosens over hours. `stationary_constant = 0.01` runs in
-  attract mode, so `original_xy` eases along the turbulence flow and respawns return to a slowly
-  drifting home rather than the literal spawn grid. If undesirable, thread a softened
-  `stationary_constant` into the attract bake in `screensaver.rs` (the lever is documented
-  inline).
+- [ ] **D6a soak-watch (screensaver morph feel)**: the idle home-drift was REMOVED in the 2026-06-22
+  fabric fix, so `original_xy` is now immutable — respawns return to the literal spawn grid and the
+  field no longer loosens over hours (this retires the original "idle grid drift" soak-watch). The
+  quadratic home-spring (`stationary_constant = 0.01`, baked unconditionally) still runs in attract
+  and now gently anchors the drifting field toward that grid. During the soak, confirm the morph still
+  reads as calm and alive — the anchoring should not visibly fight the turbulence. If it feels too
+  stiff, soften `stationary_constant` in the attract bake; if too loose, `restoring_linear` (currently
+  0.0 in attract) is the lever.
+
+### Perceptual parity fixes (2026-06-22) — operator verification
+
+These five fixes ship with v4/Line-matched defaults; final feel-values are tuned live in the FABRIC
+settings panel (flip ADVANCED for the Dev knobs).
+
+- [ ] **FABRIC settings tab visible**: in Dots, open settings (cog) — confirm a **FABRIC** tab (not
+  LINE) shows Particles/Visual/Audio/Screensaver sections, and that Line's tab still reads **LINE**.
+- [ ] **Fabric return (eye-tune `fabric_tension`)**: drag the grid into a tangled shape and release —
+  confirm it gracefully returns toward the original grid (a little misshapen is fine; the permanent
+  tangle was the bug that was fixed). Tune `fabric_tension` (Particles) for the right return feel.
+- [ ] **Hand power matches mouse (eye-tune `hand_power_scale`)**: on Leap/MediaPipe, confirm a close
+  full grab pulls the grid with roughly the mouse's strength, not far harder. Tune `hand_power_scale`
+  (Particles, default 0.3).
+- [ ] **Hands rotate the hue-split**: with a grabbing hand, confirm the explode chromatic spiral
+  centers on / rotates with the hand the way it does with the mouse (smoothed). Tune
+  `explode_focal_smoothing` (Visual) if the follow feels too laggy or jittery.
+- [ ] **Attract brightness (no dimming)**: leave Dots idle into the screensaver — confirm the calm
+  fabric reads bright white, not dim grey (the AgX white-knee lift). Tune `attract_brightness`
+  (Screensaver, default 2.2) if needed.
+- [ ] **dot_spacing rebuilds the grid**: change `dot_spacing` (Particles, ADVANCED) — confirm the
+  sketch fades out and back in with the new density (the new restart listener), and that the
+  fade returns to Dots (not Line).
 
 ### Capture baselines (deployment machine + display required)
 
@@ -166,8 +220,11 @@ Complete each item on the deployment machine (`cargo rund`) before creating the 
 
 - [ ] **Extract shared utilities** (`#74`): `dots_leap_power` + `palm_to_world` (D5),
   `wang_hash` / `hash_to_unit` (D6a), and the bone material/mesh/shader/composite (D6b) all
-  duplicate their Line counterparts. Extract to `crates/wc-sketches/src/particles/` in a follow-up,
-  fixing Line + Dots together.
+  duplicate their Line counterparts. Also fold in the focal-smoothing helpers `ease_focal` /
+  `weighted_focal` / `FOCAL_CENTER_WEIGHT`, which Dots' hue-split fix (2026-06-22) now imports
+  directly from `line::systems::sim_params` (a Line→Dots cross-module dependency that belongs in
+  shared `particles/`). Extract to `crates/wc-sketches/src/particles/` in a follow-up, fixing Line +
+  Dots together.
 - [ ] **Fix wrong "premultiplied-alpha composite" doc wording** in `bone_wireframe.rs` for both
   Line and Dots (the composite is purely additive; alpha is not consulted). Fix alongside the #74
   extraction.
