@@ -4,10 +4,12 @@
 //! Each sketch lives in its own module and follows the pattern documented in
 //! [`wc_core::sketch`].
 
+pub mod dots;
 pub mod line;
 pub mod particles;
 
 use bevy::prelude::*;
+use bevy::sprite_render::Material2dPlugin;
 
 /// Umbrella plugin that registers every concrete sketch.
 pub struct SketchesPlugin;
@@ -22,6 +24,19 @@ impl Plugin for SketchesPlugin {
         // `line::bone_wireframe`), which is Metal-safe and — unlike the closed
         // wireframe/gizmo pipelines — shader- and post-process-extensible. Its
         // `MaterialPlugin` is registered by `LineHandMeshPlugin`.
+
+        // Shared particle plugins: registered once here so multiple sketch
+        // plugins (Line, Dots, …) can consume them without triggering Bevy's
+        // unique-plugin panic. `Material2dPlugin` and `ParticleComputePlugin`
+        // are both `Plugin` singletons — adding them more than once would
+        // panic at startup.
+        app.add_plugins(
+            Material2dPlugin::<crate::particles::material::ParticleMaterial>::default(),
+        );
+        app.add_plugins(crate::particles::compute::ParticleComputePlugin);
+
+        // Concrete sketch plugins.
         app.add_plugins(line::LinePlugin);
+        app.add_plugins(dots::DotsPlugin);
     }
 }

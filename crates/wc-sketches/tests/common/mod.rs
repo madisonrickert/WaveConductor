@@ -31,10 +31,13 @@ use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bevy::sprite_render::ColorMaterial;
+use bevy::sprite_render::Material2dPlugin;
 use bevy::state::app::StatesPlugin;
 use wc_core::input::pointer::{pointer_merge_system, PointerState};
 use wc_core::input::state::HandTrackingState;
 use wc_sketches::line::LinePlugin;
+use wc_sketches::particles::compute::ParticleComputePlugin;
+use wc_sketches::particles::material::ParticleMaterial;
 
 /// Build a sketches-test app: standard wc-core lifecycle harness plus
 /// `AssetPlugin`, `MeshPlugin`, `ShaderBuffer` registration,
@@ -132,9 +135,15 @@ pub fn sketches_test_app() -> App {
     // SettingsPlugin provides the settings registry + persistence.
     app.add_plugins(wc_core::settings::SettingsPlugin);
 
-    // LinePlugin registers LineSettings, Material2dPlugin (gracefully no-ops
-    // render setup without RenderApp), ParticleComputePlugin (same), and wires
-    // OnEnter / OnExit systems.
+    // `Material2dPlugin::<ParticleMaterial>` and `ParticleComputePlugin` are
+    // now registered by the `SketchesPlugin` umbrella (hoisted so Dots and
+    // future sketches can share them without a unique-plugin panic). The test
+    // harness uses `LinePlugin` directly (no umbrella), so we register them
+    // here manually. Both gracefully no-op render setup without `RenderApp`.
+    app.add_plugins(Material2dPlugin::<ParticleMaterial>::default());
+    app.add_plugins(ParticleComputePlugin);
+
+    // LinePlugin registers LineSettings and wires OnEnter / OnExit systems.
     app.add_plugins(LinePlugin);
 
     app

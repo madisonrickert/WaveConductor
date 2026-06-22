@@ -54,7 +54,6 @@ pub mod template_adjustments_store;
 pub use systems::LineRoot;
 
 use bevy::prelude::*;
-use bevy::sprite_render::Material2dPlugin;
 use wc_core::audio::state::AudioState;
 #[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
@@ -89,13 +88,10 @@ impl Plugin for LinePlugin {
         // Register the picker-tile manifest entry (async screenshot load).
         register_line_manifest(app);
 
-        // Register the Material2d for ParticleMaterial.
-        app.add_plugins(Material2dPlugin::<
-            crate::particles::material::ParticleMaterial,
-        >::default());
-
-        // Wire the compute pipeline.
-        app.add_plugins(crate::particles::compute::ParticleComputePlugin);
+        // Note: `Material2dPlugin::<ParticleMaterial>` and
+        // `ParticleComputePlugin` are now registered once by the
+        // `SketchesPlugin` umbrella (hoisted so Dots can share them without
+        // triggering Bevy's unique-plugin panic). Do not re-add them here.
 
         // Wire the gravity-smear post-process render-graph node. In debug
         // builds, `WC_DEBUG_DISABLE_SMEAR` skips it for render-stage isolation.
