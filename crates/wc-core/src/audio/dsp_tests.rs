@@ -327,13 +327,15 @@ fn add_dots_synth_activates() {
 fn add_dots_synth_is_idempotent() {
     let mut host = DspHost::new(48_000, 2, Vec::new());
     host.apply(AudioCommand::AddDotsSynth);
-    // Set a param so we can detect whether the synth was replaced
-    // (a replacement resets params to defaults).
+    // Set a non-default param; we cannot read it back via the DspHost public
+    // API, so idempotency is verified through active-state only.
     host.apply(AudioCommand::SetDotsParam {
         key: "bandpass_freq",
         value: 4242.0,
     });
-    // Second add must be a no-op; the slot must still be active.
+    // Second AddDotsSynth must be a no-op: the slot stays active and nothing
+    // panics or double-builds (we assert active state; the is_none() guard in
+    // the engine makes replacement impossible).
     host.apply(AudioCommand::AddDotsSynth);
     assert!(host.dots_synth_active());
 }

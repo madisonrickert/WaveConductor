@@ -58,7 +58,7 @@ use super::systems::DotsMouseAttractorState;
 ///
 /// LFO modulation depth tracks the bandpass cutoff so the wobble's musical
 /// interval stays consistent as the cutoff sweeps. Mirrors the same constant
-/// in [`wc_sketches::line::audio_coupling`].
+/// in [`crate::line::audio_coupling`].
 const LFO_DEPTH_OVER_CUTOFF: f32 = 0.06;
 
 // ── Envelope-to-frequency mapping ────────────────────────────────────────────

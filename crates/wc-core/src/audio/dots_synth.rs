@@ -34,7 +34,7 @@
 //! | Key              | Effect                                              |
 //! |------------------|-----------------------------------------------------|
 //! | `"bandpass_freq"` | Both filter cutoffs (Hz); clamped ≥ 1 Hz           |
-//! | `"lfo_depth"`    | LFO depth in Hz; caller sets to `freq × 0.06`      |
+//! | `"lfo_depth"`    | LFO depth in Hz; caller sets to `freq × 0.06`; must not exceed `bandpass_freq` — the modulated cutoff has no in-graph floor and a negative SVF cutoff is undefined |
 //! | `"volume"`       | Source gain; noise gain is derived as `vol × 0.05` |
 //!
 //! See [`DotsSynth::KNOWN_KEYS`] for the canonical key list.
@@ -95,6 +95,11 @@ pub struct DotsSynth {
     /// LFO modulation depth in Hz. v4's `setFrequency` sets this as
     /// `lfoGain.gain = freq * 0.06`; the caller (coupling system) is
     /// responsible for the multiplication, this handle stores the result.
+    ///
+    /// Caller contract: keep `lfo_depth` ≤ `bandpass_freq` (the coupling uses
+    /// `bandpass_freq × 0.06`); the modulated cutoff has no in-graph floor and
+    /// a negative SVF cutoff is undefined. Mirrors `LineSynth`'s caller-enforced
+    /// convention.
     lfo_depth: Shared,
     /// Source-mix master volume. The noise path derives its gain as
     /// `volume × NOISE_GAIN_SCALE` (0.05).
