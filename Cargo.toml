@@ -171,7 +171,7 @@ leaprs = { version = "0.2.2", default-features = false, features = ["gemini"] }
 # under the 33 ms/frame budget at 30 Hz. The two-stage palm→landmark glue (anchors,
 # NMS, ROI) is implemented in `wc-core/src/input/providers/mediapipe/`. The prebuilt
 # binary is subject to the CDLA-Permissive-2.0 license, allowed in deny.toml.
-ort = { version = "=2.0.0-rc.10", features = ["coreml", "download-binaries"] }
+ort = { version = "=2.0.0-rc.12", features = ["coreml", "download-binaries"] }
 # Cross-platform webcam capture for the MediaPipe provider's production
 # `FrameSource` (behind `hand-tracking-mediapipe-camera`; AVFoundation / V4L2 /
 # MediaFoundation). Kept in a sub-feature so the inference/glue stay buildable

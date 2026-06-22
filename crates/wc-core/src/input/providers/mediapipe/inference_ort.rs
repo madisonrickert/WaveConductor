@@ -16,8 +16,8 @@
 
 use std::path::PathBuf;
 
-use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider};
-use ort::execution_providers::ExecutionProvider;
+use ort::ep::coreml::ComputeUnits;
+use ort::ep::{CoreML, ExecutionProvider};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor as OrtTensor;
@@ -47,12 +47,15 @@ impl OrtInference {
     /// provider (ONNX Runtime falls back to CPU for any unsupported op).
     ///
     /// `CoreML` runs in its default `NeuralNetwork` model format. The newer
-    /// `MLProgram` format covers more ops in principle, but its stricter parser
-    /// rejects these vendored `MediaPipe` graphs at compile time (their `MaxPool`
-    /// nodes omit the `pad` param `MLProgram` requires), failing the session
-    /// build outright — so we stay on the format that has always loaded and
-    /// accelerated them. `Core ML` places each segment on ANE/GPU/CPU itself, and
-    /// the compiled artifact is cached on disk to skip recompiling every launch.
+    /// `MLProgram` format covers a few more ops in principle, but its stricter
+    /// parser rejects these vendored `MediaPipe` graphs at compile time: the build
+    /// fails on a fused `Conv` op with `Required param 'pad' is missing`. Even
+    /// patched it only reaches 27 `CoreML` partitions — worse than
+    /// `NeuralNetwork`'s 6 once the palm model's `PReLU` slopes are reshaped to the
+    /// `[C, 1, 1]` shape the EP accepts — so we stay on `NeuralNetwork`. `Core ML`
+    /// places each segment on ANE/GPU/CPU itself, and the compiled artifact is
+    /// cached on disk per model ([`coreml_cache_dir`]) to skip recompiling every
+    /// launch.
     ///
     /// The session's CPU thread pool is capped to two intra-op threads with
     /// spin-waiting disabled: two sessions (palm + landmark) each own a pool, and
@@ -64,18 +67,16 @@ impl OrtInference {
     /// Returns [`InferenceError::Load`] if the session cannot be built or the
     /// model has no input.
     pub fn load(model_bytes: &[u8]) -> Result<Self, InferenceError> {
-        let load_err = |e: ort::Error| InferenceError::Load(e.to_string());
-
-        let mut coreml = CoreMLExecutionProvider::default()
+        let mut coreml = CoreML::default()
             // ALL lets Core ML place each segment on ANE/GPU/CPU as it sees fit
             // (the default, set explicitly). The default NeuralNetwork model
             // format is kept deliberately — see the doc comment: MLProgram fails
             // to compile these vendored models.
-            .with_compute_units(CoreMLComputeUnits::All);
+            .with_compute_units(ComputeUnits::All);
         // Core ML compiles each model to a native artifact on first load; caching
         // it on disk avoids paying that compile every launch. A missing cache dir
         // is non-fatal — we just recompile each run.
-        if let Some(cache) = coreml_cache_dir() {
+        if let Some(cache) = coreml_cache_dir(model_bytes) {
             coreml = coreml.with_model_cache_dir(cache.display());
         }
 
@@ -110,12 +111,16 @@ impl OrtInference {
         let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
 
         let input_name = session
-            .inputs
+            .inputs()
             .first()
             .ok_or_else(|| InferenceError::Load("model has no inputs".into()))?
-            .name
-            .clone();
-        let output_names = session.outputs.iter().map(|o| o.name.clone()).collect();
+            .name()
+            .to_owned();
+        let output_names = session
+            .outputs()
+            .iter()
+            .map(|o| o.name().to_owned())
+            .collect();
         Ok(Self {
             session,
             input_name,
@@ -137,16 +142,70 @@ impl OrtInference {
     }
 }
 
-/// Resolve the on-disk `CoreML` model-cache directory
-/// (`<cache>/waveconductor/coreml-cache`), creating it if absent.
+/// Map an `ort` error to a model-load failure. Generic over the recovery
+/// context `R` because rc.12's `SessionBuilder` error-recovery API parameterizes
+/// `ort::Error<R>` by the value `.recover()` would hand back (`SessionBuilder`,
+/// `Session`, or `()`), so a single non-generic closure can't span the call
+/// sites here.
+fn load_err<R>(e: ort::Error<R>) -> InferenceError {
+    InferenceError::Load(e.to_string())
+}
+
+/// Map an `ort` error to an inference-run failure. Generic over the recovery
+/// context for the same reason as [`load_err`].
+fn run_err<R>(e: ort::Error<R>) -> InferenceError {
+    InferenceError::Run(e.to_string())
+}
+
+/// Compute a stable per-model cache key from the model bytes.
 ///
-/// Returns `None` when no cache dir is available or it cannot be created; the
-/// caller then loads without a cache (recompiling the Core ML artifact each run)
-/// rather than failing.
-fn coreml_cache_dir() -> Option<PathBuf> {
+/// ONNX Runtime's `CoreML` EP names its compiled-artifact subdirectory by a
+/// model hash that does **not** change when only our model's initializers change:
+/// an unused-initializer strip and the `PReLU` slope reshape (`[1,C,1,1]` →
+/// `[C,1,1]`, which moves `PReLU` onto `CoreML` and collapses the palm graph from
+/// 30 partitions to 6) both leave that EP-side key identical. Without our own
+/// namespacing, a model update therefore loads the *previous* model's stale
+/// compiled partition and fails at inference with `output_features has no value`.
+/// Hashing the model bytes here lands every distinct model in its own directory,
+/// so a changed model can never collide with a prior compile.
+///
+/// The hash only needs to be stable within a single binary (the same build that
+/// wrote the cache reads it back), so a `std` hasher suffices and adds no
+/// dependency. A toolchain change that alters the hash merely forces a one-time
+/// recompile, which is harmless.
+fn model_cache_key(model_bytes: &[u8]) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    model_bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Resolve the on-disk `CoreML` model-cache directory for a specific model
+/// (`<cache>/waveconductor/coreml-cache/<model-key>`), creating it if absent.
+///
+/// The per-model `<model-key>` ([`model_cache_key`]) is what makes reusing the
+/// cache across model revisions safe — see that function for why a directory
+/// shared between models corrupts after a model change.
+///
+/// Disabled under `cfg(test)`: the unit tests load the same model from many
+/// parallel processes, and ONNX Runtime's `CoreML` EP is not safe against two of
+/// them populating the shared cache directory at once (the loser of the
+/// move-into-place race fails with "an item with the same name already exists").
+/// A test loads each model once, so the cache buys nothing, and skipping it also
+/// keeps tests from writing into the real user cache dir. Production (non-test)
+/// keeps the cache for fast startup, where each model is loaded exactly once.
+///
+/// Returns `None` when caching is disabled, no cache dir is available, or it
+/// cannot be created; the caller then loads without a cache (recompiling the
+/// Core ML artifact each run) rather than failing.
+fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     let dir = dirs::cache_dir()?
         .join("waveconductor")
-        .join("coreml-cache");
+        .join("coreml-cache")
+        .join(model_cache_key(model_bytes));
     match std::fs::create_dir_all(&dir) {
         Ok(()) => Some(dir),
         Err(e) => {
@@ -169,8 +228,6 @@ impl HandInference for OrtInference {
     /// needs `ort` I/O binding with preallocated tensors — a narrow,
     /// profiling-gated follow-up tied to the `ort` upgrade path, not done blind.
     fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
-        let run_err = |e: ort::Error| InferenceError::Run(e.to_string());
-
         // ort tensor shapes are `i64`; our `usize` dims convert infallibly for
         // any realistic image/landmark tensor.
         let shape: Vec<i64> = input
@@ -209,6 +266,28 @@ impl HandInference for OrtInference {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn coreml_cache_key_is_per_model_and_deterministic() {
+        // Regression: ONNX Runtime's CoreML EP reuses one on-disk cache key
+        // across our model revisions, so after a model change it would serve the
+        // previous model's stale compiled partition and fail at inference with
+        // "output_features has no value" (observed when the PReLU slope reshape
+        // collapsed the palm graph 30 -> 6 partitions against a 30-partition
+        // cache). The cache directory must be namespaced by model content:
+        // distinct bytes -> distinct key, identical bytes -> identical key.
+        let v1 = model_cache_key(b"palm-model-rev-1");
+        let v2 = model_cache_key(b"palm-model-rev-2");
+        assert_ne!(
+            v1, v2,
+            "different model bytes must namespace to different cache keys"
+        );
+        assert_eq!(
+            v1,
+            model_cache_key(b"palm-model-rev-1"),
+            "the same model bytes must map to the same cache key"
+        );
+    }
 
     fn model_bytes(name: &str) -> Vec<u8> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
