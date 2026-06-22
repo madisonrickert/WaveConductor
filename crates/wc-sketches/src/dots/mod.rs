@@ -32,6 +32,7 @@
 //! [`crate::particles::material::ParticleMaterial`] are registered once by
 //! the [`crate::SketchesPlugin`] umbrella, not here.
 
+pub mod post_process;
 pub mod settings;
 pub mod systems;
 
@@ -51,11 +52,17 @@ impl Plugin for DotsPlugin {
         // Register DotsSettings with the settings system (panel + persistence).
         app.register_sketch_settings::<settings::DotsSettings>();
 
+        // Explode post-process: render node + uniform extract.
+        app.add_plugins(post_process::DotsPostProcessPlugin);
+
         // Register the picker-tile manifest entry (async screenshot load).
         register_dots_manifest(app);
 
         // Lifecycle: spawn the grid on enter, despawn and release VRAM on exit.
-        app.add_systems(OnEnter(AppState::Dots), systems::spawn_dots);
+        app.add_systems(
+            OnEnter(AppState::Dots),
+            (systems::spawn_dots, insert_dots_post_params).chain(),
+        );
         app.add_systems(
             OnExit(AppState::Dots),
             (despawn_with::<DotsRoot>, remove_dots_sim_params),
@@ -128,15 +135,42 @@ fn dots_idle_veto(world: &World) -> bool {
         .is_some_and(|s| s.power > 0.0)
 }
 
+/// `OnEnter(AppState::Dots)` — insert [`post_process::DotsPostParams`] with
+/// static defaults (Task 1). Task 2 will drive `i_mouse` and `i_resolution`
+/// from the live cursor and window each frame via `update_dots_sim_params`.
+///
+/// Static values:
+/// - `shrink_factor = 0.98` — v4 default.
+/// - `gamma = 1.0` — identity; Task 2 can read `DotsSettings` here.
+/// - `i_mouse = [0.5, 0.5]` — screen centre (normalised UV).
+/// - `i_resolution` — from the primary window; falls back to `[1920.0, 1080.0]`.
+fn insert_dots_post_params(
+    mut commands: Commands<'_, '_>,
+    window: Query<'_, '_, &Window>,
+) {
+    let (w, h) = window
+        .single()
+        .map_or((1920.0, 1080.0), |win| (win.width(), win.height()));
+    commands.insert_resource(post_process::DotsPostParams {
+        i_resolution: [w, h],
+        i_mouse: [0.5, 0.5],
+        shrink_factor: 0.98,
+        gamma: 1.0,
+    });
+}
+
 /// `OnExit(AppState::Dots)` companion to [`systems::spawn_dots`].
 ///
 /// Drops `ParticleSimParams` so its `Handle<ShaderBuffer>` clone is freed and
 /// the GPU storage buffer's ref-count reaches zero, releasing VRAM on each
 /// Enter/Exit cycle. Also drops `CpuMirror` so its per-particle `Vec` is
 /// freed; `spawn_dots` re-inserts a fresh snapshot on the next `OnEnter`.
+/// Also drops [`post_process::DotsPostParams`] so the render system no-ops
+/// outside Dots (the `Option<Res<DotsPostParams>>` gate returns `None`).
 fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::compute::ParticleSimParams>();
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
+    commands.remove_resource::<post_process::DotsPostParams>();
 }
 
 #[cfg(test)]
@@ -205,13 +239,15 @@ mod tests {
         assert!(dots_idle_veto(&world), "veto must be true when power > 0.0");
     }
 
-    /// `remove_dots_sim_params` must drop `ParticleSimParams` and `CpuMirror`
-    /// on Dots exit so VRAM and CPU memory are released.
+    /// `remove_dots_sim_params` must drop `ParticleSimParams`, `CpuMirror`,
+    /// and `DotsPostParams` on Dots exit so VRAM and CPU memory are released
+    /// and the render system no-ops outside Dots.
     #[test]
     fn remove_dots_sim_params_drops_resources() {
         use crate::particles::compute::ParticleSimParams;
         use crate::particles::particle::SimParams;
         use crate::particles::sim_cpu::CpuMirror;
+        use post_process::DotsPostParams;
 
         let mut world = World::new();
         world.insert_resource(ParticleSimParams {
@@ -220,6 +256,12 @@ mod tests {
             particle_count: 0,
         });
         world.insert_resource(CpuMirror { particles: vec![] });
+        world.insert_resource(DotsPostParams {
+            i_resolution: [1920.0, 1080.0],
+            i_mouse: [0.5, 0.5],
+            shrink_factor: 0.98,
+            gamma: 1.0,
+        });
 
         world
             .run_system_once(remove_dots_sim_params)
@@ -232,6 +274,39 @@ mod tests {
         assert!(
             world.get_resource::<CpuMirror>().is_none(),
             "CpuMirror must be removed on Dots exit"
+        );
+        assert!(
+            world.get_resource::<DotsPostParams>().is_none(),
+            "DotsPostParams must be removed on Dots exit so render system no-ops"
+        );
+    }
+
+    /// `insert_dots_post_params` must insert `DotsPostParams` on Dots enter
+    /// with the static defaults: `shrink_factor=0.98`, `gamma=1.0`,
+    /// `i_mouse=[0.5, 0.5]`, and `i_resolution` read from the window (or the
+    /// fallback `[1920, 1080]` when no window entity is present).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "comparing literal defaults")]
+    fn insert_dots_post_params_inserts_resource() {
+        use post_process::DotsPostParams;
+
+        let mut world = World::new();
+        // No window entity — the system falls back to [1920, 1080].
+        world
+            .run_system_once(insert_dots_post_params)
+            .expect("insert_dots_post_params run");
+
+        let params = world
+            .get_resource::<DotsPostParams>()
+            .expect("DotsPostParams must be present after OnEnter(Dots)");
+        assert_eq!(params.shrink_factor, 0.98, "shrink_factor must be 0.98");
+        assert_eq!(params.gamma, 1.0, "gamma must be 1.0");
+        assert_eq!(params.i_mouse, [0.5, 0.5], "i_mouse must default to centre");
+        // Fallback resolution when no window is present.
+        assert_eq!(
+            params.i_resolution,
+            [1920.0, 1080.0],
+            "i_resolution must fall back to [1920, 1080] when no window"
         );
     }
 }
