@@ -43,6 +43,7 @@
 
 pub mod audio_coupling;
 pub mod hand_attractors;
+pub mod hash;
 pub mod post_process;
 pub mod settings;
 pub mod systems;

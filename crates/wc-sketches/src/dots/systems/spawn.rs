@@ -21,6 +21,7 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bytemuck::cast_slice;
 
+use crate::dots::hash::{dots_attract_lifespan, spawn_hash01};
 use crate::dots::settings::DotsSettings;
 use crate::particles::compute::ParticleSimParams;
 use crate::particles::material::ParticleMaterial;
@@ -62,8 +63,10 @@ pub struct DotsRoot;
 /// flip y to +up. Particles are seeded with zero velocity and `alpha = 0`
 /// (fade-in governed by `SimParams.fade_duration`).
 ///
-/// Attract-mode fields are inert defaults: `age = 0`, `lifespan = 0`,
-/// `spawn_hash = 0`, `spawn_color = white`. D6 seeds them with live values.
+/// Attract-mode fields: `age = 0`, `lifespan = dots_attract_lifespan(i)`,
+/// `spawn_hash = spawn_hash01(i)`, `spawn_color = white`. The kernel reads
+/// `lifespan` and `spawn_hash` only when `attract_gate != 0` (D6a Task 2 wires
+/// the screensaver gate), so the live (non-attract) path is unaffected.
 ///
 /// The returned `Vec` length is clamped to `[100, 200_000]`.
 #[must_use]
@@ -110,17 +113,18 @@ pub fn build_grid_particles(w: f32, h: f32, spacing: f32) -> Vec<Particle> {
             // Flip y to +up (world origin at center, window origin at top-left).
             let world_y = -(wy - half_h);
 
-            // D2 inert defaults for attract-mode fields. D6 will seed
-            // age/lifespan/spawn_hash with per-particle hashed values and
-            // spawn_color from the palette.
+            // Sequential particle index — used to seed the attract-mode fields
+            // deterministically (D6a Task 1). The kernel reads lifespan and
+            // spawn_hash only when attract_gate != 0; the live path ignores them.
+            let i = particles.len() as u32;
             particles.push(Particle {
                 position: [world_x, world_y],
                 velocity: [0.0, 0.0],
                 original_xy: [world_x, world_y],
                 alpha: 0.0,
                 age: 0.0,
-                lifespan: 0.0,
-                spawn_hash: 0.0,
+                lifespan: dots_attract_lifespan(i),
+                spawn_hash: spawn_hash01(i),
                 spawn_color: SPAWN_COLOR_WHITE,
                 _pad: 0.0,
             });

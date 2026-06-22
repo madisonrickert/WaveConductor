@@ -9,6 +9,13 @@
 //! written to `attractors[0]` with `power * DOTS_GRAVITY_CONSTANT` baked in.
 //! Tracked-hand [`crate::dots::hand_attractors::DotsHandAttractor`] entries are
 //! appended after the mouse attractor (same threshold/bake/cap as the Line path).
+//!
+//! The pure baker [`bake_dots_sim_params`] assembles all [`SimParams`] fields
+//! from the attractor array, gate, and turbulence inputs. The live writer
+//! [`update_dots_sim_params`] calls it with [`DotsAttractGate::OFF`] and
+//! [`DotsTurbulence::OFF`] so the active (non-attract) path is provably
+//! unchanged. The coming D6a screensaver driver (Task 2) will call
+//! [`bake_dots_sim_params`] directly with live gate and turbulence values.
 
 #![allow(
     clippy::as_conversions,
@@ -55,26 +62,152 @@ pub const V4_DOTS_INERTIAL_DRAG: f32 = 0.23913643334;
 /// place. Not used in D2 (no attractors yet).
 pub const DOTS_GRAVITY_CONSTANT: f32 = 100.0;
 
+/// Window geometry the param-baker needs. Bundled so [`bake_dots_sim_params`]
+/// takes one window argument, and so the screensaver's attract writer (Task 2)
+/// builds it the same way. Mirrors Line's [`crate::line::systems::sim_params::WindowGeom`].
+#[derive(Clone, Copy, Debug)]
+pub struct DotsWindowGeom {
+    /// Window width in logical pixels.
+    pub width: f32,
+    /// Window height in logical pixels.
+    pub height: f32,
+}
+
+impl DotsWindowGeom {
+    /// Read the geometry from a Bevy [`Window`].
+    #[must_use]
+    pub fn from_window(window: &Window) -> Self {
+        Self {
+            width: window.width(),
+            height: window.height(),
+        }
+    }
+}
+
+/// Attract-mode gate for the per-particle lifetime respawn + fraction kill in
+/// `simulate.wgsl`. Only the screensaver's attract writer (D6a Task 2) enables
+/// it; the live writer passes [`DotsAttractGate::OFF`] so Active behavior is
+/// provably unchanged (the kernel's gated branches never take).
+///
+/// Mirrors Line's [`crate::line::systems::sim_params::AttractGate`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DotsAttractGate {
+    /// `true` only while the Dots screensaver drives the sim.
+    pub enabled: bool,
+    /// Survivor fraction `0..=1`: particles whose spawn hash lands at or above
+    /// this fade out and stay dead while the gate is enabled. Ignored when
+    /// `enabled` is `false`.
+    pub fraction: f32,
+}
+
+impl DotsAttractGate {
+    /// The live (Active-mode) gate: both attract mechanisms off.
+    pub const OFF: Self = Self {
+        enabled: false,
+        fraction: 1.0,
+    };
+}
+
+/// Attract-mode noise-turbulence parameters for the kernel's divergence-free
+/// drift force. Only the screensaver's attract writer (D6a Task 2) supplies a
+/// non-zero amplitude; the live writer passes [`DotsTurbulence::OFF`] so the
+/// force is provably inert during Active interaction (`turbulence_amp == 0.0`
+/// skips the kernel branch entirely).
+///
+/// Mirrors Line's [`crate::line::systems::sim_params::Turbulence`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DotsTurbulence {
+    /// Drift speed (world px/s) the curl-noise flow advects positions at.
+    /// `0.0` disables the turbulence.
+    pub amp: f32,
+    /// Spatial frequency of the flow (radians per world unit).
+    pub scale: f32,
+    /// Animation phase (seconds of elapsed wall-clock).
+    pub time: f32,
+}
+
+impl DotsTurbulence {
+    /// The live (Active-mode) value: turbulence fully off.
+    pub const OFF: Self = Self {
+        amp: 0.0,
+        scale: 0.0,
+        time: 0.0,
+    };
+}
+
+/// Build the full [`SimParams`] for a Dots frame from a baked attractor array,
+/// the frame `dt`, the window geometry, and the attract/turbulence gate inputs.
+///
+/// Both the live writer ([`update_dots_sim_params`]) and the screensaver's
+/// attract driver (D6a Task 2) call this so the two producers cannot drift in
+/// their drag-baking, size-scaling, fade duration, or stationary-spring value.
+///
+/// `attractors` carries the already-`DOTS_GRAVITY_CONSTANT`-baked powers;
+/// `count` is the number of live entries. `dt` is the (uncapped) per-frame
+/// delta — the 50 ms cap is applied here. `gate` switches the attract-only
+/// lifetime/fraction mechanisms (live writer: [`DotsAttractGate::OFF`]);
+/// `turbulence` supplies the attract-only noise-drift force (live writer:
+/// [`DotsTurbulence::OFF`]).
+///
+/// Per-call no-allocation guarantee: all arithmetic is on stack scalars; the
+/// attractor array is passed by value (fixed-size stack copy).
+#[must_use]
+pub(crate) fn bake_dots_sim_params(
+    dt: f32,
+    geom: DotsWindowGeom,
+    attractors: [Attractor; MAX_ATTRACTORS],
+    count: u32,
+    gate: DotsAttractGate,
+    turbulence: DotsTurbulence,
+) -> SimParams {
+    // --- Drag baking (v4 Dots parity, against the fixed Dots dt) ----------
+    let pulling_drag_baked = V4_DOTS_PULLING_DRAG.powf(V4_FIXED_DT_DOTS);
+    let inertial_drag_baked = V4_DOTS_INERTIAL_DRAG.powf(V4_FIXED_DT_DOTS);
+
+    // --- Size scaling: canvas-width multiplier ONLY -----------------------
+    // v4: `min(2^(w / 836 - 1), 1)`. Gravity is baked into attractor power
+    // host-side; size_scale carries only the width term, matching Line's
+    // `bake_sim_params` convention so `force_mag = a.power * size_scale` is
+    // uniform across sketches.
+    let size_scale = (2.0_f32.powf(geom.width / 836.0 - 1.0)).min(1.0);
+
+    SimParams {
+        // dt: per-frame delta capped at 50 ms — matches Line's convention.
+        dt: dt.min(0.05),
+        attractor_count: count,
+        pulling_drag_baked,
+        inertial_drag_baked,
+        size_scale,
+        // v4 Dots FADE_DURATION = 3.0 seconds per-particle fade-in.
+        fade_duration: 3.0,
+        // v4 constrainToBox = false: effectively infinite bounds so the
+        // OOB→home teleport never fires. Dots grid dots return home via the
+        // stationary spring, not via a hard position reset.
+        constrain_min: [-1e9, -1e9],
+        constrain_max: [1e9, 1e9],
+        // Attract-mode gate: 1 when the screensaver drives the sim, 0 otherwise.
+        attract_gate: u32::from(gate.enabled),
+        attract_fraction: gate.fraction,
+        // Turbulence: non-zero only when the screensaver supplies it.
+        turbulence_amp: turbulence.amp,
+        turbulence_scale: turbulence.scale,
+        turbulence_time: turbulence.time,
+        // v4 STATIONARY_CONSTANT = 0.01. Each particle is pulled toward its
+        // original_xy home. Line passes 0.0 (provable no-op); Dots needs 0.01
+        // so the grid stays anchored and returns home after interaction.
+        stationary_constant: 0.01,
+        attractors,
+    }
+}
+
 /// `Update` — gated by `sketch_active(AppState::Dots)`.
 ///
-/// Writes [`SimParams`] into [`ParticleSimParams`] each frame with v4 Dots
-/// values:
-///
-/// - Drag baked against [`V4_FIXED_DT_DOTS`] (not render dt) for v4 parity.
-/// - `size_scale = min(2^(w/836 − 1), 1)` — canvas-width multiplier ONLY.
-///   The compute kernel uses `force_mag = a.power × size_scale`; `power`
-///   carries `DOTS_GRAVITY_CONSTANT × raw_power` (baked host-side here),
-///   matching Line's `bake_sim_params` convention so the kernel formula is
-///   uniform across sketches.
-/// - `fade_duration = 3.0`, `stationary_constant = 0.01`.
-/// - `constrain_min/max = ±1 × 10⁹` — OOB→home reset never fires (v4
-///   `constrainToBox = false`).
-/// - `attract_gate = 0`, attract/turbulence fields = off.
-/// - Mouse attractor: when [`DotsMouseAttractorState`]`.power > 0`, written
-///   to `attractors[0]` with `power * DOTS_GRAVITY_CONSTANT` baked in.
-/// - Hand attractors: [`DotsHandAttractor`] entries with `power.abs() > 1e-2`
-///   are appended after the mouse, capped at [`MAX_ATTRACTORS`], with
-///   `power * DOTS_GRAVITY_CONSTANT` baked in — mirrors Line's hand-append loop.
+/// Collects the live attractors (mouse + tracked hands), then delegates
+/// full [`SimParams`] assembly to the shared [`bake_dots_sim_params`] baker with
+/// [`DotsAttractGate::OFF`] and [`DotsTurbulence::OFF`], so the attract-only
+/// lifetime respawn, fraction kill, and noise turbulence never run during live
+/// interaction. The output is written to [`ParticleSimParams`] for the render
+/// world to extract each frame.
 ///
 /// Per-frame no-allocation guarantee: all arithmetic is on stack scalars; the
 /// attractor array is a zero-initialized stack array written in place.
@@ -85,25 +218,11 @@ pub fn update_dots_sim_params(
     dots_hands: Query<'_, '_, &DotsHandAttractor, With<TrackedHand>>,
     mut sim: ResMut<'_, ParticleSimParams>,
 ) {
-    let w = window.width();
-
-    // --- Drag baking (v4 Dots parity, against the fixed Dots dt) --------
-    let pulling_drag_baked = V4_DOTS_PULLING_DRAG.powf(V4_FIXED_DT_DOTS);
-    let inertial_drag_baked = V4_DOTS_INERTIAL_DRAG.powf(V4_FIXED_DT_DOTS);
-
-    // --- Size scaling: canvas-width multiplier ONLY ----------------------
-    // v4: `min(2^(w / 836 - 1), 1)`. Gravity is baked into attractor power
-    // host-side below; size_scale carries only the width term, matching Line's
-    // `bake_sim_params` convention so `force_mag = a.power * size_scale` is
-    // uniform across sketches.
-    let size_scale = (2.0_f32.powf(w / 836.0 - 1.0)).min(1.0);
-
     // --- Mouse attractor at index 0 ----------------------------------------
     // When the pointer is active (`power > 0`), bake `gravity_constant` into
     // the attractor's power host-side so the WGSL kernel treats power uniformly
     // across attractor sources (`force_mag = a.power * size_scale`). This
     // mirrors Line's `update_sim_params` convention exactly.
-    // v4: `gravity_constant = 100` (declared above as `DOTS_GRAVITY_CONSTANT`).
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
     let mut attractor_count = 0_u32;
     if mouse.power > 0.0 {
@@ -147,34 +266,20 @@ pub fn update_dots_sim_params(
         slot += 1;
     }
 
-    sim.params = SimParams {
-        // dt: per-frame delta capped at 50 ms. Matches Line's convention:
-        // `bake_sim_params` applies `dt.min(0.05)` before passing to the kernel.
-        dt: time.delta_secs().min(0.05),
-        attractor_count,
-        pulling_drag_baked,
-        inertial_drag_baked,
-        size_scale,
-        // v4 Dots FADE_DURATION = 3.0 seconds per-particle fade-in.
-        fade_duration: 3.0,
-        // v4 constrainToBox = false: effectively infinite bounds so the
-        // OOB→home teleport never fires. Dots grid dots should only return
-        // home via the stationary spring, not via a hard position reset.
-        constrain_min: [-1e9, -1e9],
-        constrain_max: [1e9, 1e9],
-        // Attract-mode gate and fraction: off for D2 (D6 wires the screensaver).
-        attract_gate: 0,
-        attract_fraction: 1.0,
-        // Turbulence: off for D2.
-        turbulence_amp: 0.0,
-        turbulence_scale: 0.0,
-        turbulence_time: 0.0,
-        // v4 STATIONARY_CONSTANT = 0.01. Each particle is pulled toward its
-        // original_xy home. Line passes 0.0 (provable no-op); Dots needs 0.01
-        // so the grid stays anchored and returns home after interaction.
-        stationary_constant: 0.01,
+    // --- Bake via the shared baker -----------------------------------------
+    // `DotsAttractGate::OFF` + `DotsTurbulence::OFF`: the attract-only lifetime
+    // respawn, fraction kill, and noise turbulence never run during live
+    // interaction. The live path is bit-unchanged vs. the pre-refactor inline
+    // SimParams literal — all field values are identical.
+    let geom = DotsWindowGeom::from_window(&window);
+    sim.params = bake_dots_sim_params(
+        time.delta_secs(),
+        geom,
         attractors,
-    };
+        attractor_count,
+        DotsAttractGate::OFF,
+        DotsTurbulence::OFF,
+    );
 }
 
 #[cfg(test)]
@@ -479,6 +584,88 @@ mod tests {
             sim.params.attractor_count, MAX_ATTRACTORS as u32,
             "attractor_count must be clamped to MAX_ATTRACTORS={MAX_ATTRACTORS}, got {}",
             sim.params.attractor_count
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Baker unit tests (D6a Task 1)
+    // -----------------------------------------------------------------------
+
+    /// `bake_dots_sim_params` with gate enabled and turbulence non-zero must
+    /// set `attract_gate = 1`, pass `attract_fraction` through verbatim, and
+    /// set `turbulence_amp/scale/time` from the turbulence input. All fields
+    /// shared between the live and attract paths must be identical.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the shared baker must produce bit-identical shared fields for both callers"
+    )]
+    fn bake_dots_sim_params_bakes_the_attract_gate() {
+        let geom = DotsWindowGeom {
+            width: 1280.0,
+            height: 720.0,
+        };
+        let attractors = [Attractor::default(); MAX_ATTRACTORS];
+
+        // Live caller: gate off — both attract mechanisms disabled, turbulence off.
+        let live = bake_dots_sim_params(
+            0.016,
+            geom,
+            attractors,
+            0,
+            DotsAttractGate::OFF,
+            DotsTurbulence::OFF,
+        );
+        assert_eq!(live.attract_gate, 0, "live bake must leave the gate off");
+        assert_eq!(
+            live.turbulence_amp, 0.0,
+            "live bake must leave turbulence off"
+        );
+
+        // Attract caller: gate on, fraction and turbulence passed through verbatim.
+        let gate = DotsAttractGate {
+            enabled: true,
+            fraction: 0.6,
+        };
+        let turb = DotsTurbulence {
+            amp: 1.0,
+            scale: 0.012,
+            time: 3.5,
+        };
+        let attract = bake_dots_sim_params(0.016, geom, attractors, 0, gate, turb);
+        assert_eq!(attract.attract_gate, 1, "attract bake must set the gate");
+        assert!(
+            (attract.attract_fraction - 0.6).abs() < 1e-6,
+            "attract_fraction must be gate.fraction"
+        );
+        assert!(
+            (attract.turbulence_amp - 1.0).abs() < 1e-6,
+            "turbulence_amp must be turb.amp"
+        );
+        assert!(
+            (attract.turbulence_scale - 0.012).abs() < 1e-6,
+            "turbulence_scale must be turb.scale"
+        );
+        assert!(
+            (attract.turbulence_time - 3.5).abs() < 1e-6,
+            "turbulence_time must be turb.time"
+        );
+
+        // Everything the two callers share is identical — the gate/turbulence
+        // inputs are the ONLY difference between live and attract baking.
+        assert!(
+            (live.pulling_drag_baked - attract.pulling_drag_baked).abs() < 1e-9,
+            "pulling_drag_baked must be caller-independent"
+        );
+        assert!(
+            (live.size_scale - attract.size_scale).abs() < 1e-9,
+            "size_scale must be caller-independent"
+        );
+        assert_eq!(live.constrain_min, attract.constrain_min);
+        assert_eq!(live.constrain_max, attract.constrain_max);
+        assert!(
+            (live.stationary_constant - attract.stationary_constant).abs() < 1e-9,
+            "stationary_constant must be caller-independent"
         );
     }
 }
