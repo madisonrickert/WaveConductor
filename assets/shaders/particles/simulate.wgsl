@@ -16,6 +16,9 @@
 //   self-heals back into the spawn image.
 // Both mechanisms are gated off when attract_gate == 0; live (Active)
 // behavior is unchanged (age is pinned to 0, nothing else differs).
+//
+// CPU mirror: step_one in particles/sim_cpu.rs replicates every kernel term
+// (including the stationary-spring below); both files must change together.
 
 struct Particle {
     position: vec2<f32>,
@@ -53,11 +56,13 @@ struct SimParams {
     attract_gate: u32,
     attract_fraction: f32,
     // Attract-mode noise turbulence: amplitude (0 = off), spatial frequency, and
-    // animation phase. _turb_pad keeps `attractors` 16-byte aligned.
+    // animation phase. stationary_constant (v4 home-spring strength; 0 = off)
+    // occupies the same slot as the former _turb_pad to keep `attractors` 16-byte
+    // aligned. Renamed in lockstep with the Rust SimParams field (Task 5).
     turbulence_amp: f32,
     turbulence_scale: f32,
     turbulence_time: f32,
-    _turb_pad: f32,
+    stationary_constant: f32,
     attractors: array<Attractor, MAX_ATTRACTORS>,
 };
 
@@ -145,6 +150,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         accel = accel + dir * force_mag;
     }
+
+    // v4 stationary spring (gated; stationary_constant == 0 -> no-op = Line parity).
+    if (params.stationary_constant > 0.0) {
+        let home = p.original_xy - p.position;
+        let home_len = length(home);
+        accel = accel + params.stationary_constant * home * home_len;
+        if (params.attractor_count == 0u) {
+            p.original_xy = p.original_xy - home * 0.05;
+        }
+    }
+
     p.velocity = p.velocity + accel * params.dt;
 
     // --- Drag selection (pulling when any attractor active) --------------

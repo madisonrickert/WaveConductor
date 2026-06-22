@@ -130,6 +130,22 @@ pub fn step_one(p: &mut Particle, params: &SimParams) {
         accel[1] += dy * inv_dist * force_mag;
     }
 
+    // v4 stationary spring: pull each particle toward its spawn home with a
+    // length-scaled (nonlinear) force, and ease home toward the particle when no
+    // attractor is active (idle drift). Gated on stationary_constant > 0.0 so
+    // Line (which passes 0.0) is provably unchanged. Dots passes 0.01.
+    if params.stationary_constant > 0.0 {
+        let hx = p.original_xy[0] - p.position[0];
+        let hy = p.original_xy[1] - p.position[1];
+        let home_len = (hx * hx + hy * hy).sqrt();
+        accel[0] += params.stationary_constant * hx * home_len;
+        accel[1] += params.stationary_constant * hy * home_len;
+        if params.attractor_count == 0 {
+            p.original_xy[0] -= hx * 0.05;
+            p.original_xy[1] -= hy * 0.05;
+        }
+    }
+
     // Attract-mode noise turbulence (off — and provably inert — during Active,
     // where turbulence_amp is 0).
     if attract && params.turbulence_amp > 0.0 {
@@ -387,6 +403,55 @@ mod tests {
         assert_eq!(p.velocity, [0.0, 0.0]);
         assert_eq!(p.age, 0.0);
         assert!((p.alpha - params.dt / params.fade_duration).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stationary_spring_pulls_displaced_particle_toward_home() {
+        // Home at origin, particle displaced to +x, no attractors, spring on.
+        let mut params = zero_attractor_params();
+        params.stationary_constant = 0.1;
+        let mut p = Particle {
+            position: [10.0, 0.0],
+            velocity: [0.0, 0.0],
+            original_xy: [0.0, 0.0],
+            alpha: 1.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            spawn_color: f32::from_bits(0x00FF_FFFF),
+            _pad: 0.0,
+        };
+        step_one(&mut p, &params);
+        // Spring accel = stationary_constant * (home - pos) * |home - pos|
+        //              = 0.1 * (-10) * 10 = -10 in x; velocity gains it (then drag).
+        assert!(p.velocity[0] < 0.0, "spring must pull toward home; got {}", p.velocity[0]);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "spring-off path writes exact-bit values (0*drag=0, no movement, no drift); \
+                  bit-for-bit equality is the correct check"
+    )]
+    fn stationary_constant_zero_is_a_noop() {
+        // Line's value: with no attractors, no spring, zero initial velocity, the
+        // particle must not move (drag on zero velocity stays zero).
+        let params = zero_attractor_params(); // stationary_constant defaults to 0.0
+        let mut p = Particle {
+            position: [10.0, 0.0],
+            velocity: [0.0, 0.0],
+            original_xy: [0.0, 0.0],
+            alpha: 1.0,
+            age: 0.0,
+            lifespan: 0.0,
+            spawn_hash: 0.0,
+            spawn_color: f32::from_bits(0x00FF_FFFF),
+            _pad: 0.0,
+        };
+        step_one(&mut p, &params);
+        assert_eq!(p.velocity, [0.0, 0.0], "stationary_constant==0 must add no force");
+        assert_eq!(p.position, [10.0, 0.0], "particle must not move");
+        assert_eq!(p.original_xy, [0.0, 0.0], "home must not drift when spring is off");
     }
 
     #[test]
