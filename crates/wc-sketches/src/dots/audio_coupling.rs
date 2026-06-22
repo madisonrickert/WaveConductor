@@ -24,11 +24,25 @@
 //! Three `SetDotsParam` commands per frame, pushed onto the lock-free
 //! [`AudioCommandSender`] ring:
 //!
-//! - `"volume"` = `activity_envelope` (clamped `[0, 1]`).
-//! - `"bandpass_freq"` = `200 + envelope × 1800` Hz, sweeping 200→2000 Hz
-//!   with activity. Approximation of v4's `120/normVarLen × avgVel/100`
-//!   (which required per-particle stats); documented as a tuning target.
+//! - `"volume"` = `env × breath × synth_volume_scale`, clamped `≥ 0`.
+//! - `"bandpass_freq"` = `(base + envelope × range) × breath`, sweeping from
+//!   `bandpass_base_hz` to `base + bandpass_range_hz` with activity, further
+//!   modulated by the breath LFO. Approximation of v4's per-particle stats;
+//!   all three tuning parameters live in [`DotsSettings`].
 //! - `"lfo_depth"` = `bandpass_freq × 0.06` (v4's exact relation, preserved).
+//!
+//! ## Breath
+//!
+//! A slow sine gated by the activity envelope recreates v4's "low warm pulse
+//! following the in-out particle motion":
+//!
+//! ```text
+//! breath = 1 + depth × env × sin(TAU × rate_hz × t)
+//! ```
+//!
+//! Because the swell is scaled by `env`, at rest (`env = 0`) `breath = 1.0` —
+//! the breath has no effect when the fabric is silent. Volume and cutoff both
+//! receive the same breath so the two parameters stay perceptually coupled.
 //!
 //! ## Known gap: LFO rate
 //!
@@ -56,6 +70,7 @@ use wc_core::audio::ring::AudioCommandSender;
 use wc_core::input::entity::TrackedHand;
 
 use super::hand_attractors::DotsHandAttractor;
+use super::settings::DotsSettings;
 use super::systems::DotsMouseAttractorState;
 
 // ── Hand-activity threshold ───────────────────────────────────────────────────
@@ -80,45 +95,6 @@ pub(crate) const HAND_ACTIVITY_THRESHOLD: f32 = 1e-2;
 /// in [`crate::line::audio_coupling`].
 const LFO_DEPTH_OVER_CUTOFF: f32 = 0.06;
 
-// ── Envelope-to-frequency mapping ────────────────────────────────────────────
-
-/// Base bandpass cutoff (Hz) when the activity envelope is at zero (silence).
-///
-/// This is the low-end anchor of the envelope-to-frequency sweep. At rest
-/// (no attractor active) the fabric is still and the cutoff parks here.
-/// Operator-tunable by ear; this constant is the primary lever.
-///
-/// Approximation of v4's `120 / normVarLen × avgVel / 100` formula at the
-/// idle (high variance, zero velocity) end of its range.
-const BANDPASS_BASE_HZ: f32 = 200.0;
-
-/// Bandpass cutoff sweep range (Hz) across the full `[0, 1]` activity envelope.
-///
-/// `bandpass_freq = BANDPASS_BASE_HZ + envelope × BANDPASS_RANGE_HZ`
-/// sweeps 200 Hz (silence) → 2000 Hz (full activity), covering roughly a
-/// decade of cutoff travel across the vocal / upper-midrange band. The
-/// 200–2000 Hz window was chosen to approximate v4's observed cutoff range
-/// during press; operator tunes by ear at the next hardware checkpoint.
-const BANDPASS_RANGE_HZ: f32 = 1800.0;
-
-// ── Envelope time constants ───────────────────────────────────────────────────
-
-/// Attack rate (s⁻¹) for the activity envelope's rising edge.
-///
-/// Mirrors Line's `synth_attack_ms = 115 ms` default:
-/// `rate = 1000 / 115 ≈ 8.70 s⁻¹`. Per-frame lerp step is `rate × Δt`,
-/// giving ~63% of target in one attack time-constant (exponential follow).
-/// Operator tunes by ear — this constant is the "press snappiness" knob.
-const ENVELOPE_ATTACK_RATE: f32 = 1000.0 / 115.0; // ≈ 8.70 s⁻¹
-
-/// Release rate (s⁻¹) for the activity envelope's falling edge.
-///
-/// Mirrors Line's `synth_release_ms = 350 ms` default:
-/// `rate = 1000 / 350 ≈ 2.86 s⁻¹`. Gives a ~350 ms exponential tail after
-/// the attractor is released. Operator tunes by ear — this constant is the
-/// "tail length" knob.
-const ENVELOPE_RELEASE_RATE: f32 = 1000.0 / 350.0; // ≈ 2.86 s⁻¹
-
 // ── Resource ──────────────────────────────────────────────────────────────────
 
 /// Smoothed attack/release activity envelope for Dots audio.
@@ -127,7 +103,8 @@ const ENVELOPE_RELEASE_RATE: f32 = 1000.0 / 350.0; // ≈ 2.86 s⁻¹
 /// active (mouse `power > 0.0` OR any `DotsHandAttractor::power >
 /// HAND_ACTIVITY_THRESHOLD`) and decays toward 0.0 after all attractors
 /// release. Advanced each frame by [`drive_dots_audio`] using the asymmetric
-/// rates [`ENVELOPE_ATTACK_RATE`] / [`ENVELOPE_RELEASE_RATE`].
+/// attack/release rates derived from [`DotsSettings::synth_attack_ms`] and
+/// [`DotsSettings::synth_release_ms`].
 ///
 /// Initialised to 0.0 (`Default`) by the plugin. Persists across `OnEnter`/
 /// `OnExit` cycles — the synth is removed on exit and rebuilt on entry, so a
@@ -142,23 +119,30 @@ pub struct DotsAudioEnvelope(pub f32);
 /// Advance the [`DotsAudioEnvelope`] value by one frame.
 ///
 /// Pure function: given the current envelope value, combined attractor power,
-/// and frame delta in seconds, returns the next envelope value clamped to
-/// `[0, 1]`. Extracted from [`drive_dots_audio`] so the envelope math is
-/// unit-testable without a Bevy `World`. Production code calls this through
-/// the system.
+/// frame delta in seconds, and explicit attack/release rates, returns the next
+/// envelope value clamped to `[0, 1]`. Extracted from [`drive_dots_audio`] so
+/// the envelope math is unit-testable without a Bevy `World`. Production code
+/// derives rates from [`DotsSettings::synth_attack_ms`] and
+/// [`DotsSettings::synth_release_ms`] before calling here.
 ///
 /// `active_power` is the pre-computed maximum over the mouse and all hand
 /// attractor powers — see [`dots_activity_power`]. The envelope target is
 /// derived from a simple threshold:
 ///
-/// - `active_power > 0.0` → target 1.0, advance at [`ENVELOPE_ATTACK_RATE`].
-/// - `active_power == 0.0` → target 0.0, decay at [`ENVELOPE_RELEASE_RATE`].
-pub(crate) fn step_dots_envelope(envelope: f32, active_power: f32, dt: f32) -> f32 {
+/// - `active_power > 0.0` → target 1.0, advance at `attack_rate` (s⁻¹).
+/// - `active_power == 0.0` → target 0.0, decay at `release_rate` (s⁻¹).
+pub(crate) fn step_dots_envelope(
+    envelope: f32,
+    active_power: f32,
+    dt: f32,
+    attack_rate: f32,
+    release_rate: f32,
+) -> f32 {
     let target = if active_power > 0.0 { 1.0_f32 } else { 0.0_f32 };
     let rate = if target > envelope {
-        ENVELOPE_ATTACK_RATE
+        attack_rate
     } else {
-        ENVELOPE_RELEASE_RATE
+        release_rate
     };
     // Per-frame exponential follow: `lerp(current, target, rate × dt)`.
     // `(rate × dt).min(1.0)` prevents overshoot when the frame time is large
@@ -193,24 +177,26 @@ pub(crate) fn dots_activity_power(mouse_power: f32, max_hand_power: f32) -> f32 
 
 /// Derive the `"bandpass_freq"` param value from the activity envelope.
 ///
-/// `bandpass_freq = BANDPASS_BASE_HZ + envelope × BANDPASS_RANGE_HZ`
-/// sweeps from 200 Hz (silence) to 2000 Hz (full activity).
+/// `bandpass_freq = base + envelope × range`, sweeping from `base` Hz at
+/// silence to `base + range` Hz at full activity. Both `base` and `range`
+/// come from [`DotsSettings`] so they are operator-tunable at runtime.
 ///
 /// This is an envelope approximation of v4's `120 / normVarLen × avgVel / 100`
 /// formula, which required per-particle stats unavailable in v5 without a CPU
-/// mirror or GPU readback. The 200–2000 Hz range is the primary tuning target
+/// mirror or GPU readback. The base and range are the primary tuning targets
 /// for the operator's hardware sign-off.
 ///
 /// Extracted for unit-testability.
-pub(crate) fn dots_bandpass_freq(envelope: f32) -> f32 {
-    BANDPASS_BASE_HZ + envelope * BANDPASS_RANGE_HZ
+pub(crate) fn dots_bandpass_freq(envelope: f32, base: f32, range: f32) -> f32 {
+    base + envelope * range
 }
 
 /// Derive the `"lfo_depth"` param value from the bandpass cutoff.
 ///
 /// Preserves v4's exact relation: `lfoGain.gain = bandpassFreq × 0.06`.
-/// At 200 Hz base the LFO depth is 12 Hz; at 2000 Hz peak the depth is
-/// 120 Hz — a decade of modulation depth travel alongside the cutoff sweep.
+/// The LFO modulation depth tracks the bandpass cutoff so the wobble's musical
+/// interval stays consistent as the cutoff sweeps. Mirrors the same constant
+/// in [`crate::line::audio_coupling`].
 ///
 /// Extracted for unit-testability.
 pub(crate) fn dots_lfo_depth(bandpass_freq: f32) -> f32 {
@@ -243,6 +229,7 @@ pub fn drive_dots_audio(
     mouse: Res<'_, DotsMouseAttractorState>,
     hands: Query<'_, '_, &DotsHandAttractor, With<TrackedHand>>,
     time: Res<'_, Time>,
+    settings: Res<'_, DotsSettings>,
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     mut envelope: ResMut<'_, DotsAudioEnvelope>,
 ) {
@@ -252,9 +239,19 @@ pub fn drive_dots_audio(
     // Combine mouse and hand activity into a single scalar; clamp to [0, 1].
     let active = dots_activity_power(mouse.power, max_hand_power);
 
+    // Derive envelope rates from settings (ms → s⁻¹).
+    let attack_rate = 1000.0 / settings.synth_attack_ms;
+    let release_rate = 1000.0 / settings.synth_release_ms;
+
     // Advance the envelope every frame — even when the audio engine is absent
     // (headless tests) — so the resource reflects the current activity state.
-    envelope.0 = step_dots_envelope(envelope.0, active, time.delta_secs());
+    envelope.0 = step_dots_envelope(
+        envelope.0,
+        active,
+        time.delta_secs(),
+        attack_rate,
+        release_rate,
+    );
 
     // The audio engine is not started in headless integration tests (no cpal
     // device). Skip ring pushes cleanly when the sender is absent.
@@ -263,20 +260,35 @@ pub fn drive_dots_audio(
     };
 
     let env = envelope.0;
-    let bandpass_freq = dots_bandpass_freq(env);
+
+    // Modeled in-out swell: a slow sine, scaled by the activity envelope so it
+    // is silent at rest and swells in with the press. Recreates v4's "low warm
+    // pulse following the in-out particle motion" without GPU field stats.
+    let t = time.elapsed_secs();
+    let breath = 1.0
+        + settings.breath_depth
+            * env
+            * (core::f32::consts::TAU * settings.breath_rate_hz * t).sin();
+
+    // Apply breath and volume trim; clamp to avoid any negative volume.
+    let volume = (env * breath * settings.synth_volume_scale).max(0.0);
+    // Apply breath to the cutoff so volume and filter swell together.
+    let bandpass_freq =
+        dots_bandpass_freq(env, settings.bandpass_base_hz, settings.bandpass_range_hz) * breath;
+    // v4's `lfoGain.gain = bandpassFreq × 0.06`, preserved exactly.
     let lfo_depth = dots_lfo_depth(bandpass_freq);
 
-    // `"volume"` = activity envelope directly. The DotsSynth derives the noise
+    // `"volume"` = envelope × breath × volume trim. DotsSynth derives noise
     // path gain internally as `volume × 0.05` (v4 parity).
     push_dots_audio(
         &mut audio_cmd,
         AudioCommand::SetDotsParam {
             key: "volume",
-            value: env,
+            value: volume,
         },
     );
-    // `"bandpass_freq"`: envelope-mapped cutoff (200→2000 Hz). Approximation
-    // of v4's variance/velocity stat; tune by ear at hardware sign-off.
+    // `"bandpass_freq"`: settings-driven warm cutoff with breath modulation.
+    // Tune `bandpass_base_hz` / `bandpass_range_hz` by ear at hardware sign-off.
     push_dots_audio(
         &mut audio_cmd,
         AudioCommand::SetDotsParam {
@@ -318,39 +330,46 @@ fn push_dots_audio(sender: &mut AudioCommandSender, command: AudioCommand) {
 mod tests {
     use super::*;
 
+    // Rates matching DotsSettings defaults: attack = 1000/115 s⁻¹, release = 1000/350 s⁻¹.
+    const TEST_ATTACK_RATE: f32 = 1000.0 / 115.0;
+    const TEST_RELEASE_RATE: f32 = 1000.0 / 350.0;
+    // Bandpass defaults used in parameterized tests.
+    const TEST_BASE_HZ: f32 = 110.0;
+    const TEST_RANGE_HZ: f32 = 280.0;
+
     // ── Envelope step: direction and bounds ───────────────────────────────
 
     /// Envelope rises from 0 toward 1 when the attractor is active.
     #[test]
     fn envelope_rises_when_power_nonzero() {
-        let after = step_dots_envelope(0.0, 1.0, 1.0 / 60.0);
+        let after = step_dots_envelope(0.0, 1.0, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
         assert!(
             after > 0.0,
             "envelope must rise when power > 0; got {after}"
         );
-        assert!(after <= 1.0, "envelope must stay ≤ 1.0; got {after}");
+        assert!(after <= 1.0, "envelope must stay <= 1.0; got {after}");
     }
 
     /// Envelope decays from 1 toward 0 when the attractor is released.
     #[test]
     fn envelope_decays_when_power_zero() {
-        let after = step_dots_envelope(1.0, 0.0, 1.0 / 60.0);
+        let after = step_dots_envelope(1.0, 0.0, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
         assert!(
             after < 1.0,
             "envelope must decay when power == 0; got {after}"
         );
-        assert!(after >= 0.0, "envelope must stay ≥ 0.0; got {after}");
+        assert!(after >= 0.0, "envelope must stay >= 0.0; got {after}");
     }
 
     /// A huge dt (frame hitch) must not push the envelope outside `[0, 1]`.
     #[test]
     fn envelope_stays_in_unit_interval_with_extreme_dt() {
-        let at_peak = step_dots_envelope(0.5, 1.0, 100.0);
+        let at_peak = step_dots_envelope(0.5, 1.0, 100.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
         assert!(
             (0.0..=1.0).contains(&at_peak),
             "envelope out of [0,1] on attack with dt=100: {at_peak}"
         );
-        let at_floor = step_dots_envelope(0.5, 0.0, 100.0);
+        let at_floor = step_dots_envelope(0.5, 0.0, 100.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
         assert!(
             (0.0..=1.0).contains(&at_floor),
             "envelope out of [0,1] on release with dt=100: {at_floor}"
@@ -362,10 +381,11 @@ mod tests {
     fn envelope_rises_monotonically_across_frames() {
         let mut env = 0.0_f32;
         for frame in 0..20 {
-            let next = step_dots_envelope(env, 1.0, 1.0 / 60.0);
+            let next =
+                step_dots_envelope(env, 1.0, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
             assert!(
                 next >= env,
-                "envelope decreased on active frame {frame}: {env} → {next}"
+                "envelope decreased on active frame {frame}: {env} -> {next}"
             );
             env = next;
         }
@@ -380,10 +400,11 @@ mod tests {
     fn envelope_decays_monotonically_across_frames() {
         let mut env = 1.0_f32;
         for frame in 0..20 {
-            let next = step_dots_envelope(env, 0.0, 1.0 / 60.0);
+            let next =
+                step_dots_envelope(env, 0.0, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
             assert!(
                 next <= env,
-                "envelope increased on idle frame {frame}: {env} → {next}"
+                "envelope increased on idle frame {frame}: {env} -> {next}"
             );
             env = next;
         }
@@ -399,68 +420,112 @@ mod tests {
     #[test]
     fn bandpass_freq_at_zero_envelope_equals_base() {
         assert_eq!(
-            dots_bandpass_freq(0.0),
-            BANDPASS_BASE_HZ,
-            "bandpass_freq at env=0 must equal BANDPASS_BASE_HZ ({BANDPASS_BASE_HZ} Hz)"
+            dots_bandpass_freq(0.0, TEST_BASE_HZ, TEST_RANGE_HZ),
+            TEST_BASE_HZ,
+            "bandpass_freq at env=0 must equal base ({TEST_BASE_HZ} Hz)"
         );
     }
 
-    /// At envelope = 1, `bandpass_freq` equals base + range (2000 Hz).
+    /// At envelope = 1, `bandpass_freq` equals base + range.
     #[test]
     fn bandpass_freq_at_full_envelope_equals_base_plus_range() {
         assert_eq!(
-            dots_bandpass_freq(1.0),
-            BANDPASS_BASE_HZ + BANDPASS_RANGE_HZ,
-            "bandpass_freq at env=1 must equal BASE + RANGE"
+            dots_bandpass_freq(1.0, TEST_BASE_HZ, TEST_RANGE_HZ),
+            TEST_BASE_HZ + TEST_RANGE_HZ,
+            "bandpass_freq at env=1 must equal BASE ({TEST_BASE_HZ}) + RANGE ({TEST_RANGE_HZ})"
         );
     }
 
-    /// `lfo_depth == bandpass_freq × 0.06` at every sample point.
+    /// `lfo_depth == bandpass_freq * 0.06` at every sample point.
     #[test]
     fn lfo_depth_equals_bandpass_times_point_zero_six() {
         for env in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
-            let bp = dots_bandpass_freq(env);
+            let bp = dots_bandpass_freq(env, TEST_BASE_HZ, TEST_RANGE_HZ);
             let depth = dots_lfo_depth(bp);
             assert_eq!(
                 depth,
                 bp * LFO_DEPTH_OVER_CUTOFF,
-                "lfo_depth != bandpass_freq × 0.06 at env={env} (bp={bp})"
+                "lfo_depth != bandpass_freq * 0.06 at env={env} (bp={bp})"
             );
         }
     }
 
-    /// At the base cutoff (200 Hz), LFO depth is 12 Hz (200 × 0.06).
+    /// At the default base cutoff (110 Hz), LFO depth is 6.6 Hz (110 * 0.06).
     #[test]
-    fn lfo_depth_at_base_cutoff_is_twelve_hz() {
-        let depth = dots_lfo_depth(BANDPASS_BASE_HZ);
+    fn lfo_depth_at_base_cutoff_is_six_point_six_hz() {
+        let depth = dots_lfo_depth(TEST_BASE_HZ);
         assert!(
-            (depth - 12.0).abs() < 1e-4,
-            "lfo_depth at base cutoff must be 12 Hz; got {depth}"
+            (depth - 6.6).abs() < 1e-4,
+            "lfo_depth at base cutoff must be 6.6 Hz; got {depth}"
         );
     }
 
-    /// At the peak cutoff (2000 Hz), LFO depth is 120 Hz (2000 × 0.06).
+    /// At the default peak cutoff (110 + 280 = 390 Hz), LFO depth is 23.4 Hz.
     #[test]
-    fn lfo_depth_at_peak_cutoff_is_one_hundred_twenty_hz() {
-        let depth = dots_lfo_depth(BANDPASS_BASE_HZ + BANDPASS_RANGE_HZ);
+    fn lfo_depth_at_peak_cutoff_is_twenty_three_point_four_hz() {
+        let depth = dots_lfo_depth(TEST_BASE_HZ + TEST_RANGE_HZ);
         assert!(
-            (depth - 120.0).abs() < 1e-3,
-            "lfo_depth at peak cutoff must be 120 Hz; got {depth}"
+            (depth - 23.4).abs() < 1e-3,
+            "lfo_depth at peak cutoff must be 23.4 Hz; got {depth}"
         );
     }
 
-    /// The volume param equals the envelope directly (no extra scaling).
-    /// Asserts the clamping in `step_dots_envelope` keeps volume in `[0, 1]`.
+    /// The envelope stays in `[0, 1]` across the four boundary cases, ensuring
+    /// the downstream volume clamp can't see negative input from the envelope.
     #[test]
     fn volume_param_equals_envelope_and_stays_in_unit_interval() {
-        // volume = envelope.0 (the direct assignment in drive_dots_audio).
         // The meaningful guarantee is that step_dots_envelope always keeps the
         // value in [0, 1], so volume can never clip or go negative.
         for &(power, init) in &[(1.0_f32, 0.0_f32), (0.0, 1.0), (1.0, 1.0), (0.0, 0.0)] {
-            let env = step_dots_envelope(init, power, 1.0 / 60.0);
+            let env =
+                step_dots_envelope(init, power, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
             assert!(
                 (0.0..=1.0).contains(&env),
                 "volume out of [0,1]: power={power}, init={init}, env={env}"
+            );
+        }
+    }
+
+    // ── Breath modulation ─────────────────────────────────────────────────
+
+    /// With envelope = 0, breath must be exactly 1.0 for any time value.
+    /// Because `breath = 1 + depth * env * sin(...)` and env = 0, the sine
+    /// term drops out entirely — rest stays unmodulated and silent.
+    #[test]
+    fn breath_at_zero_envelope_is_unity() {
+        let depth = 0.3_f32;
+        let rate_hz = 0.7_f32;
+        for t in [0.0_f32, 0.1, 0.5, 1.0, 3.7, 100.0] {
+            let breath = 1.0 + depth * 0.0 * (core::f32::consts::TAU * rate_hz * t).sin();
+            assert_eq!(
+                breath, 1.0,
+                "breath must be 1.0 when env=0 (t={t}); got {breath}"
+            );
+        }
+    }
+
+    /// With envelope = 1 and depth = 0.3, breath stays within [0.7, 1.3]
+    /// across a time sweep. This confirms the breath swell is bounded and
+    /// never makes volume or cutoff negative.
+    #[test]
+    fn breath_modulates_within_bounds() {
+        let depth = 0.3_f32;
+        let rate_hz = 0.7_f32;
+        let env = 1.0_f32;
+        // Sample 1000 time points covering several full cycles.
+        // Use u16 (max 65535 fits exactly in f32's 23-bit mantissa).
+        for i in 0..1000_u16 {
+            let t = f32::from(i) * 0.01;
+            let breath = 1.0 + depth * env * (core::f32::consts::TAU * rate_hz * t).sin();
+            assert!(
+                breath >= 1.0 - depth,
+                "breath below lower bound at t={t}: {breath} < {}",
+                1.0 - depth
+            );
+            assert!(
+                breath <= 1.0 + depth,
+                "breath above upper bound at t={t}: {breath} > {}",
+                1.0 + depth
             );
         }
     }
@@ -478,7 +543,7 @@ mod tests {
     /// power, confirming a hand alone can drive the envelope.
     #[test]
     fn activity_power_hand_only_above_threshold() {
-        // 0.5 > HAND_ACTIVITY_THRESHOLD (0.01) → hand contribution 0.5
+        // 0.5 > HAND_ACTIVITY_THRESHOLD (0.01) -> hand contribution 0.5
         let p = dots_activity_power(0.0, 0.5);
         assert!(
             (p - 0.5).abs() < 1e-6,
@@ -489,7 +554,7 @@ mod tests {
     /// Hand below threshold with mouse inactive: activity power is 0.0.
     #[test]
     fn activity_power_hand_below_threshold_is_zero() {
-        // 0.005 < HAND_ACTIVITY_THRESHOLD (0.01) → no hand contribution
+        // 0.005 < HAND_ACTIVITY_THRESHOLD (0.01) -> no hand contribution
         let p = dots_activity_power(0.0, 0.005);
         assert!(
             p == 0.0,
@@ -563,10 +628,11 @@ mod tests {
 
         let mut env = 0.0_f32;
         for frame in 0..20 {
-            let next = step_dots_envelope(env, active, 1.0 / 60.0);
+            let next =
+                step_dots_envelope(env, active, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
             assert!(
                 next >= env,
-                "envelope must not decrease with hand active (frame {frame}): {env} → {next}"
+                "envelope must not decrease with hand active (frame {frame}): {env} -> {next}"
             );
             env = next;
         }
@@ -584,10 +650,11 @@ mod tests {
 
         let mut env = 1.0_f32;
         for frame in 0..20 {
-            let next = step_dots_envelope(env, active, 1.0 / 60.0);
+            let next =
+                step_dots_envelope(env, active, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
             assert!(
                 next <= env,
-                "envelope must not rise when both inactive (frame {frame}): {env} → {next}"
+                "envelope must not rise when both inactive (frame {frame}): {env} -> {next}"
             );
             env = next;
         }
@@ -622,7 +689,8 @@ mod tests {
         );
 
         // Confirm the envelope rises from this target.
-        let env_after = step_dots_envelope(0.0, active, 1.0 / 60.0);
+        let env_after =
+            step_dots_envelope(0.0, active, 1.0 / 60.0, TEST_ATTACK_RATE, TEST_RELEASE_RATE);
         assert!(
             env_after > 0.0,
             "envelope must rise from loudest-hand activity; got {env_after}"
@@ -657,6 +725,8 @@ mod tests {
         let mut time = Time::<()>::default();
         time.advance_by(std::time::Duration::from_millis(16)); // ~60 Hz
         world.insert_resource(time);
+        // Settings required now that drive_dots_audio reads Res<DotsSettings>.
+        world.insert_resource(DotsSettings::default());
         // No AudioCommandSender inserted — system must skip ring pushes cleanly.
         // No TrackedHand entities — hand query iterates zero rows.
 
@@ -671,7 +741,7 @@ mod tests {
         );
         assert!(
             env <= 1.0,
-            "drive_dots_audio must keep envelope ≤ 1.0; got {env}"
+            "drive_dots_audio must keep envelope <= 1.0; got {env}"
         );
     }
 
@@ -697,6 +767,8 @@ mod tests {
         let mut time = Time::<()>::default();
         time.advance_by(std::time::Duration::from_millis(16));
         world.insert_resource(time);
+        // Settings required now that drive_dots_audio reads Res<DotsSettings>.
+        world.insert_resource(DotsSettings::default());
 
         // Spawn a TrackedHand with a DotsHandAttractor whose power is well
         // above HAND_ACTIVITY_THRESHOLD (0.01). The value 0.5 simulates a
@@ -722,7 +794,7 @@ mod tests {
             env > 0.0,
             "drive_dots_audio must raise envelope from hand alone (mouse inactive); got {env}"
         );
-        assert!(env <= 1.0, "envelope must stay ≤ 1.0; got {env}");
+        assert!(env <= 1.0, "envelope must stay <= 1.0; got {env}");
     }
 
     /// `drive_dots_audio` leaves the envelope decaying when both the mouse is
@@ -742,6 +814,8 @@ mod tests {
         let mut time = Time::<()>::default();
         time.advance_by(std::time::Duration::from_millis(16));
         world.insert_resource(time);
+        // Settings required now that drive_dots_audio reads Res<DotsSettings>.
+        world.insert_resource(DotsSettings::default());
 
         // Spawn a hand whose power is zeroed (below threshold after floor snap).
         world.spawn((
@@ -763,6 +837,6 @@ mod tests {
             env < 1.0,
             "envelope must decay when both mouse and hands are inactive; got {env}"
         );
-        assert!(env >= 0.0, "envelope must stay ≥ 0.0; got {env}");
+        assert!(env >= 0.0, "envelope must stay >= 0.0; got {env}");
     }
 }

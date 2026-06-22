@@ -34,6 +34,22 @@
 //! - **`attract_turbulence`** — drift speed of the attract-mode
 //!   divergence-free curl-noise flow (world px/s). The screensaver's
 //!   primary motion. `0.0` freezes the field. Dev-only knob.
+//! - **`synth_volume_scale`** — master output gain trim for the synth voice.
+//!   1.0 = unchanged. Lower values reduce loudness without touching system
+//!   volume.
+//! - **`synth_attack_ms`** — activity envelope attack time in milliseconds.
+//!   Smaller = snappier press onset; larger = slower swell-in.
+//! - **`synth_release_ms`** — activity envelope release tail in milliseconds.
+//!   Smaller = abrupt cutoff on release; larger = long tail.
+//! - **`breath_depth`** — amplitude of the modeled in-out breath swell.
+//!   0 = no breath modulation; 1 = full ±100% swell (scaled by envelope so
+//!   rest is always silent).
+//! - **`bandpass_base_hz`** — bandpass cutoff at rest (envelope = 0). The
+//!   low-end anchor for the envelope-to-frequency sweep. Dev-only tuning knob.
+//! - **`bandpass_range_hz`** — how far the cutoff sweeps above the base across
+//!   the full activity envelope `[0, 1]`. Dev-only tuning knob.
+//! - **`breath_rate_hz`** — frequency of the modeled breath sine LFO in Hz.
+//!   Lower = slower in-out pulse; higher = faster flutter. Dev-only knob.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -108,6 +124,116 @@ pub struct DotsSettings {
     )]
     #[serde(default = "default_attract_turbulence")]
     pub attract_turbulence: f32,
+
+    // ── Audio ────────────────────────────────────────────────────────────────
+    /// Master output gain trim applied after the activity envelope.
+    /// 1.0 = unchanged. Adjust to balance kiosk loudness without touching
+    /// system volume. Applied as `env * breath * synth_volume_scale`.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 2.0_f32,
+        step = 0.05_f32,
+        label = "Synth volume",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_synth_volume_scale")]
+    pub synth_volume_scale: f32,
+
+    /// Activity envelope attack time in milliseconds. Smaller = snappier
+    /// press onset; larger = slower swell-in. Internally converted to an
+    /// envelope lerp rate of `1000 / attack_ms`.
+    #[setting(
+        default = 115.0_f32,
+        min = 5.0_f32,
+        max = 200.0_f32,
+        step = 5.0_f32,
+        label = "Synth attack",
+        unit = "ms",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_synth_attack_ms")]
+    pub synth_attack_ms: f32,
+
+    /// Activity envelope release tail in milliseconds. Smaller = abrupt
+    /// cutoff on release; larger = long pad tail. Internally converted to an
+    /// envelope lerp rate of `1000 / release_ms`.
+    #[setting(
+        default = 350.0_f32,
+        min = 100.0_f32,
+        max = 3000.0_f32,
+        step = 50.0_f32,
+        label = "Synth release",
+        unit = "ms",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_synth_release_ms")]
+    pub synth_release_ms: f32,
+
+    /// Amplitude of the modeled in-out breath swell. At 0 there is no breath
+    /// modulation; at 1 the volume and cutoff swell ±100% around their
+    /// envelope value. Scaled by `env` so the breath is silent at rest.
+    #[setting(
+        default = 0.3_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Breath depth",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_breath_depth")]
+    pub breath_depth: f32,
+
+    /// Bandpass cutoff at rest (envelope = 0), in Hz. The low-end anchor
+    /// for the envelope-to-frequency sweep. Tune by ear at hardware sign-off.
+    /// Approximation of v4's idle end of `120 / normVarLen × avgVel / 100`.
+    #[setting(
+        default = 110.0_f32,
+        min = 50.0_f32,
+        max = 1000.0_f32,
+        step = 10.0_f32,
+        label = "Bandpass base",
+        unit = "Hz",
+        section = "Audio",
+        category = Dev
+    )]
+    #[serde(default = "default_bandpass_base_hz")]
+    pub bandpass_base_hz: f32,
+
+    /// Bandpass cutoff sweep range, in Hz, across the full `[0, 1]` activity
+    /// envelope. `cutoff = base + envelope × range`. Tune by ear.
+    #[setting(
+        default = 280.0_f32,
+        min = 50.0_f32,
+        max = 4000.0_f32,
+        step = 10.0_f32,
+        label = "Bandpass range",
+        unit = "Hz",
+        section = "Audio",
+        category = Dev
+    )]
+    #[serde(default = "default_bandpass_range_hz")]
+    pub bandpass_range_hz: f32,
+
+    /// Frequency of the modeled breath sine LFO in Hz. Lower = slower in-out
+    /// pulse; higher = faster flutter. Tune by ear to match the particle
+    /// in-out motion feel. Dev-only knob.
+    #[setting(
+        default = 0.7_f32,
+        min = 0.1_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Breath rate",
+        unit = "Hz",
+        section = "Audio",
+        category = Dev
+    )]
+    #[serde(default = "default_breath_rate_hz")]
+    pub breath_rate_hz: f32,
 }
 
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
@@ -127,6 +253,34 @@ fn default_attract_particle_fraction() -> f32 {
 
 fn default_attract_turbulence() -> f32 {
     6.0
+}
+
+fn default_synth_volume_scale() -> f32 {
+    1.0
+}
+
+fn default_synth_attack_ms() -> f32 {
+    115.0
+}
+
+fn default_synth_release_ms() -> f32 {
+    350.0
+}
+
+fn default_breath_depth() -> f32 {
+    0.3
+}
+
+fn default_bandpass_base_hz() -> f32 {
+    110.0
+}
+
+fn default_bandpass_range_hz() -> f32 {
+    280.0
+}
+
+fn default_breath_rate_hz() -> f32 {
+    0.7
 }
 
 #[cfg(test)]
@@ -167,6 +321,14 @@ mod tests {
                 < f32::EPSILON
         );
         assert!((defaults.attract_turbulence - default_attract_turbulence()).abs() < f32::EPSILON);
+        // Audio fields added in task 4.
+        assert!((defaults.synth_volume_scale - default_synth_volume_scale()).abs() < f32::EPSILON);
+        assert!((defaults.synth_attack_ms - default_synth_attack_ms()).abs() < f32::EPSILON);
+        assert!((defaults.synth_release_ms - default_synth_release_ms()).abs() < f32::EPSILON);
+        assert!((defaults.breath_depth - default_breath_depth()).abs() < f32::EPSILON);
+        assert!((defaults.bandpass_base_hz - default_bandpass_base_hz()).abs() < f32::EPSILON);
+        assert!((defaults.bandpass_range_hz - default_bandpass_range_hz()).abs() < f32::EPSILON);
+        assert!((defaults.breath_rate_hz - default_breath_rate_hz()).abs() < f32::EPSILON);
     }
 
     /// Confirms that persisted TOML missing the new attract fields still
