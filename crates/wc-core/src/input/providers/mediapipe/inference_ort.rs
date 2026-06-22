@@ -20,7 +20,7 @@ use ort::ep::coreml::ComputeUnits;
 use ort::ep::{CoreML, ExecutionProvider};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
-use ort::value::Tensor as OrtTensor;
+use ort::value::TensorRef;
 
 use super::inference::{HandInference, InferenceError, Tensor};
 
@@ -218,15 +218,19 @@ fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
 impl HandInference for OrtInference {
     /// Run one stage.
     ///
-    /// Two residual copies remain, both bound by the `ort`/trait APIs rather than
-    /// the pipeline: the input is cloned into an owned `OrtTensor`
-    /// (`from_array` takes ownership; ≈110 KB palm / ≈150 KB landmark f32), and
-    /// each output is copied out of `ort`'s arena into our runtime-agnostic
-    /// `Tensor` (the trait returns owned `Vec`s; the largest is the ≈145 KB palm
-    /// box tensor). The pipeline's per-frame *input* buffer is already reused
-    /// upstream (see [`super::pipeline::Pipeline`]); removing these last copies
-    /// needs `ort` I/O binding with preallocated tensors — a narrow,
-    /// profiling-gated follow-up tied to the `ort` upgrade path, not done blind.
+    /// The input is **not** copied: it is bound as a borrowed [`TensorRef`] view
+    /// over the pipeline's reused per-frame input buffer (see
+    /// [`super::pipeline::Pipeline`]), so no per-frame input allocation happens on
+    /// the hot path. Each frame previously cloned the whole input (≈0.4 MB palm /
+    /// ≈0.6 MB landmark f32) into an owned tensor; `from_array_view` removes that.
+    ///
+    /// One copy remains, forced by the trait: each output is copied out of `ort`'s
+    /// arena into our runtime-agnostic `Tensor` because the trait returns owned
+    /// `Vec`s (largest is the ≈145 KB palm box tensor). Removing it too would need
+    /// `ort` I/O binding with preallocated output buffers *and* a trait change so
+    /// `run` writes into caller-owned storage. On Apple Silicon's unified memory
+    /// there is no host/device transfer for I/O binding to save, so that is a
+    /// profiling-gated follow-up, not done blind.
     fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
         // ort tensor shapes are `i64`; our `usize` dims convert infallibly for
         // any realistic image/landmark tensor.
@@ -236,7 +240,8 @@ impl HandInference for OrtInference {
             .map(|&d| i64::try_from(d))
             .collect::<Result<_, _>>()
             .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?;
-        let in_tensor = OrtTensor::from_array((shape, input.data.clone())).map_err(run_err)?;
+        let in_tensor =
+            TensorRef::from_array_view((shape, input.data.as_slice())).map_err(run_err)?;
 
         let outputs = self
             .session
