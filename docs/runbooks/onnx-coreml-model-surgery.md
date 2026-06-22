@@ -242,10 +242,12 @@ what the model computes. The only converter-free variable is the PReLU slope
 *shape*, which our reshape already handles.
 
 Runtime-side, `ort` I/O binding buys nothing extra on Apple Silicon (unified
-memory: no host/device copy to eliminate). The per-frame input *clone* is instead
-removed with a borrowed `TensorRef::from_array_view` over the pipeline's reused
-buffer; the remaining output copy is forced by the `HandInference` trait's owned
-`Vec<Tensor>` return and left as a profiling-gated follow-up.
+memory: no host/device copy to eliminate), so the per-frame copies were removed
+directly instead: the input is a borrowed `TensorRef::from_array_view` over the
+pipeline's reused buffer, and `HandInference::run` writes its outputs into a
+caller-owned `Vec<Tensor>` reused across frames (grown once, refilled in place).
+Steady-state inference now allocates nothing after warmup; the post-processing
+path (anchor decode, NMS, ROI, smoothing) was already zero-alloc by design.
 
 ## Bit-exact edit + verify recipe
 

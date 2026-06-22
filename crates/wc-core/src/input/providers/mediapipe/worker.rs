@@ -460,8 +460,9 @@ mod tests {
     }
 
     impl HandInference for StaticInference {
-        fn run(&mut self, _input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
-            Ok(self.outputs.clone())
+        fn run(&mut self, _input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
+            out.clone_from(&self.outputs);
+            Ok(())
         }
     }
 
@@ -824,7 +825,7 @@ mod tests {
     struct FailingInference;
 
     impl HandInference for FailingInference {
-        fn run(&mut self, _input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
+        fn run(&mut self, _input: &Tensor, _out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
             Err(InferenceError::Run("boom".into()))
         }
     }

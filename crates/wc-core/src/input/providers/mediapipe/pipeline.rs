@@ -389,6 +389,11 @@ pub struct Pipeline {
     palm_dets: Vec<PalmDetection>,
     /// Reused weighted-NMS scratch (mask, cluster, kept buffers).
     palm_nms: PalmNmsScratch,
+    /// Reused palm-stage raw output tensors ([`HandInference::run`] refills them
+    /// in place), so decoding never allocates the model outputs per acquisition.
+    palm_outputs: Vec<Tensor>,
+    /// Reused landmark-stage raw output tensors, refilled in place per ROI.
+    landmark_outputs: Vec<Tensor>,
 }
 
 impl Pipeline {
@@ -426,6 +431,8 @@ impl Pipeline {
             },
             palm_dets: Vec::new(),
             palm_nms: PalmNmsScratch::default(),
+            palm_outputs: Vec::new(),
+            landmark_outputs: Vec::new(),
         }
     }
 
@@ -575,8 +582,8 @@ impl Pipeline {
         // refill the reused input tensor — no per-acquisition allocation.
         resize_into(square, PALM_SIZE, PALM_SIZE, &mut self.palm_resize_buf);
         fill_nhwc_unit(&self.palm_resize_buf, &mut self.palm_input);
-        let out = self.palm.run(&self.palm_input)?;
-        let (boxes, scores) = pick_palm_outputs(&out)?;
+        self.palm.run(&self.palm_input, &mut self.palm_outputs)?;
+        let (boxes, scores) = pick_palm_outputs(&self.palm_outputs)?;
         // Decode + NMS through the reused scratch buffers: the `_into` forms
         // clear-and-refill, so capacities persist across frames and the
         // steady-state acquisition path allocates nothing (worker-loop rule).
@@ -617,13 +624,14 @@ impl Pipeline {
         // tensor — no per-ROI image/tensor allocation.
         warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
         fill_nhwc_unit(&self.warp_buf, &mut self.landmark_input);
-        let out = self.landmark.run(&self.landmark_input)?;
+        self.landmark
+            .run(&self.landmark_input, &mut self.landmark_outputs)?;
         let LandmarkOutputs {
             image: raw_lms,
             presence,
             handedness: handed,
             world: raw_world,
-        } = pick_landmark_outputs(&out)?;
+        } = pick_landmark_outputs(&self.landmark_outputs)?;
         if presence < self.config.presence_threshold {
             return Ok(None);
         }
@@ -1558,8 +1566,9 @@ mod tests {
             data: vec![0.0; idx(PALM_SIZE) * idx(PALM_SIZE) * 3],
             shape: vec![1, idx(PALM_SIZE), idx(PALM_SIZE), 3],
         };
+        let mut palm_out = Vec::new();
         let t_palm = bench(20, &mut || {
-            let _ = palm.run(&palm_in).expect("palm run");
+            palm.run(&palm_in, &mut palm_out).expect("palm run");
         });
 
         // ROI warp (one per detected hand) + landmark inference.
@@ -1578,8 +1587,9 @@ mod tests {
             data: vec![0.0; idx(LM_SIZE) * idx(LM_SIZE) * 3],
             shape: vec![1, idx(LM_SIZE), idx(LM_SIZE), 3],
         };
+        let mut lm_out = Vec::new();
         let t_lm = bench(20, &mut || {
-            let _ = landmark.run(&lm_in).expect("landmark run");
+            landmark.run(&lm_in, &mut lm_out).expect("landmark run");
         });
 
         eprintln!("  palm.run (192):       {t_palm:.2}");
@@ -1620,10 +1630,11 @@ mod tests {
     }
 
     impl HandInference for CountingInference {
-        fn run(&mut self, _input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
+        fn run(&mut self, _input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(self.outputs.clone())
+            out.clone_from(&self.outputs);
+            Ok(())
         }
     }
 

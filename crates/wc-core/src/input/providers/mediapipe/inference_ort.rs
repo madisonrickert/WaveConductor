@@ -40,6 +40,10 @@ pub struct OrtInference {
     input_name: String,
     output_names: Vec<String>,
     backend: &'static str,
+    /// Reused `i64` shape buffer for the input tensor view. The input shape is
+    /// fixed per model, so refilling this in place each frame (rather than
+    /// `collect`ing a fresh `Vec`) keeps `run` off the per-frame allocator.
+    input_shape: Vec<i64>,
 }
 
 impl OrtInference {
@@ -126,6 +130,7 @@ impl OrtInference {
             input_name,
             output_names,
             backend,
+            input_shape: Vec::new(),
         })
     }
 
@@ -218,51 +223,57 @@ fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
 impl HandInference for OrtInference {
     /// Run one stage.
     ///
-    /// The input is **not** copied: it is bound as a borrowed [`TensorRef`] view
-    /// over the pipeline's reused per-frame input buffer (see
-    /// [`super::pipeline::Pipeline`]), so no per-frame input allocation happens on
-    /// the hot path. Each frame previously cloned the whole input (≈0.4 MB palm /
-    /// ≈0.6 MB landmark f32) into an owned tensor; `from_array_view` removes that.
+    /// Allocation-free on the steady-state hot path. The input is bound as a
+    /// borrowed [`TensorRef`] view over the pipeline's reused per-frame input
+    /// buffer (no input copy; each frame previously cloned ≈0.4 MB palm / ≈0.6 MB
+    /// landmark f32). Each output is written into `out`, a buffer the caller owns
+    /// and reuses across frames: `out` is grown/truncated to the model's output
+    /// count once, then each tensor's `data`/`shape` is refilled in place
+    /// (`clear` keeps capacity). After the first call neither the input shape, the
+    /// output container, nor the output data allocates.
     ///
-    /// One copy remains, forced by the trait: each output is copied out of `ort`'s
-    /// arena into our runtime-agnostic `Tensor` because the trait returns owned
-    /// `Vec`s (largest is the ≈145 KB palm box tensor). Removing it too would need
-    /// `ort` I/O binding with preallocated output buffers *and* a trait change so
-    /// `run` writes into caller-owned storage. On Apple Silicon's unified memory
-    /// there is no host/device transfer for I/O binding to save, so that is a
-    /// profiling-gated follow-up, not done blind.
-    fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError> {
-        // ort tensor shapes are `i64`; our `usize` dims convert infallibly for
-        // any realistic image/landmark tensor.
-        let shape: Vec<i64> = input
-            .shape
-            .iter()
-            .map(|&d| i64::try_from(d))
-            .collect::<Result<_, _>>()
-            .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?;
+    /// Outputs are written in the model's **declared output order** (see the
+    /// struct doc), which the landmark stage selects by index.
+    fn run(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
+        // Refill the reused i64 shape buffer in place (ort shapes are i64; our
+        // usize dims convert infallibly for any realistic image/landmark tensor).
+        self.input_shape.clear();
+        for &d in &input.shape {
+            self.input_shape.push(
+                i64::try_from(d)
+                    .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?,
+            );
+        }
         let in_tensor =
-            TensorRef::from_array_view((shape, input.data.as_slice())).map_err(run_err)?;
+            TensorRef::from_array_view((self.input_shape.as_slice(), input.data.as_slice()))
+                .map_err(run_err)?;
 
         let outputs = self
             .session
             .run(ort::inputs![self.input_name.as_str() => in_tensor])
             .map_err(run_err)?;
 
-        // Re-materialize each output in declared order as our runtime-agnostic
-        // `Tensor` (owned `f32` + `usize` shape). `Shape` derefs to `[i64]`.
-        let mut result = Vec::with_capacity(self.output_names.len());
-        for name in &self.output_names {
+        // Reuse `out`: size it to the output count, then refill each tensor's
+        // buffers in place, in declared order. `Shape` derefs to `[i64]`.
+        out.truncate(self.output_names.len());
+        while out.len() < self.output_names.len() {
+            out.push(Tensor::default());
+        }
+        for (slot, name) in out.iter_mut().zip(&self.output_names) {
             let (shape, data) = outputs[name.as_str()]
                 .try_extract_tensor::<f32>()
                 .map_err(run_err)?;
-            let dims: Result<Vec<usize>, _> = shape.iter().map(|&d| usize::try_from(d)).collect();
-            let shape = dims.map_err(|e| InferenceError::Run(format!("bad output dim: {e}")))?;
-            result.push(Tensor {
-                data: data.to_vec(),
-                shape,
-            });
+            slot.data.clear();
+            slot.data.extend_from_slice(data);
+            slot.shape.clear();
+            for &d in shape.iter() {
+                slot.shape.push(
+                    usize::try_from(d)
+                        .map_err(|e| InferenceError::Run(format!("bad output dim: {e}")))?,
+                );
+            }
         }
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -326,8 +337,9 @@ mod tests {
         // in Rust, not in the graph). Proves ort loads and runs it in-crate.
         let mut model =
             OrtInference::load(&model_bytes("palm_detection.onnx")).expect("load via ort");
-        let out = model
-            .run(&Tensor::zeros(vec![1, 192, 192, 3]))
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 192, 192, 3]), &mut out)
             .expect("ort palm forward pass");
         let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
         assert!(
@@ -348,8 +360,9 @@ mod tests {
         // exercising load + run + the declared-order shape extraction.
         let mut model =
             OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
-        let out = model
-            .run(&Tensor::zeros(vec![1, 224, 224, 3]))
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
             .expect("ort landmark forward pass");
         let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
         assert_eq!(out.len(), 4, "shapes={shapes:?}");
@@ -379,8 +392,9 @@ mod tests {
         // `handedness_probability_below_half_reads_left`.
         let mut model =
             OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
-        let out = model
-            .run(&Tensor::zeros(vec![1, 224, 224, 3]))
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
             .expect("ort landmark forward pass");
         assert_eq!(
             out[1].shape,
@@ -405,8 +419,9 @@ mod tests {
         let mut model =
             OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
         // Landmark model expects [1,224,224,3]; supply a palm-sized input instead.
+        let mut out = Vec::new();
         let err = model
-            .run(&Tensor::zeros(vec![1, 192, 192, 3]))
+            .run(&Tensor::zeros(vec![1, 192, 192, 3]), &mut out)
             .expect_err("shape mismatch should return an error");
         assert!(matches!(err, InferenceError::Run(_)));
     }

@@ -42,7 +42,7 @@ pub enum InferenceError {
 }
 
 /// A dense row-major `f32` tensor plus its shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tensor {
     /// Row-major elements; `data.len()` must equal the product of `shape`.
     pub data: Vec<f32>,
@@ -88,12 +88,17 @@ impl Tensor {
 
 /// Runs one ONNX model stage.
 pub trait HandInference: Send {
-    /// Run the model on `input`, returning the raw output tensors in the model's
-    /// output order.
+    /// Run the model on `input`, writing the raw output tensors (in the model's
+    /// declared output order) into `out`.
+    ///
+    /// `out` is **reused across calls**: it is grown or truncated to the model's
+    /// output count and each tensor's `data`/`shape` is refilled in place, so the
+    /// steady-state hot path performs no heap allocation. Pass the same `Vec` each
+    /// frame (a scratch field on the caller).
     ///
     /// # Errors
     /// Returns [`InferenceError::Run`] if the forward pass fails.
-    fn run(&mut self, input: &Tensor) -> Result<Vec<Tensor>, InferenceError>;
+    fn run(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError>;
 }
 
 #[cfg(test)]
