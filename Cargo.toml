@@ -212,13 +212,25 @@ needless_pass_by_value = "allow"
 
 [profile.dev]
 opt-level = 1
-# Line-only DWARF: keeps readable panics/backtraces (file:line) but drops
-# variable type info that bloats target/debug to 30+ GiB on the Bevy dep tree.
-# Flip back to `true` temporarily if you need lldb breakpoints/inspection.
+# Debuginfo is split to keep target/debug small (full DWARF on the Bevy dep tree
+# alone bloats it past 30+ GiB):
+# - workspace crates keep line-tables-only here — readable panics/backtraces
+#   (file:line) into our own code, minus the variable/type DWARF.
+# - dependencies drop debuginfo entirely (`debug = false` under `package."*"`
+#   below) — we don't step-debug into Bevy, so even their line tables are dead
+#   weight across the dep tree.
+# Need lldb inspection into a dep? Temporarily raise the `package."*"` override
+# (or this line) back to `true` and rebuild.
 debug = "line-tables-only"
 
+# `package."*"` matches all dependencies but NOT workspace members (the same
+# scoping that lets opt-level differ: deps build at 3 for runtime speed, our
+# crates stay at dev's 1 for fast compiles). `debug = false` here is the
+# documented Cargo recipe for a smaller target/debug — it overrides the
+# line-tables-only above for non-workspace crates only.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.release]
 # GUARD — do NOT set `debug-assertions = true` here (or on any release/soak
