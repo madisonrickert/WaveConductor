@@ -7,7 +7,9 @@
 //!   [`crate::particles::compute::ParticleSimParams`].
 //! - [`mouse`] — Pointer/touch attractor state and decay systems.
 //! - [`post_params`] — Per-frame writer for
-//!   [`crate::dots::post_process::DotsPostParams`] (cursor, resolution, gamma).
+//!   [`crate::dots::post_process::DotsPostParams`]: resolution, gamma,
+//!   `shrink_factor`, and the explode hue-split centre (`i_mouse`) driven by
+//!   the cursor or, when a hand is grabbing, an eased [`post_params::DotsExplodeFocal`].
 
 pub mod mouse;
 pub mod post_params;
