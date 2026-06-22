@@ -4,8 +4,14 @@
 //! Simpler than [`super::line_synth::LineSynth`] — no evolution envelope,
 //! no brown-noise breath modulators, no per-oscillator drift. Just the v4
 //! chain: two detuned triangle oscillators → lowpass → bandpass + white
-//! noise, driven by a fixed 8.66 Hz LFO whose depth is a `Shared` param
+//! noise, driven by a warm fixed ~1.5 Hz LFO whose depth is a `Shared` param
 //! (set by the coupling system to `bandpass_freq × 0.06`).
+//!
+//! Note: v4's `createAudioGroup` sets `lfo.frequency = 8.66` only at
+//! construction time — a placeholder that v4 overwrites every frame with
+//! `flatRatio` (~1–3 Hz). The v5 voice locks the rate at 1.5 Hz (the
+//! modeled-breath approach: the slow in-out swell is synthesized in the
+//! coupling layer, not here).
 //!
 //! ## Audio-thread allocation policy
 //!
@@ -21,9 +27,9 @@
 //! osc2 (triangle, 164.82 Hz,          ×0.3)  ─┴─→ osc_mix
 //!                                                    × follow(volume)
 //!                                                    │
-//!   (voice | follow(bandpass_freq) + sine(8.66)×follow(lfo_depth) | Q=5.18) >> lowpass
+//!   (voice | follow(bandpass_freq) + sine(1.5)×follow(lfo_depth) | Q=5.18) >> lowpass
 //!                                                    │
-//!   (lp    | follow(bandpass_freq) + sine(8.66)×follow(lfo_depth) | Q=5.18) >> bandpass
+//!   (lp    | follow(bandpass_freq) + sine(1.5)×follow(lfo_depth) | Q=5.18) >> bandpass
 //!                                                    │ ×0.7 (filterGain)
 //!                                                    │
 //!   white() × follow(volume × 0.05)  ───────────────┴─→ + → output
@@ -57,8 +63,11 @@ const OSC1_DETUNE_FACTOR: f32 = 1.001_157;
 const FILTER_Q: f32 = 5.18;
 /// Post-bandpass amplitude scalar. v4: `filterGain.gain = 0.7`.
 const FILTER_GAIN: f32 = 0.7;
-/// Fixed LFO rate in Hz. v4: `lfo.frequency = 8.66`. Not a Shared param.
-const LFO_RATE_HZ: f32 = 8.66;
+/// Fixed LFO rate in Hz. v4 sets `lfo.frequency = 8.66` at construction but
+/// overwrites it every frame with `flatRatio` (~1–3 Hz), so 8.66 was only a
+/// placeholder. The v5 voice locks the rate at a warm 1.5 Hz; the slow
+/// in-out swell is synthesized in the coupling layer instead. Not a Shared param.
+const LFO_RATE_HZ: f32 = 1.5;
 /// Noise path gain factor: `noise_gain = volume × NOISE_GAIN_SCALE`. v4: `volume * 0.05`.
 const NOISE_GAIN_SCALE: f32 = 0.05;
 /// SVF filters go numerically unstable at exactly zero cutoff; clamp any
@@ -143,9 +152,11 @@ impl DotsSynth {
         //
         // v4: `lfoGain.gain` is set to `freq × 0.06`; `lfoGain.connect(filter.frequency)`.
         // The filter.frequency CV = base_freq + lfo_output.
-        // lfo_output = sine(8.66 Hz) × lfo_depth.
-        // `sine_hz(LFO_RATE_HZ)` is a fixed-rate oscillator (LFO_RATE_HZ is a
-        // compile-time constant, no Shared needed for the rate).
+        // lfo_output = sine(LFO_RATE_HZ) × lfo_depth.
+        // `sine_hz(LFO_RATE_HZ)` is a fixed-rate oscillator at 1.5 Hz
+        // (LFO_RATE_HZ is a compile-time constant; no Shared needed for the rate).
+        // v4 used 8.66 Hz only as a construction-time placeholder and overwrote it
+        // each frame with flatRatio (~1–3 Hz); 1.5 Hz models that warm wobble range.
         let lfo1 = sine_hz::<f32>(LFO_RATE_HZ);
         let lfo_depth1 = var(&lfo_depth) >> follow(PARAM_SMOOTHING_S);
         let bp_base1 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
@@ -156,8 +167,8 @@ impl DotsSynth {
         // v4: `lfoGain` also connects to `filter2.frequency`. Both filters
         // share the same LFO signal in v4; we duplicate the expression here
         // because fundsp An-nodes are not Clone. Two `sine_hz::<f32>(LFO_RATE_HZ)`
-        // nodes starting at t=0 produce identical deterministic output, so the
-        // duplication is semantically equivalent to sharing.
+        // nodes starting at t=0 produce identical deterministic output at 1.5 Hz,
+        // so the duplication is semantically equivalent to sharing.
         let lfo2 = sine_hz::<f32>(LFO_RATE_HZ);
         let lfo_depth2 = var(&lfo_depth) >> follow(PARAM_SMOOTHING_S);
         let bp_base2 = var(&bandpass_freq) >> follow(PARAM_SMOOTHING_S);
@@ -244,6 +255,16 @@ impl core::fmt::Debug for DotsSynth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard that the LFO rate constant stays in a perceptually warm range.
+    /// 8.66 Hz (v4's construction-time placeholder) caused excess shimmer;
+    /// anything above ~3 Hz would re-introduce that problem.
+    #[test]
+    fn lfo_rate_is_warm() {
+        // Evaluated at compile time via const block; fails to compile if the
+        // constant drifts out of the safe low-shimmer range.
+        const { assert!(LFO_RATE_HZ > 0.0 && LFO_RATE_HZ <= 3.0) }
+    }
 
     #[test]
     fn new_builds_without_panic() {
