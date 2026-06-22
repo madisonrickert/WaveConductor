@@ -29,9 +29,9 @@ use wc_core::input::providers::mock::MockProvider;
 use wc_core::input::state::{FusedHandFrame, HandTrackingFrame};
 use wc_core::input::systems::{fuse_hand_frames, poll_all_providers, sync_hand_entities};
 use wc_core::lifecycle::state::{AppState, SketchActivity};
-use wc_sketches::particles::compute::ParticleSimParams;
 use wc_sketches::line::leap_attractors::{LineHandAttractor, LINE_HAND_DECAY_SPEED};
 use wc_sketches::line::systems::MouseAttractorState;
+use wc_sketches::particles::compute::ParticleSimParams;
 
 /// Drive the keyboard-nav action that selects Line.
 ///

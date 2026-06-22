@@ -24,14 +24,14 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bytemuck::cast_slice;
 
-use crate::particles::compute::ParticleSimParams;
 use crate::line::hash::{hash_to_unit, wang_hash};
 use crate::line::heatmap::sample_from_heatmap;
+use crate::line::settings::LineSettings;
+use crate::line::systems::sim_params::LineSmearFocal;
+use crate::particles::compute::ParticleSimParams;
 use crate::particles::material::ParticleMaterial;
 use crate::particles::particle::{Particle, SimParams};
-use crate::line::settings::LineSettings;
 use crate::particles::sim_cpu::CpuMirror;
-use crate::line::systems::sim_params::LineSmearFocal;
 
 /// Marker component placed on every entity owned by the Line sketch.
 ///

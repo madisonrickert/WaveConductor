@@ -134,3 +134,17 @@ Remaining open parity gaps from the Verdict section after this pass:
 
 Gaps #1–#3 are closed in code; #4 (and the native Browse dialog click-through +
 the nine Leap scenarios) need Madison's hands-on / hardware pass.
+
+## Dots Plan D1: gravity engine relocated to shared `crate::particles`
+
+The gravity engine that previously lived under `line/particles/` (`compute`,
+`particle`, `material`, `sim_cpu`, plus `simulate.wgsl` and `render.wgsl`) was
+moved to the shared `crates/wc-sketches/src/particles/` module in Dots Plan D1.
+This restores v4's `@/particles` seam so Dots can use the same foundation
+without duplication.
+
+Line's behavior is **unchanged**: it passes `stationary_constant = 0.0` to the
+shared `SimParams`, which makes the new spring/stationary kernel term a no-op
+(`accel += 0.0 * home * |home|`). The full verification gate (clippy, nextest,
+doctests, `cargo doc`, `cargo xtask capture`) passed without new warnings or
+regressions after the move.

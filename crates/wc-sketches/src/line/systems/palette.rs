@@ -11,9 +11,9 @@
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 
-use crate::particles::material::ParticleMaterial;
 use crate::line::settings::{LineSettings, PaletteMode};
 use crate::line::LineRoot;
+use crate::particles::material::ParticleMaterial;
 
 /// Pack the palette settings into the `palette_params` uniform value
 /// (`x` = mode index, `y` = strength, `z` = spread, `w` = reserved). `Off`

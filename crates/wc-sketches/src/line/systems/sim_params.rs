@@ -17,12 +17,12 @@
 use bevy::prelude::*;
 use wc_core::input::entity::TrackedHand;
 
-use crate::particles::compute::ParticleSimParams;
 use crate::line::leap_attractors::LineHandAttractor;
-use crate::particles::particle::{Attractor, SimParams, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::mouse::MouseAttractorState;
+use crate::particles::compute::ParticleSimParams;
+use crate::particles::particle::{Attractor, SimParams, MAX_ATTRACTORS};
 
 /// v4 `PARTICLE_SYSTEM_PARAMS.PULLING_DRAG_CONSTANT`. Baked via
 /// `pow(_, V4_FIXED_DT)` to produce the per-frame drag the compute kernel

@@ -424,7 +424,11 @@ mod tests {
         step_one(&mut p, &params);
         // Spring accel = stationary_constant * (home - pos) * |home - pos|
         //              = 0.1 * (-10) * 10 = -10 in x; velocity gains it (then drag).
-        assert!(p.velocity[0] < 0.0, "spring must pull toward home; got {}", p.velocity[0]);
+        assert!(
+            p.velocity[0] < 0.0,
+            "spring must pull toward home; got {}",
+            p.velocity[0]
+        );
     }
 
     #[test]
@@ -449,9 +453,17 @@ mod tests {
             _pad: 0.0,
         };
         step_one(&mut p, &params);
-        assert_eq!(p.velocity, [0.0, 0.0], "stationary_constant==0 must add no force");
+        assert_eq!(
+            p.velocity,
+            [0.0, 0.0],
+            "stationary_constant==0 must add no force"
+        );
         assert_eq!(p.position, [10.0, 0.0], "particle must not move");
-        assert_eq!(p.original_xy, [0.0, 0.0], "home must not drift when spring is off");
+        assert_eq!(
+            p.original_xy,
+            [0.0, 0.0],
+            "home must not drift when spring is off"
+        );
     }
 
     #[test]

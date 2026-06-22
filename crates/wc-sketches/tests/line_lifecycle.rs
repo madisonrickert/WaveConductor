@@ -225,9 +225,9 @@ fn idle_veto_keeps_line_active_during_attractor_decay() {
 
 #[test]
 fn update_sim_params_writes_mouse_attractor_with_gravity_scaling() {
-    use wc_sketches::particles::compute::ParticleSimParams;
     use wc_sketches::line::settings::LineSettings;
     use wc_sketches::line::systems::MouseAttractorState;
+    use wc_sketches::particles::compute::ParticleSimParams;
 
     let mut app = sketches_test_app();
     app.update();

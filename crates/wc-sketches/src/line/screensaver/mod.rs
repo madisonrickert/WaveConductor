@@ -59,15 +59,15 @@ use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
 
-use crate::particles::compute::ParticleSimParams;
-use crate::particles::material::ParticleMaterial;
-use crate::particles::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::sim_params::{
     bake_post_base, bake_sim_params, bake_smear_tints, AttractGate, Turbulence, WindowGeom,
 };
 use crate::line::LineRoot;
+use crate::particles::compute::ParticleSimParams;
+use crate::particles::material::ParticleMaterial;
+use crate::particles::particle::{Attractor, MAX_ATTRACTORS};
 
 /// Spatial frequency (radians per world unit) of the turbulence flow's base
 /// octave. ~0.012 ≈ a 520-px primary swirl wavelength (the second octave is

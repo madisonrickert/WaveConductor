@@ -13,10 +13,10 @@
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 
-use crate::particles::material::ParticleMaterial;
 use crate::line::settings::LineSettings;
 use crate::line::template_adjustments_store::LineTemplateAdjustments;
 use crate::line::LineRoot;
+use crate::particles::material::ParticleMaterial;
 
 /// The active template's colour influence (`0..1`), or `0.0` when no template is
 /// active. Delegates to the allocation-free [`LineTemplateAdjustments::color_influence_for`]

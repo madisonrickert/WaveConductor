@@ -32,15 +32,15 @@ use bevy::render::storage::ShaderBuffer;
 use bevy::sprite_render::MeshMaterial2d;
 use bytemuck::cast_slice;
 
-use crate::particles::compute::ParticleSimParams;
 use crate::line::heatmap::sample_from_heatmap;
-use crate::particles::material::ParticleMaterial;
-use crate::particles::particle::Particle;
 use crate::line::settings::LineSettings;
 use crate::line::systems::spawn::make_particle;
 use crate::line::template_adjustments::{pack_rgb8, TemplateAdjustments};
 use crate::line::template_adjustments_store::{hash_of_path_str, LineTemplateAdjustments};
 use crate::line::LineRoot;
+use crate::particles::compute::ParticleSimParams;
+use crate::particles::material::ParticleMaterial;
+use crate::particles::particle::Particle;
 
 /// Quiescence window before a re-seed fires (so a slider drag coalesces). Short
 /// enough to feel connected while tuning; each fire is one full buffer

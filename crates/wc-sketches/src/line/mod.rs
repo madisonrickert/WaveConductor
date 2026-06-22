@@ -90,7 +90,9 @@ impl Plugin for LinePlugin {
         register_line_manifest(app);
 
         // Register the Material2d for ParticleMaterial.
-        app.add_plugins(Material2dPlugin::<crate::particles::material::ParticleMaterial>::default());
+        app.add_plugins(Material2dPlugin::<
+            crate::particles::material::ParticleMaterial,
+        >::default());
 
         // Wire the compute pipeline.
         app.add_plugins(crate::particles::compute::ParticleComputePlugin);
