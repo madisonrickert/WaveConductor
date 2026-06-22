@@ -44,6 +44,7 @@ use bevy::camera::{Hdr, RenderTarget, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
+use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{Extent3d, TextureFormat};
 use bevy::render::view::Msaa;
 use bevy::window::WindowResized;
@@ -87,10 +88,12 @@ fn hand_mesh_color() -> Color {
 /// `OnEnter(AppState::Dots)` and removed on exit. The additive composite pass
 /// (Task D6b-2) reads this image and adds it into the Dots scene before bloom.
 ///
-/// Carry-forward (D6b-2): add `ExtractResource` derive and register
-/// `ExtractResourcePlugin::<DotsHandMeshTarget>` in the composite plugin so
-/// the render world can sample the image.
-#[derive(Resource, Clone)]
+/// [`ExtractResource`] mirrors this into the render world each frame so the
+/// composite pass in [`super::bone_composite`] can sample the GPU image. The
+/// render-world copy is explicitly removed by a `remove_dots_hand_mesh_target_if_absent`
+/// system in that plugin (see the D3 lesson there) so the composite no-ops after
+/// `OnExit(AppState::Dots)`.
+#[derive(Resource, Clone, ExtractResource)]
 pub struct DotsHandMeshTarget {
     /// Handle to the off-screen HDR image. Sized to the window's physical
     /// resolution and resized with the window (see [`resize_bone_target`]).
@@ -471,14 +474,11 @@ mod tests {
             .run_system_once(ensure_bone_meshes)
             .expect("second ensure_bone_meshes run");
 
-        let bone_count = app
-            .world()
-            .get::<Children>(hand)
-            .map_or(0, |c| {
-                c.iter()
-                    .filter(|&e| app.world().get::<BoneIndex>(e).is_some())
-                    .count()
-            });
+        let bone_count = app.world().get::<Children>(hand).map_or(0, |c| {
+            c.iter()
+                .filter(|&e| app.world().get::<BoneIndex>(e).is_some())
+                .count()
+        });
 
         assert_eq!(
             bone_count, BONE_COUNT,

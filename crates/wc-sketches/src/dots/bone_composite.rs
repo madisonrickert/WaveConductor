@@ -1,14 +1,13 @@
-//! Additive bone-glow composite pass for the Line sketch.
+//! Additive bone-glow composite pass for the Dots (Fabric) sketch.
 //!
 //! ## Role
 //!
-//! The hand-mesh wireframe bones are rendered by [`crate::line::hand_mesh`]'s
-//! `HandMeshCamera3d` into an off-screen HDR image (emissive bones on black, no
-//! bloom, no tonemapping). [`line_bone_composite`] then **adds** that image into
-//! the main camera's HDR view target. It runs in the Core2d schedule's
-//! `EarlyPostProcess` set *after* the gravity smear
-//! ([`crate::line::post_process`]) and *before* bloom/tonemapping in
-//! `PostProcess`.
+//! The hand-mesh wireframe bones are rendered by [`crate::dots::hand_mesh`]'s
+//! `DotsHandMeshCamera3d` into an off-screen HDR image (emissive bones on black,
+//! no bloom, no tonemapping). [`dots_bone_composite`] then **adds** that image
+//! into the main camera's HDR view target. It runs in the Core2d schedule's
+//! `EarlyPostProcess` set *after* the explode post-process
+//! ([`crate::dots::post_process`]) and *before* bloom/tonemapping in `PostProcess`.
 //!
 //! Because the add happens in linear HDR before the main camera's `Bloom` +
 //! `AgX` tonemap, the bones are glowed and tonemapped together with the scene —
@@ -20,12 +19,28 @@
 //!
 //! ## Wiring
 //!
-//! [`HandMeshTarget`] holds the off-screen image handle; it is inserted on
-//! `OnEnter(AppState::Line)` (by `hand_mesh::spawn_hand_mesh_camera`) and
+//! [`DotsHandMeshTarget`] holds the off-screen image handle; it is inserted on
+//! `OnEnter(AppState::Dots)` (by `hand_mesh::spawn_hand_mesh_camera`) and
 //! removed on exit. [`ExtractResourcePlugin`] mirrors it into the render world.
 //! The node no-ops cleanly whenever the resource (or its GPU image) is absent —
-//! so it costs nothing outside Line and during the brief window before the
+//! so it costs nothing outside Dots and during the brief window before the
 //! image first uploads.
+//!
+//! ## Render-world removal (D3 lesson)
+//!
+//! Bevy 0.19's `ExtractResourcePlugin` propagates inserts and updates but **not**
+//! removals. After `OnExit(AppState::Dots)` removes `DotsHandMeshTarget` from
+//! the main world, the render-world copy would linger, keeping the composite
+//! running on other sketches with a stale bone image. The
+//! `remove_dots_hand_mesh_target_if_absent` system (registered in
+//! [`ExtractSchedule`]) issues the explicit `remove_resource` when the
+//! main-world source is absent. Mirrors the `remove_dots_post_params_if_absent`
+//! pattern in [`crate::dots::post_process`].
+//!
+//! **Known limitation (carry-forward #75):** bones bypass the main camera's
+//! bloom rolloff — they are added into the scene before bloom runs, so
+//! over-bright bone texels bloom via the main camera's bloom settings rather
+//! than a dedicated per-bone bloom stage.
 
 #![allow(
     clippy::as_conversions,
@@ -36,7 +51,7 @@
 use bevy::core_pipeline::{Core2d, Core2dSystems};
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
-use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     binding_types::{sampler, texture_2d},
@@ -52,65 +67,53 @@ use bevy::render::view::ViewTarget;
 use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::shader::Shader;
 
-/// Off-screen render target the hand-mesh bones are rasterized into.
-///
-/// `Rgba16Float` so the emissive bones (`> 1.0`) survive un-clamped. Created on
-/// `OnEnter(AppState::Line)` and removed on exit; [`ExtractResource`] mirrors it
-/// into the render world where [`line_bone_composite`] samples it. When absent
-/// (every non-Line state) the composite node is a clean no-op.
-#[derive(Resource, Clone, ExtractResource)]
-pub struct HandMeshTarget {
-    /// Handle to the off-screen HDR image. Sized to the window's physical
-    /// resolution and resized with the window (see `hand_mesh`).
-    pub image: Handle<Image>,
-}
+use super::hand_mesh::DotsHandMeshTarget;
 
-/// Plugin that registers the additive bone-glow composite node.
-pub struct LineBoneCompositePlugin;
+/// Plugin that registers the additive bone-glow composite node for Dots.
+pub struct DotsBoneCompositePlugin;
 
-impl Plugin for LineBoneCompositePlugin {
+impl Plugin for DotsBoneCompositePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ExtractResourcePlugin::<HandMeshTarget>::default());
+        app.add_plugins(ExtractResourcePlugin::<DotsHandMeshTarget>::default());
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
-        // Run in EarlyPostProcess after the gravity smear and before bloom +
-        // tonemapping (`PostProcess`), so the main camera's bloom/tonemap process
-        // the scene *with the bones added*.
+        // Run in EarlyPostProcess after the explode post-process and before
+        // bloom + tonemapping (`PostProcess`), so the main camera's bloom/tonemap
+        // process the scene *with the bones added*.
         render_app.add_systems(
             Core2d,
-            line_bone_composite
+            dots_bone_composite
                 .in_set(Core2dSystems::EarlyPostProcess)
-                .after(super::post_process::line_post_process),
+                .after(super::post_process::dots_post_process),
         );
 
         // Explicitly remove the render-world copy when the main-world resource
         // is gone. `ExtractResourcePlugin` propagates inserts and updates but
         // NOT removals (verified against bevy_render 0.19 extract_resource.rs —
-        // the None branch is a complete no-op). Without this, `HandMeshTarget`
-        // lingers in the render world after `OnExit(AppState::Line)`, keeping
+        // the None branch is a complete no-op). Without this, `DotsHandMeshTarget`
+        // lingers in the render world after `OnExit(AppState::Dots)`, keeping
         // the composite running on other sketches with the last-frame bone image.
         // The render-world `Handle<Image>` clone also keeps the GPU texture alive,
         // so `gpu_images.get` returns `Some` and the composite does NOT self-guard
-        // via the RenderAssets lookup alone (the D3 bug). Mirrors the
-        // `remove_dots_post_params_if_absent` pattern in `crate::dots::post_process`.
-        render_app.add_systems(ExtractSchedule, remove_hand_mesh_target_if_absent);
+        // via the RenderAssets lookup alone (the D3 bug). See the module docs.
+        render_app.add_systems(ExtractSchedule, remove_dots_hand_mesh_target_if_absent);
     }
 
     fn finish(&self, app: &mut App) {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.init_resource::<BoneCompositePipeline>();
+        render_app.init_resource::<DotsBoneCompositePipeline>();
     }
 }
 
-/// Cached pipeline state for the composite. Initialised once in
-/// [`LineBoneCompositePlugin::finish`].
+/// Cached pipeline state for the Dots bone composite. Initialised once in
+/// [`DotsBoneCompositePlugin::finish`].
 #[derive(Resource)]
-pub struct BoneCompositePipeline {
+pub struct DotsBoneCompositePipeline {
     /// Bind-group layout descriptor (scene texture, sampler, bone texture).
     pub bind_group_layout_descriptor: BindGroupLayoutDescriptor,
     /// Filtering sampler used to read both textures.
@@ -119,7 +122,7 @@ pub struct BoneCompositePipeline {
     pub pipeline_id: CachedRenderPipelineId,
 }
 
-impl FromWorld for BoneCompositePipeline {
+impl FromWorld for DotsBoneCompositePipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
 
@@ -133,19 +136,19 @@ impl FromWorld for BoneCompositePipeline {
             ),
         );
         let bind_group_layout_descriptor =
-            BindGroupLayoutDescriptor::new("line_bone_composite_layout", &entries);
+            BindGroupLayoutDescriptor::new("dots_bone_composite_layout", &entries);
 
         let sampler = render_device.create_sampler(&SamplerDescriptor::default());
 
         let shader: Handle<Shader> = world
             .resource::<AssetServer>()
-            .load("shaders/line/bone_composite.wgsl");
+            .load("shaders/dots/bone_composite.wgsl");
 
         let pipeline_id =
             world
                 .resource_mut::<PipelineCache>()
                 .queue_render_pipeline(RenderPipelineDescriptor {
-                    label: Some("line_bone_composite_pipeline".into()),
+                    label: Some("dots_bone_composite_pipeline".into()),
                     layout: vec![bind_group_layout_descriptor.clone()],
                     immediate_size: 0,
                     vertex: VertexState {
@@ -181,22 +184,28 @@ impl FromWorld for BoneCompositePipeline {
     }
 }
 
-/// Render system that adds the off-screen bone image into the main view target.
+/// Render system that adds the off-screen bone image into the main Dots view
+/// target.
 ///
-/// Runs in [`Core2dSystems::EarlyPostProcess`] after the gravity smear and
-/// before bloom. Gates on [`ExtractedCamera::hdr`]: the main Line `Camera2d` is
-/// the only Core2d camera and it is HDR, so this matches just it. (The bone
-/// `Camera3d` is on the Core3d graph, so it never reaches this system.) As of
-/// Bevy 0.19 the `Hdr` marker is no longer extracted to the render world, so we
-/// read HDR-ness from the extracted camera; a `&'static Hdr` `ViewQuery` would
-/// silently never match.
+/// Runs in [`Core2dSystems::EarlyPostProcess`] after the explode post-process
+/// and before bloom. Gates on [`ExtractedCamera::hdr`]: the main Dots `Camera2d`
+/// is the only Core2d camera and it is HDR, so this matches just it. (The bone
+/// `DotsHandMeshCamera3d` is on the Core3d graph and never reaches this system.)
+/// As of Bevy 0.19 the `Hdr` marker is no longer extracted to the render world,
+/// so we read HDR-ness from the extracted camera; a `&'static Hdr` `ViewQuery`
+/// would silently never match.
+///
+/// No-ops cleanly when `DotsHandMeshTarget` is absent (any non-Dots state, or
+/// the brief window before the image first uploads). The render-world removal
+/// system ensures the target is absent after `OnExit(AppState::Dots)` — see the
+/// module docs for why the `RenderAssets` lookup alone does not suffice.
 ///
 /// [`Core2dSystems::EarlyPostProcess`]: bevy::core_pipeline::Core2dSystems::EarlyPostProcess
-pub fn line_bone_composite(
+pub fn dots_bone_composite(
     view: ViewQuery<'_, '_, (&'static ViewTarget, &'static ExtractedCamera)>,
-    target: Option<Res<'_, HandMeshTarget>>,
+    target: Option<Res<'_, DotsHandMeshTarget>>,
     gpu_images: Res<'_, RenderAssets<GpuImage>>,
-    pipeline_res: Option<Res<'_, BoneCompositePipeline>>,
+    pipeline_res: Option<Res<'_, DotsBoneCompositePipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
     mut render_context: RenderContext<'_, '_>,
 ) {
@@ -206,8 +215,9 @@ pub fn line_bone_composite(
         return;
     }
 
-    // No bone target this frame (not in Line, or image not yet uploaded) → clean
-    // no-op. Return BEFORE `post_process_write` so the view target is untouched.
+    // No bone target this frame (not in Dots, or image not yet uploaded) →
+    // clean no-op. Return BEFORE `post_process_write` so the view target is
+    // untouched.
     let Some(target) = target else {
         return;
     };
@@ -226,7 +236,7 @@ pub fn line_bone_composite(
     let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
 
     let bind_group = render_context.render_device().create_bind_group(
-        "line_bone_composite_bind_group",
+        "dots_bone_composite_bind_group",
         &layout,
         &BindGroupEntries::sequential((
             post_process.source,
@@ -238,14 +248,14 @@ pub fn line_bone_composite(
     let mut pass = render_context
         .command_encoder()
         .begin_render_pass(&RenderPassDescriptor {
-            label: Some("line_bone_composite_pass"),
+            label: Some("dots_bone_composite_pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: post_process.destination,
                 depth_slice: None,
                 resolve_target: None,
                 // The fullscreen triangle writes every pixel (scene + bones), so
                 // the loaded contents are immaterial; `Load` avoids a clear and
-                // matches the gravity-smear pass's pattern.
+                // matches the explode post-process pass's pattern.
                 ops: Operations {
                     load: LoadOp::Load,
                     store: StoreOp::Store,
@@ -261,26 +271,47 @@ pub fn line_bone_composite(
     pass.draw(0..3, 0..1);
 }
 
-/// Removes the render-world [`HandMeshTarget`] when the main world no longer
-/// has it — i.e. after `OnExit(AppState::Line)` fires.
+/// Removes the render-world [`DotsHandMeshTarget`] when the main world no
+/// longer has it — i.e. after `OnExit(AppState::Dots)` fires.
 ///
 /// [`ExtractResourcePlugin`] propagates inserts and updates each
 /// [`ExtractSchedule`] tick but does **not** issue `remove_resource` when the
 /// main-world source is absent (verified against `bevy_render` 0.19
 /// `extract_resource.rs`: the `None` arm is a no-op). Without this explicit
-/// removal the stale render-world copy keeps [`line_bone_composite`] running
-/// Line's composite pass on other sketches with a stale bone image — and the
+/// removal the stale render-world copy keeps [`dots_bone_composite`] running
+/// Dots' composite pass on other sketches with a stale bone image — and the
 /// render-world `Handle<Image>` clone keeps the GPU texture alive, so the
 /// `RenderAssets<GpuImage>` lookup would not self-guard (the D3 bug).
 ///
-/// Mirrors [`crate::dots::post_process`]'s `remove_dots_post_params_if_absent`
-/// and the matching system in [`crate::dots::bone_composite`].
-fn remove_hand_mesh_target_if_absent(
+/// Mirrors [`crate::dots::post_process`]'s `remove_dots_post_params_if_absent`.
+fn remove_dots_hand_mesh_target_if_absent(
     mut commands: Commands<'_, '_>,
-    main_resource: Extract<'_, '_, Option<Res<'_, HandMeshTarget>>>,
-    render_resource: Option<Res<'_, HandMeshTarget>>,
+    main_resource: Extract<'_, '_, Option<Res<'_, DotsHandMeshTarget>>>,
+    render_resource: Option<Res<'_, DotsHandMeshTarget>>,
 ) {
     if main_resource.is_none() && render_resource.is_some() {
-        commands.remove_resource::<HandMeshTarget>();
+        commands.remove_resource::<DotsHandMeshTarget>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build-smoke test: `DotsBoneCompositePlugin` adds cleanly under
+    /// `MinimalPlugins` (no `RenderApp` present) without panicking.
+    ///
+    /// The plugin's `build` and `finish` both early-return when
+    /// `get_sub_app_mut(RenderApp)` returns `None`, so registering it outside
+    /// a full render context must be a no-op — not a panic.
+    ///
+    /// Mirrors the `particle_compute_plugin_builds` smoke test pattern in
+    /// `tests/particles_foundation.rs`.
+    #[test]
+    fn dots_bone_composite_plugin_builds() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(DotsBoneCompositePlugin);
+        app.update();
     }
 }

@@ -42,6 +42,7 @@
 //! the [`crate::SketchesPlugin`] umbrella, not here.
 
 pub mod audio_coupling;
+pub mod bone_composite;
 pub mod bone_wireframe;
 pub mod hand_attractors;
 pub mod hand_mesh;
@@ -145,9 +146,14 @@ impl Plugin for DotsPlugin {
         app.add_plugins(screensaver::DotsScreensaverPlugin);
         // Wireframe bone visualization (D6b Task 1): off-screen bone Camera3d
         // + 20 icosphere children per TrackedHand while Dots is active.
-        // Task D6b-2 adds the composite that blends the bone image into the
-        // Dots scene.
         app.add_plugins(hand_mesh::DotsHandMeshPlugin);
+        // Additive bone-glow composite (D6b Task 2): blends the off-screen bone
+        // image into the Dots scene before bloom + tonemapping. No-ops cleanly
+        // when `DotsHandMeshTarget` is absent (outside Dots or before the image
+        // first uploads). Carry-forward: add a `WC_DEBUG_DISABLE_BONE_COMPOSITE`
+        // gate here (mirroring Line's `should_register_bone_composite`) if Dots
+        // needs per-stage render isolation in debug builds.
+        app.add_plugins(bone_composite::DotsBoneCompositePlugin);
     }
 }
 
