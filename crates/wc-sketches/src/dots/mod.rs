@@ -42,7 +42,9 @@
 //! the [`crate::SketchesPlugin`] umbrella, not here.
 
 pub mod audio_coupling;
+pub mod bone_wireframe;
 pub mod hand_attractors;
+pub mod hand_mesh;
 pub mod hash;
 pub mod post_process;
 pub mod screensaver;
@@ -141,6 +143,11 @@ impl Plugin for DotsPlugin {
         app.add_plugins(hand_attractors::DotsLeapAttractorsPlugin);
         // Screensaver attract driver (D6a).
         app.add_plugins(screensaver::DotsScreensaverPlugin);
+        // Wireframe bone visualization (D6b Task 1): off-screen bone Camera3d
+        // + 20 icosphere children per TrackedHand while Dots is active.
+        // Task D6b-2 adds the composite that blends the bone image into the
+        // Dots scene.
+        app.add_plugins(hand_mesh::DotsHandMeshPlugin);
     }
 }
 
