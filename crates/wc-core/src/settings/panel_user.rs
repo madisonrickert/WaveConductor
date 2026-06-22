@@ -61,9 +61,13 @@ type KeySnapshot = SmallVec<[&'static str; 8]>;
 /// maps to the active tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SettingsTab {
-    /// Active sketch (Line): particles, visual, spawn, audio.
+    /// Active sketch: sketch-specific knobs (particles, visual, audio, etc.).
+    ///
+    /// The header label and the settings struct rendered here both depend on
+    /// which sketch is running; see [`active_sketch_tab`] and
+    /// [`draw_dock_header`].
     #[default]
-    Line,
+    Sketch,
     /// Hand-tracking provider, Leap, and feel.
     HandTracking,
     /// Interface (overlay) and attract-mode/screensaver display.
@@ -71,9 +75,12 @@ enum SettingsTab {
 }
 
 impl SettingsTab {
-    /// All tabs in left-to-right display order, with their header labels.
+    /// All tabs in left-to-right display order. The label for
+    /// [`SettingsTab::Sketch`] is a static placeholder; the live label
+    /// comes from [`active_sketch_tab`] and is substituted at render time
+    /// in [`draw_dock_header`].
     const ORDER: [(SettingsTab, &'static str); 3] = [
-        (SettingsTab::Line, "LINE"),
+        (SettingsTab::Sketch, "LINE"),
         (SettingsTab::HandTracking, "HAND TRACKING"),
         (SettingsTab::Display, "DISPLAY"),
     ];
@@ -108,10 +115,25 @@ fn field_visible(def: &SettingDef, advanced: bool) -> bool {
 /// rather than silently hidden.
 fn tab_for_storage_key(key: &str) -> SettingsTab {
     match key {
-        "line" => SettingsTab::Line,
+        // Both sketch settings types route to the generic Sketch tab; only
+        // the currently-running sketch's struct renders (see the active-sketch
+        // gate in `draw_user_panel`).
+        "line" | "dots" => SettingsTab::Sketch,
         "hand_tracking" => SettingsTab::HandTracking,
         // "screensaver", overlay/auto_fade, and anything new.
         _ => SettingsTab::Display,
+    }
+}
+
+/// Storage key + header label of the settings struct shown in the active-sketch
+/// tab, by current `AppState`. Sketches whose settings route to `SettingsTab::Sketch`
+/// are gated on this so only the running sketch's knobs render (both `LineSettings`
+/// and `DotsSettings` are always registered).
+fn active_sketch_tab(state: AppState) -> (&'static str, &'static str) {
+    match state {
+        AppState::Dots => ("dots", "FABRIC"),
+        // Line is the default/home-adjacent sketch label.
+        _ => ("line", "LINE"),
     }
 }
 
@@ -202,6 +224,13 @@ fn draw_user_panel(world: &mut World) {
     // registry resource is absent (tests, `Off` with an empty registry).
     let provider_status = provider_status_snapshot(world);
 
+    // Read the active AppState to determine which sketch's settings to show
+    // in the Sketch tab and what label to display. Done before the egui
+    // context borrow so the resource stays accessible to the reflection
+    // pass inside the closure.
+    let app_state = *world.resource::<State<AppState>>().get();
+    let (active_key, active_label) = active_sketch_tab(app_state);
+
     // Set true inside the closure when an import/delete changed the store, so the
     // in-memory library resource is reloaded after the closure releases `world`.
     #[cfg(feature = "templates")]
@@ -272,8 +301,10 @@ fn draw_user_panel(world: &mut World) {
                     v.slider_trailing_fill = true;
 
                     // Header: tab bar (the title) on the left, Advanced toggle on
-                    // the right. Fixed, outside the scroll body.
-                    draw_dock_header(ui, &mut selected_tab, &mut advanced, &style);
+                    // the right. Fixed, outside the scroll body. The active-sketch
+                    // label ("LINE" or "FABRIC") is passed so the Sketch tab reads
+                    // the live name rather than a static placeholder.
+                    draw_dock_header(ui, &mut selected_tab, &mut advanced, active_label, &style);
                     ui.add_space(4.0);
                     hairline(ui, &style);
                     ui.add_space(8.0);
@@ -285,21 +316,30 @@ fn draw_user_panel(world: &mut World) {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for key in &keys {
-                                if tab_for_storage_key(key) == selected_tab {
-                                    render_section_by_key(
-                                        world,
-                                        ui,
-                                        key,
-                                        provider_status,
-                                        #[cfg(feature = "templates")]
-                                        &template_rows,
-                                        #[cfg(feature = "templates")]
-                                        &mut template_dirty,
-                                        advanced,
-                                        &style,
-                                    );
-                                    render_custom_sections(world, ui, key, &style);
+                                let tab = tab_for_storage_key(key);
+                                if tab != selected_tab {
+                                    continue;
                                 }
+                                // On the Sketch tab only the running sketch's
+                                // settings render; both `LineSettings` and
+                                // `DotsSettings` are always registered, so
+                                // without this gate both would appear.
+                                if tab == SettingsTab::Sketch && *key != active_key {
+                                    continue;
+                                }
+                                render_section_by_key(
+                                    world,
+                                    ui,
+                                    key,
+                                    provider_status,
+                                    #[cfg(feature = "templates")]
+                                    &template_rows,
+                                    #[cfg(feature = "templates")]
+                                    &mut template_dirty,
+                                    advanced,
+                                    &style,
+                                );
+                                render_custom_sections(world, ui, key, &style);
                             }
                         });
                 },
@@ -334,10 +374,16 @@ fn draw_user_panel(world: &mut World) {
 /// tab bar's baseline. The Advanced toggle reuses the same lit/underlined
 /// treatment — it reads as a fourth, modal tab that reveals a layer rather than
 /// switching pages.
+///
+/// `active_sketch_label` is the live label for [`SettingsTab::Sketch`]
+/// (e.g. `"LINE"` or `"FABRIC"`), derived from the current [`AppState`] by
+/// the caller. It overrides the static placeholder stored in
+/// [`SettingsTab::ORDER`] for that entry.
 fn draw_dock_header(
     ui: &mut egui::Ui,
     selected: &mut SettingsTab,
     advanced: &mut bool,
+    active_sketch_label: &str,
     style: &OverlayStyle,
 ) {
     ui.scope(|ui| {
@@ -351,13 +397,21 @@ fn draw_dock_header(
 
         ui.horizontal(|ui| {
             for (tab, label) in SettingsTab::ORDER {
+                // The Sketch tab's label comes from the live AppState so it
+                // reads "LINE" in Line and "FABRIC" in Dots; the placeholder
+                // in ORDER is never shown directly.
+                let display_label = if tab == SettingsTab::Sketch {
+                    active_sketch_label
+                } else {
+                    label
+                };
                 let is_sel = *selected == tab;
                 let color = if is_sel {
                     style.text_primary
                 } else {
                     style.text_secondary
                 };
-                let text = egui::RichText::new(label).size(12.5).color(color);
+                let text = egui::RichText::new(display_label).size(12.5).color(color);
                 let resp = ui.selectable_label(is_sel, text);
                 if resp.clicked() {
                     *selected = tab;
@@ -1614,11 +1668,32 @@ fn settings_type_id_for_key(
 mod tests {
     use super::*;
 
+    /// Both sketch storage keys ("line" and "dots") route to `SettingsTab::Sketch`;
+    /// hand-tracking routes to `HandTracking`; everything else falls to `Display`.
+    #[test]
+    fn dots_and_line_route_to_sketch_tab() {
+        assert_eq!(tab_for_storage_key("line"), SettingsTab::Sketch);
+        assert_eq!(tab_for_storage_key("dots"), SettingsTab::Sketch);
+        assert_eq!(
+            tab_for_storage_key("hand_tracking"),
+            SettingsTab::HandTracking
+        );
+        assert_eq!(tab_for_storage_key("overlay_ui"), SettingsTab::Display);
+    }
+
+    /// The active-sketch tab label and storage key follow `AppState`: Dots shows
+    /// "FABRIC", and all other states (including Line and Home) show "LINE".
+    #[test]
+    fn active_sketch_tab_label_follows_state() {
+        assert_eq!(active_sketch_tab(AppState::Dots), ("dots", "FABRIC"));
+        assert_eq!(active_sketch_tab(AppState::Line), ("line", "LINE"));
+    }
+
     /// Every settings struct lands in a tab, and the map is total: unknown
     /// keys (a future struct, the overlay) fall to Display rather than vanish.
     #[test]
     fn tab_routing_is_total() {
-        assert_eq!(tab_for_storage_key("line"), SettingsTab::Line);
+        assert_eq!(tab_for_storage_key("line"), SettingsTab::Sketch);
         assert_eq!(
             tab_for_storage_key("hand_tracking"),
             SettingsTab::HandTracking

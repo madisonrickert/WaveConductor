@@ -23,7 +23,9 @@
 //!   allocation. Restart on change (the compute pipeline rebuilds its
 //!   storage buffer at spawn time).
 //! - **`gamma`** — per-channel gamma curve applied as a final visual
-//!   correction step. v4 default = 1.0 (identity). Restart on change.
+//!   correction step. v4 default = 1.0 (identity). Read live every frame in
+//!   `post_params.rs`; no restart required. `User`-category so it appears
+//!   without ADVANCED.
 //! - **`attract_particle_fraction`** — fraction of particles kept alive
 //!   during attract mode (screensaver). The rest fade out and stay dead until
 //!   wake. Survivors are chosen by a deterministic per-index hash so the
@@ -52,6 +54,7 @@ pub struct DotsSettings {
         max = 100.0_f32,
         step = 1.0_f32,
         label = "Dot spacing (px)",
+        section = "Particles",
         category = Dev,
         requires_restart
     )]
@@ -59,15 +62,16 @@ pub struct DotsSettings {
     pub dot_spacing: f32,
 
     /// Per-channel gamma curve applied as a final visual correction.
-    /// v4 default = 1.0 (identity). Restart on change.
+    /// v4 default = 1.0 (identity). Read live every frame in `post_params.rs`,
+    /// so no restart is required.
     #[setting(
         default = 1.0_f32,
         min = 0.1_f32,
         max = 4.0_f32,
         step = 0.1_f32,
         label = "Gamma",
-        category = Dev,
-        requires_restart
+        section = "Visual",
+        category = User
     )]
     #[serde(default = "default_gamma")]
     pub gamma: f32,
@@ -83,6 +87,7 @@ pub struct DotsSettings {
         max = 1.0_f32,
         step = 0.05_f32,
         label = "Attract particle fraction",
+        section = "Screensaver",
         category = Dev
     )]
     #[serde(default = "default_attract_particle_fraction")]
@@ -98,6 +103,7 @@ pub struct DotsSettings {
         max = 20.0_f32,
         step = 0.5_f32,
         label = "Attract turbulence",
+        section = "Screensaver",
         category = Dev
     )]
     #[serde(default = "default_attract_turbulence")]
