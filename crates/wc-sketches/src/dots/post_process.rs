@@ -47,7 +47,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::ViewTarget;
-use bevy::render::RenderApp;
+use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::shader::Shader;
 use bytemuck::{Pod, Zeroable};
 
@@ -109,6 +109,15 @@ impl Plugin for DotsPostProcessPlugin {
             Core2d,
             dots_post_process.in_set(Core2dSystems::EarlyPostProcess),
         );
+
+        // Explicitly remove the render-world copy when the main-world resource
+        // is gone. `ExtractResourcePlugin` propagates inserts and updates but
+        // NOT removals (verified against bevy_render 0.19 extract_resource.rs —
+        // the None branch is a complete no-op). Without this, `DotsPostParams`
+        // lingers in the render world after `OnExit(AppState::Dots)`, causing
+        // `dots_post_process` to keep running the explode pass on other sketches
+        // with stale uniform values.
+        render_app.add_systems(ExtractSchedule, remove_dots_post_params_if_absent);
     }
 
     fn finish(&self, app: &mut App) {
@@ -209,6 +218,30 @@ impl FromWorld for DotsPostProcessPipeline {
             pipeline_id,
             post_params_buffer,
         }
+    }
+}
+
+/// Removes the render-world [`DotsPostParams`] when the main world no longer
+/// has it — i.e. after `OnExit(AppState::Dots)` fires.
+///
+/// [`ExtractResourcePlugin`] propagates inserts and updates each
+/// [`ExtractSchedule`] tick but does **not** issue `remove_resource` when the
+/// main-world source is absent (verified against `bevy_render` 0.19
+/// `extract_resource.rs`: the `None` arm is a no-op). Without this explicit
+/// removal the stale render-world copy keeps [`dots_post_process`] running
+/// Dots' explode pass on other sketches with stale uniform values.
+///
+/// The two [`ExtractSchedule`] systems — this one and the
+/// [`ExtractResourcePlugin`]'s own insert/update system — guard on mutually
+/// exclusive conditions (`main_resource.is_none()` vs `is_some()`), so there
+/// is no ordering conflict between them.
+fn remove_dots_post_params_if_absent(
+    mut commands: Commands<'_, '_>,
+    main_resource: Extract<'_, '_, Option<Res<'_, DotsPostParams>>>,
+    render_resource: Option<Res<'_, DotsPostParams>>,
+) {
+    if main_resource.is_none() && render_resource.is_some() {
+        commands.remove_resource::<DotsPostParams>();
     }
 }
 
