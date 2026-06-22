@@ -59,3 +59,57 @@ dt = 0.016666667
 
 [scenarios.line-screensaver.debug]
 FORCE_SCREENSAVER = "1"
+
+# ── Dots (Fabric) — active mode ──────────────────────────────────────────────
+# Captures the fabric particle grid in active mode (mouse/hand available via the
+# synthetic provider). provider = "synthetic" emits a stationary open hand so
+# bone-wireframe visuals are deterministic without hardware.
+#
+# BASELINES ARE OPERATOR-SEEDED: no baseline PNGs are committed by D7 Task 1.
+# After visual/hardware verification on the deployment machine, seed them with:
+#   cargo xtask capture dots-synthetic --update-baselines
+# then commit the resulting baselines/<name>/ PNGs. See tests/visual/CLAUDE.md
+# for the full baseline workflow and the "deployment-class machine" requirement.
+
+[scenarios.dots-synthetic]
+sketch = "dots"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+
+# ── Dots (Fabric) screensaver / attract mode ─────────────────────────────────
+# Forces the app into SketchActivity::Screensaver at startup (FORCE_SCREENSAVER)
+# so the attract visual is captured deterministically. provider = "mock" (silent,
+# no synthetic hand): Dots' screensaver has no wandering-pulse choreography — the
+# sole motion is a curl-noise turbulence that slowly morphs the idle grid, plus
+# fraction-kill (60% of particles survive) and lifetime-respawn self-heal (each
+# surviving particle returns to its home position on a staggered 10-18 s lifespan,
+# seeded by wang_hash). stationary_constant = 0.01 runs in attract mode, so
+# original_xy eases along the turbulence flow — respawns heal to a slowly drifting
+# home rather than the literal spawn grid (soak-watch item in PARITY.md).
+#
+# Frame indices sample the turbulence build-up + the respawn cycle
+# (dt = 1/60; shortest seeded lifespan ~10 s; fraction-kill fires at entry):
+#    60 (t= 1.0)  early field: fraction-kill applied, turbulence barely started
+#   180 (t= 3.0)  post-settle: turbulence developing, surviving particles drifting
+#   360 (t= 6.0)  turbulence visibly morphing the grid
+#   600 (t=10.0)  first respawn boundary: shortest-lived particles begin returning
+#   900 (t=15.0)  mid-respawn cycle: turbulence established, self-heal in progress
+#  1320 (t=22.0)  steady-state: respawn self-heal + turbulence drift, fabric readable
+#  1800 (t=30.0)  late frame: fully developed morph + stationary-drift visible
+#
+# ONE scenario covers all thermal tiers (tier only changes present rate; the
+# virtual-clock capture harness pins its own dt and ignores winit UpdateMode).
+#
+# BASELINES ARE OPERATOR-SEEDED: see the dots-synthetic header comment above.
+
+[scenarios.dots-screensaver]
+sketch = "dots"
+provider = "mock"
+config = "clean"
+frames = [60, 180, 360, 600, 900, 1320, 1800]
+dt = 0.016666667
+
+[scenarios.dots-screensaver.debug]
+FORCE_SCREENSAVER = "1"
