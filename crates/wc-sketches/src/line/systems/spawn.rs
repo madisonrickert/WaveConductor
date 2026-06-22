@@ -27,7 +27,7 @@ use bytemuck::cast_slice;
 use crate::particles::compute::ParticleSimParams;
 use crate::line::hash::{hash_to_unit, wang_hash};
 use crate::line::heatmap::sample_from_heatmap;
-use crate::line::material::LineMaterial;
+use crate::particles::material::ParticleMaterial;
 use crate::particles::particle::{Particle, SimParams};
 use crate::line::settings::LineSettings;
 use crate::line::sim_cpu::LineCpuMirror;
@@ -129,7 +129,7 @@ pub fn spawn_line(
     window: Single<'_, '_, &Window>,
     asset_server: Res<'_, AssetServer>,
     mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
-    mut materials: ResMut<'_, Assets<LineMaterial>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
     // The active image's per-image adjustments (templates feature only). Absent
     // resource / no active template ⇒ identity defaults (prior behaviour).
@@ -231,25 +231,25 @@ pub fn spawn_line(
     let solid_color = debug_toggles
         .as_ref()
         .and_then(|t| t.solid_particles)
-        .map_or_else(LineMaterial::solid_off, |[r, g, b, a]| {
+        .map_or_else(ParticleMaterial::solid_off, |[r, g, b, a]| {
             Vec4::new(r, g, b, a)
         });
     #[cfg(not(debug_assertions))]
-    let solid_color = LineMaterial::solid_off();
+    let solid_color = ParticleMaterial::solid_off();
 
-    let material_handle = materials.add(LineMaterial {
+    let material_handle = materials.add(ParticleMaterial {
         particles: particles_handle.clone(),
         star_texture,
         solid_color,
         // Velocity tint off at spawn (Active-mode value); the attract driver
         // ramps it with the screensaver fade.
-        attract_color: LineMaterial::attract_color_off(),
+        attract_color: ParticleMaterial::attract_color_off(),
         // Colour influence off at spawn; the colour-influence driver writes the
         // active template's value each frame.
-        template_color: LineMaterial::template_color_off(),
+        template_color: ParticleMaterial::template_color_off(),
         // Palette off at spawn (mode index 0); the palette driver writes the
         // active LineSettings palette values each frame (change-gated).
-        palette_params: LineMaterial::palette_off(),
+        palette_params: ParticleMaterial::palette_off(),
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

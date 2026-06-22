@@ -25,8 +25,8 @@
 //!    pipeline (`assets/shaders/particles/simulate.wgsl`) which updates the
 //!    storage buffer in place.
 //! 4. Bevy's 2D render path consumes the same storage buffer through
-//!    [`material::LineMaterial`] and draws a quad per particle via the
-//!    vertex-index-driven `assets/shaders/line/render.wgsl`.
+//!    [`crate::particles::material::ParticleMaterial`] and draws a quad per particle via the
+//!    vertex-index-driven `assets/shaders/particles/render.wgsl`.
 //! 5. `OnExit(AppState::Line)` runs `despawn_with::<LineRoot>` and
 //!    `remove_sim_params` to free the entity tree and drop the
 //!    `ParticleSimParams` resource so its `Handle<ShaderBuffer>` clone is
@@ -40,7 +40,6 @@ pub mod hand_mesh;
 pub mod hash;
 pub mod heatmap;
 pub mod leap_attractors;
-pub mod material;
 pub mod particle_stats;
 pub mod post_process;
 pub mod screensaver;
@@ -91,8 +90,8 @@ impl Plugin for LinePlugin {
         // Register the picker-tile manifest entry (async screenshot load).
         register_line_manifest(app);
 
-        // Register the Material2d for LineMaterial.
-        app.add_plugins(Material2dPlugin::<material::LineMaterial>::default());
+        // Register the Material2d for ParticleMaterial.
+        app.add_plugins(Material2dPlugin::<crate::particles::material::ParticleMaterial>::default());
 
         // Wire the compute pipeline.
         app.add_plugins(crate::particles::compute::ParticleComputePlugin);
@@ -197,7 +196,7 @@ impl Plugin for LinePlugin {
             systems::color_influence::drive_color_influence.run_if(sketch_active(AppState::Line)),
         );
         // Live palette-uniform driver: maps the LineSettings palette knobs into
-        // the LineMaterial::palette_params uniform. Registered under both the
+        // the ParticleMaterial::palette_params uniform. Registered under both the
         // active and screensaver gates (mirrors drive_attract_color) so the
         // palette applies live AND in attract while running zero systems when
         // idle. Change-gated internally, so it is a single float compare per

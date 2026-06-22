@@ -1,9 +1,9 @@
 //! Live palette-uniform driver.
 //!
-//! Maps the `LineSettings` palette knobs onto [`LineMaterial`]`::palette_params`
+//! Maps the `LineSettings` palette knobs onto [`ParticleMaterial`]`::palette_params`
 //! (`x` = mode index, `y` = strength, `z` = spread, `w` = reserved). Compares
 //! against the material's current value rather than a `Local` cache, so a
-//! freshly respawned material (seeded [`LineMaterial::palette_off`]) picks up the
+//! freshly respawned material (seeded [`ParticleMaterial::palette_off`]) picks up the
 //! correct target on the next frame without any user interaction. Dragging an
 //! unrelated slider or sitting idle costs one float compare per frame with no
 //! asset re-upload.
@@ -11,41 +11,41 @@
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 
-use crate::line::material::LineMaterial;
+use crate::particles::material::ParticleMaterial;
 use crate::line::settings::{LineSettings, PaletteMode};
 use crate::line::LineRoot;
 
 /// Pack the palette settings into the `palette_params` uniform value
 /// (`x` = mode index, `y` = strength, `z` = spread, `w` = reserved). `Off`
-/// returns [`LineMaterial::palette_off`] (`Vec4::ZERO`) regardless of the other
+/// returns [`ParticleMaterial::palette_off`] (`Vec4::ZERO`) regardless of the other
 /// knobs, so the shader's uniform-mode branch is skipped and color is the
 /// pre-palette path bit-exactly. Strength is clamped to `0..=1`; spread is clamped
 /// non-negative so a stray value can't invert the mapping.
 #[must_use]
 pub fn palette_params(mode: PaletteMode, strength: f32, scale: f32) -> Vec4 {
     if mode == PaletteMode::Off {
-        return LineMaterial::palette_off();
+        return ParticleMaterial::palette_off();
     }
     Vec4::new(mode.index(), strength.clamp(0.0, 1.0), scale.max(0.0), 0.0)
 }
 
-/// Drive [`LineMaterial::palette_params`] from the `LineSettings` palette knobs.
+/// Drive [`ParticleMaterial::palette_params`] from the `LineSettings` palette knobs.
 ///
 /// Runs while Line is active and while its screensaver shows (registered under
 /// both gates in [`crate::line::LinePlugin`], like the attract-color driver) so
 /// the palette applies live and in attract while keeping zero systems when idle.
 /// Compares against the material's current `palette_params` rather than a `Local`
-/// cache: mutating a `LineMaterial` re-prepares its bind group, so the write
+/// cache: mutating a `ParticleMaterial` re-prepares its bind group, so the write
 /// happens only when the packed value actually differs from what is already in the
 /// asset (a settings edit or a fresh respawn). A freshly respawned material is
-/// seeded [`LineMaterial::palette_off`] (`Vec4::ZERO`); when the user has an
+/// seeded [`ParticleMaterial::palette_off`] (`Vec4::ZERO`); when the user has an
 /// enabled palette that seed differs from the live target, so the system rewrites
 /// on the very next frame — no user interaction required. A frame where the asset
 /// isn't loaded yet (`get` → `None`) is silently skipped and retried next frame.
 pub fn drive_palette(
     settings: Res<'_, LineSettings>,
-    roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
-    mut materials: ResMut<'_, Assets<LineMaterial>>,
+    roots: Query<'_, '_, &MeshMaterial2d<ParticleMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
 ) {
     let target = palette_params(
         settings.palette_mode,
@@ -130,15 +130,15 @@ mod tests {
         );
         world.insert_resource(settings);
 
-        // Build a LineMaterial seeded at palette_off() — exactly what spawn_line does.
-        let mut assets = Assets::<LineMaterial>::default();
-        let material = LineMaterial {
+        // Build a ParticleMaterial seeded at palette_off() — exactly what spawn_line does.
+        let mut assets = Assets::<ParticleMaterial>::default();
+        let material = ParticleMaterial {
             particles: Handle::default(),
             star_texture: Handle::default(),
-            solid_color: LineMaterial::solid_off(),
-            attract_color: LineMaterial::attract_color_off(),
-            template_color: LineMaterial::template_color_off(),
-            palette_params: LineMaterial::palette_off(),
+            solid_color: ParticleMaterial::solid_off(),
+            attract_color: ParticleMaterial::attract_color_off(),
+            template_color: ParticleMaterial::template_color_off(),
+            palette_params: ParticleMaterial::palette_off(),
         };
         let handle = assets.add(material);
         world.insert_resource(assets);
@@ -152,7 +152,7 @@ mod tests {
             .expect("drive_palette system run");
         assert_eq!(
             world
-                .resource::<Assets<LineMaterial>>()
+                .resource::<Assets<ParticleMaterial>>()
                 .get(&handle)
                 .unwrap()
                 .palette_params,
@@ -163,10 +163,10 @@ mod tests {
         // Simulate a material respawn: reset palette_params back to palette_off(),
         // as if OnEnter(AppState::Line) re-seeded the material. Settings unchanged.
         world
-            .resource_mut::<Assets<LineMaterial>>()
+            .resource_mut::<Assets<ParticleMaterial>>()
             .get_mut(&handle)
             .unwrap()
-            .palette_params = LineMaterial::palette_off();
+            .palette_params = ParticleMaterial::palette_off();
 
         // Second run: must re-sync even though settings did not change.
         // This is the assertion that FAILS under the old Local<Option<Vec4>> code.
@@ -175,7 +175,7 @@ mod tests {
             .expect("drive_palette system run (respawn)");
         assert_eq!(
             world
-                .resource::<Assets<LineMaterial>>()
+                .resource::<Assets<ParticleMaterial>>()
                 .get(&handle)
                 .unwrap()
                 .palette_params,

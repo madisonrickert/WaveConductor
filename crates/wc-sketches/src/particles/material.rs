@@ -2,7 +2,7 @@
 //! render shader.
 //!
 //! The same `ShaderBuffer` handle owned by the sketch root entity is
-//! fed to both `LineMaterial` (for rendering, read-only) and the compute
+//! fed to both `ParticleMaterial` (for rendering, read-only) and the compute
 //! pipeline node (for simulation, read-write). Bevy reference-counts the
 //! buffer; the data lives in one place on the GPU.
 //!
@@ -33,7 +33,7 @@ use bevy::sprite_render::{AlphaMode2d, Material2d};
 /// `@binding(5)` the per-image colour-influence params, and `@binding(6)` is
 /// the psychedelic palette params.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub struct LineMaterial {
+pub struct ParticleMaterial {
     /// Particle storage buffer, read-only from the vertex shader.
     #[storage(0, read_only)]
     pub particles: Handle<ShaderBuffer>,
@@ -79,7 +79,7 @@ pub struct LineMaterial {
     pub palette_params: Vec4,
 }
 
-impl LineMaterial {
+impl ParticleMaterial {
     /// The `solid_color` sentinel meaning "off" (use the star texture). Shared
     /// by the spawn site and the tests so they agree on the off value.
     pub fn solid_off() -> Vec4 {
@@ -106,13 +106,13 @@ impl LineMaterial {
     }
 }
 
-impl Material2d for LineMaterial {
+impl Material2d for ParticleMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/line/render.wgsl".into()
+        "shaders/particles/render.wgsl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/line/render.wgsl".into()
+        "shaders/particles/render.wgsl".into()
     }
 
     /// Standard alpha blending (`AlphaMode2d::Blend`) — Bevy's default for the
@@ -131,24 +131,24 @@ mod tests {
     fn default_solid_color_is_off() {
         // alpha == 0 means "off" (use the star texture). Constructed via the
         // helper so spawn.rs and tests agree on the off-sentinel.
-        assert_eq!(LineMaterial::solid_off(), Vec4::ZERO);
+        assert_eq!(ParticleMaterial::solid_off(), Vec4::ZERO);
     }
 
     #[test]
     fn default_attract_color_is_off() {
         // strength (x) == 0 means "no velocity tint" — the Active-mode value.
-        assert_eq!(LineMaterial::attract_color_off(), Vec4::ZERO);
+        assert_eq!(ParticleMaterial::attract_color_off(), Vec4::ZERO);
     }
 
     #[test]
     fn default_template_color_is_off() {
         // strength (x) == 0 means "no image-colour tint" — the no-template value.
-        assert_eq!(LineMaterial::template_color_off(), Vec4::ZERO);
+        assert_eq!(ParticleMaterial::template_color_off(), Vec4::ZERO);
     }
 
     #[test]
     fn default_palette_params_is_off() {
         // mode channel (x) == 0 means "palette off" — the shader branch is skipped.
-        assert_eq!(LineMaterial::palette_off(), Vec4::ZERO);
+        assert_eq!(ParticleMaterial::palette_off(), Vec4::ZERO);
     }
 }

@@ -1,7 +1,7 @@
 //! Live colour-influence uniform driver.
 //!
 //! Writes the active template's `color_influence` (0..1) into the
-//! [`LineMaterial`]`::template_color` uniform, so dragging the colour-influence
+//! [`ParticleMaterial`]`::template_color` uniform, so dragging the colour-influence
 //! slider tints particles immediately with **no re-seed** (the per-particle
 //! image colour is already baked into the buffer; only the blend strength
 //! changes). It compares against the material's current value, so the asset is
@@ -13,7 +13,7 @@
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 
-use crate::line::material::LineMaterial;
+use crate::particles::material::ParticleMaterial;
 use crate::line::settings::LineSettings;
 use crate::line::template_adjustments_store::LineTemplateAdjustments;
 use crate::line::LineRoot;
@@ -26,14 +26,14 @@ pub fn influence_for(spawn_template: &str, store: &LineTemplateAdjustments) -> f
     store.color_influence_for(spawn_template)
 }
 
-/// Sync the active colour influence into the `LineMaterial` uniform. Only writes
+/// Sync the active colour influence into the `ParticleMaterial` uniform. Only writes
 /// (and thus re-uploads) when it differs from the material's current value, so
 /// there is no per-frame churn and a respawned material picks up the right value.
 pub fn drive_color_influence(
     settings: Res<'_, LineSettings>,
     store: Res<'_, LineTemplateAdjustments>,
-    roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
-    mut materials: ResMut<'_, Assets<LineMaterial>>,
+    roots: Query<'_, '_, &MeshMaterial2d<ParticleMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
 ) {
     let target = influence_for(&settings.spawn_template, &store);
     for handle in &roots {

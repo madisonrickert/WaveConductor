@@ -98,7 +98,7 @@ impl Plugin for ParticleComputePlugin {
 pub struct ParticleSimParams {
     /// Per-frame uniforms (dt, drag, attractor position, etc.).
     pub params: SimParams,
-    /// Handle to the particle storage buffer (shared with `LineMaterial`).
+    /// Handle to the particle storage buffer (shared with `ParticleMaterial`).
     pub particles_handle: Handle<ShaderBuffer>,
     /// Number of particles — determines dispatch size.
     pub particle_count: u32,

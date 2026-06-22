@@ -34,7 +34,7 @@ use bytemuck::cast_slice;
 
 use crate::particles::compute::ParticleSimParams;
 use crate::line::heatmap::sample_from_heatmap;
-use crate::line::material::LineMaterial;
+use crate::particles::material::ParticleMaterial;
 use crate::particles::particle::Particle;
 use crate::line::settings::LineSettings;
 use crate::line::systems::spawn::make_particle;
@@ -81,8 +81,8 @@ pub fn reseed_on_adjustments_change(
     // The render buffer is *recreated* on re-upload (Bevy's ShaderBuffer
     // prepare does `create_buffer_with_data`), which invalidates the material's
     // cached bind group; touch the material so it rebinds to the new buffer.
-    roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
-    mut materials: ResMut<'_, Assets<LineMaterial>>,
+    roots: Query<'_, '_, &MeshMaterial2d<ParticleMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
     time: Res<'_, Time>,
     mut state: Local<'_, ReseedState>,
 ) {

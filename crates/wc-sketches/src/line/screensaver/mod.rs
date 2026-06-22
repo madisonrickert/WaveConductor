@@ -60,7 +60,7 @@ use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
 
 use crate::particles::compute::ParticleSimParams;
-use crate::line::material::LineMaterial;
+use crate::particles::material::ParticleMaterial;
 use crate::particles::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
@@ -192,7 +192,7 @@ fn attract_color_params(fade_alpha: f32, strength: f32, brightness: f32) -> Vec4
     Vec4::new(fade * strength.max(0.0), lift, 0.0, 0.0)
 }
 
-/// Drive [`LineMaterial::attract_color`] from the [`ScreensaverFade`]
+/// Drive [`ParticleMaterial::attract_color`] from the [`ScreensaverFade`]
 /// envelope × [`LineSettings::attract_color_strength`].
 ///
 /// Runs during both Screensaver (fade-in) and Active (fade-out after wake) —
@@ -205,8 +205,8 @@ fn attract_color_params(fade_alpha: f32, strength: f32, brightness: f32) -> Vec4
 fn drive_attract_color(
     fade: Res<'_, ScreensaverFade>,
     settings: Res<'_, LineSettings>,
-    roots: Query<'_, '_, &MeshMaterial2d<LineMaterial>, With<LineRoot>>,
-    mut materials: ResMut<'_, Assets<LineMaterial>>,
+    roots: Query<'_, '_, &MeshMaterial2d<ParticleMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
     mut last: Local<'_, Vec4>,
 ) {
     let target = attract_color_params(
