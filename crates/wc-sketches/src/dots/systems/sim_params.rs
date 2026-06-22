@@ -7,6 +7,8 @@
 //! spring (`0.01`), and effectively infinite constrain bounds (`constrainToBox =
 //! false` in v4). When the mouse attractor is active (`power > 0`), it is
 //! written to `attractors[0]` with `power * DOTS_GRAVITY_CONSTANT` baked in.
+//! Tracked-hand [`crate::dots::hand_attractors::DotsHandAttractor`] entries are
+//! appended after the mouse attractor (same threshold/bake/cap as the Line path).
 
 #![allow(
     clippy::as_conversions,
@@ -16,7 +18,9 @@
 )]
 
 use bevy::prelude::*;
+use wc_core::input::entity::TrackedHand;
 
+use crate::dots::hand_attractors::DotsHandAttractor;
 use crate::dots::systems::mouse::DotsMouseAttractorState;
 use crate::particles::compute::ParticleSimParams;
 use crate::particles::particle::{Attractor, SimParams, MAX_ATTRACTORS};
@@ -67,9 +71,10 @@ pub const DOTS_GRAVITY_CONSTANT: f32 = 100.0;
 ///   `constrainToBox = false`).
 /// - `attract_gate = 0`, attract/turbulence fields = off.
 /// - Mouse attractor: when [`DotsMouseAttractorState`]`.power > 0`, written
-///   to `attractors[0]` with `power * DOTS_GRAVITY_CONSTANT` baked in and
-///   `attractor_count = 1`; otherwise the array stays zeroed and
-///   `attractor_count = 0`.
+///   to `attractors[0]` with `power * DOTS_GRAVITY_CONSTANT` baked in.
+/// - Hand attractors: [`DotsHandAttractor`] entries with `power.abs() > 1e-2`
+///   are appended after the mouse, capped at [`MAX_ATTRACTORS`], with
+///   `power * DOTS_GRAVITY_CONSTANT` baked in — mirrors Line's hand-append loop.
 ///
 /// Per-frame no-allocation guarantee: all arithmetic is on stack scalars; the
 /// attractor array is a zero-initialized stack array written in place.
@@ -77,6 +82,7 @@ pub fn update_dots_sim_params(
     time: Res<'_, Time>,
     window: Single<'_, '_, &Window>,
     mouse: Res<'_, DotsMouseAttractorState>,
+    dots_hands: Query<'_, '_, &DotsHandAttractor, With<TrackedHand>>,
     mut sim: ResMut<'_, ParticleSimParams>,
 ) {
     let w = window.width();
@@ -99,7 +105,7 @@ pub fn update_dots_sim_params(
     // mirrors Line's `update_sim_params` convention exactly.
     // v4: `gravity_constant = 100` (declared above as `DOTS_GRAVITY_CONSTANT`).
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
-    let attractor_count: u32;
+    let mut attractor_count = 0_u32;
     if mouse.power > 0.0 {
         attractors[0] = Attractor {
             position: mouse.position,
@@ -112,8 +118,45 @@ pub fn update_dots_sim_params(
             radius: 0.0,
         };
         attractor_count = 1;
-    } else {
-        attractor_count = 0;
+    }
+
+    // --- Hand attractors: append after the mouse ---------------------------
+    // Skip very-low-power entries to avoid wasting uniform slots on
+    // fully-decayed hands. `slot` tracks the usize index in parallel with
+    // `attractor_count` (u32) to avoid a `usize::try_from` / `expect` in the
+    // hot path. Both advance in lockstep and are capped at MAX_ATTRACTORS (=8),
+    // which fits in both types. Mirrors Line's `update_sim_params` loop exactly
+    // (same threshold, same gravity bake, same cap).
+    #[allow(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "slot/attractor_count are bounded by MAX_ATTRACTORS (=8); cast is provably lossless"
+    )]
+    let mut slot = attractor_count as usize;
+    for hand_attractor in &dots_hands {
+        if hand_attractor.power.abs() <= 1e-2 {
+            continue;
+        }
+        if slot >= MAX_ATTRACTORS {
+            break;
+        }
+        attractors[slot] = Attractor {
+            position: hand_attractor.position.to_array(),
+            // Bake DOTS_GRAVITY_CONSTANT into power, matching the mouse
+            // attractor treatment above.
+            power: hand_attractor.power * DOTS_GRAVITY_CONSTANT,
+            // Unbounded pull (v4 parity).
+            radius: 0.0,
+        };
+        #[allow(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            reason = "slot is bounded by MAX_ATTRACTORS (=8) before this point; cast is provably lossless"
+        )]
+        {
+            attractor_count += 1;
+            slot += 1;
+        }
     }
 
     sim.params = SimParams {
@@ -296,5 +339,128 @@ mod tests {
                 "size_scale {scale} out of (0, 1] at width {w}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hand attractor integration tests (D5 Task 1)
+    // -----------------------------------------------------------------------
+
+    use crate::dots::hand_attractors::DotsHandAttractor;
+    use wc_core::input::entity::TrackedHand;
+
+    /// Helper: insert the resources + spawn a `TrackedHand` with a
+    /// `DotsHandAttractor` at the given power and position.
+    fn setup_world_with_hand(
+        mouse_power: f32,
+        hand_power: f32,
+        hand_pos: Vec2,
+    ) -> World {
+        let mut world = setup_world(mouse_power, [0.0, 0.0]);
+        world.spawn((
+            TrackedHand,
+            DotsHandAttractor {
+                power: hand_power,
+                position: hand_pos,
+            },
+        ));
+        world
+    }
+
+    /// Inactive mouse + one hand with power=0.5: the hand is appended to slot 0
+    /// with `power * DOTS_GRAVITY_CONSTANT` baked in; `attractor_count = 1`.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn hand_attractor_appended_after_inactive_mouse() {
+        let hand_pos = Vec2::new(100.0, 50.0);
+        let mut world = setup_world_with_hand(0.0, 0.5, hand_pos);
+
+        world
+            .run_system_once(update_dots_sim_params)
+            .expect("update_dots_sim_params run");
+
+        let sim = world.resource::<ParticleSimParams>();
+        let params = &sim.params;
+
+        assert_eq!(
+            params.attractor_count, 1,
+            "one hand attractor must produce attractor_count=1"
+        );
+        assert!(
+            (params.attractors[0].power - 0.5 * DOTS_GRAVITY_CONSTANT).abs() < 1e-5,
+            "hand power baked: expected {}, got {}",
+            0.5 * DOTS_GRAVITY_CONSTANT,
+            params.attractors[0].power
+        );
+        #[allow(
+            clippy::float_cmp,
+            reason = "position is copied verbatim from the hand attractor (integer-valued Vec2) — bit-exact equality is correct"
+        )]
+        {
+            assert_eq!(
+                params.attractors[0].position,
+                hand_pos.to_array(),
+                "hand position copied verbatim to attractor slot"
+            );
+        }
+    }
+
+    /// Active mouse at slot 0 + one hand: mouse goes to slot 0, hand to slot 1;
+    /// `attractor_count = 2`.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn mouse_at_slot_0_hand_at_slot_1() {
+        let mut world = setup_world_with_hand(1.0, 0.5, Vec2::new(200.0, 100.0));
+
+        world
+            .run_system_once(update_dots_sim_params)
+            .expect("update_dots_sim_params run");
+
+        let sim = world.resource::<ParticleSimParams>();
+        let params = &sim.params;
+
+        assert_eq!(
+            params.attractor_count, 2,
+            "mouse + 1 hand must yield attractor_count=2"
+        );
+        // Mouse at slot 0 (baked power: 1.0 * DOTS_GRAVITY_CONSTANT).
+        assert!(
+            (params.attractors[0].power - 1.0 * DOTS_GRAVITY_CONSTANT).abs() < 1e-5,
+            "mouse baked power at slot 0: expected {}, got {}",
+            1.0 * DOTS_GRAVITY_CONSTANT,
+            params.attractors[0].power
+        );
+        // Hand at slot 1 (baked power: 0.5 * DOTS_GRAVITY_CONSTANT).
+        assert!(
+            (params.attractors[1].power - 0.5 * DOTS_GRAVITY_CONSTANT).abs() < 1e-5,
+            "hand baked power at slot 1: expected {}, got {}",
+            0.5 * DOTS_GRAVITY_CONSTANT,
+            params.attractors[1].power
+        );
+    }
+
+    /// Near-zero hand (`power = 0.005`, below the 1e-2 threshold) is skipped.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn near_zero_hand_is_skipped() {
+        let mut world = setup_world_with_hand(0.0, 0.005, Vec2::new(0.0, 0.0));
+
+        world
+            .run_system_once(update_dots_sim_params)
+            .expect("update_dots_sim_params run");
+
+        let sim = world.resource::<ParticleSimParams>();
+        assert_eq!(
+            sim.params.attractor_count, 0,
+            "hand with power=0.005 (below 1e-2 threshold) must be skipped"
+        );
     }
 }

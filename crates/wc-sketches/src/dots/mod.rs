@@ -42,6 +42,7 @@
 //! the [`crate::SketchesPlugin`] umbrella, not here.
 
 pub mod audio_coupling;
+pub mod hand_attractors;
 pub mod post_process;
 pub mod settings;
 pub mod systems;
@@ -134,7 +135,9 @@ impl Plugin for DotsPlugin {
             systems::update_dots_post_params.run_if(sketch_active(AppState::Dots)),
         );
 
-        // Hand attractors (D3) and screensaver (D6) will be added here.
+        // Hand attractors (D5) wired here.
+        app.add_plugins(hand_attractors::DotsLeapAttractorsPlugin);
+        // Screensaver (D6) will be added here.
     }
 }
 
