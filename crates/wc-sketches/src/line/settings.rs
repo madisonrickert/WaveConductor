@@ -3,7 +3,7 @@
 //! Curated knobs that show up in the user panel. v4 exposes two: particle
 //! density and the gravity constant. Plan 7 mirrors that. Drag and attractor
 //! radius existed as v5-only knobs during Plan 6 (the inverse-linear gravity
-//! era); Plan 7 baked drag into [`crate::line::particle::SimParams`] from
+//! era); Plan 7 baked drag into [`crate::particles::particle::SimParams`] from
 //! fixed v4 constants and made the force constant-magnitude (no radius
 //! needed), so both fields are dropped.
 //!

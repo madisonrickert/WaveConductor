@@ -61,7 +61,7 @@ use wc_core::sketch::sketch_active;
 
 use crate::line::compute::LineSimParams;
 use crate::line::material::LineMaterial;
-use crate::line::particle::{Attractor, MAX_ATTRACTORS};
+use crate::particles::particle::{Attractor, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::sim_params::{

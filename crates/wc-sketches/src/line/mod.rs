@@ -42,7 +42,6 @@ pub mod hash;
 pub mod heatmap;
 pub mod leap_attractors;
 pub mod material;
-pub mod particle;
 pub mod particle_stats;
 pub mod post_process;
 pub mod screensaver;

@@ -19,7 +19,7 @@ use wc_core::input::entity::TrackedHand;
 
 use crate::line::compute::LineSimParams;
 use crate::line::leap_attractors::LineHandAttractor;
-use crate::line::particle::{Attractor, SimParams, MAX_ATTRACTORS};
+use crate::particles::particle::{Attractor, SimParams, MAX_ATTRACTORS};
 use crate::line::post_process::LinePostParams;
 use crate::line::settings::LineSettings;
 use crate::line::systems::mouse::MouseAttractorState;
@@ -189,7 +189,7 @@ pub fn bake_sim_params(
         turbulence_amp: turbulence.amp,
         turbulence_scale: turbulence.scale,
         turbulence_time: turbulence.time,
-        _turb_pad: 0.0,
+        stationary_constant: 0.0,
         attractors,
     }
 }

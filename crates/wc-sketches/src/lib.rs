@@ -5,6 +5,7 @@
 //! [`wc_core::sketch`].
 
 pub mod line;
+pub mod particles;
 
 use bevy::prelude::*;
 

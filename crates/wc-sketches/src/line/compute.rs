@@ -41,7 +41,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQue
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use super::particle::SimParams;
+use crate::particles::particle::SimParams;
 
 /// Workgroup size must match `@workgroup_size(64)` in `simulate.wgsl`.
 const WORKGROUP_SIZE: u32 = 64;
@@ -187,7 +187,7 @@ fn init_line_pipeline(
     // uploads new data via `queue.write_buffer` — no per-frame allocation.
     let sim_params_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("line_sim_params_uniform"),
-        size: std::mem::size_of::<super::particle::SimParams>() as u64,
+        size: std::mem::size_of::<crate::particles::particle::SimParams>() as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });

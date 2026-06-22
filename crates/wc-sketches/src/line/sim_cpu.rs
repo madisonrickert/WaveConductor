@@ -21,8 +21,8 @@
 use bevy::prelude::*;
 
 #[cfg(test)]
-use super::particle::Attractor;
-use super::particle::{Particle, SimParams, MAX_ATTRACTORS};
+use crate::particles::particle::Attractor;
+use crate::particles::particle::{Particle, SimParams, MAX_ATTRACTORS};
 
 /// CPU mirror of the particle storage buffer.
 ///
@@ -199,7 +199,7 @@ mod tests {
             turbulence_amp: 0.0,
             turbulence_scale: 0.0,
             turbulence_time: 0.0,
-            _turb_pad: 0.0,
+            stationary_constant: 0.0,
             attractors: [Attractor::default(); MAX_ATTRACTORS],
         }
     }

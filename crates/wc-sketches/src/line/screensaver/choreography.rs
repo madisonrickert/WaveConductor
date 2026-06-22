@@ -37,7 +37,7 @@
 use crate::line::systems::sim_params::{weighted_focal, FOCAL_CENTER_WEIGHT};
 
 /// World-space attractor sample: position + raw power, ready to bake into a
-/// [`crate::line::particle::Attractor`] (after the caller multiplies power by
+/// [`crate::particles::particle::Attractor`] (after the caller multiplies power by
 /// `gravity_constant`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AttractorSample {

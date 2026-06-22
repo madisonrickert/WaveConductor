@@ -35,7 +35,7 @@ use bytemuck::cast_slice;
 use crate::line::compute::LineSimParams;
 use crate::line::heatmap::sample_from_heatmap;
 use crate::line::material::LineMaterial;
-use crate::line::particle::Particle;
+use crate::particles::particle::Particle;
 use crate::line::settings::LineSettings;
 use crate::line::systems::spawn::make_particle;
 use crate::line::template_adjustments::{pack_rgb8, TemplateAdjustments};

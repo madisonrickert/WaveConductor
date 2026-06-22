@@ -137,13 +137,13 @@ pub struct SimParams {
     /// Animation phase for the turbulence flow (seconds of elapsed wall-clock).
     /// Advancing it scrolls the divergence-free flow field so the drift evolves.
     pub turbulence_time: f32,
-    /// Padding so `attractors` (16-byte aligned in WGSL) starts on a 16-byte
-    /// boundary — this turbulence block totals 16 bytes. Never read by the kernel.
-    #[allow(
-        clippy::pub_underscore_fields,
-        reason = "GPU struct layout padding must be pub for bytemuck"
-    )]
-    pub _turb_pad: f32,
+    /// v4 `STATIONARY_CONSTANT` — the home-spring strength. Each particle is
+    /// pulled toward its `original_xy` with a length-scaled force, and when no
+    /// attractor is active its home eases toward it (idle drift). `0.0` is a
+    /// provable no-op (Line passes 0.0); Dots passes `0.01`. Occupies the slot
+    /// formerly held by `_turb_pad`, so the scalar header stays 64 bytes and the
+    /// `attractors` array remains 16-byte aligned — struct size is unchanged.
+    pub stationary_constant: f32,
     /// Attractor list. Entries `[0..attractor_count]` are live; the rest are
     /// zero-power and ignored.
     pub attractors: [Attractor; MAX_ATTRACTORS],
