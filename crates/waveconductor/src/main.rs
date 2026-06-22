@@ -71,7 +71,24 @@ fn main() {
                 // Bevy's LogPlugin would clobber that with its own subscriber
                 // and emit `ERROR Could not set global logger…` at startup.
                 .disable::<bevy::log::LogPlugin>(),
-            bevy_egui::EguiPlugin::default(),
+            bevy_egui::EguiPlugin {
+                // egui's bindless texture path needs wgpu's `TEXTURE_BINDING_ARRAY`,
+                // which Metal (macOS) and browser WebGPU (wasm) don't expose. On those
+                // backends bevy_egui auto-disables bindless and logs a startup warning.
+                // Gate the *request* by target so we neither ask for it nor warn there,
+                // while keeping bevy_egui's default on backends that support it
+                // (Vulkan/DX12 on Linux/Windows). Revisit the macOS arm if bevy gains
+                // Metal bindless support: https://github.com/bevyengine/bevy/issues/18149
+                bindless_mode_array_size: if cfg!(any(
+                    target_os = "macos",
+                    target_arch = "wasm32"
+                )) {
+                    None
+                } else {
+                    bevy_egui::EguiPlugin::default().bindless_mode_array_size
+                },
+                ..Default::default()
+            },
             CorePlugin,
             SketchesPlugin,
         ))
