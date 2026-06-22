@@ -98,8 +98,20 @@ fn drive_dots_attract(
     // Empty attractor array — Dots' screensaver has no wandering pulses.
     // `count = 0` puts the kernel in inertial-drag mode; the turbulence drift
     // is the only force moving particles.
+    //
+    // restoring_linear = 0.0: the fabric-tension spring must NOT fight the
+    // turbulence morph during attract mode. The live writer passes
+    // `settings.fabric_tension` instead; here we always suppress it.
     let attractors = [Attractor::default(); MAX_ATTRACTORS];
-    sim.params = bake_dots_sim_params(time.delta_secs(), geom, attractors, 0, gate, turbulence);
+    sim.params = bake_dots_sim_params(
+        time.delta_secs(),
+        geom,
+        attractors,
+        0,
+        gate,
+        turbulence,
+        0.0,
+    );
 }
 
 #[cfg(test)]
@@ -168,5 +180,17 @@ mod tests {
             params.attractor_count, 0,
             "attractor_count must be 0 (Dots screensaver has no wandering pulses)"
         );
+        // Task 6: the screensaver always bakes restoring_linear = 0.0 so the
+        // fabric-tension spring does not fight the turbulence morph.
+        #[allow(
+            clippy::float_cmp,
+            reason = "restoring_linear is written as literal 0.0 — bit-exact comparison is correct"
+        )]
+        {
+            assert_eq!(
+                params.restoring_linear, 0.0,
+                "screensaver must bake restoring_linear=0.0 (spring must not fight turbulence)"
+            );
+        }
     }
 }

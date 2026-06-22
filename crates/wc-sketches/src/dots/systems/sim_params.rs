@@ -28,6 +28,7 @@ use bevy::prelude::*;
 use wc_core::input::entity::TrackedHand;
 
 use crate::dots::hand_attractors::DotsHandAttractor;
+use crate::dots::settings::DotsSettings;
 use crate::dots::systems::mouse::DotsMouseAttractorState;
 use crate::particles::compute::ParticleSimParams;
 use crate::particles::particle::{Attractor, SimParams, MAX_ATTRACTORS};
@@ -136,18 +137,21 @@ impl DotsTurbulence {
 }
 
 /// Build the full [`SimParams`] for a Dots frame from a baked attractor array,
-/// the frame `dt`, the window geometry, and the attract/turbulence gate inputs.
+/// the frame `dt`, the window geometry, attract/turbulence gate inputs, and
+/// the linear restoring-spring coefficient.
 ///
 /// Both the live writer ([`update_dots_sim_params`]) and the screensaver's
-/// attract driver (D6a Task 2) call this so the two producers cannot drift in
-/// their drag-baking, size-scaling, fade duration, or stationary-spring value.
+/// attract driver call this so the two producers cannot drift in their
+/// drag-baking, size-scaling, fade duration, or stationary-spring value.
 ///
-/// `attractors` carries the already-`DOTS_GRAVITY_CONSTANT`-baked powers;
+/// `attractors` carries the already gravity-constant-baked powers;
 /// `count` is the number of live entries. `dt` is the (uncapped) per-frame
 /// delta — the 50 ms cap is applied here. `gate` switches the attract-only
 /// lifetime/fraction mechanisms (live writer: [`DotsAttractGate::OFF`]);
 /// `turbulence` supplies the attract-only noise-drift force (live writer:
-/// [`DotsTurbulence::OFF`]).
+/// [`DotsTurbulence::OFF`]). `restoring_linear` is the Hookean spring
+/// coefficient; pass `0.0` during screensaver attract so the spring does not
+/// fight the turbulence morph.
 ///
 /// Per-call no-allocation guarantee: all arithmetic is on stack scalars; the
 /// attractor array is passed by value (fixed-size stack copy).
@@ -159,6 +163,7 @@ pub(crate) fn bake_dots_sim_params(
     count: u32,
     gate: DotsAttractGate,
     turbulence: DotsTurbulence,
+    restoring_linear: f32,
 ) -> SimParams {
     // --- Drag baking (v4 Dots parity, against the fixed Dots dt) ----------
     let pulling_drag_baked = V4_DOTS_PULLING_DRAG.powf(V4_FIXED_DT_DOTS);
@@ -196,10 +201,10 @@ pub(crate) fn bake_dots_sim_params(
         // immutable original_xy home. Line passes 0.0 (provable no-op); Dots
         // needs 0.01 so the grid stays anchored and returns home after interaction.
         stationary_constant: 0.01,
-        // Linear (Hookean) fabric-tension coefficient. Task 6 wires the knob;
-        // baked at 0.0 here so the layout lands with no behavior change beyond
-        // the immutable-home fix (drift removal) from Task 5.
-        restoring_linear: 0.0,
+        // Linear (Hookean) fabric-tension coefficient. Supplied by the caller:
+        // the live writer passes `settings.fabric_tension`; the screensaver
+        // always passes 0.0 so the spring does not fight the turbulence morph.
+        restoring_linear,
         _spring_pad: [0.0; 3],
         attractors,
     }
@@ -221,22 +226,23 @@ pub fn update_dots_sim_params(
     window: Single<'_, '_, &Window>,
     mouse: Res<'_, DotsMouseAttractorState>,
     dots_hands: Query<'_, '_, &DotsHandAttractor, With<TrackedHand>>,
+    settings: Res<'_, DotsSettings>,
     mut sim: ResMut<'_, ParticleSimParams>,
 ) {
     // --- Mouse attractor at index 0 ----------------------------------------
-    // When the pointer is active (`power > 0`), bake `gravity_constant` into
-    // the attractor's power host-side so the WGSL kernel treats power uniformly
-    // across attractor sources (`force_mag = a.power * size_scale`). This
-    // mirrors Line's `update_sim_params` convention exactly.
+    // When the pointer is active (`power > 0`), bake `settings.gravity_constant`
+    // into the attractor's power host-side so the WGSL kernel treats power
+    // uniformly across attractor sources (`force_mag = a.power * size_scale`).
+    // This mirrors Line's `update_sim_params` convention exactly.
     let mut attractors = [Attractor::default(); MAX_ATTRACTORS];
     let mut attractor_count = 0_u32;
     if mouse.power > 0.0 {
         attractors[0] = Attractor {
             position: mouse.position,
-            // Bake DOTS_GRAVITY_CONSTANT into power (host-side), matching the
-            // WGSL comment "mouse.power * gravity_constant is already baked into
+            // Bake gravity_constant into power (host-side), matching the WGSL
+            // comment "mouse.power * gravity_constant is already baked into
             // attractor.power host-side". The kernel sees the combined value.
-            power: mouse.power * DOTS_GRAVITY_CONSTANT,
+            power: mouse.power * settings.gravity_constant,
             // Unbounded pull (v4 parity: no current Dots attractor localizes its
             // radius; the grid feels a constant-magnitude pull toward the cursor).
             radius: 0.0,
@@ -251,6 +257,10 @@ pub fn update_dots_sim_params(
     // hot path. Both advance in lockstep and are capped at MAX_ATTRACTORS (=8),
     // which fits in both types. Mirrors Line's `update_sim_params` loop exactly
     // (same threshold, same gravity bake, same cap).
+    //
+    // Hand raw power from close full-grab is ~500–2500 vs. the mouse's ~200;
+    // `settings.hand_power_scale` (default 0.3) brings the hand bake down
+    // toward the mouse feel before the shared gravity_constant multiplier.
     let mut slot = attractor_count as usize;
     for hand_attractor in &dots_hands {
         if hand_attractor.power.abs() <= 1e-2 {
@@ -261,9 +271,10 @@ pub fn update_dots_sim_params(
         }
         attractors[slot] = Attractor {
             position: hand_attractor.position.to_array(),
-            // Bake DOTS_GRAVITY_CONSTANT into power, matching the mouse
-            // attractor treatment above.
-            power: hand_attractor.power * DOTS_GRAVITY_CONSTANT,
+            // Bake gravity_constant and hand_power_scale into power, matching
+            // the mouse attractor's gravity bake but with the per-source scale
+            // to compensate for the hand's higher raw power range.
+            power: hand_attractor.power * settings.gravity_constant * settings.hand_power_scale,
             // Unbounded pull (v4 parity).
             radius: 0.0,
         };
@@ -274,8 +285,8 @@ pub fn update_dots_sim_params(
     // --- Bake via the shared baker -----------------------------------------
     // `DotsAttractGate::OFF` + `DotsTurbulence::OFF`: the attract-only lifetime
     // respawn, fraction kill, and noise turbulence never run during live
-    // interaction. The live path is bit-unchanged vs. the pre-refactor inline
-    // SimParams literal — all field values are identical.
+    // interaction. `settings.fabric_tension` is threaded through as the linear
+    // restoring-spring coefficient so the fabric returns crisply after input.
     let geom = DotsWindowGeom::from_window(&window);
     sim.params = bake_dots_sim_params(
         time.delta_secs(),
@@ -284,6 +295,7 @@ pub fn update_dots_sim_params(
         attractor_count,
         DotsAttractGate::OFF,
         DotsTurbulence::OFF,
+        settings.fabric_tension,
     );
 }
 
@@ -292,6 +304,8 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
+
+    use crate::dots::settings::DotsSettings;
 
     /// Helper: insert the resources `update_dots_sim_params` requires.
     fn setup_world(mouse_power: f32, mouse_pos: [f32; 2]) -> World {
@@ -305,6 +319,8 @@ mod tests {
             power: mouse_power,
             position: mouse_pos,
         });
+        // DotsSettings required by update_dots_sim_params (Task 6).
+        world.insert_resource(DotsSettings::default());
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_millis(16));
         world.insert_resource(time);
@@ -461,7 +477,8 @@ mod tests {
     }
 
     /// Inactive mouse + one hand with power=0.5: the hand is appended to slot 0
-    /// with `power * DOTS_GRAVITY_CONSTANT` baked in; `attractor_count = 1`.
+    /// with `power * gravity_constant * hand_power_scale` baked in (Task 6).
+    /// Default `gravity_constant=100`, `hand_power_scale=0.3` → 0.5 * 100 * 0.3 = 15.
     #[test]
     #[allow(
         clippy::expect_used,
@@ -482,10 +499,13 @@ mod tests {
             params.attractor_count, 1,
             "one hand attractor must produce attractor_count=1"
         );
+        // With default gravity_constant=100 and hand_power_scale=0.3:
+        // baked power = 0.5 * 100.0 * 0.3 = 15.0.
+        // Verify the hand_power_scale is applied (result is NOT 0.5 * 100 = 50).
+        let expected = 0.5_f32 * 100.0 * 0.3;
         assert!(
-            (params.attractors[0].power - 0.5 * DOTS_GRAVITY_CONSTANT).abs() < 1e-5,
-            "hand power baked: expected {}, got {}",
-            0.5 * DOTS_GRAVITY_CONSTANT,
+            (params.attractors[0].power - expected).abs() < 1e-5,
+            "hand power baked with hand_power_scale=0.3: expected {expected}, got {}",
             params.attractors[0].power
         );
         #[allow(
@@ -502,7 +522,8 @@ mod tests {
     }
 
     /// Active mouse at slot 0 + one hand: mouse goes to slot 0, hand to slot 1;
-    /// `attractor_count = 2`.
+    /// `attractor_count = 2`. Mouse uses `gravity_constant` only; hand also
+    /// applies `hand_power_scale` (Task 6).
     #[test]
     #[allow(
         clippy::expect_used,
@@ -522,18 +543,20 @@ mod tests {
             params.attractor_count, 2,
             "mouse + 1 hand must yield attractor_count=2"
         );
-        // Mouse at slot 0 (baked power: 1.0 * DOTS_GRAVITY_CONSTANT).
+        // Mouse at slot 0: baked power = 1.0 * gravity_constant(100) = 100.
+        // No hand_power_scale on mouse; mouse and hand use different multipliers.
+        let mouse_expected = 1.0_f32 * 100.0;
         assert!(
-            (params.attractors[0].power - 1.0 * DOTS_GRAVITY_CONSTANT).abs() < 1e-5,
-            "mouse baked power at slot 0: expected {}, got {}",
-            1.0 * DOTS_GRAVITY_CONSTANT,
+            (params.attractors[0].power - mouse_expected).abs() < 1e-5,
+            "mouse baked power at slot 0: expected {mouse_expected}, got {}",
             params.attractors[0].power
         );
-        // Hand at slot 1 (baked power: 0.5 * DOTS_GRAVITY_CONSTANT).
+        // Hand at slot 1: baked power = 0.5 * gravity_constant(100) * hand_power_scale(0.3) = 15.
+        // Verify scale is applied: result is 15, NOT 0.5 * 100 = 50.
+        let hand_expected = 0.5_f32 * 100.0 * 0.3;
         assert!(
-            (params.attractors[1].power - 0.5 * DOTS_GRAVITY_CONSTANT).abs() < 1e-5,
-            "hand baked power at slot 1: expected {}, got {}",
-            0.5 * DOTS_GRAVITY_CONSTANT,
+            (params.attractors[1].power - hand_expected).abs() < 1e-5,
+            "hand baked power at slot 1 with hand_power_scale=0.3: expected {hand_expected}, got {}",
             params.attractors[1].power
         );
     }
@@ -613,6 +636,8 @@ mod tests {
         let attractors = [Attractor::default(); MAX_ATTRACTORS];
 
         // Live caller: gate off — both attract mechanisms disabled, turbulence off.
+        // restoring_linear = 0.0 (used only to satisfy the new signature; the
+        // live writer passes settings.fabric_tension in production).
         let live = bake_dots_sim_params(
             0.016,
             geom,
@@ -620,6 +645,7 @@ mod tests {
             0,
             DotsAttractGate::OFF,
             DotsTurbulence::OFF,
+            0.0,
         );
         assert_eq!(live.attract_gate, 0, "live bake must leave the gate off");
         assert_eq!(
@@ -628,6 +654,8 @@ mod tests {
         );
 
         // Attract caller: gate on, fraction and turbulence passed through verbatim.
+        // The screensaver always passes restoring_linear = 0.0 so the spring
+        // does not fight the turbulence morph.
         let gate = DotsAttractGate {
             enabled: true,
             fraction: 0.6,
@@ -637,7 +665,7 @@ mod tests {
             scale: 0.012,
             time: 3.5,
         };
-        let attract = bake_dots_sim_params(0.016, geom, attractors, 0, gate, turb);
+        let attract = bake_dots_sim_params(0.016, geom, attractors, 0, gate, turb, 0.0);
         assert_eq!(attract.attract_gate, 1, "attract bake must set the gate");
         assert!(
             (attract.attract_fraction - 0.6).abs() < 1e-6,
@@ -671,6 +699,75 @@ mod tests {
         assert!(
             (live.stationary_constant - attract.stationary_constant).abs() < 1e-9,
             "stationary_constant must be caller-independent"
+        );
+        assert!(
+            (live.restoring_linear - attract.restoring_linear).abs() < 1e-9,
+            "restoring_linear must be caller-independent when both pass 0.0"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fabric tension / gravity / hand-power-scale threading tests (Task 6)
+    // -----------------------------------------------------------------------
+
+    /// With `fabric_tension = 2.0` in `DotsSettings`, `update_dots_sim_params`
+    /// must write `restoring_linear = 2.0` to `SimParams`. Confirms the setting
+    /// is threaded live from settings → baker → GPU struct.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on system-run failure is the intended failure mode"
+    )]
+    fn fabric_tension_setting_writes_restoring_linear() {
+        let mut world = setup_world(0.0, [0.0, 0.0]);
+        // Override fabric_tension to a non-default value so the assertion
+        // is meaningful (default is 1.0, not 0.0).
+        {
+            let mut settings = world.resource_mut::<DotsSettings>();
+            settings.fabric_tension = 2.0;
+        }
+
+        world
+            .run_system_once(update_dots_sim_params)
+            .expect("update_dots_sim_params run");
+
+        let params = &world.resource::<ParticleSimParams>().params;
+        assert!(
+            (params.restoring_linear - 2.0).abs() < 1e-6,
+            "restoring_linear must equal fabric_tension=2.0, got {}",
+            params.restoring_linear
+        );
+    }
+
+    /// The screensaver baker always receives `restoring_linear = 0.0` so the
+    /// Hookean spring does not fight the turbulence morph during attract mode.
+    /// Tested via a direct baker call (the screensaver system is in its own
+    /// module; see `screensaver.rs` tests for the full system assertion).
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "restoring_linear is written as literal 0.0 — bit-exact comparison is correct"
+    )]
+    fn screensaver_baker_receives_zero_restoring_linear() {
+        let geom = DotsWindowGeom {
+            width: 1280.0,
+            height: 720.0,
+        };
+        let attractors = [Attractor::default(); MAX_ATTRACTORS];
+        let gate = DotsAttractGate {
+            enabled: true,
+            fraction: 0.6,
+        };
+        let turb = DotsTurbulence {
+            amp: 6.0,
+            scale: 0.012, // DOTS_TURBULENCE_SCALE from screensaver.rs
+            time: 0.0,
+        };
+        // Screensaver always passes 0.0 for restoring_linear.
+        let attract = bake_dots_sim_params(0.016, geom, attractors, 0, gate, turb, 0.0);
+        assert_eq!(
+            attract.restoring_linear, 0.0,
+            "screensaver bake must produce restoring_linear=0.0"
         );
     }
 }

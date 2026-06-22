@@ -22,6 +22,19 @@
 //!   1920-wide canvas exceeds 230,000 dots, risking runaway storage-buffer
 //!   allocation. Restart on change (the compute pipeline rebuilds its
 //!   storage buffer at spawn time).
+//! - **`gravity_constant`** — attractor-force scale baked into every
+//!   attractor power host-side (matching v4's `gravity_constant = 100`).
+//!   `User`-category knob in the Particles panel; live (no restart).
+//! - **`hand_power_scale`** — multiplicative trim applied to hand-attractor
+//!   power before the `gravity_constant` bake. Close full-grab hands produce
+//!   raw powers ~500–2500 vs. the mouse's ~200; `0.3` brings them down
+//!   toward the mouse feel. Dev-only knob; live.
+//! - **`fabric_tension`** — linear (Hookean) restoring-spring coefficient:
+//!   how strongly each particle is pulled toward its immutable
+//!   `original_xy` home. `0.0` means no spring; higher values create a
+//!   stiffer grid. During the screensaver this is always baked at `0.0` so
+//!   the spring does not fight the turbulence morph. `User`-category knob;
+//!   live.
 //! - **`gamma`** — per-channel gamma curve applied as a final visual
 //!   correction step. v4 default = 1.0 (identity). Read live every frame in
 //!   `post_params.rs`; no restart required. `User`-category so it appears
@@ -76,6 +89,56 @@ pub struct DotsSettings {
     )]
     #[serde(default = "default_dot_spacing")]
     pub dot_spacing: f32,
+
+    /// Attractor-force scale baked into every attractor power host-side,
+    /// matching v4's `gravity_constant = 100`. Raising this makes all
+    /// attractors stronger; lowering it weakens them uniformly. Read live
+    /// every frame in `sim_params.rs`; no restart required.
+    #[setting(
+        default = 100.0_f32,
+        min = 0.0_f32,
+        max = 500.0_f32,
+        step = 10.0_f32,
+        label = "Gravity",
+        section = "Particles",
+        category = User
+    )]
+    #[serde(default = "default_gravity_constant")]
+    pub gravity_constant: f32,
+
+    /// Multiplicative trim applied to hand-attractor power before baking
+    /// `gravity_constant` in. Close full-grab hands produce raw powers of
+    /// ~500–2500 vs. the mouse's ~200; `0.3` brings them down toward the
+    /// mouse feel. Dev-only knob; read live every frame.
+    #[setting(
+        default = 0.3_f32,
+        min = 0.0_f32,
+        max = 2.0_f32,
+        step = 0.05_f32,
+        label = "Hand power scale",
+        section = "Particles",
+        category = Dev
+    )]
+    #[serde(default = "default_hand_power_scale")]
+    pub hand_power_scale: f32,
+
+    /// Linear (Hookean) restoring-spring coefficient: how strongly each
+    /// particle is pulled back toward its immutable `original_xy` home.
+    /// `0.0` means no linear spring; higher values create a stiffer fabric
+    /// that resists displacement and returns more crisply after interaction.
+    /// During the screensaver this is always baked at `0.0` so the spring
+    /// does not fight the turbulence morph. Read live every frame.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 5.0_f32,
+        step = 0.1_f32,
+        label = "Fabric tension",
+        section = "Particles",
+        category = User
+    )]
+    #[serde(default = "default_fabric_tension")]
+    pub fabric_tension: f32,
 
     /// Per-channel gamma curve applied as a final visual correction.
     /// v4 default = 1.0 (identity). Read live every frame in `post_params.rs`,
@@ -243,6 +306,20 @@ fn default_dot_spacing() -> f32 {
     20.0
 }
 
+/// Default value backing both `DotsSettings::gravity_constant` and the const
+/// `DOTS_GRAVITY_CONSTANT` in `sim_params.rs` (= 100.0). Keep both in sync.
+fn default_gravity_constant() -> f32 {
+    100.0
+}
+
+fn default_hand_power_scale() -> f32 {
+    0.3
+}
+
+fn default_fabric_tension() -> f32 {
+    1.0
+}
+
 fn default_gamma() -> f32 {
     1.0
 }
@@ -315,6 +392,19 @@ mod tests {
     fn default_values_match_serde_defaults() {
         let defaults = DotsSettings::default();
         assert!((defaults.dot_spacing - default_dot_spacing()).abs() < f32::EPSILON);
+        // Particle physics fields added in task 6.
+        assert!(
+            (defaults.gravity_constant - default_gravity_constant()).abs() < f32::EPSILON,
+            "gravity_constant default mismatch"
+        );
+        assert!(
+            (defaults.hand_power_scale - default_hand_power_scale()).abs() < f32::EPSILON,
+            "hand_power_scale default mismatch"
+        );
+        assert!(
+            (defaults.fabric_tension - default_fabric_tension()).abs() < f32::EPSILON,
+            "fabric_tension default mismatch"
+        );
         assert!((defaults.gamma - default_gamma()).abs() < f32::EPSILON);
         assert!(
             (defaults.attract_particle_fraction - default_attract_particle_fraction()).abs()
