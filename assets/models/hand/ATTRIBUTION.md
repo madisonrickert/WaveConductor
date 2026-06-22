@@ -20,12 +20,17 @@ here so builds and the unattended deployment never need the network.
   https://huggingface.co/opencv/palm_detection_mediapipe
 - **License:** Apache-2.0.
 - **Original SHA-256:** `78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c`
-- **Modification:** the two FPN `Resize` nodes were rewritten from the ONNX
-  `sizes`-input form (which `tract` 0.21 does not honour) to an explicit
-  `scales=[1,1,2,2]` 2× upsample. This is **bit-exact** under onnxruntime
-  (max-abs-err 0.0 vs the original on identical input). Reproducible via
-  `tools/handtrack-oracle/graph_surgery.py`.
-- **Vendored (surgeried) SHA-256:** `834842ed98870b72619d7d8284a8cde107fca89dd70041ef3b99799faac7f319`
+- **Modifications** (in order; each **bit-exact** under onnxruntime, max-abs-err
+  0.0 vs its input). Full history + methodology:
+  `docs/runbooks/onnx-coreml-model-surgery.md`.
+  1. Two FPN `Resize` nodes rewritten from the ONNX `sizes`-input form (which
+     `tract` 0.21 does not honour) to an explicit `scales=[1,1,2,2]` 2× upsample.
+     Reproducible via `tools/handtrack-oracle/graph_surgery.py`.
+  2. Two unused initializers (`Concat__234:0`, `Concat__263:0`) stripped
+     (`16dd90f`).
+  3. 26 `PReLU` slopes reshaped `[1,C,1,1]` → `[C,1,1]` so the CoreML EP accepts
+     them, cutting the palm graph from 30 to 6 CoreML partitions (`d2369f4f`).
+- **Vendored (surgeried) SHA-256:** `dae15e9874942b77b8489986a0e1fcae8769c107e34f1bb71878f4b6a92de4ff`
 - **I/O:** input `input_1` `[1,192,192,3]`; outputs `[1,2016,18]` raw box/keypoint
   regressions, `[1,2016,1]` raw scores. Anchor decode + NMS are performed in Rust
   (the graph emits raw tensors).
