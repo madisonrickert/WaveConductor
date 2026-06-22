@@ -157,8 +157,7 @@ mod tests {
             sum += f64::from(l);
         }
         let mean = sum / f64::from(n);
-        let mid =
-            f64::from(DOTS_ATTRACT_LIFESPAN_MIN_SECS + DOTS_ATTRACT_LIFESPAN_MAX_SECS) / 2.0;
+        let mid = f64::from(DOTS_ATTRACT_LIFESPAN_MIN_SECS + DOTS_ATTRACT_LIFESPAN_MAX_SECS) / 2.0;
         assert!(
             (mean - mid).abs() < 1.0,
             "lifespan mean {mean} far from {mid}"

@@ -45,6 +45,7 @@ pub mod audio_coupling;
 pub mod hand_attractors;
 pub mod hash;
 pub mod post_process;
+pub mod screensaver;
 pub mod settings;
 pub mod systems;
 
@@ -138,7 +139,8 @@ impl Plugin for DotsPlugin {
 
         // Hand attractors (D5) wired here.
         app.add_plugins(hand_attractors::DotsLeapAttractorsPlugin);
-        // Screensaver (D6) will be added here.
+        // Screensaver attract driver (D6a).
+        app.add_plugins(screensaver::DotsScreensaverPlugin);
     }
 }
 
