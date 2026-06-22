@@ -15,6 +15,6 @@ pub mod sim_params;
 pub mod spawn;
 
 pub use mouse::{decay_dots_mouse_attractor, update_dots_mouse_attractor, DotsMouseAttractorState};
-pub use post_params::update_dots_post_params;
+pub use post_params::{update_dots_post_params, DotsExplodeFocal};
 pub use sim_params::update_dots_sim_params;
 pub use spawn::{spawn_dots, DotsRoot};

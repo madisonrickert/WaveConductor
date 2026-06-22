@@ -191,7 +191,10 @@ fn detach_all_dots_attractors(
 ///
 /// Runs inside the `sketch_active(AppState::Dots)` gate — zero-cost while Dots
 /// is idle.
-fn update_dots_hand_attractors(
+///
+/// `pub(crate)` so [`crate::dots::DotsPlugin`] can express the ordering
+/// constraint `update_dots_post_params.after(update_dots_hand_attractors)`.
+pub(crate) fn update_dots_hand_attractors(
     mut hands: Query<
         '_,
         '_,

@@ -137,9 +137,14 @@ impl Plugin for DotsPlugin {
                 .chain()
                 .run_if(sketch_active(AppState::Dots)),
         );
+        // `update_dots_post_params` runs after `update_dots_hand_attractors` so
+        // it reads the current frame's hand power (the exponential ease makes a
+        // 1-frame lag harmless, but the ordering is cheap and correct).
         app.add_systems(
             Update,
-            systems::update_dots_post_params.run_if(sketch_active(AppState::Dots)),
+            systems::update_dots_post_params
+                .after(hand_attractors::update_dots_hand_attractors)
+                .run_if(sketch_active(AppState::Dots)),
         );
 
         // Hand attractors (D5) wired here.
@@ -247,17 +252,22 @@ fn exit_dots_audio(
     }
 }
 
-/// `OnEnter(AppState::Dots)` — insert [`post_process::DotsPostParams`] with
-/// static seed values. [`systems::update_dots_post_params`] overwrites these
-/// every frame with live cursor, resolution, and gamma; the values here are
-/// only visible on the first frame before the `Update` systems run.
+/// `OnEnter(AppState::Dots)` — insert [`post_process::DotsPostParams`] and
+/// [`systems::DotsExplodeFocal`] with static seed values.
+/// [`systems::update_dots_post_params`] overwrites these every frame with live
+/// cursor/hand focal, resolution, and settings; the values here are only
+/// visible on the first frame before the `Update` systems run.
 ///
-/// Seed values:
-/// - `shrink_factor = 0.98` — v4 default.
+/// Seed values for `DotsPostParams`:
+/// - `shrink_factor = 0.98` — v4 default (overwritten each frame from
+///   [`settings::DotsSettings::shrink_factor`]).
 /// - `gamma = 1.0` — identity; the Update driver reads `DotsSettings` each frame.
 /// - `i_mouse = [0.5, 0.5]` — screen centre (normalised UV); prevents a corner
 ///   explode on the first frame before any cursor is known.
 /// - `i_resolution` — from the primary window; falls back to `[1920.0, 1080.0]`.
+///
+/// `DotsExplodeFocal` is seeded at [`Vec2::ZERO`] (world-space screen centre)
+/// so a hand grab on the first frame eases from the centre, not a stale value.
 fn insert_dots_post_params(mut commands: Commands<'_, '_>, window: Query<'_, '_, &Window>) {
     let (w, h) = window
         .single()
@@ -268,6 +278,9 @@ fn insert_dots_post_params(mut commands: Commands<'_, '_>, window: Query<'_, '_,
         shrink_factor: 0.98,
         gamma: 1.0,
     });
+    // Seed the focal at world-space center so the first hand grab eases
+    // smoothly from center rather than from a stale position.
+    commands.insert_resource(systems::DotsExplodeFocal(Vec2::ZERO));
 }
 
 /// `OnExit(AppState::Dots)` companion to [`systems::spawn_dots`].
@@ -278,10 +291,14 @@ fn insert_dots_post_params(mut commands: Commands<'_, '_>, window: Query<'_, '_,
 /// freed; `spawn_dots` re-inserts a fresh snapshot on the next `OnEnter`.
 /// Also drops [`post_process::DotsPostParams`] so the render system no-ops
 /// outside Dots (the `Option<Res<DotsPostParams>>` gate returns `None`).
+/// Also drops [`systems::DotsExplodeFocal`] so the focal cannot carry a stale
+/// position into the next Dots entry; `insert_dots_post_params` re-seeds it
+/// at [`Vec2::ZERO`] on the next `OnEnter`.
 fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::compute::ParticleSimParams>();
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<post_process::DotsPostParams>();
+    commands.remove_resource::<systems::DotsExplodeFocal>();
 }
 
 /// How long the user must stop adjusting a `requires_restart` setting before
@@ -411,14 +428,15 @@ mod tests {
     }
 
     /// `remove_dots_sim_params` must drop `ParticleSimParams`, `CpuMirror`,
-    /// and `DotsPostParams` on Dots exit so VRAM and CPU memory are released
-    /// and the render system no-ops outside Dots.
+    /// `DotsPostParams`, and `DotsExplodeFocal` on Dots exit so VRAM and CPU
+    /// memory are released and the render system no-ops outside Dots.
     #[test]
     fn remove_dots_sim_params_drops_resources() {
         use crate::particles::compute::ParticleSimParams;
         use crate::particles::particle::SimParams;
         use crate::particles::sim_cpu::CpuMirror;
         use post_process::DotsPostParams;
+        use systems::DotsExplodeFocal;
 
         let mut world = World::new();
         world.insert_resource(ParticleSimParams {
@@ -433,6 +451,7 @@ mod tests {
             shrink_factor: 0.98,
             gamma: 1.0,
         });
+        world.insert_resource(DotsExplodeFocal(Vec2::ZERO));
 
         world
             .run_system_once(remove_dots_sim_params)
@@ -450,16 +469,22 @@ mod tests {
             world.get_resource::<DotsPostParams>().is_none(),
             "DotsPostParams must be removed on Dots exit so render system no-ops"
         );
+        assert!(
+            world.get_resource::<DotsExplodeFocal>().is_none(),
+            "DotsExplodeFocal must be removed on Dots exit so focal cannot carry stale position"
+        );
     }
 
-    /// `insert_dots_post_params` must insert `DotsPostParams` on Dots enter
-    /// with the static defaults: `shrink_factor=0.98`, `gamma=1.0`,
-    /// `i_mouse=[0.5, 0.5]`, and `i_resolution` read from the window (or the
-    /// fallback `[1920, 1080]` when no window entity is present).
+    /// `insert_dots_post_params` must insert `DotsPostParams` and
+    /// `DotsExplodeFocal` on Dots enter with the static defaults:
+    /// `shrink_factor=0.98`, `gamma=1.0`, `i_mouse=[0.5, 0.5]`,
+    /// `i_resolution` read from the window (or the fallback `[1920, 1080]`
+    /// when no window entity is present), and the focal at `Vec2::ZERO`.
     #[test]
     #[allow(clippy::float_cmp, reason = "comparing literal defaults")]
     fn insert_dots_post_params_inserts_resource() {
         use post_process::DotsPostParams;
+        use systems::DotsExplodeFocal;
 
         let mut world = World::new();
         // No window entity — the system falls back to [1920, 1080].
@@ -478,6 +503,16 @@ mod tests {
             params.i_resolution,
             [1920.0, 1080.0],
             "i_resolution must fall back to [1920, 1080] when no window"
+        );
+
+        // DotsExplodeFocal must be seeded at Vec2::ZERO (world-space center).
+        let focal = world
+            .get_resource::<DotsExplodeFocal>()
+            .expect("DotsExplodeFocal must be present after OnEnter(Dots)");
+        assert_eq!(
+            focal.0,
+            Vec2::ZERO,
+            "DotsExplodeFocal must be seeded at Vec2::ZERO"
         );
     }
 

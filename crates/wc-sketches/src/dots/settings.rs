@@ -63,6 +63,12 @@
 //!   the full activity envelope `[0, 1]`. Dev-only tuning knob.
 //! - **`breath_rate_hz`** — frequency of the modeled breath sine LFO in Hz.
 //!   Lower = slower in-out pulse; higher = faster flutter. Dev-only knob.
+//! - **`shrink_factor`** — uniform shrink applied to each iteration of the
+//!   explode (chromatic-aberration) post-process pass. v4 default = 0.98.
+//!   Lower values produce a more compact spiral halo. Dev-only knob; live.
+//! - **`explode_focal_smoothing`** — hand-to-focal smoothing time constant (τ,
+//!   seconds). Controls how quickly the explode spiral center follows a
+//!   grabbing hand. `0.0` = instant snap. Dev-only knob; live.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -187,6 +193,41 @@ pub struct DotsSettings {
     )]
     #[serde(default = "default_attract_turbulence")]
     pub attract_turbulence: f32,
+
+    // ── Visual (explode pass) ─────────────────────────────────────────────────
+    /// Uniform shrink factor applied per iteration of the explode
+    /// (chromatic-aberration) post-process pass. Controls how fast the
+    /// spiral halo "bleeds" outward; lower values produce a more compact
+    /// halo. v4 default = 0.98. Dev-only knob; live (no restart).
+    #[setting(
+        default = 0.98_f32,
+        min = 0.9_f32,
+        max = 1.0_f32,
+        step = 0.005_f32,
+        label = "Explode shrink",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_shrink_factor")]
+    pub shrink_factor: f32,
+
+    /// Hand-to-focal smoothing time constant (τ, seconds). Controls how
+    /// quickly the explode spiral center follows a grabbing hand's world
+    /// position. `0.0` = instant snap; larger values = slower, smoother
+    /// follow. Mirrors `LineSettings::smear_focal_smoothing`. Dev-only
+    /// knob; live.
+    #[setting(
+        default = 0.25_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Hand split smoothing",
+        unit = "s",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_explode_focal_smoothing")]
+    pub explode_focal_smoothing: f32,
 
     // ── Audio ────────────────────────────────────────────────────────────────
     /// Master output gain trim applied after the activity envelope.
@@ -332,6 +373,14 @@ fn default_attract_turbulence() -> f32 {
     6.0
 }
 
+fn default_shrink_factor() -> f32 {
+    0.98
+}
+
+fn default_explode_focal_smoothing() -> f32 {
+    0.25
+}
+
 fn default_synth_volume_scale() -> f32 {
     1.0
 }
@@ -411,6 +460,16 @@ mod tests {
                 < f32::EPSILON
         );
         assert!((defaults.attract_turbulence - default_attract_turbulence()).abs() < f32::EPSILON);
+        // Visual (explode) fields added in task 7.
+        assert!(
+            (defaults.shrink_factor - default_shrink_factor()).abs() < f32::EPSILON,
+            "shrink_factor default mismatch"
+        );
+        assert!(
+            (defaults.explode_focal_smoothing - default_explode_focal_smoothing()).abs()
+                < f32::EPSILON,
+            "explode_focal_smoothing default mismatch"
+        );
         // Audio fields added in task 4.
         assert!((defaults.synth_volume_scale - default_synth_volume_scale()).abs() < f32::EPSILON);
         assert!((defaults.synth_attack_ms - default_synth_attack_ms()).abs() < f32::EPSILON);
