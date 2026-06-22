@@ -64,8 +64,24 @@ bevy = { version = "0.19", default-features = false, features = [
     "x11",
     "wayland",
 ] }
-# UI
-bevy_egui = "0.40"
+# UI. `default-features = false` to drop bevy_egui's default `picking` feature:
+# it pulls in the `bevy_picking` crate and registers egui<->picking integration
+# systems that warn at startup ("`bevy_egui/picking` is enabled, but PickingPlugin
+# is not added") because our curated DefaultPlugins set deliberately omits
+# `bevy/bevy_picking`. We don't use Bevy's picking backend — egui pointer capture
+# is handled directly (see settings/input_capture.rs and the EguiPrimaryContextPass
+# UI systems) — so the feature is dead weight. Dropping it silences the warning
+# and removes `bevy_picking` from the dependency graph entirely. We re-enable the
+# rest of the default set (everything except `picking`). bevy-inspector-egui
+# already declares bevy_egui with default-features = false, so this is the sole
+# source of the `picking` feature; nothing re-enables it via unification.
+bevy_egui = { version = "0.40", default-features = false, features = [
+    "manage_clipboard",
+    "open_url",
+    "default_fonts",
+    "render",
+    "bevy_ui",
+] }
 bevy-inspector-egui = "0.37"
 egui-phosphor = "0.12"
 # (bevy_mod_debugdump removed 2026-05-25 — declared but never consumed by any
