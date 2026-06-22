@@ -349,9 +349,7 @@ mod tests {
             .run_system_once(update_dots_hand_attractors)
             .expect("update_dots_hand_attractors run");
 
-        let mut q = app
-            .world_mut()
-            .query::<&DotsHandAttractor>();
+        let mut q = app.world_mut().query::<&DotsHandAttractor>();
         let attractor = q.single(app.world()).expect("one DotsHandAttractor");
 
         // power: grab=1.0, z=350 → one EMA step → 0.005.

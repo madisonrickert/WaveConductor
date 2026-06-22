@@ -1,4 +1,4 @@
-//! Activity-envelope coupling: [`DotsMouseAttractorState`] → [`DotsSynth`].
+//! Activity-envelope coupling: mouse + hand attractors → [`DotsSynth`].
 //!
 //! ## Approach (ENVELOPE-PRIMARY)
 //!
@@ -10,10 +10,14 @@
 //! or a full CPU mirror of the compute simulation (CPU budget + stale audio).
 //!
 //! Instead a single attack/release ACTIVITY envelope driven by
-//! [`DotsMouseAttractorState::power`] stands in for all three v4 control
-//! signals. The envelope rises toward 1.0 while the attractor is active
-//! (`power > 0.0`) and decays toward 0.0 after release. Volume, bandpass
-//! cutoff, and LFO depth all derive from this single envelope value each frame.
+//! [`DotsMouseAttractorState::power`] and [`super::hand_attractors::DotsHandAttractor::power`]
+//! stands in for all three v4 control signals. The envelope rises toward 1.0
+//! while any attractor is active (mouse `power > 0.0` OR any hand power above
+//! [`HAND_ACTIVITY_THRESHOLD`]) and decays toward 0.0 after all release.
+//! "Loudest hand wins": the max over all tracked hands is used so a second,
+//! farther hand cannot duck a near grab — mirrors Line's `update_hand_audio_drive`
+//! pattern. Volume, bandpass cutoff, and LFO depth all derive from this single
+//! envelope value each frame.
 //!
 //! ## What this writes each frame
 //!
@@ -49,8 +53,23 @@ use bevy::prelude::*;
 
 use wc_core::audio::command::AudioCommand;
 use wc_core::audio::ring::AudioCommandSender;
+use wc_core::input::entity::TrackedHand;
 
+use super::hand_attractors::DotsHandAttractor;
 use super::systems::DotsMouseAttractorState;
+
+// ── Hand-activity threshold ───────────────────────────────────────────────────
+
+/// Minimum [`DotsHandAttractor::power`] that counts as "active" for the audio
+/// envelope.
+///
+/// The Dots power model floors at [`super::hand_attractors::DOTS_HAND_POWER_FLOOR`]
+/// (0.05) — any power below that is hard-zeroed, so values between zero and the
+/// floor never appear in practice. This threshold sits just above numerical
+/// noise (`1e-2 < 0.05`) and below the floor, meaning any non-zero power
+/// produced by `dots_leap_power` is treated as active. Consistent with the
+/// sim-feed `1e-2` convention documented in the plan.
+pub(crate) const HAND_ACTIVITY_THRESHOLD: f32 = 1e-2;
 
 // ── v4 constants ──────────────────────────────────────────────────────────────
 
@@ -104,10 +123,11 @@ const ENVELOPE_RELEASE_RATE: f32 = 1000.0 / 350.0; // ≈ 2.86 s⁻¹
 
 /// Smoothed attack/release activity envelope for Dots audio.
 ///
-/// A scalar in `[0, 1]` that rises toward 1.0 while the Dots mouse attractor
-/// is active (`DotsMouseAttractorState::power > 0.0`) and decays toward 0.0
-/// after release. Advanced each frame by [`drive_dots_audio`] using the
-/// asymmetric rates [`ENVELOPE_ATTACK_RATE`] / [`ENVELOPE_RELEASE_RATE`].
+/// A scalar in `[0, 1]` that rises toward 1.0 while any Dots attractor is
+/// active (mouse `power > 0.0` OR any `DotsHandAttractor::power >
+/// HAND_ACTIVITY_THRESHOLD`) and decays toward 0.0 after all attractors
+/// release. Advanced each frame by [`drive_dots_audio`] using the asymmetric
+/// rates [`ENVELOPE_ATTACK_RATE`] / [`ENVELOPE_RELEASE_RATE`].
 ///
 /// Initialised to 0.0 (`Default`) by the plugin. Persists across `OnEnter`/
 /// `OnExit` cycles — the synth is removed on exit and rebuilt on entry, so a
@@ -121,15 +141,20 @@ pub struct DotsAudioEnvelope(pub f32);
 
 /// Advance the [`DotsAudioEnvelope`] value by one frame.
 ///
-/// Pure function: given the current envelope value, attractor power, and frame
-/// delta in seconds, returns the next envelope value clamped to `[0, 1]`.
-/// Extracted from [`drive_dots_audio`] so the envelope math is unit-testable
-/// without a Bevy `World`. Production code calls this through the system.
+/// Pure function: given the current envelope value, combined attractor power,
+/// and frame delta in seconds, returns the next envelope value clamped to
+/// `[0, 1]`. Extracted from [`drive_dots_audio`] so the envelope math is
+/// unit-testable without a Bevy `World`. Production code calls this through
+/// the system.
 ///
-/// - `power > 0.0` → target 1.0, advance at [`ENVELOPE_ATTACK_RATE`].
-/// - `power == 0.0` → target 0.0, decay at [`ENVELOPE_RELEASE_RATE`].
-pub(crate) fn step_dots_envelope(envelope: f32, power: f32, dt: f32) -> f32 {
-    let target = if power > 0.0 { 1.0_f32 } else { 0.0_f32 };
+/// `active_power` is the pre-computed maximum over the mouse and all hand
+/// attractor powers — see [`dots_activity_power`]. The envelope target is
+/// derived from a simple threshold:
+///
+/// - `active_power > 0.0` → target 1.0, advance at [`ENVELOPE_ATTACK_RATE`].
+/// - `active_power == 0.0` → target 0.0, decay at [`ENVELOPE_RELEASE_RATE`].
+pub(crate) fn step_dots_envelope(envelope: f32, active_power: f32, dt: f32) -> f32 {
+    let target = if active_power > 0.0 { 1.0_f32 } else { 0.0_f32 };
     let rate = if target > envelope {
         ENVELOPE_ATTACK_RATE
     } else {
@@ -139,6 +164,31 @@ pub(crate) fn step_dots_envelope(envelope: f32, power: f32, dt: f32) -> f32 {
     // `(rate × dt).min(1.0)` prevents overshoot when the frame time is large
     // (e.g. hitching). Clamp ensures floating-point noise can't escape [0, 1].
     (envelope + (target - envelope) * (rate * dt).min(1.0)).clamp(0.0, 1.0)
+}
+
+/// Derive the combined activity power from the mouse and all tracked hands.
+///
+/// Returns the maximum scalar "active" power across all sources so that the
+/// loudest hand wins and a second, farther hand cannot duck a near grab.
+/// Specifically:
+///
+/// - Mouse contributes its `power` directly (any `> 0.0` means mouse is active).
+/// - Each hand contributes its [`DotsHandAttractor::power`] if it exceeds
+///   [`HAND_ACTIVITY_THRESHOLD`] (otherwise contributes `0.0`).
+/// - The result is the max over all contributions, clamped to `[0, 1]`.
+///
+/// Extracted for unit-testability: the system passes its query-gathered values
+/// here; tests can call directly with synthetic inputs without a Bevy `World`.
+pub(crate) fn dots_activity_power(mouse_power: f32, max_hand_power: f32) -> f32 {
+    // Any non-zero mouse power counts as active (mirrors the pre-D5 condition).
+    let mouse_active = if mouse_power > 0.0 { mouse_power } else { 0.0 };
+    // Hands: threshold-gate to avoid residual near-zero noise from the EMA.
+    let hand_active = if max_hand_power > HAND_ACTIVITY_THRESHOLD {
+        max_hand_power
+    } else {
+        0.0
+    };
+    mouse_active.max(hand_active).clamp(0.0, 1.0)
 }
 
 /// Derive the `"bandpass_freq"` param value from the activity envelope.
@@ -179,6 +229,11 @@ pub(crate) fn dots_lfo_depth(bandpass_freq: f32) -> f32 {
 /// without an `AudioCommandSender` can still observe the envelope state via
 /// `Res<DotsAudioEnvelope>`.
 ///
+/// The envelope target is "any active attractor": it rises while the mouse is
+/// active OR any [`DotsHandAttractor`] power exceeds [`HAND_ACTIVITY_THRESHOLD`].
+/// The loudest hand wins (max over all hands) so a second, farther hand cannot
+/// duck a near grab — mirrors Line's `update_hand_audio_drive` pattern.
+///
 /// ## LFO rate gap
 ///
 /// See module-level docs. The LFO oscillator rate is **not** driven here; it
@@ -186,13 +241,20 @@ pub(crate) fn dots_lfo_depth(bandpass_freq: f32) -> f32 {
 /// ENVELOPE-PRIMARY tradeoff.
 pub fn drive_dots_audio(
     mouse: Res<'_, DotsMouseAttractorState>,
+    hands: Query<'_, '_, &DotsHandAttractor, With<TrackedHand>>,
     time: Res<'_, Time>,
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     mut envelope: ResMut<'_, DotsAudioEnvelope>,
 ) {
+    // Loudest hand wins: fold max over all tracked hands without allocating.
+    let max_hand_power = hands.iter().fold(0.0_f32, |acc, h| acc.max(h.power));
+
+    // Combine mouse and hand activity into a single scalar; clamp to [0, 1].
+    let active = dots_activity_power(mouse.power, max_hand_power);
+
     // Advance the envelope every frame — even when the audio engine is absent
     // (headless tests) — so the resource reflects the current activity state.
-    envelope.0 = step_dots_envelope(envelope.0, mouse.power, time.delta_secs());
+    envelope.0 = step_dots_envelope(envelope.0, active, time.delta_secs());
 
     // The audio engine is not started in headless integration tests (no cpal
     // device). Skip ring pushes cleanly when the sender is absent.
@@ -403,12 +465,180 @@ mod tests {
         }
     }
 
+    // ── dots_activity_power: combined mouse + hand scalar ─────────────────
+
+    /// Mouse active with no hands: activity power equals mouse power (clamped).
+    #[test]
+    fn activity_power_mouse_only() {
+        let p = dots_activity_power(1.0, 0.0);
+        assert!((p - 1.0).abs() < 1e-6, "mouse-only must give 1.0; got {p}");
+    }
+
+    /// Hand above threshold with mouse inactive: activity power equals hand
+    /// power, confirming a hand alone can drive the envelope.
+    #[test]
+    fn activity_power_hand_only_above_threshold() {
+        // 0.5 > HAND_ACTIVITY_THRESHOLD (0.01) → hand contribution 0.5
+        let p = dots_activity_power(0.0, 0.5);
+        assert!(
+            (p - 0.5).abs() < 1e-6,
+            "hand-only above threshold must give 0.5; got {p}"
+        );
+    }
+
+    /// Hand below threshold with mouse inactive: activity power is 0.0.
+    #[test]
+    fn activity_power_hand_below_threshold_is_zero() {
+        // 0.005 < HAND_ACTIVITY_THRESHOLD (0.01) → no hand contribution
+        let p = dots_activity_power(0.0, 0.005);
+        assert!(
+            p == 0.0,
+            "hand below threshold with inactive mouse must give 0.0; got {p}"
+        );
+    }
+
+    /// Both inactive: activity power is 0.0 (envelope should decay).
+    #[test]
+    fn activity_power_both_inactive_is_zero() {
+        let p = dots_activity_power(0.0, 0.0);
+        assert!(p == 0.0, "both inactive must give 0.0; got {p}");
+    }
+
+    /// Loudest hand wins: when two hand powers are supplied (caller takes max
+    /// before calling this function), the result tracks the max, not the sum
+    /// or the min.
+    #[test]
+    fn activity_power_loudest_hand_wins() {
+        // Simulate two hands: near grab (power 0.8) and far grab (power 0.2).
+        // The caller folds max before passing in, so max_hand_power = 0.8.
+        let max_hand = 0.8_f32.max(0.2_f32);
+        let p = dots_activity_power(0.0, max_hand);
+        // Must equal the louder hand (0.8), not the sum (1.0) or min (0.2).
+        assert!(
+            (p - 0.8).abs() < 1e-6,
+            "loudest hand (0.8) must win over quieter hand (0.2); got {p}"
+        );
+    }
+
+    /// Mouse + hand: the result is the max, not the sum.
+    #[test]
+    fn activity_power_mouse_and_hand_takes_max() {
+        let p = dots_activity_power(0.6, 0.4);
+        assert!(
+            (p - 0.6).abs() < 1e-6,
+            "mouse (0.6) > hand (0.4): expected max 0.6, got {p}"
+        );
+        let p2 = dots_activity_power(0.3, 0.7);
+        assert!(
+            (p2 - 0.7).abs() < 1e-6,
+            "hand (0.7) > mouse (0.3): expected max 0.7, got {p2}"
+        );
+    }
+
+    /// Activity power is always clamped to `[0, 1]`.
+    #[test]
+    fn activity_power_clamps_to_unit_interval() {
+        // Supra-unity inputs (provider over-range) must not escape [0, 1].
+        let p = dots_activity_power(2.0, 3.0);
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "activity power must clamp to [0,1]; got {p}"
+        );
+    }
+
+    // ── Hand activity drives the envelope (pure helper chain) ─────────────
+
+    /// Mouse inactive but a hand above threshold: envelope rises across frames.
+    ///
+    /// This is the primary D5 Task 2 contract: a hand grab with no mouse activity
+    /// must cause the audio envelope to advance toward 1.0.
+    #[test]
+    fn envelope_rises_with_hand_active_mouse_inactive() {
+        // A hand power of 0.5 is well above HAND_ACTIVITY_THRESHOLD (0.01).
+        let active = dots_activity_power(0.0, 0.5);
+        assert!(
+            active > 0.0,
+            "hand above threshold must give non-zero active"
+        );
+
+        let mut env = 0.0_f32;
+        for frame in 0..20 {
+            let next = step_dots_envelope(env, active, 1.0 / 60.0);
+            assert!(
+                next >= env,
+                "envelope must not decrease with hand active (frame {frame}): {env} → {next}"
+            );
+            env = next;
+        }
+        assert!(
+            env > 0.0,
+            "envelope must have risen with only hand active after 20 frames; got {env}"
+        );
+    }
+
+    /// Both mouse and hand inactive: envelope decays from a raised state.
+    #[test]
+    fn envelope_decays_when_both_inactive() {
+        let active = dots_activity_power(0.0, 0.0);
+        assert!(active == 0.0, "both inactive must give 0.0 active");
+
+        let mut env = 1.0_f32;
+        for frame in 0..20 {
+            let next = step_dots_envelope(env, active, 1.0 / 60.0);
+            assert!(
+                next <= env,
+                "envelope must not rise when both inactive (frame {frame}): {env} → {next}"
+            );
+            env = next;
+        }
+        assert!(
+            env < 1.0,
+            "envelope must have decayed when both inactive after 20 frames; got {env}"
+        );
+    }
+
+    /// "Loudest hand wins" end-to-end: with two hands, the envelope target
+    /// tracks the max power hand, not the sum and not the quieter hand.
+    ///
+    /// Asserts the max-fold pattern used in `drive_dots_audio` (callers fold
+    /// `f32::max` before calling `dots_activity_power`) produces a result
+    /// between `0.0` (quieter hand alone, below threshold-gate from env side)
+    /// and the louder hand's contribution.
+    #[test]
+    fn loudest_hand_wins_end_to_end() {
+        let hand_near = 0.8_f32; // near, strong grab
+        let hand_far = 0.1_f32; // far, weak grab
+
+        // The system folds max before calling dots_activity_power.
+        let max_power = hand_near.max(hand_far); // = 0.8
+        let active = dots_activity_power(0.0, max_power);
+
+        // Result must equal the near hand contribution, not the sum (which
+        // would be clamped to 1.0 and lose the magnitude signal) and not the
+        // min (which would misrepresent the dominant hand).
+        assert!(
+            (active - 0.8).abs() < 1e-6,
+            "loudest hand wins: max-folded activity must be 0.8, got {active}"
+        );
+
+        // Confirm the envelope rises from this target.
+        let env_after = step_dots_envelope(0.0, active, 1.0 / 60.0);
+        assert!(
+            env_after > 0.0,
+            "envelope must rise from loudest-hand activity; got {env_after}"
+        );
+    }
+
     // ── System-level test: envelope advances via RunSystemOnce ────────────
 
     /// `drive_dots_audio` advances the envelope when run without an
     /// `AudioCommandSender` (headless mode). Verifies the system is wired
     /// correctly and that the early-return on absent audio does not skip the
     /// envelope step.
+    ///
+    /// No `DotsHandAttractor` entities are spawned — the query iterates zero
+    /// rows, contributing `max_hand_power = 0.0`. The mouse alone drives the
+    /// envelope here.
     #[test]
     fn drive_dots_audio_advances_envelope_without_audio_sender() {
         use bevy::ecs::system::RunSystemOnce;
@@ -428,6 +658,7 @@ mod tests {
         time.advance_by(std::time::Duration::from_millis(16)); // ~60 Hz
         world.insert_resource(time);
         // No AudioCommandSender inserted — system must skip ring pushes cleanly.
+        // No TrackedHand entities — hand query iterates zero rows.
 
         world
             .run_system_once(drive_dots_audio)
@@ -442,5 +673,96 @@ mod tests {
             env <= 1.0,
             "drive_dots_audio must keep envelope ≤ 1.0; got {env}"
         );
+    }
+
+    /// `drive_dots_audio` raises the envelope when a `DotsHandAttractor` entity
+    /// with power above the threshold is present and the mouse is inactive.
+    ///
+    /// Spawns a synthetic `TrackedHand + DotsHandAttractor` entity (mirroring
+    /// Task 1's system test setup in `hand_attractors::tests`) and confirms the
+    /// system reads the component and advances the envelope.
+    #[test]
+    fn drive_dots_audio_raises_envelope_from_hand_alone() {
+        use bevy::ecs::system::RunSystemOnce;
+        use wc_core::input::entity::TrackedHand;
+
+        let mut world = World::new();
+        // Mouse inactive.
+        world.insert_resource(DotsMouseAttractorState {
+            power: 0.0,
+            position: [0.0, 0.0],
+        });
+        // Envelope starts at 0.
+        world.insert_resource(DotsAudioEnvelope(0.0));
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(16));
+        world.insert_resource(time);
+
+        // Spawn a TrackedHand with a DotsHandAttractor whose power is well
+        // above HAND_ACTIVITY_THRESHOLD (0.01). The value 0.5 simulates a
+        // hand mid-grab that has been running for several frames (the EMA
+        // climbs from 0.005 on the first frame; 0.5 is a reachable steady
+        // state after sustained grabbing).
+        world.spawn((
+            TrackedHand,
+            bevy::prelude::Transform::default(),
+            bevy::prelude::Visibility::default(),
+            DotsHandAttractor {
+                power: 0.5,
+                position: bevy::prelude::Vec2::ZERO,
+            },
+        ));
+
+        world
+            .run_system_once(drive_dots_audio)
+            .expect("drive_dots_audio must run without error");
+
+        let env = world.resource::<DotsAudioEnvelope>().0;
+        assert!(
+            env > 0.0,
+            "drive_dots_audio must raise envelope from hand alone (mouse inactive); got {env}"
+        );
+        assert!(env <= 1.0, "envelope must stay ≤ 1.0; got {env}");
+    }
+
+    /// `drive_dots_audio` leaves the envelope decaying when both the mouse is
+    /// inactive and all hand powers are below `HAND_ACTIVITY_THRESHOLD`.
+    #[test]
+    fn drive_dots_audio_decays_envelope_when_both_inactive() {
+        use bevy::ecs::system::RunSystemOnce;
+        use wc_core::input::entity::TrackedHand;
+
+        let mut world = World::new();
+        world.insert_resource(DotsMouseAttractorState {
+            power: 0.0,
+            position: [0.0, 0.0],
+        });
+        // Envelope starts raised at 1.0.
+        world.insert_resource(DotsAudioEnvelope(1.0));
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(16));
+        world.insert_resource(time);
+
+        // Spawn a hand whose power is zeroed (below threshold after floor snap).
+        world.spawn((
+            TrackedHand,
+            bevy::prelude::Transform::default(),
+            bevy::prelude::Visibility::default(),
+            DotsHandAttractor {
+                power: 0.0,
+                position: bevy::prelude::Vec2::ZERO,
+            },
+        ));
+
+        world
+            .run_system_once(drive_dots_audio)
+            .expect("drive_dots_audio must run without error");
+
+        let env = world.resource::<DotsAudioEnvelope>().0;
+        assert!(
+            env < 1.0,
+            "envelope must decay when both mouse and hands are inactive; got {env}"
+        );
+        assert!(env >= 0.0, "envelope must stay ≥ 0.0; got {env}");
     }
 }

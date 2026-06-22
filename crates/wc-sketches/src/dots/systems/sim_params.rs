@@ -350,11 +350,7 @@ mod tests {
 
     /// Helper: insert the resources + spawn a `TrackedHand` with a
     /// `DotsHandAttractor` at the given power and position.
-    fn setup_world_with_hand(
-        mouse_power: f32,
-        hand_power: f32,
-        hand_pos: Vec2,
-    ) -> World {
+    fn setup_world_with_hand(mouse_power: f32, hand_power: f32, hand_pos: Vec2) -> World {
         let mut world = setup_world(mouse_power, [0.0, 0.0]);
         world.spawn((
             TrackedHand,
