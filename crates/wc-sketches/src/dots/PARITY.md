@@ -23,7 +23,7 @@ Internal name: `Dots`. Display name: "Fabric".
   size_clamp` formula; touch co-driven via `Res<Touches>`; lifecycle teardown drops
   `ParticleSimParams` + `CpuMirror` on `OnExit`.
 
-- **Plan D3 (shipped)** — Explode post-process. `DotsExplodePlugin` ports v4's `shaders/dots/`
+- **Plan D3 (shipped)** — Explode post-process. `DotsPostProcessPlugin` ports v4's `shaders/dots/`
   WGSL: per-pixel spiral-loop (m2 spiral matrix corrected to column-major), per-channel shrink
   compounding, `pow` guard, `i_mouse` Y-flip. Incidental fixes: (a) Line's gravity-smear whiteout
   outside Line (`gamma = 0` in `gravity.wgsl` → `pow(rgb, 0) = 1.0`), gated via `LinePostParams`
@@ -50,8 +50,10 @@ Internal name: `Dots`. Display name: "Fabric".
 
 - **Plan D6b (shipped)** — Bone-wireframe hand rendering. `DotsHandMeshPlugin` +
   `DotsBoneCompositePlugin` port Line's per-hand skeleton visualization: 20-bone `LineList`
-  icospheres, ice-blue `#b0d8ff`, dedicated overlay `Camera3d` (HDR + TonyMcMapface + per-camera
-  Bloom), composited additively over the fabric. Incidental fix: Line's bone-composite leak
+  icospheres, ice-blue `#b0d8ff`, dedicated overlay `Camera3d` (HDR, `Tonemapping::None`, no
+  per-camera bloom; the bone image is composited additively into the main camera's HDR target
+  pre-bloom so the main Bloom + AgX tonemap the bones coherently — known limit #75: no separate
+  bloom rolloff), composited additively over the fabric. Incidental fix: Line's bone-composite leak
   (`Handle<Image>` clone keeps GPU texture alive after `OnExit`) fixed for both Line and Dots via
   `remove_*_hand_mesh_target_if_absent` in `ExtractSchedule`.
 
