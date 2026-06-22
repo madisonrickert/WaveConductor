@@ -76,7 +76,14 @@ fn drive_dots_attract(
     let geom = DotsWindowGeom::from_window(&window);
     // Attract gate: enables the kernel's fraction kill (spatially uniform
     // thinning by per-index spawn hash) and per-particle lifetime respawn
-    // (the field self-heals back into the spawn image on staggered lifespans).
+    // (the field self-heals toward each particle's home on staggered
+    // lifespans). Note: Dots bakes `stationary_constant = 0.01` in both paths
+    // (for live parity), so the kernel's idle home-drift also runs here with
+    // `attractor_count == 0` — under turbulence each `original_xy` eases along
+    // the flow, so respawns return to a slowly-drifting home rather than the
+    // literal spawn grid. Whether the grid holds its layout over a multi-hour
+    // idle is a soak-watch item; the lever (if it drifts undesirably) is to
+    // thread a softened `stationary_constant` into the attract bake.
     let gate = DotsAttractGate {
         enabled: true,
         fraction: settings.attract_particle_fraction,
