@@ -147,6 +147,13 @@ impl Plugin for DotsPlugin {
                 .run_if(sketch_active(AppState::Dots)),
         );
 
+        // Gate the bone camera and composite on tracked-hand presence (Task 2).
+        // O(≤2 hands) + one bool write per frame; no allocation.
+        app.add_systems(
+            Update,
+            hand_mesh::update_dots_bone_activity.run_if(sketch_active(AppState::Dots)),
+        );
+
         // Hand attractors (D5) wired here.
         app.add_plugins(hand_attractors::DotsLeapAttractorsPlugin);
         // Screensaver attract driver (D6a).
@@ -281,6 +288,10 @@ fn insert_dots_post_params(mut commands: Commands<'_, '_>, window: Query<'_, '_,
     // Seed the focal at world-space center so the first hand grab eases
     // smoothly from center rather than from a stale position.
     commands.insert_resource(systems::DotsExplodeFocal(Vec2::ZERO));
+    // Start with the bone camera and composite disabled until a hand appears.
+    // `update_dots_bone_activity` will flip this to `true` on the first Update
+    // that sees a TrackedHand entity.
+    commands.insert_resource(hand_mesh::DotsBoneActive(false));
 }
 
 /// `OnExit(AppState::Dots)` companion to [`systems::spawn_dots`].
@@ -299,6 +310,9 @@ fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<post_process::DotsPostParams>();
     commands.remove_resource::<systems::DotsExplodeFocal>();
+    // Remove the presence flag so the render-world removal system (`remove_dots_bone_active_if_absent`)
+    // triggers and the composite early-returns cleanly outside Dots.
+    commands.remove_resource::<hand_mesh::DotsBoneActive>();
 }
 
 /// How long the user must stop adjusting a `requires_restart` setting before
@@ -428,13 +442,15 @@ mod tests {
     }
 
     /// `remove_dots_sim_params` must drop `ParticleSimParams`, `CpuMirror`,
-    /// `DotsPostParams`, and `DotsExplodeFocal` on Dots exit so VRAM and CPU
-    /// memory are released and the render system no-ops outside Dots.
+    /// `DotsPostParams`, `DotsExplodeFocal`, and `DotsBoneActive` on Dots exit
+    /// so VRAM and CPU memory are released and the render system no-ops outside
+    /// Dots.
     #[test]
     fn remove_dots_sim_params_drops_resources() {
         use crate::particles::compute::ParticleSimParams;
         use crate::particles::particle::SimParams;
         use crate::particles::sim_cpu::CpuMirror;
+        use hand_mesh::DotsBoneActive;
         use post_process::DotsPostParams;
         use systems::DotsExplodeFocal;
 
@@ -452,6 +468,7 @@ mod tests {
             gamma: 1.0,
         });
         world.insert_resource(DotsExplodeFocal(Vec2::ZERO));
+        world.insert_resource(DotsBoneActive(true));
 
         world
             .run_system_once(remove_dots_sim_params)
@@ -473,16 +490,21 @@ mod tests {
             world.get_resource::<DotsExplodeFocal>().is_none(),
             "DotsExplodeFocal must be removed on Dots exit so focal cannot carry stale position"
         );
+        assert!(
+            world.get_resource::<DotsBoneActive>().is_none(),
+            "DotsBoneActive must be removed on Dots exit so the render-world removal system fires"
+        );
     }
 
-    /// `insert_dots_post_params` must insert `DotsPostParams` and
-    /// `DotsExplodeFocal` on Dots enter with the static defaults:
+    /// `insert_dots_post_params` must insert `DotsPostParams`, `DotsExplodeFocal`,
+    /// and `DotsBoneActive(false)` on Dots enter with the static defaults:
     /// `shrink_factor=0.98`, `gamma=1.0`, `i_mouse=[0.5, 0.5]`,
     /// `i_resolution` read from the window (or the fallback `[1920, 1080]`
     /// when no window entity is present), and the focal at `Vec2::ZERO`.
     #[test]
     #[allow(clippy::float_cmp, reason = "comparing literal defaults")]
     fn insert_dots_post_params_inserts_resource() {
+        use hand_mesh::DotsBoneActive;
         use post_process::DotsPostParams;
         use systems::DotsExplodeFocal;
 
@@ -513,6 +535,15 @@ mod tests {
             focal.0,
             Vec2::ZERO,
             "DotsExplodeFocal must be seeded at Vec2::ZERO"
+        );
+
+        // DotsBoneActive must be seeded false — no hands are present at entry.
+        let bone_active = world
+            .get_resource::<DotsBoneActive>()
+            .expect("DotsBoneActive must be present after OnEnter(Dots)");
+        assert!(
+            !bone_active.0,
+            "DotsBoneActive must be false at Dots entry (no hands yet)"
         );
     }
 

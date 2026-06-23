@@ -67,7 +67,7 @@ use bevy::render::view::ViewTarget;
 use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::shader::Shader;
 
-use super::hand_mesh::DotsHandMeshTarget;
+use super::hand_mesh::{DotsBoneActive, DotsHandMeshTarget};
 
 /// Plugin that registers the additive bone-glow composite node for Dots.
 pub struct DotsBoneCompositePlugin;
@@ -75,6 +75,9 @@ pub struct DotsBoneCompositePlugin;
 impl Plugin for DotsBoneCompositePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractResourcePlugin::<DotsHandMeshTarget>::default());
+        // Extract the hand-presence flag alongside the target so the composite
+        // node can read it in the render world without an extra cross-world query.
+        app.add_plugins(ExtractResourcePlugin::<DotsBoneActive>::default());
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -100,6 +103,8 @@ impl Plugin for DotsBoneCompositePlugin {
         // so `gpu_images.get` returns `Some` and the composite does NOT self-guard
         // via the RenderAssets lookup alone (the D3 bug). See the module docs.
         render_app.add_systems(ExtractSchedule, remove_dots_hand_mesh_target_if_absent);
+        // Mirror the same D3 removal pattern for the presence flag.
+        render_app.add_systems(ExtractSchedule, remove_dots_bone_active_if_absent);
     }
 
     fn finish(&self, app: &mut App) {
@@ -195,15 +200,21 @@ impl FromWorld for DotsBoneCompositePipeline {
 /// so we read HDR-ness from the extracted camera; a `&'static Hdr` `ViewQuery`
 /// would silently never match.
 ///
-/// No-ops cleanly when `DotsHandMeshTarget` is absent (any non-Dots state, or
-/// the brief window before the image first uploads). The render-world removal
-/// system ensures the target is absent after `OnExit(AppState::Dots)` — see the
-/// module docs for why the `RenderAssets` lookup alone does not suffice.
+/// No-ops cleanly when [`DotsHandMeshTarget`] is absent (any non-Dots state, or
+/// the brief window before the image first uploads) **or** when [`DotsBoneActive`]
+/// is `false` (no [`wc_core::input::entity::TrackedHand`] entities this frame).
+/// Both early-returns fire BEFORE [`ViewTarget::post_process_write`] so the
+/// ping-pong is not flipped — the explode output flows to bloom unchanged.
+///
+/// The render-world removal systems ensure both resources are absent after
+/// `OnExit(AppState::Dots)` — see the module docs for why the `RenderAssets`
+/// lookup alone does not suffice.
 ///
 /// [`Core2dSystems::EarlyPostProcess`]: bevy::core_pipeline::Core2dSystems::EarlyPostProcess
 pub fn dots_bone_composite(
     view: ViewQuery<'_, '_, (&'static ViewTarget, &'static ExtractedCamera)>,
     target: Option<Res<'_, DotsHandMeshTarget>>,
+    bone_active: Option<Res<'_, DotsBoneActive>>,
     gpu_images: Res<'_, RenderAssets<GpuImage>>,
     pipeline_res: Option<Res<'_, DotsBoneCompositePipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
@@ -217,10 +228,20 @@ pub fn dots_bone_composite(
 
     // No bone target this frame (not in Dots, or image not yet uploaded) →
     // clean no-op. Return BEFORE `post_process_write` so the view target is
-    // untouched.
+    // untouched and the explode output flows to bloom unchanged.
     let Some(target) = target else {
         return;
     };
+
+    // No hands tracked this frame → skip the composite BEFORE `post_process_write`
+    // so the ping-pong is not flipped. This prevents the stale (last-rendered)
+    // bone image from ghosting onto the scene when no hand is present. The bone
+    // Camera3d is also inactive at this point (see `update_dots_bone_activity`),
+    // so the bone image itself has not been refreshed this frame.
+    if !bone_active.is_some_and(|a| a.0) {
+        return;
+    }
+
     let Some(bone_image) = gpu_images.get(&target.image) else {
         return;
     };
@@ -291,6 +312,22 @@ fn remove_dots_hand_mesh_target_if_absent(
 ) {
     if main_resource.is_none() && render_resource.is_some() {
         commands.remove_resource::<DotsHandMeshTarget>();
+    }
+}
+
+/// Removes the render-world [`DotsBoneActive`] when the main world no longer
+/// has it — i.e. after `OnExit(AppState::Dots)` removes it from the main world.
+///
+/// Mirrors [`remove_dots_hand_mesh_target_if_absent`] exactly: the D3 removal
+/// pattern applied to the hand-presence flag so the composite guard resets
+/// cleanly when Dots is not active.
+fn remove_dots_bone_active_if_absent(
+    mut commands: Commands<'_, '_>,
+    main_resource: Extract<'_, '_, Option<Res<'_, DotsBoneActive>>>,
+    render_resource: Option<Res<'_, DotsBoneActive>>,
+) {
+    if main_resource.is_none() && render_resource.is_some() {
+        commands.remove_resource::<DotsBoneActive>();
     }
 }
 

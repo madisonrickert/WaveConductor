@@ -107,12 +107,55 @@ pub struct DotsHandMeshTarget {
 #[derive(Component)]
 pub struct DotsHandMeshCamera3d;
 
+/// Hand-presence gate for the bone camera and composite pass.
+///
+/// Set each frame by [`update_dots_bone_activity`]: `true` when at least one
+/// [`TrackedHand`] entity is tracked, `false` when none are present. Extracted
+/// to the render world via [`ExtractResourcePlugin`] so
+/// [`super::bone_composite::dots_bone_composite`] can early-return before
+/// flipping the post-process ping-pong when no hand is tracked — preventing
+/// ghost-bone blending from the last-rendered bone image.
+///
+/// Inserted on `OnEnter(AppState::Dots)` (default `false`) and removed on
+/// `OnExit`. The render-world copy is explicitly removed by
+/// `remove_dots_bone_active_if_absent` in [`super::bone_composite`] (the D3
+/// pattern, mirroring [`DotsHandMeshTarget`]).
+#[derive(Resource, ExtractResource, Clone, Copy)]
+pub struct DotsBoneActive(pub bool);
+
 /// Marker placed on a `TrackedHand` once [`ensure_bone_meshes`] has attached
 /// its 20 bone children, so the reconcile pass is idempotent. Removed on
 /// `OnExit(AppState::Dots)` alongside the bone children, so re-entering Dots
 /// re-spawns bones for hands that are still being tracked.
 #[derive(Component)]
 struct DotsHandMeshBones;
+
+/// Per-frame: gate the bone camera and composite on tracked-hand presence.
+///
+/// Queries all [`TrackedHand`] entities and writes the presence flag:
+///
+/// - **≥1 hand tracked:** sets the bone [`Camera3d`]'s [`Camera::is_active`]
+///   to `true` and writes [`DotsBoneActive`]`(true)` — both pass continue
+///   exactly as today.
+/// - **No hands tracked:** sets `is_active = false` (Bevy skips an inactive
+///   camera wholesale — no MSAA×4 full-res 3D pass, no VRAM write) and writes
+///   [`DotsBoneActive`]`(false)` so the composite node early-returns before
+///   the post-process ping-pong flip, preventing ghost-bone blending.
+///
+/// Registered in `Update` in [`super::DotsPlugin`], gated on
+/// `sketch_active(AppState::Dots)`. O(≤2 hands) + one bool write; no
+/// per-frame allocation.
+pub fn update_dots_bone_activity(
+    hands: Query<'_, '_, (), With<TrackedHand>>,
+    mut cameras: Query<'_, '_, &mut Camera, With<DotsHandMeshCamera3d>>,
+    mut active: ResMut<'_, DotsBoneActive>,
+) {
+    let present = !hands.is_empty();
+    active.0 = present;
+    for mut cam in &mut cameras {
+        cam.is_active = present;
+    }
+}
 
 /// Plugin wiring the Dots wireframe bone visualization.
 pub struct DotsHandMeshPlugin;
@@ -483,6 +526,69 @@ mod tests {
         assert_eq!(
             bone_count, BONE_COUNT,
             "idempotent: second reconcile must not duplicate bones; got {bone_count}"
+        );
+    }
+
+    /// Verifies [`update_dots_bone_activity`] gates the bone camera and the
+    /// [`DotsBoneActive`] resource on tracked-hand presence.
+    ///
+    /// With zero [`TrackedHand`] entities: camera `is_active` must be `false`
+    /// and `DotsBoneActive.0` must be `false`.  After spawning one
+    /// [`TrackedHand`] and running the system again: both must be `true`.
+    ///
+    /// This is the primary unit gate for Task 2 — the no-hands path is
+    /// verifiable headlessly; the hands-present rendering path (bones still
+    /// appear, no ghosting on exit) requires Leap/MediaPipe hardware and is
+    /// operator-deferred.
+    #[test]
+    fn update_dots_bone_activity_gates_camera_and_resource() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+
+        // Seed the resource exactly as OnEnter(AppState::Dots) will do.
+        app.insert_resource(DotsBoneActive(false));
+
+        // Spawn a bone camera entity. Camera::default() has is_active = true,
+        // so the system must flip it to false on the zero-hands run.
+        let camera = app
+            .world_mut()
+            .spawn((DotsHandMeshCamera3d, Camera::default()))
+            .id();
+
+        // --- zero TrackedHand entities ---
+        app.world_mut()
+            .run_system_once(update_dots_bone_activity)
+            .expect("update_dots_bone_activity should run (zero hands)");
+
+        assert!(
+            !app.world()
+                .get::<Camera>(camera)
+                .expect("camera must exist")
+                .is_active,
+            "camera must be inactive when no TrackedHand is present"
+        );
+        assert!(
+            !app.world().resource::<DotsBoneActive>().0,
+            "DotsBoneActive must be false when no TrackedHand is present"
+        );
+
+        // --- spawn one TrackedHand ---
+        app.world_mut().spawn(TrackedHand);
+
+        app.world_mut()
+            .run_system_once(update_dots_bone_activity)
+            .expect("update_dots_bone_activity should run (one hand)");
+
+        assert!(
+            app.world()
+                .get::<Camera>(camera)
+                .expect("camera must exist")
+                .is_active,
+            "camera must be active when a TrackedHand is present"
+        );
+        assert!(
+            app.world().resource::<DotsBoneActive>().0,
+            "DotsBoneActive must be true when a TrackedHand is present"
         );
     }
 }
