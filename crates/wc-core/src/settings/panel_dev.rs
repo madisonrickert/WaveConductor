@@ -27,6 +27,94 @@ use crate::lifecycle::actions::WaveConductorAction;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
 
+/// How often the latched FPS readout in the dev panel refreshes (seconds).
+///
+/// 0.30 s gives roughly 3 updates per second: fast enough to track trends,
+/// slow enough that the digit string is readable between refreshes.
+const REFRESH_INTERVAL_S: f64 = 0.30;
+
+/// Color tier for the frame-rate readout, with hysteresis to prevent strobing.
+///
+/// A ±3 FPS dead-band around each threshold means a signal that oscillates
+/// near 55 or 30 FPS will not flip the color every latch cycle.
+///
+/// Transition table:
+///
+/// | From  | Condition       | To    |
+/// |-------|-----------------|-------|
+/// | Green | fps < 52        | Amber |
+/// | Amber | fps ≥ 55        | Green |
+/// | Amber | fps < 30        | Red   |
+/// | Red   | fps ≥ 33        | Amber |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FpsTier {
+    /// FPS is at or above the display-refresh floor (≥ 55).
+    Green,
+    /// FPS is degraded but not critically low (30–55).
+    #[default]
+    Amber,
+    /// FPS is critically low (< 30).
+    Red,
+}
+
+impl FpsTier {
+    /// Advance to the next tier for the given `fps` reading.
+    ///
+    /// Applies a ±3 FPS dead-band: leaving `Green` requires fps < 52, and
+    /// leaving `Red` requires fps ≥ 33. The middle `Amber` tier uses the raw
+    /// 55/30 thresholds as entry points from both sides.
+    fn advance(self, fps: f64) -> Self {
+        match self {
+            Self::Green => {
+                if fps < 52.0 {
+                    Self::Amber
+                } else {
+                    Self::Green
+                }
+            }
+            Self::Amber => {
+                if fps >= 55.0 {
+                    Self::Green
+                } else if fps < 30.0 {
+                    Self::Red
+                } else {
+                    Self::Amber
+                }
+            }
+            Self::Red => {
+                if fps >= 33.0 {
+                    Self::Amber
+                } else {
+                    Self::Red
+                }
+            }
+        }
+    }
+}
+
+/// Latched frame-rate readout for the dev panel.
+///
+/// Refreshed at most every [`REFRESH_INTERVAL_S`] seconds so the displayed
+/// digits are human-readable instead of updating every frame. Holds the most
+/// recently sampled smoothed FPS, frame time, the elapsed-seconds timestamp
+/// of that sample, and the stable color tier.
+///
+/// When `last_refresh_s == 0.0` and `fps == 0.0` the latch has never been
+/// successfully populated (e.g. `DiagnosticsStore` was absent on every
+/// attempt). `draw_frame_rate_row` shows "(diagnostics unavailable)" in that
+/// case.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub(crate) struct DevFpsReadout {
+    /// Smoothed FPS from the last successful refresh.
+    pub fps: f64,
+    /// Smoothed frame time in milliseconds from the last successful refresh.
+    pub frame_ms: f64,
+    /// `Time::elapsed_secs_f64()` at the last successful refresh.
+    pub last_refresh_s: f64,
+    /// Color tier, updated with hysteresis each successful refresh.
+    pub tier: FpsTier,
+}
+
 /// True when the dev inspector window should be drawn.
 ///
 /// Defaults to `false` — production deployments and casual users never see
@@ -56,6 +144,7 @@ pub fn handle_dev_panel_toggle(
 /// because `Window::show` panics with "Called `available_rect()` before
 /// `Context::run()`" when invoked outside an active egui pass.
 pub(super) fn add_systems(app: &mut App) {
+    app.init_resource::<DevFpsReadout>();
     app.add_systems(
         bevy_egui::EguiPrimaryContextPass,
         draw_dev_panel.run_if(dev_panel_visible),
@@ -142,22 +231,43 @@ fn draw_dev_panel(world: &mut World) {
         buf.snapshot_recent(200, &mut log_lines);
     }
 
-    // Smoothed frame-rate readout for the pinned Performance row. `get_resource`
-    // (not `resource`) keeps the panel safe under the MinimalPlugins test harness,
-    // where DiagnosticsStore is absent. Dev-panel-only; the stack copy is trivial.
-    let frame_stats: Option<(f64, f64)> = world
-        .get_resource::<bevy::diagnostic::DiagnosticsStore>()
-        .map(|store| {
-            let fps = store
-                .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
-                .and_then(bevy::diagnostic::Diagnostic::smoothed)
-                .unwrap_or(0.0);
-            let frame_ms = store
-                .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
-                .and_then(bevy::diagnostic::Diagnostic::smoothed)
-                .unwrap_or(0.0);
-            (fps, frame_ms)
-        });
+    // Latch the frame-rate readout at REFRESH_INTERVAL_S cadence so the
+    // displayed digits are human-readable and the color is stabilized with
+    // hysteresis. Both `Time` and `DiagnosticsStore` are read before the egui
+    // closure borrows `world`. When `DiagnosticsStore` is absent (MinimalPlugins
+    // test harness, or the binary did not install FrameTimeDiagnosticsPlugin),
+    // `last_refresh_s` is left unchanged so the next frame retries immediately —
+    // cheap and correct, since the store is either always present or always
+    // absent in practice.
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    {
+        let current_last = world.resource::<DevFpsReadout>().last_refresh_s;
+        if now - current_last >= REFRESH_INTERVAL_S {
+            let new_data: Option<(f64, f64)> = world
+                .get_resource::<bevy::diagnostic::DiagnosticsStore>()
+                .map(|store| {
+                    let fps = store
+                        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+                        .and_then(bevy::diagnostic::Diagnostic::smoothed)
+                        .unwrap_or(0.0);
+                    let frame_ms = store
+                        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+                        .and_then(bevy::diagnostic::Diagnostic::smoothed)
+                        .unwrap_or(0.0);
+                    (fps, frame_ms)
+                });
+            if let Some((fps, frame_ms)) = new_data {
+                let mut readout = world.resource_mut::<DevFpsReadout>();
+                readout.tier = readout.tier.advance(fps);
+                readout.fps = fps;
+                readout.frame_ms = frame_ms;
+                readout.last_refresh_s = now;
+            }
+            // If store is absent, leave last_refresh_s at its prior value so
+            // we retry on the next frame (the check is cheap).
+        }
+    }
+    let fps_readout = *world.resource::<DevFpsReadout>();
 
     // Left-docked, mirroring the settings dock's frame discipline so the two sit
     // side-by-side as matching leaves: same top (y = 60), same bottom inset (16),
@@ -197,7 +307,7 @@ fn draw_dev_panel(world: &mut World) {
                     hairline(ui, &style);
                     ui.add_space(8.0);
 
-                    draw_frame_rate_row(ui, &style, frame_stats);
+                    draw_frame_rate_row(ui, &style, fps_readout);
                     ui.add_space(8.0);
 
                     // One outer scroll area fills the fixed dock height; sections
@@ -303,14 +413,17 @@ const DEBUG_DOCK_WIDTH: f32 = 420.0;
 /// makes the layout identical every frame.
 const HINT_WRAP_WIDTH: f32 = DEBUG_DOCK_WIDTH - 80.0;
 
-/// One always-visible frame-rate row pinned at the top of the dev panel. Green
-/// at refresh-rate, amber mid, red when frames are clearly dropping. With Bevy's
-/// default `VSync` the FPS caps at the display refresh, so green == hitting refresh.
-fn draw_frame_rate_row(
-    ui: &mut bevy_egui::egui::Ui,
-    style: &OverlayStyle,
-    stats: Option<(f64, f64)>,
-) {
+/// One always-visible frame-rate row pinned at the top of the dev panel.
+///
+/// Displays the latched [`DevFpsReadout`] — updated at most every
+/// [`REFRESH_INTERVAL_S`] seconds — so the digit string is readable. Color is
+/// driven by the latch's [`FpsTier`], which uses hysteresis to prevent
+/// strobing near the 55/30 FPS thresholds. With Bevy's default `VSync`, green
+/// means the app is hitting the display refresh rate.
+///
+/// When the latch has never been successfully populated (no `DiagnosticsStore`
+/// seen yet) the row shows `(diagnostics unavailable)` instead.
+fn draw_frame_rate_row(ui: &mut bevy_egui::egui::Ui, style: &OverlayStyle, readout: DevFpsReadout) {
     ui.horizontal(|ui| {
         ui.label(
             bevy_egui::egui::RichText::new("FPS")
@@ -318,26 +431,25 @@ fn draw_frame_rate_row(
                 .size(11.5)
                 .strong(),
         );
-        if let Some((fps, frame_ms)) = stats {
-            let color = if fps >= 55.0 {
-                style.ok_green
-            } else if fps >= 30.0 {
-                style.warn_amber
-            } else {
-                style.error_red
+        // Never-populated: DiagnosticsStore absent on every refresh attempt.
+        if readout.last_refresh_s == 0.0 && readout.fps == 0.0 {
+            ui.label(
+                bevy_egui::egui::RichText::new("(diagnostics unavailable)").color(style.text_faint),
+            );
+        } else {
+            let color = match readout.tier {
+                FpsTier::Green => style.ok_green,
+                FpsTier::Amber => style.warn_amber,
+                FpsTier::Red => style.error_red,
             };
             ui.label(
-                bevy_egui::egui::RichText::new(format!("{fps:.1}"))
+                bevy_egui::egui::RichText::new(format!("{:.1}", readout.fps))
                     .color(color)
                     .strong(),
             );
             ui.label(
-                bevy_egui::egui::RichText::new(format!("({frame_ms:.1} ms)"))
+                bevy_egui::egui::RichText::new(format!("({:.1} ms)", readout.frame_ms))
                     .color(style.text_faint),
-            );
-        } else {
-            ui.label(
-                bevy_egui::egui::RichText::new("(diagnostics unavailable)").color(style.text_faint),
             );
         }
     });
@@ -535,5 +647,50 @@ mod tests {
             !app.world().resource::<DevPanelVisible>().0,
             "second press should hide panel",
         );
+    }
+
+    // --- FpsTier hysteresis tests ---
+    // These are pure unit tests of the `advance` function; no Bevy app needed.
+
+    #[test]
+    fn fps_tier_green_stays_green_inside_dead_band() {
+        // 53 FPS is above the 52-FPS exit threshold; tier must not leave Green.
+        assert_eq!(FpsTier::Green.advance(53.0), FpsTier::Green);
+    }
+
+    #[test]
+    fn fps_tier_green_drops_to_amber_below_dead_band() {
+        // 51 FPS is below the 52-FPS exit threshold; tier must step to Amber.
+        assert_eq!(FpsTier::Green.advance(51.0), FpsTier::Amber);
+    }
+
+    #[test]
+    fn fps_tier_green_never_skips_directly_to_red() {
+        // Even a catastrophic drop from Green must land on Amber, not Red.
+        assert_eq!(FpsTier::Green.advance(10.0), FpsTier::Amber);
+    }
+
+    #[test]
+    fn fps_tier_red_stays_red_inside_dead_band() {
+        // 32 FPS is below the 33-FPS exit threshold; tier must not leave Red.
+        assert_eq!(FpsTier::Red.advance(32.0), FpsTier::Red);
+    }
+
+    #[test]
+    fn fps_tier_red_rises_to_amber_above_dead_band() {
+        // 34 FPS is above the 33-FPS exit threshold; tier must step to Amber.
+        assert_eq!(FpsTier::Red.advance(34.0), FpsTier::Amber);
+    }
+
+    #[test]
+    fn fps_tier_amber_enters_green_at_threshold() {
+        // At exactly 55 FPS the tier must become Green.
+        assert_eq!(FpsTier::Amber.advance(55.0), FpsTier::Green);
+    }
+
+    #[test]
+    fn fps_tier_amber_enters_red_below_threshold() {
+        // At 29 FPS the tier must become Red.
+        assert_eq!(FpsTier::Amber.advance(29.0), FpsTier::Red);
     }
 }
