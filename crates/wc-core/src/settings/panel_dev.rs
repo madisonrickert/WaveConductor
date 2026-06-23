@@ -76,6 +76,7 @@ fn dev_panel_visible(visible: Res<'_, DevPanelVisible>) -> bool {
 ///
 /// Only runs when [`DevPanelVisible`] is `true` (gated by the
 /// `dev_panel_visible` run condition in [`add_systems`]).
+#[allow(clippy::too_many_lines)]
 fn draw_dev_panel(world: &mut World) {
     // Guard: EguiPlugin must be initialized. In test harnesses that use
     // MinimalPlugins without EguiPlugin the resource won't exist and
@@ -141,6 +142,23 @@ fn draw_dev_panel(world: &mut World) {
         buf.snapshot_recent(200, &mut log_lines);
     }
 
+    // Smoothed frame-rate readout for the pinned Performance row. `get_resource`
+    // (not `resource`) keeps the panel safe under the MinimalPlugins test harness,
+    // where DiagnosticsStore is absent. Dev-panel-only; the stack copy is trivial.
+    let frame_stats: Option<(f64, f64)> = world
+        .get_resource::<bevy::diagnostic::DiagnosticsStore>()
+        .map(|store| {
+            let fps = store
+                .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+                .and_then(bevy::diagnostic::Diagnostic::smoothed)
+                .unwrap_or(0.0);
+            let frame_ms = store
+                .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+                .and_then(bevy::diagnostic::Diagnostic::smoothed)
+                .unwrap_or(0.0);
+            (fps, frame_ms)
+        });
+
     // Left-docked, mirroring the settings dock's frame discipline so the two sit
     // side-by-side as matching leaves: same top (y = 60), same bottom inset (16),
     // same side inset (16). Fixed 420 px wide — this is diagnostics-only, narrower
@@ -177,6 +195,9 @@ fn draw_dev_panel(world: &mut World) {
                     );
                     ui.add_space(4.0);
                     hairline(ui, &style);
+                    ui.add_space(8.0);
+
+                    draw_frame_rate_row(ui, &style, frame_stats);
                     ui.add_space(8.0);
 
                     // One outer scroll area fills the fixed dock height; sections
@@ -281,6 +302,46 @@ const DEBUG_DOCK_WIDTH: f32 = 420.0;
 /// visibly flickers between layouts. Wrapping inside a fixed-width scope
 /// makes the layout identical every frame.
 const HINT_WRAP_WIDTH: f32 = DEBUG_DOCK_WIDTH - 80.0;
+
+/// One always-visible frame-rate row pinned at the top of the dev panel. Green
+/// at refresh-rate, amber mid, red when frames are clearly dropping. With Bevy's
+/// default `VSync` the FPS caps at the display refresh, so green == hitting refresh.
+fn draw_frame_rate_row(
+    ui: &mut bevy_egui::egui::Ui,
+    style: &OverlayStyle,
+    stats: Option<(f64, f64)>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            bevy_egui::egui::RichText::new("FPS")
+                .color(style.text_secondary)
+                .size(11.5)
+                .strong(),
+        );
+        if let Some((fps, frame_ms)) = stats {
+            let color = if fps >= 55.0 {
+                style.ok_green
+            } else if fps >= 30.0 {
+                style.warn_amber
+            } else {
+                style.error_red
+            };
+            ui.label(
+                bevy_egui::egui::RichText::new(format!("{fps:.1}"))
+                    .color(color)
+                    .strong(),
+            );
+            ui.label(
+                bevy_egui::egui::RichText::new(format!("({frame_ms:.1} ms)"))
+                    .color(style.text_faint),
+            );
+        } else {
+            ui.label(
+                bevy_egui::egui::RichText::new("(diagnostics unavailable)").color(style.text_faint),
+            );
+        }
+    });
+}
 
 /// Draw a small dim multi-line hint at a fixed wrap width (see
 /// [`HINT_WRAP_WIDTH`] for why the width must not track the live

@@ -6,6 +6,7 @@
 
 use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
@@ -91,6 +92,7 @@ fn main() {
             },
             CorePlugin,
             SketchesPlugin,
+            FrameTimeDiagnosticsPlugin::default(),
         ))
         // `install_hand_tracking_providers` runs as a Startup system so it can
         // read `Res<HandTrackingSettings>` after SettingsPlugin has loaded the
