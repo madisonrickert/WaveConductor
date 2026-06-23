@@ -6,10 +6,12 @@
 //! ```text
 //! target/WaveConductor.app/
 //! └── Contents/
-//!     ├── MacOS/waveconductor   (release binary, mode 0o755)
-//!     ├── Resources/assets/     (workspace assets/, recursive copy)
-//!     ├── Info.plist            (generated XML property list)
-//!     └── PkgInfo               (APPL????)
+//!     ├── MacOS/waveconductor         (release binary, mode 0o755)
+//!     ├── MacOS/libLeapC.6.dylib      (vendored Leap SDK runtime)
+//!     ├── MacOS/libLeapC.dylib        (unversioned alias, resolves @loader_path)
+//!     ├── Resources/assets/           (workspace assets/, recursive copy)
+//!     ├── Info.plist                  (generated XML property list)
+//!     └── PkgInfo                     (APPL????)
 //! ```
 //!
 //! ## Out of scope
@@ -103,7 +105,11 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     set_executable(&dst_bin)?;
 
-    // 2b. Recursively copy the workspace assets/ tree into Resources/assets/.
+    // 2b. Copy the vendored Leap SDK dylib next to the binary so that the
+    //     binary's `@loader_path/libLeapC.6.dylib` rpath resolves at launch.
+    copy_leap_dylib(&root, &macos_dir)?;
+
+    // 2c. Recursively copy the workspace assets/ tree into Resources/assets/.
     //     The runtime resolver `asset_root()` in wc-core/src/platform/assets.rs
     //     detects the `Contents/MacOS` exe dir and resolves to
     //     `Contents/Resources/assets` — so this destination is load-bearing.
@@ -117,7 +123,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    // 2c. Write Info.plist.
+    // 2d. Write Info.plist.
     let plist_path = contents.join("Info.plist");
     let plist = info_plist(
         BUNDLE_NAME,
@@ -129,7 +135,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::write(&plist_path, plist.as_bytes())?;
 
-    // 2d. Write PkgInfo (optional, conventional for macOS app bundles).
+    // 2e. Write PkgInfo (optional, conventional for macOS app bundles).
     std::fs::write(contents.join("PkgInfo"), b"APPL????")?;
 
     // 3. Compute bundle byte size for the report.
@@ -269,6 +275,70 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<u64, Box<dyn std::error::Error
     Ok(count)
 }
 
+/// Map a Rust target architecture name to the vendor subdirectory that holds
+/// the prebuilt Leap SDK libraries for that architecture.
+///
+/// Returns `None` for architectures that have no vendored Leap SDK copy.
+/// Covered by unit tests in the `tests` module.
+pub fn leap_vendor_subdir(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("macos-aarch64"),
+        "x86_64" => Some("macos-x86_64"),
+        _ => None,
+    }
+}
+
+/// Copy the vendored Leap SDK dylib files into `dst_dir` (normally
+/// `Contents/MacOS/`) so that the binary's `@loader_path/libLeapC.6.dylib`
+/// rpath entry resolves at launch.
+///
+/// Both the versioned file (`libLeapC.6.dylib`) and the unversioned alias
+/// (`libLeapC.dylib`) are copied as regular files; the alias is a symlink in
+/// the vendor tree but we copy the target bytes so the bundle is self-contained
+/// without symlink support being required by every tool that touches the .app.
+///
+/// Returns a clear error if the host architecture is unsupported or the source
+/// dylib is absent.
+fn copy_leap_dylib(root: &Path, dst_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let arch = std::env::consts::ARCH;
+    let subdir = leap_vendor_subdir(arch).ok_or_else(|| {
+        format!(
+            "bundle-mac: no vendored Leap SDK for architecture '{arch}'; \
+             add a vendor/leapc/macos-{arch}/ directory with libLeapC.6.dylib"
+        )
+    })?;
+    let vendor_dir = root.join("vendor").join("leapc").join(subdir);
+
+    for name in &["libLeapC.6.dylib", "libLeapC.dylib"] {
+        let src = vendor_dir.join(name);
+        if !src.exists() {
+            return Err(format!(
+                "bundle-mac: vendored dylib not found at {}; \
+                 re-run `git lfs pull` or restore the vendor tree",
+                src.display()
+            )
+            .into());
+        }
+        // Read via `read` (not symlink-following `copy`) so that if `libLeapC.dylib`
+        // is a symlink we copy the actual bytes rather than creating another symlink.
+        let bytes = std::fs::read(&src).map_err(|e| {
+            format!(
+                "bundle-mac: cannot read {}: {e}",
+                src.display()
+            )
+        })?;
+        let dst = dst_dir.join(name);
+        std::fs::write(&dst, &bytes).map_err(|e| {
+            format!(
+                "bundle-mac: cannot write {}: {e}",
+                dst.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Set the executable bit (Unix mode 0o755) on a file.
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -304,6 +374,47 @@ fn dir_size(dir: &Path) -> Result<u64, Box<dyn std::error::Error>> {
 #[allow(clippy::expect_used, reason = "expect is appropriate in test scaffolding")]
 mod tests {
     use super::*;
+
+    // ---- leap_vendor_subdir ---------------------------------------------------
+
+    #[test]
+    fn leap_vendor_subdir_aarch64() {
+        assert_eq!(
+            leap_vendor_subdir("aarch64"),
+            Some("macos-aarch64"),
+            "aarch64 must map to macos-aarch64"
+        );
+    }
+
+    #[test]
+    fn leap_vendor_subdir_x86_64() {
+        assert_eq!(
+            leap_vendor_subdir("x86_64"),
+            Some("macos-x86_64"),
+            "x86_64 must map to macos-x86_64"
+        );
+    }
+
+    #[test]
+    fn leap_vendor_subdir_unsupported_returns_none() {
+        assert_eq!(
+            leap_vendor_subdir("riscv64"),
+            None,
+            "unsupported arch must return None"
+        );
+        assert_eq!(
+            leap_vendor_subdir("wasm32"),
+            None,
+            "wasm32 must return None"
+        );
+        assert_eq!(
+            leap_vendor_subdir(""),
+            None,
+            "empty string must return None"
+        );
+    }
+
+    // ---- plist ---------------------------------------------------------------
 
     fn sample_plist() -> String {
         info_plist(
