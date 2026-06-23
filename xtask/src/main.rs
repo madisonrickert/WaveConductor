@@ -7,6 +7,7 @@
 
 #![allow(clippy::print_stdout, reason = "xtask is a CLI; printing is its job")]
 
+mod bundle_mac;
 mod capture;
 mod check_secrets;
 mod manifest;
@@ -28,6 +29,8 @@ enum Command {
     CheckSecrets(check_secrets::Args),
     /// Deterministic visual capture + baseline regression for a scenario.
     Capture(capture::Args),
+    /// Build the release binary and assemble a self-contained WaveConductor.app.
+    BundleMac(bundle_mac::Args),
 }
 
 fn main() {
@@ -39,6 +42,7 @@ fn main() {
         }
         Command::CheckSecrets(args) => check_secrets::run(args),
         Command::Capture(args) => capture::run(args),
+        Command::BundleMac(args) => bundle_mac::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");

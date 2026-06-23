@@ -36,6 +36,10 @@ const SUBCOMMANDS: &[Entry] = &[
         name: "capture",
         description: "Deterministic visual capture + baseline regression for a scenario.",
     },
+    Entry {
+        name: "bundle-mac",
+        description: "Build the release binary and assemble a self-contained WaveConductor.app.",
+    },
 ];
 
 /// Execute the manifest subcommand.
