@@ -17,26 +17,6 @@ use wc_sketches::SketchesPlugin;
 
 mod hand_providers;
 
-/// Relative path to the Line sketch's background sample, resolved against
-/// the cwd the binary was launched in. `cargo run -p waveconductor` runs
-/// In debug builds we resolve against `CARGO_MANIFEST_DIR` (the binary
-/// crate's directory at compile time) so the path works regardless of the
-/// shell's cwd when `cargo run -p waveconductor` is invoked. Release bundles
-/// ship `assets/` next to the binary, so the cwd-relative path is correct
-/// there.
-///
-/// Bevy's `AssetPlugin.file_path = "../../assets"` works by a separate
-/// mechanism: Bevy's `FileAssetReader` already resolves against
-/// `CARGO_MANIFEST_DIR` in debug builds. `std::fs::read` does not, hence
-/// the explicit `concat!`.
-#[cfg(debug_assertions)]
-const LINE_BACKGROUND_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/sketches/line/line_background.ogg"
-);
-#[cfg(not(debug_assertions))]
-const LINE_BACKGROUND_PATH: &str = "assets/sketches/line/line_background.ogg";
-
 fn main() {
     // `init_tracing` returns the in-app log buffer the capture layer feeds; the
     // dev panel's Log view reads it as a resource.
@@ -60,12 +40,13 @@ fn main() {
                     ..default()
                 })
                 .set(AssetPlugin {
-                    // Dev builds: shaders live at the workspace root, two levels
-                    // above the binary crate. Release bundles: the bundler
-                    // copies `assets/` next to the binary, so the default
-                    // `"assets"` is correct.
-                    #[cfg(debug_assertions)]
-                    file_path: "../../assets".into(),
+                    // Resolved at runtime via `wc_core::platform::assets::asset_root`
+                    // so dev, release, and macOS `.app` bundle deployments all
+                    // find shaders and other assets without environment-specific
+                    // compile-time paths.
+                    file_path: wc_core::platform::assets::asset_root()
+                        .to_string_lossy()
+                        .into_owned(),
                     ..default()
                 })
                 // We initialize tracing-subscriber in init_tracing() above;
@@ -141,16 +122,22 @@ fn main() {
 /// Read the Line background OGG into a `BackgroundSampleAsset` resource.
 ///
 /// The audio engine runs in a separate cpal thread that can't reach Bevy's
-/// `AssetServer`, so we load the file synchronously here on the main
-/// thread before `App::run()` and stash the raw bytes in a resource the
-/// engine's `Startup` system reads. Failure to read the file logs a
-/// warning and yields an empty asset; the engine treats that as "no
-/// background mix" and proceeds normally.
+/// `AssetServer`, so we load the file synchronously here on the main thread
+/// before `App::run()` and stash the raw bytes in a resource the engine's
+/// `Startup` system reads. Failure to read the file logs a warning and yields
+/// an empty asset; the engine treats that as "no background mix" and proceeds
+/// normally.
+///
+/// The path is resolved at runtime via [`wc_core::platform::assets::asset_root`]
+/// so dev, release, and macOS `.app` bundle deployments all locate the sample
+/// without environment-specific compile-time paths or cwd assumptions.
 fn load_line_background() -> BackgroundSampleAsset {
-    match std::fs::read(LINE_BACKGROUND_PATH) {
+    let path = wc_core::platform::assets::asset_root()
+        .join("sketches/line/line_background.ogg");
+    match std::fs::read(&path) {
         Ok(bytes) => {
             tracing::info!(
-                path = LINE_BACKGROUND_PATH,
+                path = %path.display(),
                 size = bytes.len(),
                 "loaded Line background sample"
             );
@@ -158,7 +145,7 @@ fn load_line_background() -> BackgroundSampleAsset {
         }
         Err(err) => {
             tracing::warn!(
-                path = LINE_BACKGROUND_PATH,
+                path = %path.display(),
                 ?err,
                 "Line background sample not found; audio engine will run without it"
             );

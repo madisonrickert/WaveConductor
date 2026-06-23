@@ -95,8 +95,8 @@ pub struct MediaPipeConfig {
     /// [`crate::settings::HandTrackingSettings`] (dev panel).
     pub smoothing_beta: f32,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
-    /// Defaults to the workspace-relative `assets/models/hand` (resolved at
-    /// runtime against the working directory, like Bevy's `assets/`).
+    /// Resolved at runtime via [`crate::platform::assets::asset_root`] so the
+    /// path is correct in dev, release, and macOS `.app` bundle deployments.
     pub model_dir: PathBuf,
 }
 
@@ -111,7 +111,7 @@ impl Default for MediaPipeConfig {
             depth_calibration_k: PipelineConfig::default().depth_calibration_k,
             smoothing_min_cutoff: DEFAULT_MIN_CUTOFF,
             smoothing_beta: DEFAULT_BETA,
-            model_dir: PathBuf::from("assets/models/hand"),
+            model_dir: crate::platform::assets::asset_root().join("models/hand"),
         }
     }
 }

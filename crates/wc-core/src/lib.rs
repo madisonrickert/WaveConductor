@@ -27,6 +27,7 @@ pub mod debug;
 pub mod diagnostics;
 pub mod input;
 pub mod lifecycle;
+pub mod platform;
 pub mod settings;
 pub mod sketch;
 /// Image template library (native-only, behind the `templates` feature).
