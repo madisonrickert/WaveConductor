@@ -132,8 +132,7 @@ fn main() {
 /// so dev, release, and macOS `.app` bundle deployments all locate the sample
 /// without environment-specific compile-time paths or cwd assumptions.
 fn load_line_background() -> BackgroundSampleAsset {
-    let path = wc_core::platform::assets::asset_root()
-        .join("sketches/line/line_background.ogg");
+    let path = wc_core::platform::assets::asset_root().join("sketches/line/line_background.ogg");
     match std::fs::read(&path) {
         Ok(bytes) => {
             tracing::info!(

@@ -51,8 +51,7 @@ pub fn asset_root() -> PathBuf {
 
     // 5. Absolute CWD fallback so Bevy's FileAssetReader can locate shaders when
     //    `cargo run --release` is launched from the workspace root.
-    std::env::current_dir()
-        .map_or_else(|_| PathBuf::from("assets"), |d| d.join("assets"))
+    std::env::current_dir().map_or_else(|_| PathBuf::from("assets"), |d| d.join("assets"))
 }
 
 /// Inspect the directory holding the running binary and return the first
@@ -109,7 +108,9 @@ mod tests {
 
     #[test]
     fn asset_root_env_override_wins() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tmp_subdir("env");
         fs::create_dir_all(&dir).expect("create temp dir");
         // SAFETY: serialised by ENV_MUTEX; no other thread touches
@@ -172,6 +173,9 @@ mod tests {
         let result = resolve_from_exe_dir(&bin_dir);
         fs::remove_dir_all(&root).ok();
 
-        assert!(result.is_none(), "should return None when no assets dir exists");
+        assert!(
+            result.is_none(),
+            "should return None when no assets dir exists"
+        );
     }
 }

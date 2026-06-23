@@ -159,9 +159,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         println!();
         println!("To launch:  open target/WaveConductor.app");
         println!("Note: an unsigned app requires right-click -> Open (or");
-        println!(
-            "  xattr -dr com.apple.quarantine target/WaveConductor.app) the first time."
-        );
+        println!("  xattr -dr com.apple.quarantine target/WaveConductor.app) the first time.");
         println!("Out of scope: code-signing/notarization and a custom .icns icon.");
     }
 
@@ -245,10 +243,10 @@ fn build_release(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "bundle-mac: `cargo build -p waveconductor --release` failed with {status}"
+        Err(
+            format!("bundle-mac: `cargo build -p waveconductor --release` failed with {status}")
+                .into(),
         )
-        .into())
     }
 }
 
@@ -321,19 +319,11 @@ fn copy_leap_dylib(root: &Path, dst_dir: &Path) -> Result<(), Box<dyn std::error
         }
         // Read via `read` (not symlink-following `copy`) so that if `libLeapC.dylib`
         // is a symlink we copy the actual bytes rather than creating another symlink.
-        let bytes = std::fs::read(&src).map_err(|e| {
-            format!(
-                "bundle-mac: cannot read {}: {e}",
-                src.display()
-            )
-        })?;
+        let bytes = std::fs::read(&src)
+            .map_err(|e| format!("bundle-mac: cannot read {}: {e}", src.display()))?;
         let dst = dst_dir.join(name);
-        std::fs::write(&dst, &bytes).map_err(|e| {
-            format!(
-                "bundle-mac: cannot write {}: {e}",
-                dst.display()
-            )
-        })?;
+        std::fs::write(&dst, &bytes)
+            .map_err(|e| format!("bundle-mac: cannot write {}: {e}", dst.display()))?;
     }
 
     Ok(())
@@ -371,7 +361,10 @@ fn dir_size(dir: &Path) -> Result<u64, Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect is appropriate in test scaffolding")]
+#[allow(
+    clippy::expect_used,
+    reason = "expect is appropriate in test scaffolding"
+)]
 mod tests {
     use super::*;
 
