@@ -26,9 +26,11 @@
 //!
 //! AM LFO: sine at `(scalar−1)·100 + 1e-10` Hz, amplitude 0.5 around base 1.0.
 //!
-//! Noise: white → bandpass(Q=100, `1500·(1+scalar²)`) · `1/Q` · `clamp((scalar−1.002)·20, 0, 1)`.
-//! The `1/Q` factor renormalizes fundsp's Simper-SVF bandpass (peak gain = Q,
-//! not normalized) back to v4's unity-peak `BiquadFilterNode` level.
+//! Noise: white → bandpass(Q=100, `min(1500·(1+scalar²), 20 kHz)`) · `1/Q` ·
+//! `clamp((scalar−1.002)·20, 0, 1)`. The `1/Q` factor renormalizes fundsp's
+//! Simper-SVF bandpass (peak gain = Q, not normalized) back to v4's unity-peak
+//! `BiquadFilterNode` level; the `20 kHz` cap keeps the SVF below Nyquist so a
+//! sustained grip can't diverge it to NaN (see [`NOISE_CUTOFF_MAX_HZ`]).
 
 use fundsp::prelude::*;
 
@@ -59,6 +61,20 @@ const PARAM_SMOOTHING_S: f32 = 0.016;
 /// Q, so the raw fundsp path is `NOISE_Q`× hotter than v4. The `1/NOISE_Q` scale
 /// on the noise voice restores v4's unity-peak level.
 const NOISE_Q: f32 = 100.0;
+
+/// Upper bound (Hz) on the noise bandpass centre frequency.
+///
+/// The cutoff is `1500·(1+scalar²)`, and during a sustained grip
+/// `osc_freq_scalar` (hence `scalar²`) grows without bound, so after ~45 s the
+/// raw cutoff exceeds Nyquist. fundsp's Simper-SVF computes `g = tan(π·fc/sr)`,
+/// which goes negative once `fc > sr/2`; that diverges the TPT integrator to
+/// NaN, and NaN is sticky — the bandpass, then the whole `mix >> limiter` graph,
+/// then emits NaN forever (dead silence until sketch re-entry). v4's `WebAudio`
+/// `BiquadFilterNode` clamps frequency to Nyquist per spec; this restores that
+/// clamp. 20 kHz sits below Nyquist at every supported sample rate (≥ 44.1 kHz)
+/// and is perceptually identical for broadband hiss, so the cap changes nothing
+/// audible — only `num_cycles`/`osc_freq_scalar` itself stays unbounded (v4-faithful).
+const NOISE_CUTOFF_MAX_HZ: f32 = 20_000.0;
 
 /// Cymatics voice graph.
 ///
@@ -166,7 +182,10 @@ impl CymaticsSynth {
         let scalar_sq_noise =
             (var(&osc_freq_scalar) * var(&osc_freq_scalar)) >> follow(PARAM_SMOOTHING_S);
         // Bandpass cutoff: 1500*(1+scalar²). At scalar=1.0: 3000 Hz; rises with scalar.
-        let noise_cutoff = (scalar_sq_noise + 1.0) * 1500.0;
+        // Clamped just below Nyquist (NOISE_CUTOFF_MAX_HZ): a sustained grip grows
+        // scalar without bound, and an unclamped cutoff past Nyquist diverges the
+        // SVF to a sticky NaN that kills the whole voice (see NOISE_CUTOFF_MAX_HZ).
+        let noise_cutoff = ((scalar_sq_noise + 1.0) * 1500.0) >> clip_to(0.0, NOISE_CUTOFF_MAX_HZ);
         // Noise gain: clamp((scalar-1.002)*20, 0, 1). Zero until scalar > 1.002.
         let noise_gain = ((var(&osc_freq_scalar) - 1.002_f32) * 20.0) >> clip_to(0.0, 1.0);
         // white noise → SVF bandpass (Q=100, dynamic cutoff) → scale by noise_gain.
@@ -358,5 +377,27 @@ mod tests {
             "osc_freq_scalar write must not disturb osc_volume; got {}",
             s2.osc_volume.value()
         );
+    }
+
+    /// Regression: a sustained grip drives `osc_freq_scalar` (hence the noise
+    /// bandpass cutoff `1500·(1+scalar²)`) far past Nyquist. Before the
+    /// [`NOISE_CUTOFF_MAX_HZ`] clamp, fundsp's SVF computed `g = tan(π·fc/sr) < 0`
+    /// past Nyquist and diverged to a sticky NaN that silenced the whole voice
+    /// forever (the "grip cutout"). At `osc_freq_scalar = 10` the unclamped cutoff
+    /// would be `1500·101 ≈ 151 kHz`, well past the old ~3.87 NaN threshold; every
+    /// rendered sample must stay finite.
+    #[test]
+    fn high_freq_scalar_stays_finite() {
+        let mut s = CymaticsSynth::new(48_000.0);
+        s.set_param("osc_volume", 1.0);
+        // 10 ≫ the old ~3.87 scalar at which the cutoff first crossed Nyquist.
+        s.set_param("osc_freq_scalar", 10.0);
+        for i in 0..8_192 {
+            let sample = s.tick_mono();
+            assert!(
+                sample.is_finite(),
+                "sample {i} must be finite (no NaN/inf), got {sample}"
+            );
+        }
     }
 }
