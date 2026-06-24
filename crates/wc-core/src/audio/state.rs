@@ -29,6 +29,10 @@ pub enum AudioStatus {
 /// `volume` and `muted` are the **target** state; the audio thread applies them
 /// asynchronously after consuming the matching `AudioCommand`s, so a brief
 /// out-of-sync window is possible. Treat the mismatch as harmless.
+// Each sketch adds one `synth_active` bool. The lint fires at 4; suppressing
+// it here is cleaner than encoding the activation bitmask in an integer or a
+// richer state type for what is a simple mirror of audio-thread state.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Resource, Debug, Clone, Reflect)]
 pub struct AudioState {
     /// Engine lifecycle status.
@@ -50,6 +54,9 @@ pub struct AudioState {
     /// Whether the Dots synth is currently active on the audio thread.
     /// Mirrors `DotsSynthActivated` / `DotsSynthDeactivated` messages.
     pub dots_synth_active: bool,
+    /// Whether the Cymatics voice bundle is currently active on the audio thread.
+    /// Mirrors `CymaticsSynthActivated` / `CymaticsSynthDeactivated` messages.
+    pub cymatics_synth_active: bool,
     /// Most recent error from the audio thread, if any.
     pub last_error: Option<String>,
 }
@@ -64,6 +71,7 @@ impl Default for AudioState {
             muted: false,
             line_synth_active: false,
             dots_synth_active: false,
+            cymatics_synth_active: false,
             last_error: None,
         }
     }
@@ -113,6 +121,12 @@ pub fn pump_audio_messages(
             }
             AudioMessage::DotsSynthDeactivated => {
                 state.dots_synth_active = false;
+            }
+            AudioMessage::CymaticsSynthActivated => {
+                state.cymatics_synth_active = true;
+            }
+            AudioMessage::CymaticsSynthDeactivated => {
+                state.cymatics_synth_active = false;
             }
         }
     }

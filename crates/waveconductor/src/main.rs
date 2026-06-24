@@ -131,7 +131,8 @@ fn main() {
 /// so dev, release, and macOS `.app` bundle deployments all locate samples
 /// without environment-specific compile-time paths or cwd assumptions.
 ///
-/// Cymatics entries are added in Task C4.
+/// Includes line background and the three Cymatics samples (kick, risingbass,
+/// blub) converted from the v4 audio assets.
 fn load_sample_assets() -> SampleAssets {
     let root = wc_core::platform::assets::asset_root();
     let load = |name: &'static str, rel: &str| -> Option<EncodedSample> {
@@ -154,6 +155,12 @@ fn load_sample_assets() -> SampleAssets {
     };
     let mut samples = Vec::new();
     samples.extend(load("line_background", "sketches/line/line_background.ogg"));
+    samples.extend(load("cymatics_kick", "sketches/cymatics/kick.ogg"));
+    samples.extend(load(
+        "cymatics_risingbass",
+        "sketches/cymatics/risingbass.ogg",
+    ));
+    samples.extend(load("cymatics_blub", "sketches/cymatics/blub.ogg"));
     SampleAssets { samples }
 }
 

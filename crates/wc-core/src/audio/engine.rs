@@ -171,9 +171,10 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
             // Drain commands.
             while let Ok(cmd) = cmd_consumer.pop() {
                 dsp.apply(cmd);
-                // SetLineParam / SetDotsParam are fire-and-forget on the main
-                // side; omit echoes to keep per-frame param sweeps off the
-                // bounded message ring (which would otherwise drop them).
+                // SetLineParam / SetDotsParam / SetCymaticsParam /
+                // TriggerCymaticsSample are fire-and-forget on the main side;
+                // omit echoes to keep per-frame param sweeps off the bounded
+                // message ring (which would otherwise drop them).
                 let echo = match cmd {
                     AudioCommand::SetMasterVolume(_) => {
                         Some(AudioMessage::VolumeApplied(dsp.volume()))
@@ -181,11 +182,18 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
                     AudioCommand::SetMuted(m) => Some(AudioMessage::MutedApplied(m)),
                     AudioCommand::AddLineSynth => Some(AudioMessage::LineSynthActivated),
                     AudioCommand::RemoveLineSynth => Some(AudioMessage::LineSynthDeactivated),
-                    // Per-param sweeps are fire-and-forget; omit echoes to
-                    // keep the bounded message ring from dropping them.
-                    AudioCommand::SetLineParam { .. } | AudioCommand::SetDotsParam { .. } => None,
                     AudioCommand::AddDotsSynth => Some(AudioMessage::DotsSynthActivated),
                     AudioCommand::RemoveDotsSynth => Some(AudioMessage::DotsSynthDeactivated),
+                    AudioCommand::AddCymaticsSynth => Some(AudioMessage::CymaticsSynthActivated),
+                    AudioCommand::RemoveCymaticsSynth => {
+                        Some(AudioMessage::CymaticsSynthDeactivated)
+                    }
+                    // Per-param sweeps and one-shot triggers are fire-and-forget;
+                    // omit echoes to keep the bounded message ring from filling.
+                    AudioCommand::SetLineParam { .. }
+                    | AudioCommand::SetDotsParam { .. }
+                    | AudioCommand::SetCymaticsParam { .. }
+                    | AudioCommand::TriggerCymaticsSample(_) => None,
                 };
                 if let Some(msg) = echo {
                     let _ = msg_producer.push(msg);

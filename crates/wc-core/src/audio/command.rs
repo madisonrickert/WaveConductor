@@ -62,6 +62,44 @@ pub enum AudioCommand {
         /// New target value. Range and meaning depend on `key`.
         value: f32,
     },
+    /// Build and activate the Cymatics sketch's synth voice bundle. Idempotent:
+    /// a second `AddCymaticsSynth` while voices are active is a no-op.
+    ///
+    /// Allocates (the `CymaticsSynth` graph plus `LoopVoice`/`OneShotVoice`
+    /// structs) on the audio thread exactly once per sketch activation.
+    AddCymaticsSynth,
+    /// Stop the Cymatics voices. Idempotent: a second `RemoveCymaticsSynth`
+    /// while no voices are active is a no-op. Drops the bundle and its
+    /// associated allocations.
+    RemoveCymaticsSynth,
+    /// Set a named parameter on the Cymatics voice bundle. `key` is
+    /// `&'static str` to keep this variant `Copy`; legal keys are
+    /// `"osc_volume"`, `"osc_freq_scalar"` (→ synth), `"blub_volume"`,
+    /// `"blub_rate"` (→ blub loop voice). Unknown keys are logged and dropped
+    /// silently — the host never panics on a stale key.
+    SetCymaticsParam {
+        /// Parameter identifier. Must be a `'static` string literal.
+        key: &'static str,
+        /// New target value. Range and meaning depend on `key`.
+        value: f32,
+    },
+    /// Trigger a one-shot Cymatics sample by ID. Re-triggering while a shot is
+    /// still playing restarts it from the beginning. Fire-and-forget; no echo
+    /// message is sent back.
+    TriggerCymaticsSample(CymaticsSampleId),
+}
+
+/// One-shot Cymatics sample identifiers (v4 `kick`/`risingbass`).
+///
+/// Used with [`AudioCommand::TriggerCymaticsSample`] to identify which
+/// one-shot voice to fire. Both variants are `Copy` so the parent enum stays
+/// `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CymaticsSampleId {
+    /// Percussive kick on interaction onset.
+    Kick,
+    /// Rising bass swell on interaction onset.
+    RisingBass,
 }
 
 /// Messages the audio thread sends back to the main thread.
@@ -97,4 +135,9 @@ pub enum AudioMessage {
     DotsSynthActivated,
     /// Sent after the audio thread applies a `RemoveDotsSynth` command.
     DotsSynthDeactivated,
+    /// Sent after the audio thread applies an `AddCymaticsSynth` command and
+    /// successfully constructed the Cymatics voice bundle.
+    CymaticsSynthActivated,
+    /// Sent after the audio thread applies a `RemoveCymaticsSynth` command.
+    CymaticsSynthDeactivated,
 }

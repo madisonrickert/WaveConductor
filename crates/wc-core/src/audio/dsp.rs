@@ -8,17 +8,18 @@
 //! ## Real-time invariants
 //!
 //! - `render` is allocation-free.
-//! - `apply` is allocation-free **except** for `AddLineSynth` and
-//!   `AddDotsSynth`, each of which boxes a new voice graph exactly once per
-//!   sketch activation. This is a one-shot cost at sketch boundaries, not a
-//!   per-buffer allocation.
-//! - `RemoveLineSynth` / `RemoveDotsSynth` drop their boxed graphs on the
-//!   audio thread; the deallocation is bounded (a handful of `Arc` and `Box`
-//!   frees, no recursive structure that could surprise us).
+//! - `apply` is allocation-free **except** for `AddLineSynth`, `AddDotsSynth`,
+//!   and `AddCymaticsSynth`, each of which allocates a new voice graph or
+//!   bundle exactly once per sketch activation. This is a one-shot cost at
+//!   sketch boundaries, not a per-buffer allocation.
+//! - `RemoveLineSynth` / `RemoveDotsSynth` / `RemoveCymaticsSynth` drop their
+//!   graphs/bundles on the audio thread; deallocation is bounded (a handful of
+//!   `Arc` and `Box` frees, no recursive structure).
 //!
 //! Plan 9 Phase A wires the Line synth voice graph; Phase B adds background
-//! sample mixing via a named [`SampleBank`] and [`LoopVoice`]; Phase C/D wire
-//! reactivity from `ParticleStats`.
+//! sample mixing via a named [`SampleBank`] and [`LoopVoice`]; Task C4 adds
+//! the Cymatics voice bundle ([`CymaticsVoices`]) with its synth, looping blub,
+//! and kick/risingbass one-shots.
 //!
 //! ## Background sample mixing
 //!
@@ -40,10 +41,11 @@
 
 use fundsp::shared::Shared;
 
-use super::command::AudioCommand;
+use super::command::{AudioCommand, CymaticsSampleId};
+use super::cymatics_synth::CymaticsSynth;
 use super::dots_synth::DotsSynth;
 use super::line_synth::LineSynth;
-use super::sample_bank::{LoopVoice, SampleBank};
+use super::sample_bank::{LoopVoice, OneShotVoice, SampleBank};
 
 /// Bank entry name for the looping background bed (the `line_background.ogg`
 /// asset). Resolved to an index once at construction so the render loop never
@@ -60,6 +62,41 @@ const DEFAULT_BACKGROUND_VOLUME: f32 = 1.0;
 /// background volume is a host-level mixer parameter, not a synth-graph
 /// parameter.
 const BACKGROUND_VOLUME_KEY: &str = "background_volume";
+
+/// Bank entry name for the Cymatics percussive kick one-shot.
+pub const CYMATICS_KICK: &str = "cymatics_kick";
+/// Bank entry name for the Cymatics rising-bass one-shot.
+pub const CYMATICS_RISINGBASS: &str = "cymatics_risingbass";
+/// Bank entry name for the Cymatics looping blub voice.
+pub const CYMATICS_BLUB: &str = "cymatics_blub";
+
+/// Cymatics audio voices: synth, looping blub, and kick/risingbass one-shots.
+///
+/// Built on [`AudioCommand::AddCymaticsSynth`] and dropped on
+/// [`AudioCommand::RemoveCymaticsSynth`]. All sample indices are resolved from
+/// the bank at construction so the render loop never does a string lookup per
+/// buffer.
+struct CymaticsVoices {
+    /// Six-oscillator + noise synth graph. Controlled via
+    /// `SetCymaticsParam { key: "osc_volume" | "osc_freq_scalar" }`.
+    synth: CymaticsSynth,
+    /// Looping blub voice. Volume and rate are set via `SetCymaticsParam`.
+    blub: LoopVoice,
+    /// Resolved bank index for the blub sample, or `None` if absent.
+    blub_idx: Option<usize>,
+    /// Blub amplitude scalar. Clamped to `[0.0, 0.3]` on write (v4 range).
+    blub_volume: f32,
+    /// Blub playback rate. Clamped to `[0.5, 4.0]` on write (v4 range).
+    blub_rate: f64,
+    /// One-shot kick voice. Triggered via `TriggerCymaticsSample(Kick)`.
+    kick: OneShotVoice,
+    /// One-shot rising-bass voice. Triggered via `TriggerCymaticsSample(RisingBass)`.
+    risingbass: OneShotVoice,
+    /// Resolved bank index for the kick sample, or `None` if absent.
+    kick_idx: Option<usize>,
+    /// Resolved bank index for the risingbass sample, or `None` if absent.
+    risingbass_idx: Option<usize>,
+}
 
 /// DSP host owned by the cpal audio thread.
 ///
@@ -93,7 +130,9 @@ pub struct DspHost {
     background: LoopVoice,
     /// Background amplitude (the `background_volume` `SetLineParam` key).
     background_volume: Shared,
-    // Cymatics voices added in Task C4.
+    /// Active Cymatics voice bundle, if any. `None` means the sketch is not
+    /// loaded and the voices contribute nothing to the output mix.
+    cymatics: Option<CymaticsVoices>,
 }
 
 impl DspHost {
@@ -119,16 +158,18 @@ impl DspHost {
             background_idx,
             background,
             background_volume: Shared::new(DEFAULT_BACKGROUND_VOLUME),
+            cymatics: None,
         }
     }
 
     /// Apply a command. Clamps and validates values that the type system
     /// can't constrain (e.g., `SetMasterVolume` outside `[0, 1]`).
     ///
-    /// `AddLineSynth` is idempotent (a second add while active is a no-op).
-    /// `RemoveLineSynth` is idempotent (a remove with no active synth is a
-    /// no-op). `SetLineParam` with a synth not yet active is dropped via a
-    /// `tracing::warn!`; the audio thread never panics on stale params.
+    /// `AddLineSynth` / `AddDotsSynth` / `AddCymaticsSynth` are idempotent
+    /// (a second add while active is a no-op). Their `Remove*` counterparts
+    /// are likewise idempotent. `Set*Param` commands received while the
+    /// corresponding voices are inactive are dropped via `tracing::warn!`;
+    /// the audio thread never panics on stale params.
     pub fn apply(&mut self, command: AudioCommand) {
         match command {
             AudioCommand::SetMasterVolume(v) => {
@@ -182,7 +223,74 @@ impl DspHost {
                     );
                 }
             }
+            AudioCommand::AddCymaticsSynth => self.activate_cymatics(),
+            AudioCommand::RemoveCymaticsSynth => {
+                self.cymatics = None;
+            }
+            AudioCommand::SetCymaticsParam { key, value } => {
+                if let Some(c) = &mut self.cymatics {
+                    match key {
+                        // Host-level loop-voice params; clamped to v4 ranges.
+                        "blub_volume" => c.blub_volume = value.clamp(0.0, 0.3),
+                        "blub_rate" => c.blub_rate = f64::from(value.clamp(0.5, 4.0)),
+                        // Synth-graph params forwarded to CymaticsSynth.
+                        _ => c.synth.set_param(key, value),
+                    }
+                } else {
+                    tracing::warn!(
+                        key,
+                        value,
+                        "SetCymaticsParam with no active voices; dropping"
+                    );
+                }
+            }
+            AudioCommand::TriggerCymaticsSample(id) => {
+                if let Some(c) = &mut self.cymatics {
+                    match id {
+                        CymaticsSampleId::Kick => {
+                            if let Some(i) = c.kick_idx {
+                                c.kick.trigger(i);
+                            }
+                        }
+                        CymaticsSampleId::RisingBass => {
+                            if let Some(i) = c.risingbass_idx {
+                                c.risingbass.trigger(i);
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// Activate the Cymatics voice bundle if not already active. Idempotent.
+    ///
+    /// Resolves the three sample indices from the bank once (string lookup),
+    /// then allocates the synth graph and voice structs. Called only from the
+    /// `AddCymaticsSynth` match arm; extracted so `apply` stays under the
+    /// function-length lint threshold.
+    fn activate_cymatics(&mut self) {
+        if self.cymatics.is_some() {
+            return;
+        }
+        // Resolve indices once at activation; the render loop fetches bank refs
+        // per buffer using these Copy indices (no per-frame string lookup).
+        let blub_idx = self.bank.index_of(CYMATICS_BLUB);
+        let kick_idx = self.bank.index_of(CYMATICS_KICK);
+        let risingbass_idx = self.bank.index_of(CYMATICS_RISINGBASS);
+        let mut blub = LoopVoice::silent();
+        blub.set_sample(blub_idx);
+        self.cymatics = Some(CymaticsVoices {
+            synth: CymaticsSynth::new(f64::from(self.sample_rate)),
+            blub,
+            blub_idx,
+            blub_volume: 0.0,
+            blub_rate: 1.0,
+            kick: OneShotVoice::silent(),
+            risingbass: OneShotVoice::silent(),
+            kick_idx,
+            risingbass_idx,
+        });
     }
 
     /// Current master volume in `[0.0, 1.0]`. Cached for status reporting.
@@ -236,14 +344,18 @@ impl DspHost {
     ///    (scaled by `background_volume`). Zeroing first means cpal's potentially
     ///    uninitialized output buffer never leaks into the mix, and tests can pass
     ///    arbitrary initial values and still get deterministic results.
-    /// 4. Broadcast the summed synth sample across channels, add to the
-    ///    per-channel background, clamp to `[-1.0, 1.0]`.
-    /// 5. Multiply by master `gain` (`muted ? 0 : volume`).
+    /// 4. If Cymatics is active, tick its synth, add the blub loop, and add any
+    ///    in-flight kick/risingbass one-shots — all accumulating into the frame.
+    /// 5. Broadcast the summed Line+Dots synth sample across channels, add to the
+    ///    accumulated frame, **clamp once** to `[-1.0, 1.0]`.
+    /// 6. Multiply by master `gain` (`muted ? 0 : volume`).
     ///
-    /// The background [`LoopVoice`] advances its playhead by one frame per
-    /// output frame, wrapping at the sample boundary via `rem_euclid`. At
-    /// `rate == 1.0` the fractional part is 0 for integer playheads, giving
-    /// bit-exact reads identical to the old `playhead: usize` path.
+    /// The single clamp in step 5 covers all sources (background, Cymatics
+    /// voices, Line, Dots). There is no second clamp. The background
+    /// [`LoopVoice`] advances its playhead by one frame per output frame,
+    /// wrapping at the sample boundary via `rem_euclid`. At `rate == 1.0` the
+    /// fractional part is 0 for integer playheads, giving bit-exact reads
+    /// identical to the old `playhead: usize` path.
     pub fn render(&mut self, output: &mut [f32]) {
         let gain = if self.muted { 0.0 } else { self.volume };
         // `u16 → usize` is infallible on every target we support.
@@ -251,23 +363,54 @@ impl DspHost {
         // Atomic load once per buffer; smoothing deferred to the
         // reactivity-coupling layer (fires at most once per visual frame).
         let bg_volume = self.background_volume.value();
-        // Disjoint-field borrow: resolve the immutable bank reference before
-        // the loop that mutably borrows `self.background`. The bank and voice
-        // fields are distinct, so the borrow checker accepts this.
+        // Disjoint-field borrow: resolve immutable bank references before the
+        // loop that mutably borrows voice fields. `self.bank` and voice fields
+        // (`self.background`, `self.cymatics`) are distinct struct fields, so
+        // the borrow checker accepts coexisting borrows on them.
         let bg_sample = self.background_idx.and_then(|i| self.bank.sample(i));
+        // Pre-store Cymatics sample indices (Copy usize) so the render loop can
+        // fetch bank refs inside the loop using only `self.bank` (immutable) and
+        // `self.cymatics` (mutably borrowed as the voice owner) — disjoint fields.
+        let cym_blub_idx = self.cymatics.as_ref().and_then(|c| c.blub_idx);
+        let cym_kick_idx = self.cymatics.as_ref().and_then(|c| c.kick_idx);
+        let cym_rb_idx = self.cymatics.as_ref().and_then(|c| c.risingbass_idx);
 
         for frame in output.chunks_mut(channels) {
             // Tick synths before touching the frame (no interdependence).
             let line_sample = self.line_synth.as_mut().map_or(0.0, LineSynth::tick_mono);
             let dots_sample = self.dots_synth.as_mut().map_or(0.0, DotsSynth::tick_mono);
             let synth_sample = line_sample + dots_sample;
-            // Clear the frame; mix_frame accumulates into it.
+            // Zero the frame before all additive sources accumulate into it.
             for slot in frame.iter_mut() {
                 *slot = 0.0;
             }
-            // Background bed adds one interpolated frame at rate 1.0.
+            // Background bed: one interpolated frame at rate 1.0.
             self.background.mix_frame(bg_sample, frame, bg_volume, 1.0);
-            // Broadcast synth + clamp sum, apply master gain.
+            // Cymatics voices: synth (mono broadcast) + blub loop + one-shots.
+            // `self.bank` and `self.cymatics` are disjoint fields; the borrow
+            // checker accepts the immutable bank ref alongside &mut self.cymatics.
+            if let Some(c) = &mut self.cymatics {
+                let cym = c.synth.tick_mono();
+                for slot in frame.iter_mut() {
+                    *slot += cym;
+                }
+                // Extract Copy fields before mix_frame calls to avoid borrowing
+                // `c` both for the field values and the mutable voice methods.
+                let blub_vol = c.blub_volume;
+                let blub_rate = c.blub_rate;
+                c.blub.mix_frame(
+                    cym_blub_idx.and_then(|i| self.bank.sample(i)),
+                    frame,
+                    blub_vol,
+                    blub_rate,
+                );
+                c.kick
+                    .mix_frame(cym_kick_idx.and_then(|i| self.bank.sample(i)), frame, 1.0);
+                c.risingbass
+                    .mix_frame(cym_rb_idx.and_then(|i| self.bank.sample(i)), frame, 1.0);
+            }
+            // Single clamp across ALL sources (background + cymatics + Line/Dots),
+            // then master gain. No second clamp anywhere in the pipeline.
             for slot in frame.iter_mut() {
                 *slot = (synth_sample + *slot).clamp(-1.0, 1.0) * gain;
             }
@@ -284,6 +427,7 @@ impl core::fmt::Debug for DspHost {
             .field("muted", &self.muted)
             .field("line_synth_active", &self.line_synth.is_some())
             .field("dots_synth_active", &self.dots_synth.is_some())
+            .field("cymatics_active", &self.cymatics.is_some())
             .field("background_idx", &self.background_idx)
             .field("background_playhead", &self.background.playhead)
             .field("background_volume", &self.background_volume.value())
