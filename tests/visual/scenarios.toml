@@ -113,3 +113,24 @@ dt = 0.016666667
 
 [scenarios.dots-screensaver.debug]
 FORCE_SCREENSAVER = "1"
+
+# ── Cymatics — active mode (the ported v4 wave sketch) ───────────────────────
+# Captures the wave-simulation field in active mode. provider = "synthetic"
+# emits a stationary open hand (deterministic). At rest (no mouse/grab; those are
+# C9/C10) the only excitation is the idle low-radius ambient ripple from the
+# centre source (simulate.wgsl injects 2*sin(time) at the default centre), so the
+# field is a small animating concentric ripple in the v4 palette — NOT black
+# (black => rgba32float WRITE-ONLY storage / pipeline-compile failure) and NOT
+# frozen (delta_prev ~ 0 => a ping-pong continuity problem; default iterations=20
+# is even). Frame spread samples the ripple over time.
+#
+# BASELINES ARE OPERATOR-SEEDED (deferred to C15, which also adds the
+# -interacting / -screensaver scenarios + AgX palette tuning). No baseline PNGs
+# committed yet — first capture reports NEW (review). See tests/visual/CLAUDE.md.
+
+[scenarios.cymatics-synthetic]
+sketch = "cymatics"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
