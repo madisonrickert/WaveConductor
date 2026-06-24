@@ -116,6 +116,18 @@ impl Plugin for HandMeshPlugin {
         )
         .add_systems(Update, resize_bone_target.run_if(in_state(state)));
     }
+
+    /// Not unique: each sketch (Line, Dots, Cymatics, …) registers its own
+    /// `HandMeshPlugin` with that sketch's [`HandMeshConfig`]. Bevy 0.19's default
+    /// `is_unique() == true` dedupes plugins by `name()` (the type name), so the
+    /// second sketch's add would panic with "plugin was already added"; returning
+    /// `false` lets the per-sketch instances coexist (each only wires systems for
+    /// its own `app_state`). The shared composite node + bone material stay
+    /// singletons in [`HandMeshCompositePlugin`] / the `MaterialPlugin` registered
+    /// once by `SketchesPlugin`.
+    fn is_unique(&self) -> bool {
+        false
+    }
 }
 
 /// `OnEnter` — create the off-screen bone image and spawn the `Camera3d` that
