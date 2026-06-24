@@ -4,6 +4,7 @@
 //! Each sketch lives in its own module and follows the pattern documented in
 //! [`wc_core::sketch`].
 
+pub mod cymatics;
 pub mod dots;
 pub mod hand_mesh;
 pub mod line;
