@@ -50,7 +50,7 @@ use bevy::sprite_render::MeshMaterial2d;
 use wc_core::audio::state::AudioState;
 use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::screensaver::in_screensaver;
-use wc_core::lifecycle::state::AppState;
+use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
 use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
@@ -304,7 +304,29 @@ pub(crate) fn register_cymatics_manifest(app: &mut App) {
 ///
 /// Returns `false` when [`CymaticsState`] is absent (e.g. after exit), per the
 /// registered-veto contract.
+///
+/// ## Why it yields once the screensaver is showing
+///
+/// The veto's only legitimate job is to hold `Active` while the field rings
+/// down from a *real* interaction. Once `SketchActivity::Screensaver` is up the
+/// attract driver ([`screensaver::drive_cymatics_attract`]) writes
+/// `active_radius` itself (≥ `attract_radius`), which the radius check below
+/// would read as "still energised" and veto — bouncing the state straight back
+/// to `Active`. `step_centers` then decays the radius for ~10 s until the veto
+/// clears, the state re-enters `Screensaver`, the attract driver jumps the
+/// radius again, and the alive-mask blooms: a periodic phantom pulse roughly
+/// every 10 s, driven entirely by the veto reading the very field the attract
+/// driver raised. Returning `false` in `Screensaver` breaks that loop; with no
+/// input `idle_for` stays > 60 s, so the screensaver holds on its own.
 fn cymatics_idle_veto(world: &World) -> bool {
+    // Already in the screensaver: the attract driver owns `active_radius`, so a
+    // veto here would only flap the state against itself (see the doc above).
+    if world
+        .get_resource::<State<SketchActivity>>()
+        .is_some_and(|a| *a.get() == SketchActivity::Screensaver)
+    {
+        return false;
+    }
     world
         .get_resource::<CymaticsState>()
         .is_some_and(|s| s.active_radius > MINIMUM_ACTIVE_RADIUS + 1e-2)
@@ -648,6 +670,31 @@ mod tests {
         assert!(
             cymatics_idle_veto(&world),
             "veto must be true while active_radius is above rest"
+        );
+    }
+
+    /// `cymatics_idle_veto`: `false` once `SketchActivity::Screensaver` is
+    /// showing, even with a raised `active_radius`. The attract driver writes
+    /// `active_radius` itself in the screensaver, so a veto there would bounce
+    /// the state back to `Active` and flap (the periodic phantom pulse).
+    #[test]
+    fn idle_veto_is_false_in_screensaver() {
+        let mut world = World::new();
+        // A raised radius that would normally trip the veto…
+        world.insert_resource(CymaticsState {
+            active_radius: MINIMUM_ACTIVE_RADIUS + 0.2,
+            ..CymaticsState::default()
+        });
+        assert!(
+            cymatics_idle_veto(&world),
+            "sanity: a raised radius vetoes while not in the screensaver"
+        );
+
+        // …must be suppressed once the screensaver is the current activity.
+        world.insert_resource(State::new(SketchActivity::Screensaver));
+        assert!(
+            !cymatics_idle_veto(&world),
+            "veto must be false in Screensaver so the attract driver doesn't flap the state"
         );
     }
 
