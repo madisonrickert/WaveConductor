@@ -42,10 +42,7 @@
 //! the [`crate::SketchesPlugin`] umbrella, not here.
 
 pub mod audio_coupling;
-pub mod bone_composite;
-pub mod bone_wireframe;
 pub mod hand_attractors;
-pub mod hand_mesh;
 pub mod hash;
 pub mod post_process;
 pub mod screensaver;
@@ -164,27 +161,33 @@ impl Plugin for DotsPlugin {
                 .run_if(sketch_active(AppState::Dots)),
         );
 
-        // Gate the bone camera and composite on tracked-hand presence (Task 2).
-        // O(≤2 hands) + one bool write per frame; no allocation.
-        app.add_systems(
-            Update,
-            hand_mesh::update_dots_bone_activity.run_if(sketch_active(AppState::Dots)),
-        );
-
         // Hand attractors (D5) wired here.
         app.add_plugins(hand_attractors::DotsLeapAttractorsPlugin);
         // Screensaver attract driver (D6a).
         app.add_plugins(screensaver::DotsScreensaverPlugin);
-        // Wireframe bone visualization (D6b Task 1): off-screen bone Camera3d
-        // + 20 icosphere children per TrackedHand while Dots is active.
-        app.add_plugins(hand_mesh::DotsHandMeshPlugin);
-        // Additive bone-glow composite (D6b Task 2): blends the off-screen bone
-        // image into the Dots scene before bloom + tonemapping. No-ops cleanly
-        // when `DotsHandMeshTarget` is absent (outside Dots or before the image
-        // first uploads). Carry-forward: add a `WC_DEBUG_DISABLE_BONE_COMPOSITE`
-        // gate here (mirroring Line's `should_register_bone_composite`) if Dots
-        // needs per-stage render isolation in debug builds.
-        app.add_plugins(bone_composite::DotsBoneCompositePlugin);
+        // Shared wireframe bone overlay (was DotsHandMeshPlugin + DotsBoneCompositePlugin).
+        app.add_plugins(crate::hand_mesh::HandMeshPlugin {
+            config: crate::hand_mesh::HandMeshConfig {
+                app_state: AppState::Dots,
+                // Ice blue `#b0d8ff` — unchanged from the old DotsHandMesh colour.
+                bone_color: Color::srgb(
+                    f32::from(0xb0_u8) / 255.0,
+                    f32::from(0xd8_u8) / 255.0,
+                    f32::from(0xff_u8) / 255.0,
+                ),
+                glow_intensity: 5.0,
+                bone_radius: 10.0,
+            },
+        });
+        // Order the shared composite after the explode post-process (was the
+        // `.after(dots_post_process)` edge inside DotsBoneCompositePlugin).
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render_app.configure_sets(
+                bevy::core_pipeline::Core2d,
+                crate::hand_mesh::HandMeshCompositeSet
+                    .after(post_process::dots_post_process),
+            );
+        }
 
         // Restart listener: begins the FadeOut phase of the reload overlay when
         // a requires_restart setting changes (e.g. `dot_spacing`, which sizes
@@ -305,10 +308,6 @@ fn insert_dots_post_params(mut commands: Commands<'_, '_>, window: Query<'_, '_,
     // Seed the focal at world-space center so the first hand grab eases
     // smoothly from center rather than from a stale position.
     commands.insert_resource(systems::DotsExplodeFocal(Vec2::ZERO));
-    // Start with the bone camera and composite disabled until a hand appears.
-    // `update_dots_bone_activity` will flip this to `true` on the first Update
-    // that sees a TrackedHand entity.
-    commands.insert_resource(hand_mesh::DotsBoneActive(false));
 }
 
 /// `OnExit(AppState::Dots)` companion to [`systems::spawn_dots`].
@@ -327,9 +326,6 @@ fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<post_process::DotsPostParams>();
     commands.remove_resource::<systems::DotsExplodeFocal>();
-    // Remove the presence flag so the render-world removal system (`remove_dots_bone_active_if_absent`)
-    // triggers and the composite early-returns cleanly outside Dots.
-    commands.remove_resource::<hand_mesh::DotsBoneActive>();
 }
 
 /// Whether to register the explode post-process node. On unless
@@ -495,15 +491,14 @@ mod tests {
     }
 
     /// `remove_dots_sim_params` must drop `ParticleSimParams`, `CpuMirror`,
-    /// `DotsPostParams`, `DotsExplodeFocal`, and `DotsBoneActive` on Dots exit
-    /// so VRAM and CPU memory are released and the render system no-ops outside
-    /// Dots.
+    /// `DotsPostParams`, and `DotsExplodeFocal` on Dots exit so VRAM and CPU
+    /// memory are released and the render system no-ops outside Dots.
+    /// `HandPresence` lifecycle is now owned by the shared `HandMeshPlugin`.
     #[test]
     fn remove_dots_sim_params_drops_resources() {
         use crate::particles::compute::ParticleSimParams;
         use crate::particles::particle::SimParams;
         use crate::particles::sim_cpu::CpuMirror;
-        use hand_mesh::DotsBoneActive;
         use post_process::DotsPostParams;
         use systems::DotsExplodeFocal;
 
@@ -521,7 +516,6 @@ mod tests {
             gamma: 1.0,
         });
         world.insert_resource(DotsExplodeFocal(Vec2::ZERO));
-        world.insert_resource(DotsBoneActive(true));
 
         world
             .run_system_once(remove_dots_sim_params)
@@ -543,21 +537,16 @@ mod tests {
             world.get_resource::<DotsExplodeFocal>().is_none(),
             "DotsExplodeFocal must be removed on Dots exit so focal cannot carry stale position"
         );
-        assert!(
-            world.get_resource::<DotsBoneActive>().is_none(),
-            "DotsBoneActive must be removed on Dots exit so the render-world removal system fires"
-        );
     }
 
-    /// `insert_dots_post_params` must insert `DotsPostParams`, `DotsExplodeFocal`,
-    /// and `DotsBoneActive(false)` on Dots enter with the static defaults:
-    /// `shrink_factor=0.98`, `gamma=1.0`, `i_mouse=[0.5, 0.5]`,
-    /// `i_resolution` read from the window (or the fallback `[1920, 1080]`
-    /// when no window entity is present), and the focal at `Vec2::ZERO`.
+    /// `insert_dots_post_params` must insert `DotsPostParams` and `DotsExplodeFocal`
+    /// on Dots enter with the static defaults: `shrink_factor=0.98`, `gamma=1.0`,
+    /// `i_mouse=[0.5, 0.5]`, `i_resolution` read from the window (or the fallback
+    /// `[1920, 1080]` when no window entity is present), and the focal at `Vec2::ZERO`.
+    /// `HandPresence` is now owned by the shared `HandMeshPlugin`, not inserted here.
     #[test]
     #[allow(clippy::float_cmp, reason = "comparing literal defaults")]
     fn insert_dots_post_params_inserts_resource() {
-        use hand_mesh::DotsBoneActive;
         use post_process::DotsPostParams;
         use systems::DotsExplodeFocal;
 
@@ -588,15 +577,6 @@ mod tests {
             focal.0,
             Vec2::ZERO,
             "DotsExplodeFocal must be seeded at Vec2::ZERO"
-        );
-
-        // DotsBoneActive must be seeded false — no hands are present at entry.
-        let bone_active = world
-            .get_resource::<DotsBoneActive>()
-            .expect("DotsBoneActive must be present after OnEnter(Dots)");
-        assert!(
-            !bone_active.0,
-            "DotsBoneActive must be false at Dots entry (no hands yet)"
         );
     }
 

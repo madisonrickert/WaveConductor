@@ -293,7 +293,7 @@ pub fn line_bone_composite(
 /// `RenderAssets<GpuImage>` lookup would not self-guard (the D3 bug).
 ///
 /// Mirrors [`crate::dots::post_process`]'s `remove_dots_post_params_if_absent`
-/// and the matching system in [`crate::dots::bone_composite`].
+/// and the matching system in [`crate::hand_mesh::bone_composite`].
 fn remove_hand_mesh_target_if_absent(
     mut commands: Commands<'_, '_>,
     main_resource: Extract<'_, '_, Option<Res<'_, HandMeshTarget>>>,

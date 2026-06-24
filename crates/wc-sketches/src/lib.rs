@@ -36,6 +36,25 @@ impl Plugin for SketchesPlugin {
         >::default());
         app.add_plugins(crate::particles::compute::ParticleComputePlugin);
 
+        // Shared hand-mesh overlay infra, registered once (like the particle
+        // plugins above) so each sketch's `HandMeshPlugin` can be added without
+        // re-registering the material or composite node. `MaterialPlugin` and
+        // `HandMeshCompositePlugin` are `Plugin` singletons.
+        app.add_plugins(
+            bevy::pbr::MaterialPlugin::<crate::hand_mesh::BoneWireframeMaterial>::default(),
+        );
+        // `WC_DEBUG_DISABLE_BONE_COMPOSITE` gates the composite globally (debug only).
+        #[cfg(debug_assertions)]
+        let register_bone_composite = !app
+            .world()
+            .get_resource::<wc_core::debug::DebugToggles>()
+            .is_some_and(|t| t.disable_bone_composite);
+        #[cfg(not(debug_assertions))]
+        let register_bone_composite = true;
+        if register_bone_composite {
+            app.add_plugins(crate::hand_mesh::HandMeshCompositePlugin);
+        }
+
         // Concrete sketch plugins.
         app.add_plugins(line::LinePlugin);
         app.add_plugins(dots::DotsPlugin);
