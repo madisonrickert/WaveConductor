@@ -13,7 +13,11 @@
 // at ±1 texel, scaled to UV space; matches v4 halfTexelScaleX/Y) and applies
 // two directional lights with power-8 specular. Mixes BASE_COL / BASE_BODY_COL
 // by abs(height)*3, adds a vignette and radial background, and the
-// skewIntensity body push. All v4 constants reproduced exactly.
+// skewIntensity body push. The v4 palette constants are kept verbatim but
+// decoded sRGB -> linear before use, and the field is rendered UNCLAMPED in
+// linear, scene-referred HDR: bright wave cores exceed 1.0 and become real
+// highlights for the global AgX tonemap + bloom (v4 was strictly LDR, clamped
+// and straight-to-canvas; v5 unifies Cymatics with the Line/Dots AgX pipeline).
 //
 // Mesh UV [0, 1] is used as the screen coordinate (v4 used gl_FragCoord /
 // resolution). Y-convention: Bevy mesh UV is top-left origin, matching
@@ -77,8 +81,29 @@ fn sample_height_bilinear(uv: vec2<f32>, sim_res: vec2<f32>, dims: vec2<i32>) ->
     return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 
+// Accurate piecewise sRGB EOTF (sRGB display value -> linear).
+//
+// Cymatics now renders the field in linear, scene-referred colour and lets the
+// global AgX camera tonemap it (like Line and Dots). The palette constants
+// (`BASE_COL = vec3(4, 32, 55) / 255`, etc.) are authored as sRGB *display*
+// bytes -- the values v4 wrote straight to its already-sRGB canvas. To run the
+// lighting math in linear space they must first be decoded sRGB -> linear with
+// this EOTF; `cymatics_color` does that at its top. The const declarations stay
+// the sRGB source-of-truth so the palette reads as the same hex v4 used.
+//
+// The shader no longer applies any sRGB *encode* on output: the fragment writes
+// linear scene-referred colour, and the camera's AgX tonemap + the sRGB
+// swapchain own the display encode.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 // Height-gradient surface normal, two-light power-8 specular, and body mix.
-// Ports v4 `color()` verbatim. All arithmetic matches v4 line-for-line.
+// Ports v4 `color()`; the arithmetic matches v4 line-for-line, but runs on the
+// linearized palette (above) in scene-referred space and returns *unclamped* so
+// bright wave cores become true HDR highlights for the AgX tonemap.
 //
 // Normal derivation: central difference of abs(height) at ±1 texel, scaled
 // to UV space. v4: gradHeightAccX/Y using halfTexelScaleX = 0.5/cellOffset.x
@@ -92,6 +117,13 @@ fn sample_height_bilinear(uv: vec2<f32>, sim_res: vec2<f32>, dims: vec2<i32>) ->
 fn cymatics_color(uv: vec2<f32>) -> vec3<f32> {
     let sim_res = resolution.zw;
     let dims = vec2<i32>(i32(sim_res.x), i32(sim_res.y));
+
+    // Decode the sRGB-authored palette constants to linear, scene-referred space
+    // so the lighting math runs in linear (the camera's AgX does display encode).
+    let base_col = srgb_to_linear(BASE_COL);
+    let base_body_col = srgb_to_linear(BASE_BODY_COL);
+    let light_1_col = srgb_to_linear(LIGHT_1_COL);
+    let light_2_col = srgb_to_linear(LIGHT_2_COL);
 
     // One-texel step in UV space (v4's neighbour offset was ±1 texel).
     let texel = vec2<f32>(1.0) / sim_res;
@@ -129,39 +161,21 @@ fn cymatics_color(uv: vec2<f32>) -> vec3<f32> {
     s2 *= LIGHT_2_BRIGHTNESS;
 
     // v4 heightFactor = abs(height) * 3; bodyColor = mix(BASE_BODY_COL, vec3(1), skewIntensity).
+    // Runs on the linearized palette; white (vec3(1)) is the same in both spaces.
     let height_factor = abs(height) * 3.0;
-    let body = mix(BASE_BODY_COL, vec3<f32>(1.0), skew.x);
-    var col = mix(BASE_COL, body, height_factor);
-    col += s1 * LIGHT_1_COL;
-    col += s2 * LIGHT_2_COL;
-    return clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+    let body = mix(base_body_col, vec3<f32>(1.0), skew.x);
+    var col = mix(base_col, body, height_factor);
+    col += s1 * light_1_col;
+    col += s2 * light_2_col;
+    // Unclamped (v4 clamped to [0, 1]): bright cores exceed 1.0 as real HDR
+    // highlights for the AgX tonemap + bloom downstream. Lighting math keeps all
+    // channels non-negative (body is brighter than base, lights are additive).
+    return col;
 }
 
 // v4 udRoundBox: unsigned distance to a rounded rectangle (negative inside).
 fn ud_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     return length(max(abs(p) - b, vec2<f32>(0.0))) - r;
-}
-
-// Accurate piecewise sRGB EOTF (sRGB display value -> linear).
-//
-// Why this is the final output step: this material renders through the global
-// HDR `Camera2d`, whose intermediate target is linear `Rgba16Float`. Bevy's
-// tonemapping pass (here `Tonemapping::None`, bypassed for Cymatics) treats its
-// input as a *linear* stimulus and writes to the sRGB swapchain, where the
-// hardware applies the sRGB OETF (linear -> sRGB) on store at present time.
-//
-// But the colour constants above (`BASE_COL = vec3(4, 32, 55) / 255`, etc.) are
-// authored as sRGB *display* bytes -- the exact values v4 wrote straight to its
-// (already-sRGB) canvas. Writing those sRGB-authored values into the linear HDR
-// target and letting the present-time OETF re-encode them would sRGB-encode the
-// colour a SECOND time, lifting and washing out the blacks (deep blue -> pale
-// steel-blue). Applying this EOTF as the very last op makes the round-trip an
-// identity -- OETF(EOTF(c)) == c -- so the presented pixels equal v4's display
-// colours exactly. Must stay the final step, after every display-referred trim.
-fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
-    let lo = c / 12.92;
-    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
-    return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
 @fragment
@@ -198,14 +212,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // after the vignette blend so it uniformly scales the whole output frame.
     col = col * skew.y;
     // skew.z = user gamma (User setting; default 1.0 = identity, mirrors
-    // Line/Dots). Display-referred, so it applies after master_brightness and
-    // before the sRGB linearise. `gamma` is a uniform, so this is a uniform
-    // branch (no warp divergence); at 1.0 pow is the identity, skip it. Clamp
-    // >= 0 first so pow is well-defined on any underflowed negative.
+    // Line/Dots). A pre-tonemap contrast knob: it applies after master_brightness
+    // on the linear colour, before the AgX tonemap downstream. `gamma` is a
+    // uniform, so this is a uniform branch (no warp divergence); at 1.0 pow is the
+    // identity, skip it. Clamp >= 0 first so pow is well-defined on any
+    // underflowed negative.
     if skew.z != 1.0 {
         col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(skew.z));
     }
-    // Linearise the sRGB-authored colour as the final op so Bevy's present-time
-    // sRGB encode round-trips to v4's exact display values (see srgb_to_linear).
-    return vec4<f32>(srgb_to_linear(col), 1.0);
+    // Output linear, scene-referred colour. The global AgX camera tonemap + the
+    // sRGB swapchain own the display encode -- no in-shader sRGB encode here.
+    return vec4<f32>(col, 1.0);
 }
