@@ -103,21 +103,25 @@ Gotchas:
 - To exercise the bone path (or any hand-driven visual) without hardware, use
   `WAVECONDUCTOR_HAND_PROVIDER=synthetic` (stationary open-hand fixture).
 
-## The fix (not yet implemented)
+## The fix — configurable frame-rate cap (implemented)
 
-The lever is **headroom**, and the cleanest way to buy it is a **configurable
-framerate cap**:
+The lever is **headroom**, and the way we buy it is a **configurable frame-rate
+cap**: `crates/wc-core/src/frame_limiter/` (commit `3572dfec`). A `Last`-schedule
+system sleeps the main loop to hold at most `FrameLimiterSettings::target_fps`
+(global, persisted, `category = User`, default `0` = uncapped/opt-in, in the
+"Display" panel section). Set it in the panel, or pin it at launch with
+`WAVECONDUCTOR_FPS_CAP=30`. Sleep-only + drift-free pacing; native only (web is
+rAF-paced). We rolled our own rather than `bevy_framepace` (its newest release
+targets Bevy 0.18; we're on 0.19) — see the module docs.
 
-- At 30 fps the budget is 33 ms; a 14 ms frame leaves huge headroom, the GPU
-  drops to a lower clock, the spikes vanish, **and power/heat drop** — which
-  directly serves the multi-hour unattended soak goal (the project's #1
-  target). For slow ambient visuals 30-40 fps reads as smooth.
-- Bevy has no built-in cap. A dep-free **sleep-dominant** frame limiter (sleep
-  most of the idle time, spin only the final sub-millisecond for precision) is
-  preferable to `bevy_framepace` (a new dependency) and, unlike a pure
-  spin-wait, actually *lowers* power — important for soak. Make the target fps
-  a setting so 30/40/60 can be A/B'd by feel, ideally on the real kiosk.
+**Verified** on Dots idle: `WAVECONDUCTOR_FPS_CAP=30` holds a steady 30.00 fps
+(33.33 ms, flat) and the GPU performance-state goes from **98.3% Maximum clock
+(uncapped) → 2.2% Maximum / 63.7% Minimum** — the GPU idles most of each frame,
+restoring the headroom that absorbs variance and dropping power/heat sharply.
 
-Reducing per-frame GPU work (internal-resolution scale, particle count) is the
-alternative if a locked 60 fps is required, but it trades visual density for
-headroom.
+Reducing iterations is **not** a viable alternative: tested 5→3, it collapses
+the signature radial-zoom streaks into discrete sparkles (the streaks *are* the
+multi-iteration accumulation), and it's a partial lever anyway (the explode is
+one of several GPU costs). Reducing other per-frame GPU work (internal-resolution
+scale, particle count) is the option if a locked 60 fps is ever required, but it
+trades visual density for headroom.
