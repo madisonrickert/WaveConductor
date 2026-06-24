@@ -276,8 +276,19 @@ pub fn skip_to_screensaver(
     if rewind {
         timer.rewind_past_screensaver(time.elapsed());
     }
+    // Rising edge — the chord just armed the skip: the screensaver is being
+    // forced on now and will *hold* (the force flag persists past disarm) until
+    // the next real interaction. Logged once so the operator sees it enter.
+    if !*armed && next_armed {
+        tracing::info!("screensaver: Shift+S — entering, holding until interaction");
+    }
+    // Falling edge — the keyboard went quiet so the skip disarms. This does NOT
+    // exit the screensaver: it merely stops re-rewinding to swallow the chord's
+    // own key-up events; the force flag keeps the screensaver up, and the next
+    // interaction wakes it normally. (Reworded from "normal wake behavior
+    // resumes", which read as the screensaver itself exiting.)
     if *armed && !next_armed {
-        tracing::info!("screensaver: skip hotkey released; normal wake behavior resumes");
+        tracing::info!("screensaver: Shift+S released; holding, wakes on next interaction");
     }
     *armed = next_armed;
 }
