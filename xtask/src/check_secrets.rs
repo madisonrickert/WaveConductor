@@ -55,8 +55,10 @@ const FORBIDDEN: &[Forbidden] = &[
         // Simple heuristic: local-part AT domain DOT tld (TLD ≥ 2 chars).
         pattern: r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
         // Allow no-reply bot addresses that appear in git metadata and CI.
-        // Matched as substrings of the full email address.
-        allowlist: &["noreply.github.com"],
+        // Matched as substrings of the full match. `@2x.png` / `@3x.png` are
+        // Apple's `.iconset` Retina naming convention (e.g. `icon_16x16@2x.png`),
+        // not email addresses — the `@<scale>.<ext>` shape trips the heuristic.
+        allowlist: &["noreply.github.com", "@2x.png", "@3x.png"],
     },
 ];
 
