@@ -115,10 +115,10 @@ fn field_visible(def: &SettingDef, advanced: bool) -> bool {
 /// rather than silently hidden.
 fn tab_for_storage_key(key: &str) -> SettingsTab {
     match key {
-        // Both sketch settings types route to the generic Sketch tab; only
+        // All sketch settings types route to the generic Sketch tab; only
         // the currently-running sketch's struct renders (see the active-sketch
         // gate in `draw_user_panel`).
-        "line" | "dots" => SettingsTab::Sketch,
+        "line" | "dots" | "cymatics" => SettingsTab::Sketch,
         "hand_tracking" => SettingsTab::HandTracking,
         // "screensaver", overlay/auto_fade, and anything new.
         _ => SettingsTab::Display,
@@ -132,7 +132,10 @@ fn tab_for_storage_key(key: &str) -> SettingsTab {
 fn active_sketch_tab(state: AppState) -> (&'static str, &'static str) {
     match state {
         AppState::Dots => ("dots", "FABRIC"),
-        // Line is the default/home-adjacent sketch label.
+        AppState::Cymatics => ("cymatics", "CYMATICS"),
+        // Line is the default/home-adjacent sketch label. NOTE: other sketch
+        // states (e.g. Flame, Waves) share this fallback and will mis-show the
+        // Line tab once they register their own settings — add an arm each here.
         _ => ("line", "LINE"),
     }
 }
@@ -1674,6 +1677,7 @@ mod tests {
     fn dots_and_line_route_to_sketch_tab() {
         assert_eq!(tab_for_storage_key("line"), SettingsTab::Sketch);
         assert_eq!(tab_for_storage_key("dots"), SettingsTab::Sketch);
+        assert_eq!(tab_for_storage_key("cymatics"), SettingsTab::Sketch);
         assert_eq!(
             tab_for_storage_key("hand_tracking"),
             SettingsTab::HandTracking
@@ -1682,11 +1686,16 @@ mod tests {
     }
 
     /// The active-sketch tab label and storage key follow `AppState`: Dots shows
-    /// "FABRIC", and all other states (including Line and Home) show "LINE".
+    /// "FABRIC", Cymatics shows "CYMATICS", and the remaining states (including
+    /// Line and Home) fall back to "LINE".
     #[test]
     fn active_sketch_tab_label_follows_state() {
         assert_eq!(active_sketch_tab(AppState::Dots), ("dots", "FABRIC"));
         assert_eq!(active_sketch_tab(AppState::Line), ("line", "LINE"));
+        assert_eq!(
+            active_sketch_tab(AppState::Cymatics),
+            ("cymatics", "CYMATICS")
+        );
     }
 
     /// Every settings struct lands in a tab, and the map is total: unknown
