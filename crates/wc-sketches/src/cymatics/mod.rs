@@ -604,8 +604,8 @@ fn update_cymatics_material(
     // ramps toward ×attract_brightness, lifting the whole linear field up the
     // AgX curve (orange crests reach the vivid shoulder; navy lifts off pure
     // black) without sharpening the gentle waves — a uniform pre-AgX multiply.
-    let brightness = settings.master_brightness
-        * (1.0 + (settings.attract_brightness - 1.0) * fade.alpha());
+    let brightness =
+        settings.master_brightness * (1.0 + (settings.attract_brightness - 1.0) * fade.alpha());
     for handle in quad_q.iter() {
         // v4: skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2).
         // DEFAULT_NUM_CYCLES = 1.002; at rest, the clamp yields 0.
