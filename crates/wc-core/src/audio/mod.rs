@@ -57,6 +57,7 @@ pub mod engine;
 pub mod line_synth;
 pub mod nav;
 pub mod ring;
+pub mod sample_bank;
 pub mod state;
 
 use bevy::ecs::system::NonSend;
