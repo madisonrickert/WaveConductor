@@ -111,6 +111,28 @@ fn ud_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     return length(max(abs(p) - b, vec2<f32>(0.0))) - r;
 }
 
+// Accurate piecewise sRGB EOTF (sRGB display value -> linear).
+//
+// Why this is the final output step: this material renders through the global
+// HDR `Camera2d`, whose intermediate target is linear `Rgba16Float`. Bevy's
+// tonemapping pass (here `Tonemapping::None`, bypassed for Cymatics) treats its
+// input as a *linear* stimulus and writes to the sRGB swapchain, where the
+// hardware applies the sRGB OETF (linear -> sRGB) on store at present time.
+//
+// But the colour constants above (`BASE_COL = vec3(4, 32, 55) / 255`, etc.) are
+// authored as sRGB *display* bytes -- the exact values v4 wrote straight to its
+// (already-sRGB) canvas. Writing those sRGB-authored values into the linear HDR
+// target and letting the present-time OETF re-encode them would sRGB-encode the
+// colour a SECOND time, lifting and washing out the blacks (deep blue -> pale
+// steel-blue). Applying this EOTF as the very last op makes the round-trip an
+// identity -- OETF(EOTF(c)) == c -- so the presented pixels equal v4's display
+// colours exactly. Must stay the final step, after every display-referred trim.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Shift mesh UV [0, 1] to screen-centred [-0.5, 0.5].
@@ -140,8 +162,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // v4: mix(pow(cymaticsColor, vec3(mix(0.8, 1., vignetteAmount))), colBg, vignetteAmount).
     // Gamma 0.8 brightens the centre; gamma 1.0 at the edge before bg blend.
-    let col = mix(pow(cymatics, vec3<f32>(mix(0.8, 1.0, vignette))), bg, vignette);
+    var col = mix(pow(cymatics, vec3<f32>(mix(0.8, 1.0, vignette))), bg, vignette);
     // skew.y = master_brightness (User setting, default 1.0 = no-op). Applied
     // after the vignette blend so it uniformly scales the whole output frame.
-    return vec4<f32>(col * skew.y, 1.0);
+    col = col * skew.y;
+    // Linearise the sRGB-authored colour as the final op so Bevy's present-time
+    // sRGB encode round-trips to v4's exact display values (see srgb_to_linear).
+    return vec4<f32>(srgb_to_linear(col), 1.0);
 }
