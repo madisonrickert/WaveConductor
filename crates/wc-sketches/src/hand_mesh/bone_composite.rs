@@ -134,11 +134,11 @@ impl Plugin for HandMeshCompositePlugin {
 #[derive(Resource)]
 pub struct HandMeshCompositePipeline {
     /// Bind-group layout descriptor (scene texture, sampler, bone texture).
-    pub bind_group_layout_descriptor: BindGroupLayoutDescriptor,
+    pub(crate) bind_group_layout_descriptor: BindGroupLayoutDescriptor,
     /// Filtering sampler used to read both textures.
-    pub sampler: Sampler,
+    pub(crate) sampler: Sampler,
     /// Handle into Bevy's `PipelineCache` for the composite pipeline.
-    pub pipeline_id: CachedRenderPipelineId,
+    pub(crate) pipeline_id: CachedRenderPipelineId,
 }
 
 impl FromWorld for HandMeshCompositePipeline {
