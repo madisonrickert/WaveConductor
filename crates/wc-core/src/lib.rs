@@ -25,6 +25,7 @@ pub mod capture;
 #[cfg(debug_assertions)]
 pub mod debug;
 pub mod diagnostics;
+pub mod frame_limiter;
 pub mod input;
 pub mod lifecycle;
 pub mod platform;
@@ -48,6 +49,10 @@ impl Plugin for CorePlugin {
         app.add_plugins(input::HandTrackingPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
+        // Optional frame-rate cap (restores GPU headroom; see the frame_limiter
+        // module docs and docs/runbooks/dots-explode-gpu-saturation.md). Default
+        // off; opt in via the "Display" settings section or WAVECONDUCTOR_FPS_CAP.
+        app.add_plugins(frame_limiter::FrameLimiterPlugin);
         // Visual-debugging scaffold — debug builds only (compiled out of
         // release). DebugPlugin inserts DebugToggles only when a WC_DEBUG_* var
         // is set; CapturePlugin wires the capture systems only when WC_CAPTURE
