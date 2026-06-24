@@ -26,7 +26,9 @@
 //!
 //! AM LFO: sine at `(scalar−1)·100 + 1e-10` Hz, amplitude 0.5 around base 1.0.
 //!
-//! Noise: white → bandpass(Q=100, `1500·(1+scalar²)`) · `clamp((scalar−1.002)·20, 0, 1)`.
+//! Noise: white → bandpass(Q=100, `1500·(1+scalar²)`) · `1/Q` · `clamp((scalar−1.002)·20, 0, 1)`.
+//! The `1/Q` factor renormalizes fundsp's Simper-SVF bandpass (peak gain = Q,
+//! not normalized) back to v4's unity-peak `BiquadFilterNode` level.
 
 use fundsp::prelude::*;
 
@@ -48,6 +50,15 @@ const DEFAULT_FREQ_SCALAR: f32 = 1.0;
 /// Parameter smoothing time constant (seconds). Matches v4's
 /// `setTargetAtTime(_, _, 0.016)` exponential approach.
 const PARAM_SMOOTHING_S: f32 = 0.016;
+
+/// Noise bandpass resonance (v4 `noiseFilter.Q = 100`).
+///
+/// fundsp's `bandpass::<f64>()` is the Simper-SVF "band" form whose peak gain at
+/// the centre frequency equals Q (it is NOT normalized). v4's `WebAudio`
+/// `BiquadFilterNode` bandpass is unity-peak (0 dB) at the centre regardless of
+/// Q, so the raw fundsp path is `NOISE_Q`× hotter than v4. The `1/NOISE_Q` scale
+/// on the noise voice restores v4's unity-peak level.
+const NOISE_Q: f32 = 100.0;
 
 /// Cymatics voice graph.
 ///
@@ -161,8 +172,10 @@ impl CymaticsSynth {
         // white noise → SVF bandpass (Q=100, dynamic cutoff) → scale by noise_gain.
         // `bandpass::<f64>()` uses f64 for SVF coefficient math (matches DotsSynth/
         // LineSynth style; improves filter accuracy at high Q and extreme cutoffs).
-        let noise_filtered = (white() | noise_cutoff | dc(100.0_f32)) >> bandpass::<f64>();
-        let noise_voice = noise_filtered * noise_gain;
+        let noise_filtered = (white() | noise_cutoff | dc(NOISE_Q)) >> bandpass::<f64>();
+        // `* (1/NOISE_Q)` undoes the SVF's Q-proportional peak gain so the noise
+        // matches v4's unity-peak bandpass level (see the NOISE_Q comment above).
+        let noise_voice = noise_filtered * (1.0 / NOISE_Q) * noise_gain;
 
         // ----- Mix -----
         //
