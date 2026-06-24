@@ -373,6 +373,64 @@ fn shift_s_chord_arms_screensaver_skip_and_rewinds_timer() {
     );
 }
 
+/// Regression: pressing `Shift+S` within the first 60 s of uptime must target
+/// the screensaver immediately.
+///
+/// Before the force flag, `rewind_past_screensaver` saturated `now - 60 s` to
+/// zero at low uptime, so `idle_for` never crossed the 60 s threshold and
+/// `advance_activity` stayed on `Active` — the chord did nothing until the app
+/// had been up a full minute. The flag set by the rewind now carries
+/// `advance_activity` into `Screensaver` at any uptime.
+///
+/// This runs on the real clock (no `TimeUpdateStrategy`), so `Time::elapsed()`
+/// stays in the low-millisecond range — squarely inside the previously-broken
+/// `< 60 s` window the older `direct_action_input` / `shift_s_chord` tests
+/// deliberately stepped past (they advance the clock to ~61 s+ first).
+///
+/// The assertion reads the `NextState<SketchActivity>` that `advance_activity`
+/// queues in the chord frame rather than resolving the transition: actually
+/// entering `Screensaver` runs the framework's `OnEnter` present-rate systems,
+/// which need a `WinitSettings` resource the `MinimalPlugins` harness has no
+/// winit backend to provide. The queued target is exactly what the force flag
+/// changes, so it is the precise regression signal.
+#[test]
+fn shift_s_targets_screensaver_within_first_60s() {
+    let mut app = lifecycle_test_app();
+    app.update();
+
+    // Navigate to a sketch so the `SketchActivity` sub-state exists.
+    press_key(&mut app, KeyCode::Digit1);
+    app.update(); // resolve → AppState::Line, SketchActivity::Active
+    assert_eq!(
+        *app.world().resource::<State<SketchActivity>>().get(),
+        SketchActivity::Active,
+    );
+    // Precondition: nothing is steering activity away from Active yet.
+    assert!(
+        matches!(
+            app.world().resource::<NextState<SketchActivity>>(),
+            NextState::Unchanged
+        ),
+        "precondition: no pending activity transition before the chord"
+    );
+
+    // Chord: Shift held + S just-pressed in the same PreUpdate tick (the
+    // producer requires both edges together), so both presses precede the
+    // update.
+    send_press(&mut app, KeyCode::ShiftLeft);
+    send_press(&mut app, KeyCode::KeyS);
+    app.update(); // emit StartScreensaver → skip arms + force flag → advance_activity queues Screensaver
+
+    assert!(
+        matches!(
+            app.world().resource::<NextState<SketchActivity>>(),
+            NextState::Pending(SketchActivity::Screensaver)
+        ),
+        "Shift+S within the first 60 s of uptime must queue the Screensaver transition; got {:?}",
+        app.world().resource::<NextState<SketchActivity>>()
+    );
+}
+
 /// When `Digit1` and `Digit2` are pressed in the same frame, the
 /// lower-numbered sketch (`Line`, bound to `Digit1`) wins.
 ///

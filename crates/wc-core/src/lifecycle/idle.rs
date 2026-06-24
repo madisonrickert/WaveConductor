@@ -29,6 +29,17 @@ pub struct InteractionTimer {
     /// overlay is shown. With the defaults of 30 s each, the screensaver appears
     /// after 60 s of total inactivity.
     pub screensaver_threshold: Duration,
+    /// When set, [`advance_activity`] targets `Screensaver` regardless of
+    /// elapsed idle time *or* app uptime. The `Shift+S` skip sets it via
+    /// [`Self::rewind_past_screensaver`]; the next real interaction clears it
+    /// via [`Self::mark`].
+    ///
+    /// This closes a gap the rewind alone cannot: in the first 60 s of uptime
+    /// `now - 60 s` saturates to zero, so `idle_for(now) = now < 60 s` could
+    /// never satisfy the screensaver threshold by elapsed time (a `Duration`
+    /// cannot represent a negative `last_interaction`). The flag forces the
+    /// transition at any uptime.
+    force_screensaver: bool,
 }
 
 impl Default for InteractionTimer {
@@ -38,14 +49,21 @@ impl Default for InteractionTimer {
             // Both default to 30 s per v4 BaseSketch.ts.
             idle_threshold: Duration::from_secs(30),
             screensaver_threshold: Duration::from_secs(30),
+            force_screensaver: false,
         }
     }
 }
 
 impl InteractionTimer {
     /// Record that an interaction just happened.
+    ///
+    /// A real interaction also clears any pending `Shift+S` force: the operator
+    /// is back at the controls, so the screensaver wakes via the normal idle
+    /// path. (The skip re-asserts the force every armed frame, so the chord's
+    /// own key-up events — which also land here — do not prematurely clear it.)
     pub fn mark(&mut self, now: Duration) {
         self.last_interaction = now;
+        self.force_screensaver = false;
     }
 
     /// Seconds elapsed since the last interaction.
@@ -66,9 +84,28 @@ impl InteractionTimer {
     /// Rewind the timer as if both idle thresholds had already elapsed, so
     /// [`advance_activity`] targets `Screensaver` on its next run. The
     /// `Shift+S` skip ([`skip_to_screensaver`]) calls this every armed frame.
+    ///
+    /// Also raises [`Self::force_screensaver`]. Past ~60 s of uptime the rewind
+    /// alone is enough (`idle_for` reads as a full 60 s and grows from there,
+    /// so the screensaver also *holds* after the skip disarms). Within the
+    /// first 60 s the subtraction saturates to zero and `idle_for(now) = now`
+    /// stays under threshold, so the flag is what actually carries
+    /// `advance_activity` into `Screensaver` — and keeps it there until the
+    /// next real interaction clears the flag via [`Self::mark`].
     pub fn rewind_past_screensaver(&mut self, now: Duration) {
         self.last_interaction =
             now.saturating_sub(self.idle_threshold + self.screensaver_threshold);
+        self.force_screensaver = true;
+    }
+
+    /// Whether a `Shift+S` skip is currently forcing the screensaver.
+    ///
+    /// [`advance_activity`] targets `Screensaver` while this holds, regardless
+    /// of elapsed idle time or uptime; [`Self::mark`] clears it on the next real
+    /// interaction. Primarily a test hook.
+    #[must_use]
+    pub fn is_forcing_screensaver(&self) -> bool {
+        self.force_screensaver
     }
 }
 
@@ -173,6 +210,12 @@ pub fn reset_on_interaction(
 /// [`InteractionTimer`] past both thresholds so [`advance_activity`] enters
 /// `Screensaver` immediately instead of waiting out the ~60 s idle timer.
 ///
+/// [`InteractionTimer::rewind_past_screensaver`] both rewinds the timer and
+/// raises its force flag, so the skip works at *any* uptime — including the
+/// first 60 s, where the rewind saturates and `idle_for` alone can never cross
+/// the threshold. The flag holds the screensaver after the skip disarms until
+/// the next real interaction clears it.
+///
 /// ## Why it stays armed until the keyboard is quiet
 ///
 /// [`reset_on_interaction`] treats *every* keyboard event as interaction —
@@ -263,7 +306,11 @@ pub fn advance_activity(world: &mut World) {
     let now = world.resource::<Time>().elapsed();
     let timer = world.resource::<InteractionTimer>().clone();
     let idle = timer.idle_for(now);
-    let timeout_target = if idle >= timer.screensaver_threshold + timer.idle_threshold {
+    // The `Shift+S` force flag jumps straight to Screensaver at any uptime;
+    // otherwise fall back to the elapsed-idle thresholds.
+    let timeout_target = if timer.is_forcing_screensaver()
+        || idle >= timer.screensaver_threshold + timer.idle_threshold
+    {
         SketchActivity::Screensaver
     } else if idle >= timer.idle_threshold {
         SketchActivity::Idle
@@ -331,6 +378,37 @@ mod tests {
         early.mark(Duration::from_secs(5));
         early.rewind_past_screensaver(Duration::from_secs(10));
         assert_eq!(early.last_interaction(), Duration::ZERO);
+    }
+
+    #[test]
+    fn rewind_forces_screensaver_even_within_first_60s() {
+        // Within the first 60 s of uptime the rewind saturates `now - 60 s` to
+        // zero, so `idle_for` cannot reach the screensaver threshold by elapsed
+        // time. The force flag is what carries advance_activity into Screensaver.
+        let mut timer = InteractionTimer::default();
+        let now = Duration::from_secs(10); // uptime < 60 s
+        timer.mark(now);
+        assert!(
+            !timer.is_forcing_screensaver(),
+            "mark must leave force clear"
+        );
+
+        timer.rewind_past_screensaver(now);
+        assert!(
+            timer.idle_for(now) < timer.idle_threshold + timer.screensaver_threshold,
+            "at uptime < 60 s the rewind alone cannot cross the threshold"
+        );
+        assert!(
+            timer.is_forcing_screensaver(),
+            "rewind must set the force flag so advance_activity still targets Screensaver"
+        );
+
+        // A real interaction clears the force so the screensaver wakes normally.
+        timer.mark(now);
+        assert!(
+            !timer.is_forcing_screensaver(),
+            "mark (real interaction) must clear the force flag"
+        );
     }
 
     #[test]
