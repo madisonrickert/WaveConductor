@@ -72,7 +72,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
 use bevy::render::texture::GpuImage;
-use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::sim_params::{
     CymaticsSimParams, IterParamsGpu, SimParamsGpu, ITER_PARAMS_STRIDE, MAX_ITERATIONS,
@@ -127,6 +127,16 @@ impl Plugin for CymaticsComputePlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+
+        // Explicitly remove the render-world copy when the main-world resource
+        // is gone. `ExtractResourcePlugin` propagates inserts and updates but
+        // NOT removals (verified against bevy_render 0.19 extract_resource.rs —
+        // the None branch is a complete no-op). Without this, `CymaticsSimParams`
+        // lingers in the render world after `OnExit(AppState::Cymatics)`, causing
+        // `cymatics_compute`'s `run_if(resource_exists::<CymaticsSimParams>)` to
+        // stay true and keep dispatching the N-sub-step compute pass on whatever
+        // sketch is now showing — wasting GPU and thermal budget.
+        render_app.add_systems(ExtractSchedule, remove_cymatics_sim_params_if_absent);
 
         render_app
             .add_systems(RenderStartup, init_cymatics_pipeline)
@@ -494,6 +504,38 @@ fn cymatics_compute(
                 extent,
             );
         }
+    }
+}
+
+/// Removes [`CymaticsSimParams`] from the render world when the main-world
+/// source is absent.
+///
+/// [`ExtractResourcePlugin`] propagates inserts and updates from the main world
+/// to the render world each frame, but it does NOT propagate removals: when
+/// `OnExit(AppState::Cymatics)` removes the main-world [`CymaticsSimParams`],
+/// the render-world copy silently persists. This system — added to the render
+/// sub-app's [`ExtractSchedule`] alongside the `ExtractResourcePlugin` — fills
+/// that gap. It mirrors the identical fix in `dots::post_process` and
+/// `line::post_process`.
+///
+/// When the render-world copy is absent the `cymatics_compute` node's
+/// `run_if(resource_exists::<CymaticsSimParams>)` gate becomes false, stopping
+/// all N-sub-step dispatches. The `Handle<Image>` clones of A/B held inside the
+/// resource are also dropped, releasing the asset reference counts.
+///
+/// Note: the bind-group cache (a render-world `Local` in
+/// `prepare_cymatics_bind_groups`) still holds `TextureView` clones of A/B after
+/// exit; it is gated on the resource so it stops running and is not actively
+/// cleared. This pins ~12.5 MiB of A/B until sketch re-entry — an accepted F5
+/// item mirroring `hand_mesh::bone_composite`. This system addresses the
+/// thermal-budget issue (wasteful dispatch) but not that VRAM pin.
+fn remove_cymatics_sim_params_if_absent(
+    mut commands: Commands<'_, '_>,
+    main_resource: Extract<'_, '_, Option<Res<'_, CymaticsSimParams>>>,
+    render_resource: Option<Res<'_, CymaticsSimParams>>,
+) {
+    if main_resource.is_none() && render_resource.is_some() {
+        commands.remove_resource::<CymaticsSimParams>();
     }
 }
 
