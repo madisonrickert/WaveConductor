@@ -38,6 +38,7 @@
 
 pub mod compute;
 pub mod render;
+pub mod screensaver;
 pub mod settings;
 pub mod systems;
 
@@ -145,6 +146,10 @@ impl Plugin for CymaticsPlugin {
                 bone_radius: 10.0,
             },
         });
+
+        // Attract mode: two wave centres drift on slow incommensurate Lissajous
+        // paths while the screensaver shows. Zero systems when not in screensaver.
+        app.add_plugins(screensaver::CymaticsScreensaverPlugin);
 
         // Lifecycle: allocate the textures + spawn the quad on enter, despawn
         // and release VRAM on exit. Audio lifecycle joins the same schedules:
