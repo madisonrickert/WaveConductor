@@ -85,21 +85,30 @@ impl SimParamsGpu {
 ///
 /// Sized to exactly 256 bytes so each entry in the per-frame iteration buffer
 /// lands on a `min_uniform_buffer_offset_alignment`-aligned boundary. The
-/// 63 padding floats are never read by the shader.
+/// 62 padding floats are never read by the shader.
+///
+/// Field order is load-bearing and must match the WGSL `struct IterParams`:
+/// `time` at offset 0, `wave_signal` at offset 4. `wave_signal` is the
+/// per-sub-step `2·sin(time)` oscillator value, precomputed CPU-side so the
+/// shader does not recompute the same transcendental for every grid cell.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct IterParamsGpu {
     /// `iGlobalTime` for this sub-step.
     pub time: f32,
+    /// Precomputed wave-source oscillator `2·sin(time)` for this sub-step
+    /// (uniform across the dispatch; hoisted out of the per-cell shader).
+    pub wave_signal: f32,
     /// Padding to 256 bytes (dynamic-offset alignment). Never read by the shader.
-    _pad: [f32; 63],
+    _pad: [f32; 62],
 }
 
 impl Default for IterParamsGpu {
     fn default() -> Self {
         Self {
             time: 0.0,
-            _pad: [0.0; 63],
+            wave_signal: 0.0,
+            _pad: [0.0; 62],
         }
     }
 }
@@ -168,6 +177,15 @@ mod tests {
     fn iter_params_is_256_bytes() {
         assert_eq!(std::mem::size_of::<IterParamsGpu>(), 256);
         assert_eq!(ITER_PARAMS_STRIDE, 256);
+    }
+
+    /// `IterParamsGpu` field offsets must match the WGSL `struct IterParams`
+    /// (`time` @0, `wave_signal` @4). A mismatch would silently bind the wrong
+    /// f32 to each shader field — the C5/C6-style POD↔WGSL parity hazard.
+    #[test]
+    fn iter_params_field_offsets_match_wgsl() {
+        assert_eq!(std::mem::offset_of!(IterParamsGpu, time), 0);
+        assert_eq!(std::mem::offset_of!(IterParamsGpu, wave_signal), 4);
     }
 
     #[test]
