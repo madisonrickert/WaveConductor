@@ -32,6 +32,18 @@
 //! `iterations` sub-steps the freshest field is in B when the count is odd and
 //! A when it is even; the final blit copies whichever into `display` so the
 //! renderer always samples one fixed handle regardless of parity.
+//!
+//! # Cross-frame continuity
+//!
+//! A and B are persistent `RENDER_WORLD` textures that survive across frames,
+//! and the sub-step loop **always reads A first** (`ab`). So the next frame can
+//! only continue from the freshest field if the invariant "texture A holds the
+//! latest simulation state at frame end" holds. It holds automatically for even
+//! `iterations` (the last write lands in A); for odd `iterations` the last write
+//! lands in B, so the node additionally copies B → A after the display blit.
+//! [`frame_blit_plan`] computes both decisions (display source + whether to
+//! refresh A) from the sub-step count; default `iterations` is even, so the
+//! extra copy is off in the shipping config.
 
 #![allow(
     clippy::as_conversions,
@@ -156,7 +168,8 @@ struct CymaticsComputeBindGroups {
     dispatch_x: u32,
     /// `ceil(resolution.y / WORKGROUP_SIZE)`.
     dispatch_y: u32,
-    /// Sub-steps to run this frame.
+    /// Sub-steps to run this frame, clamped to `MAX_ITERATIONS` (the
+    /// `iter_buffer` slot count) in `prepare_cymatics_bind_groups`.
     iterations: u32,
 }
 
@@ -317,7 +330,13 @@ fn prepare_cymatics_bind_groups(
     // Each sub-step's phase time → the leading f32 of its 256-byte slot. The
     // shader reads only `time`, so the slot padding is left untouched; writing
     // the 4-byte field directly avoids materialising a 256-byte scratch.
-    for (i, t) in sim.iter_times.iter().enumerate() {
+    //
+    // `.take(MAX_ITERATIONS)` bounds the write to the buffer's slot count: the
+    // `iter_buffer` has exactly `MAX_ITERATIONS` slots, so an over-long
+    // `iter_times` (a malformed sub-step count) would otherwise `write_buffer`
+    // past the buffer end. Defense in depth at the boundary that owns the
+    // fixed-size buffer; the effective sub-step count is clamped to match below.
+    for (i, t) in sim.iter_times.iter().take(MAX_ITERATIONS).enumerate() {
         let offset = i as u64 * ITER_PARAMS_STRIDE;
         render_queue
             .0
@@ -373,12 +392,19 @@ fn prepare_cymatics_bind_groups(
     // no allocation). Bound-checked in the shader against `resolution`.
     let dispatch_x = sim.resolution.x.div_ceil(WORKGROUP_SIZE);
     let dispatch_y = sim.resolution.y.div_ceil(WORKGROUP_SIZE);
+
+    // Clamp the effective sub-step count to the fixed buffer capacity. The
+    // per-iteration uniform has exactly `MAX_ITERATIONS` slots; a larger value
+    // (a malformed Dev setting) would index past the buffer via the loop's
+    // dynamic offsets at submit. Matches the `.take(MAX_ITERATIONS)` write bound
+    // above so the dispatched count never exceeds the slots actually uploaded.
+    let iterations = sim.iterations.min(MAX_ITERATIONS as u32);
     commands.insert_resource(CymaticsComputeBindGroups {
         ab,
         ba,
         dispatch_x,
         dispatch_y,
-        iterations: sim.iterations,
+        iterations,
     });
 }
 
@@ -416,6 +442,15 @@ fn cymatics_compute(
                 });
         pass.set_pipeline(compute_pipeline);
 
+        // `iterations` is clamped to `MAX_ITERATIONS` in prepare; the loop's max
+        // dynamic offset is `(MAX_ITERATIONS - 1) * 256`, inside the buffer.
+        debug_assert!(
+            bg.iterations <= MAX_ITERATIONS as u32,
+            "iterations must be clamped to MAX_ITERATIONS before the dispatch loop; \
+             the iter_buffer has exactly MAX_ITERATIONS slots and a larger count \
+             would index a dynamic offset past the buffer at submit"
+        );
+
         // N sub-steps. Even i reads A / writes B (`ab`), odd i reads B / writes A
         // (`ba`); each binds its own IterParams slot via dynamic offset i*256.
         for i in 0..bg.iterations {
@@ -426,26 +461,64 @@ fn cymatics_compute(
         }
     }
 
-    // The freshest field is in B after an odd sub-step count, else A (the loop
-    // starts ab: i=0 writes B, i=1 writes A, …). Blit it into the stable
-    // `display` texture so the renderer samples one fixed handle regardless of
-    // parity. Requires COPY_SRC on A/B and COPY_DST on display (set in C5).
-    let final_handle = if bg.iterations % 2 == 1 {
-        &sim.tex_b
-    } else {
-        &sim.tex_a
+    let extent = Extent3d {
+        width: sim.resolution.x,
+        height: sim.resolution.y,
+        depth_or_array_layers: 1,
     };
+
+    // Plan this frame's copies from the sub-step count: `final_is_b` selects the
+    // display blit source (B after an odd count, else A), and `refresh_a`
+    // requests the extra B → A copy that restores cross-frame continuity. See
+    // `frame_blit_plan` for the parity reasoning.
+    let (final_is_b, refresh_a) = frame_blit_plan(bg.iterations);
+
+    // Blit the freshest field into the stable `display` texture so the renderer
+    // samples one fixed handle regardless of parity. Requires COPY_SRC on A/B
+    // and COPY_DST on display (set in C5).
+    let final_handle = if final_is_b { &sim.tex_b } else { &sim.tex_a };
     if let (Some(src), Some(dst)) = (images.get(final_handle), images.get(&sim.display)) {
         render_context.command_encoder().copy_texture_to_texture(
             src.texture.as_image_copy(),
             dst.texture.as_image_copy(),
-            Extent3d {
-                width: sim.resolution.x,
-                height: sim.resolution.y,
-                depth_or_array_layers: 1,
-            },
+            extent,
         );
     }
+
+    // Odd sub-step count: the last write landed in B, but the next frame's loop
+    // reads A first. Copy B → A so A holds the latest state at frame end and the
+    // ping-pong stays continuous across frames. Requires COPY_DST on A (set in
+    // C5). Even counts (the default) already leave the latest state in A — no
+    // copy, no overhead in the shipping config.
+    if refresh_a {
+        if let (Some(src), Some(dst)) = (images.get(&sim.tex_b), images.get(&sim.tex_a)) {
+            render_context.command_encoder().copy_texture_to_texture(
+                src.texture.as_image_copy(),
+                dst.texture.as_image_copy(),
+                extent,
+            );
+        }
+    }
+}
+
+/// Returns `(final_is_b, refresh_a)` for an `iterations`-sub-step frame.
+///
+/// `final_is_b` selects the display blit source: the loop starts `ab` (i=0
+/// writes B, i=1 writes A, …), so the last write lands in B for odd counts and A
+/// for even counts (including 0, where no sub-step ran and A still holds the
+/// prior state). `refresh_a` requests the extra B → A copy that keeps the
+/// persistent texture A holding the latest state across frames — needed exactly
+/// when the final write landed in B (odd `iterations`), since the next frame's
+/// loop reads A first. For even counts A is already current, so no copy.
+///
+/// Pure so the cross-frame continuity contract is unit-testable without a GPU;
+/// [`cymatics_compute`] uses it directly, so the test guards the real path.
+fn frame_blit_plan(iterations: u32) -> (bool, bool) {
+    let final_is_b = iterations % 2 == 1;
+    // A holds the latest state iff the final write landed in A (even count); when
+    // it landed in B (odd count) we must copy B → A to restore that invariant.
+    let refresh_a = final_is_b;
+    (final_is_b, refresh_a)
 }
 
 #[cfg(test)]
@@ -474,6 +547,26 @@ mod tests {
         assert_eq!(ITER_PARAMS_SIZE.get(), ITER_PARAMS_STRIDE);
         let last_offset = (MAX_ITERATIONS as u64 - 1) * ITER_PARAMS_STRIDE;
         assert!(u32::try_from(last_offset).is_ok());
+    }
+
+    /// Cross-frame ping-pong continuity: the per-frame copy plan must restore
+    /// the "texture A holds the latest state at frame end" invariant for every
+    /// parity. The loop reads A first, so odd counts (final write in B) need the
+    /// extra B → A copy; even counts (and 0) already leave the latest in A. This
+    /// is the regression guard for the odd-N divergence the even-default visual
+    /// capture would miss.
+    #[test]
+    fn frame_blit_plan_restores_continuity() {
+        // Odd: freshest in B, refresh A from B. N=1 is the degenerate case where
+        // only `ab` ever runs, so A would otherwise never be written.
+        assert_eq!(frame_blit_plan(1), (true, true));
+        assert_eq!(frame_blit_plan(3), (true, true));
+        // Even: freshest already in A, no extra copy. 20 is the shipping default.
+        assert_eq!(frame_blit_plan(2), (false, false));
+        assert_eq!(frame_blit_plan(20), (false, false));
+        // Zero sub-steps: no dispatch ran, A still holds the prior state. Blit A,
+        // no copy — handled like any even count.
+        assert_eq!(frame_blit_plan(0), (false, false));
     }
 
     /// Dispatch math covers a non-multiple-of-8 resolution by rounding up, so

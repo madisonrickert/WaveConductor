@@ -27,11 +27,15 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 /// Build the ping-pong + display textures at `width × height`.
 ///
 /// A and B are `rgba32float` with `STORAGE_BINDING | TEXTURE_BINDING |
-/// COPY_SRC`: each plays both read and write roles across iterations, and the
-/// final output is the blit source. The display texture is
-/// `TEXTURE_BINDING | COPY_DST` — sampled by the material, written by the
-/// post-iteration blit. `rgba32float` (not f16) preserves the small
-/// accumulated-height integration values.
+/// COPY_SRC | COPY_DST`: each plays both read and write roles across iterations,
+/// and the final output is the blit source (`COPY_SRC`). `COPY_DST` is required
+/// on A so the compute node can copy the freshest field B → A after an odd
+/// sub-step count, restoring the cross-frame ping-pong invariant ("A holds the
+/// latest state at frame end") that the next frame's read-A start relies on. A
+/// and B share one descriptor, so B carries `COPY_DST` too (unused on B,
+/// harmless). The display texture is `TEXTURE_BINDING | COPY_DST` — sampled by
+/// the material, written by the post-iteration blit. `rgba32float` (not f16)
+/// preserves the small accumulated-height integration values.
 ///
 /// # Early `rgba32float` support note
 ///
@@ -61,7 +65,9 @@ pub fn create_cymatics_textures(
 
     // Ping-pong A and B: storage + texture + copy-src so each can be the
     // compute write target one iteration and the read source the next, and the
-    // last one written is the blit source for the display copy.
+    // last one written is the blit source for the display copy. COPY_DST lets
+    // the node restore A from B after an odd sub-step count, so A holds the
+    // latest state for the next frame's read-A start (cross-frame continuity).
     let mut ping = Image::new_fill(
         extent,
         TextureDimension::D2,
@@ -69,8 +75,10 @@ pub fn create_cymatics_textures(
         TextureFormat::Rgba32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    ping.texture_descriptor.usage =
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC;
+    ping.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_SRC
+        | TextureUsages::COPY_DST;
 
     // Display: receives the final blit (COPY_DST) and is sampled by the
     // material (TEXTURE_BINDING). No storage — it is never a compute target.
