@@ -127,16 +127,23 @@ pub struct CymaticsTextures {
 /// [`ExtractResource`] clones this into the render world so the compute plugin
 /// (C6) can build its bind group without touching main-world resources.
 ///
-/// `iter_times` is pre-allocated to `MAX_ITERATIONS` and refilled with
-/// `clear()` + `push` each frame — no per-frame heap allocation on the
-/// steady-state path.
+/// The per-iteration phase is carried as two scalars (`phase_base`,
+/// `phase_dt`) rather than a `Vec<f32>` of pre-multiplied times: sub-step `i`'s
+/// time is `phase_base + i·phase_dt`, recomputed where it is written into the
+/// GPU buffer. This keeps the whole resource POD, so the per-frame
+/// `ExtractResource` clone is a cheap field copy (plus two `Handle` ref-count
+/// bumps) with **no heap allocation** — a `Vec` field would otherwise force a
+/// `Vec::clone` (alloc + free) every frame the resource changes, which is every
+/// frame on the steady-state path.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct CymaticsSimParams {
     /// Constant-per-frame uniform.
     pub params: SimParamsGpu,
-    /// Per-iteration phase times (`base + i·dt`); length == `iterations`,
-    /// capacity pre-allocated to `MAX_ITERATIONS` and refilled with `clear()`.
-    pub iter_times: Vec<f32>,
+    /// Base phase for sub-step 0 (v4 `simulationTime` at frame start). Sub-step
+    /// `i`'s time is `phase_base + i·phase_dt`.
+    pub phase_base: f32,
+    /// Per-sub-step phase increment (`cycles·2π / iterations`).
+    pub phase_dt: f32,
     /// Sub-steps this frame.
     pub iterations: u32,
     /// Ping-pong texture A. Holds the latest field at frame end and is the

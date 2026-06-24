@@ -366,9 +366,11 @@ fn spawn_cymatics(
         // `update_cymatics_sim_params`. The constructor lives in `sim_params.rs`
         // because `SimParamsGpu`'s pad field is module-private.
         params: SimParamsGpu::with_resting_physics([vx, vy], MINIMUM_ACTIVE_RADIUS),
-        // Pre-allocated to MAX_ITERATIONS; refilled each frame with `clear()` +
-        // `push` (capacity preserved) so the steady-state path never reallocates.
-        iter_times: Vec::with_capacity(MAX_ITERATIONS),
+        // Phase scalars; overwritten each frame by `update_cymatics_sim_params`.
+        // Carried as two f32s (not a Vec) so the per-frame extract clone never
+        // allocates — sub-step i's time is `phase_base + i·phase_dt`.
+        phase_base: 0.0,
+        phase_dt: 0.0,
         iterations,
         tex_a: textures.a,
         tex_b: textures.b,
@@ -386,14 +388,17 @@ fn remove_cymatics_sim_params(mut commands: Commands<'_, '_>) {
 }
 
 /// Pack [`CymaticsState`] and live physics settings into the extracted
-/// [`CymaticsSimParams`] each frame and fill the per-iteration phase times.
+/// [`CymaticsSimParams`] each frame and store the per-iteration phase scalars.
 ///
 /// v4: the effective cycle count is `numCycles / (1 + slowDown·3)`, and each of
 /// the `N` sub-steps advances the phase by `dt = cycles·2π/N`. The sub-step
-/// times are `base + i·dt` for `i in 0..N`. After filling them this advances the
-/// phase clock by `N·dt` exactly once — this is the **only** system that mutates
-/// [`CymaticsState::simulation_time`] (the audio-coupling stage later takes over
-/// the advance; the invariant is that exactly one system owns it).
+/// times are `base + i·dt` for `i in 0..N`; rather than materialise that as a
+/// per-frame `Vec`, this stores `base`/`dt` into `phase_base`/`phase_dt` and the
+/// render-world prepare step recomputes each slot's time. After storing them
+/// this advances the phase clock by `N·dt` exactly once — this is the **only**
+/// system that mutates [`CymaticsState::simulation_time`] (the audio-coupling
+/// stage later takes over the advance; the invariant is that exactly one system
+/// owns it).
 ///
 /// Physics fields (`force_multiplier`, `velocity_decay`, `height_decay`,
 /// `accumulated_height_decay`) are now read from `CymaticsSettings` each frame
@@ -429,11 +434,11 @@ fn update_cymatics_sim_params(
     let dt = cycles * std::f32::consts::TAU / n as f32;
     let base = state.simulation_time;
 
-    // `clear()` keeps the MAX_ITERATIONS capacity, so this never reallocates.
-    sim.iter_times.clear();
-    for i in 0..n {
-        sim.iter_times.push(base + i as f32 * dt);
-    }
+    // Store the phase scalars; the render-world prepare step recomputes each
+    // sub-step's time as `phase_base + i·phase_dt` (no per-frame Vec, so the
+    // extract clone never allocates).
+    sim.phase_base = base;
+    sim.phase_dt = dt;
 
     // Advance the phase clock once per frame (single-owner invariant above).
     state.simulation_time += n as f32 * dt;
@@ -569,7 +574,8 @@ mod tests {
         world.insert_resource(CymaticsState::default());
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
-            iter_times: Vec::with_capacity(MAX_ITERATIONS),
+            phase_base: 0.0,
+            phase_dt: 0.0,
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
@@ -590,22 +596,24 @@ mod tests {
         );
     }
 
-    /// `update_cymatics_sim_params` fills `iter_times` to `iterations` entries
-    /// (`base + i·dt`), advances `simulation_time` exactly once by `N·dt`, and
-    /// never reallocates `iter_times` (capacity preserved across `clear()`).
+    /// `update_cymatics_sim_params` stores the phase scalars (`phase_base` =
+    /// base, `phase_dt` = dt) and advances `simulation_time` exactly once by
+    /// `N·dt`. Sub-step `i`'s time is reconstructed as `phase_base + i·phase_dt`
+    /// by the render-world prepare step.
     #[test]
     #[allow(
         clippy::as_conversions,
         clippy::cast_precision_loss,
         reason = "test arithmetic mirrors the system's u32→f32 phase math"
     )]
-    fn update_fills_iter_times_and_advances_time_once() {
+    fn update_sets_phase_scalars_and_advances_time_once() {
         let mut world = World::new();
         world.insert_resource(CymaticsState::default());
         world.insert_resource(CymaticsSettings::default());
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
-            iter_times: Vec::with_capacity(MAX_ITERATIONS),
+            phase_base: 0.0,
+            phase_dt: 0.0,
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
@@ -621,18 +629,13 @@ mod tests {
         let dt = cycles * std::f32::consts::TAU / 20.0;
 
         let sim = world.resource::<CymaticsSimParams>();
-        assert_eq!(sim.iter_times.len(), 20, "iter_times length must equal N");
         assert!(
-            sim.iter_times.capacity() >= MAX_ITERATIONS,
-            "capacity must be preserved (no reallocation)"
+            sim.phase_base.abs() < 1e-6,
+            "phase_base must be the base phase (0.0)"
         );
         assert!(
-            sim.iter_times[0].abs() < 1e-6,
-            "first sub-step time must be the base phase (0.0)"
-        );
-        assert!(
-            (sim.iter_times[1] - dt).abs() < 1e-4,
-            "sub-step spacing must be dt"
+            (sim.phase_dt - dt).abs() < 1e-4,
+            "phase_dt must equal the per-sub-step spacing dt"
         );
         // Centres packed through in top-left UV with no y-flip.
         assert!(
@@ -665,7 +668,8 @@ mod tests {
         });
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
-            iter_times: Vec::with_capacity(MAX_ITERATIONS),
+            phase_base: 0.0,
+            phase_dt: 0.0,
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),

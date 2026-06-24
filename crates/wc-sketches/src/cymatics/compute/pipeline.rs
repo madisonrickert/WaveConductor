@@ -7,8 +7,9 @@
 //! [`CymaticsComputePlugin::build`] wires three pieces into the render world:
 //!
 //! 1. [`ExtractResourcePlugin`] clones [`CymaticsSimParams`] (the per-frame
-//!    uniform, the per-iteration phase times, the two ping-pong texture
-//!    handles, and the sub-step count) from the main world each frame.
+//!    uniform, the per-iteration phase scalars, the two ping-pong texture
+//!    handles, and the sub-step count) from the main world each frame. The
+//!    resource is POD, so the clone allocates nothing.
 //! 2. `init_cymatics_pipeline` ([`RenderStartup`]) builds the bind-group
 //!    layout, queues the compute pipeline, and allocates the two persistent
 //!    uniform buffers (the constant `SimParams` and the `MAX_ITERATIONS`-slot
@@ -334,16 +335,20 @@ fn prepare_cymatics_bind_groups(
     // shader reads only `time`, so the slot padding is left untouched; writing
     // the 4-byte field directly avoids materialising a 256-byte scratch.
     //
-    // `.take(MAX_ITERATIONS)` bounds the write to the buffer's slot count: the
-    // `iter_buffer` has exactly `MAX_ITERATIONS` slots, so an over-long
-    // `iter_times` (a malformed sub-step count) would otherwise `write_buffer`
-    // past the buffer end. Defense in depth at the boundary that owns the
-    // fixed-size buffer; the effective sub-step count is clamped to match below.
-    for (i, t) in sim.iter_times.iter().take(MAX_ITERATIONS).enumerate() {
-        let offset = i as u64 * ITER_PARAMS_STRIDE;
+    // The time is recomputed from the two phase scalars: sub-step i's time is
+    // `phase_base + i·phase_dt`, byte-identical to the old pre-multiplied
+    // `iter_times[i]` (`update_cymatics_sim_params` stores `base`/`dt`). The
+    // slot count is clamped to `MAX_ITERATIONS` — the `iter_buffer`'s exact slot
+    // count — so a malformed sub-step count can never `write_buffer` past the
+    // buffer end; the dispatched count below is clamped to the same value. `u16`
+    // holds MAX_ITERATIONS (120) and gives a lossless, lint-clean index → f32.
+    let slot_count = u16::try_from(sim.iterations.min(MAX_ITERATIONS as u32)).unwrap_or(0);
+    for i in 0..slot_count {
+        let t = sim.phase_base + f32::from(i) * sim.phase_dt;
+        let offset = u64::from(i) * ITER_PARAMS_STRIDE;
         render_queue
             .0
-            .write_buffer(&pipeline.iter_buffer, offset, bytemuck::bytes_of(t));
+            .write_buffer(&pipeline.iter_buffer, offset, bytemuck::bytes_of(&t));
     }
 
     // Rebuild the bind groups only on a texture-view change; reuse otherwise.
