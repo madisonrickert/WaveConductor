@@ -456,6 +456,18 @@ fn update_cymatics_sim_params(
 /// The `skew_curve` Dev knob applies an exponent to this raw value before
 /// packing into the uniform, allowing a wider or narrower push range.
 ///
+/// ## Change-gated upload
+///
+/// `materials.get_mut` marks the material asset `Changed`, which forces the
+/// render world to re-extract and re-upload its 32-byte uniform. Taking that
+/// borrow unconditionally every frame would re-upload an identical uniform on
+/// every frame of the multi-hour at-rest screensaver (where `num_cycles`,
+/// `skew_curve`, and `master_brightness` are all pinned). So this reads the
+/// current packed `skew` via `materials.get` first and only mutates when the
+/// freshly-packed `Vec4` differs. At rest every input is pinned, so the packed
+/// `Vec4` is bit-stable frame to frame and the exact compare holds (no
+/// epsilon needed); any real knob change flips a bit and triggers the upload.
+///
 /// ## No-allocation guarantee
 ///
 /// All arithmetic is on stack scalars; no per-frame heap allocation.
@@ -467,9 +479,6 @@ fn update_cymatics_material(
 ) {
     let Some(state) = state else { return };
     for handle in quad_q.iter() {
-        let Some(mut mat) = materials.get_mut(&handle.0) else {
-            continue;
-        };
         // v4: skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2).
         // DEFAULT_NUM_CYCLES = 1.002; at rest, the clamp yields 0.
         let skew_raw = ((state.num_cycles - DEFAULT_NUM_CYCLES) / 2.0 - 0.5)
@@ -482,7 +491,21 @@ fn update_cymatics_material(
         //   .x = skew_intensity  (body-colour push toward white)
         //   .y = master_brightness  (post-render multiplier)
         //   .zw = 0
-        mat.skew = Vec4::new(skew_intensity, settings.master_brightness, 0.0, 0.0);
+        let new_skew = Vec4::new(skew_intensity, settings.master_brightness, 0.0, 0.0);
+
+        // Skip the mutation (and the Changed flag + re-extract/re-upload it
+        // triggers) when the packed uniform is unchanged. The immutable `get`
+        // borrow is confined to this expression, so the `get_mut` below is free
+        // of a borrow conflict.
+        if materials
+            .get(&handle.0)
+            .is_some_and(|mat| mat.skew == new_skew)
+        {
+            continue;
+        }
+        if let Some(mut mat) = materials.get_mut(&handle.0) {
+            mat.skew = new_skew;
+        }
     }
 }
 
