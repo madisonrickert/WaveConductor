@@ -143,6 +143,18 @@ impl Plugin for CymaticsPlugin {
         // both slots are `None` and only mouse/touch drives the centres.
         app.init_resource::<systems::CymaticsHandGrabs>();
 
+        // Hand grab → centres: reads TrackedHand entities, detects grabs, and
+        // writes CymaticsHandGrabs. Must run before update_cymatics_centers so
+        // the interaction state machine reads fresh grab positions this frame.
+        // Runs only while Active (not screensaver — attract mode drives centres
+        // itself in Task C13).
+        app.add_systems(
+            Update,
+            systems::update_cymatics_hand_centers
+                .before(systems::update_cymatics_centers)
+                .run_if(sketch_active(AppState::Cymatics)),
+        );
+
         // Interaction state machine: updates `CymaticsState` from pointer and
         // hand-grab input. Runs only while `Active` (not screensaver — attract
         // drives the centres itself in Task C13). Must run before
