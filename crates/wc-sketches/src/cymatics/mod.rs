@@ -33,6 +33,7 @@
 pub mod compute;
 pub mod render;
 pub mod settings;
+pub mod systems;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::screensaver::in_screensaver;
@@ -136,6 +137,23 @@ impl Plugin for CymaticsPlugin {
         // `World` and return `false` when `CymaticsState` is absent, which is
         // why `OnExit` drops the resource (see `remove_cymatics_sim_params`).
         app.register_idle_veto(cymatics_idle_veto);
+
+        // Hand-grab resource: persists across enter/exit cycles (same pattern
+        // as `DotsMouseAttractorState`). Task C10 sets the fields; until then
+        // both slots are `None` and only mouse/touch drives the centres.
+        app.init_resource::<systems::CymaticsHandGrabs>();
+
+        // Interaction state machine: updates `CymaticsState` from pointer and
+        // hand-grab input. Runs only while `Active` (not screensaver — attract
+        // drives the centres itself in Task C13). Must run before
+        // `update_cymatics_sim_params` so the updated centres are packed into
+        // the GPU uniform this frame.
+        app.add_systems(
+            Update,
+            systems::update_cymatics_centers
+                .before(update_cymatics_sim_params)
+                .run_if(sketch_active(AppState::Cymatics)),
+        );
 
         // Per-frame CPU→GPU bridge. Runs while the sketch is `Active` OR while
         // its screensaver is showing, so the attract/screensaver mode keeps the
