@@ -4,7 +4,8 @@
 //! ## Category split
 //!
 //! - **User** (visible without ADVANCED): `master_brightness` (visual
-//!   brightness trim), `osc_level` + `blub_level` (audio volume trims).
+//!   brightness trim), `gamma` (visual contrast/display-gamma trim),
+//!   `osc_level` + `blub_level` (audio volume trims).
 //! - **Dev** (ADVANCED toggle required, resets each launch): all other
 //!   knobs — `vertical_resolution` + `iterations` (`requires_restart`),
 //!   four physics decay/force constants, `skew_curve`, six interaction
@@ -32,6 +33,8 @@
 //! - **`skew_curve`**: exponent applied to the raw `skewIntensity` before
 //!   packing into the render material uniform. `1.0` = linear (v4 behaviour).
 //! - **`master_brightness`**: post-render brightness multiplier. `1.0` = no-op.
+//! - **`gamma`**: per-channel display gamma applied as the final visual
+//!   correction (mirrors Line/Dots `gamma`). `1.0` = identity (v4 default).
 //! - **Interaction fields** (`min_radius`, `interacting_radius`, `target_radius`,
 //!   `grow_factor`, `decay_factor`, `lerp_factor`): v4 module constants from
 //!   `index.ts`; now live knobs threaded into `step_centers` via `CenterTuning`.
@@ -167,6 +170,23 @@ pub struct CymaticsSettings {
     )]
     #[serde(default = "default_master_brightness")]
     pub master_brightness: f32,
+
+    /// Per-channel display gamma applied as a final visual correction, mirroring
+    /// the Line and Dots `gamma` knob. `1.0` is the identity (v4 default); the
+    /// shader skips the `pow` entirely at `1.0`. Values above `1.0` deepen the
+    /// mid-tones (more contrast), below `1.0` lift them. Read live each frame via
+    /// the render material's `skew.z` lane; no restart required.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.1_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Gamma",
+        section = "Visual",
+        category = User
+    )]
+    #[serde(default = "default_gamma")]
+    pub gamma: f32,
 
     /// Exponent applied to raw `skewIntensity` (derived from `num_cycles`)
     /// before packing into the render material's skew uniform. `1.0` = linear,
@@ -439,6 +459,10 @@ fn default_master_brightness() -> f32 {
     1.0
 }
 
+fn default_gamma() -> f32 {
+    1.0
+}
+
 fn default_skew_curve() -> f32 {
     1.0
 }
@@ -542,6 +566,10 @@ mod tests {
             "master_brightness default mismatch"
         );
         assert!(
+            (d.gamma - default_gamma()).abs() < f32::EPSILON,
+            "gamma default mismatch"
+        );
+        assert!(
             (d.skew_curve - default_skew_curve()).abs() < f32::EPSILON,
             "skew_curve default mismatch"
         );
@@ -636,6 +664,10 @@ mod tests {
         assert!(
             (parsed.master_brightness - 1.0).abs() < 1e-6,
             "master_brightness should fall back to default"
+        );
+        assert!(
+            (parsed.gamma - 1.0).abs() < 1e-6,
+            "gamma should fall back to default"
         );
         assert!(
             (parsed.attract_radius - 0.3).abs() < 1e-6,

@@ -65,7 +65,8 @@ pub struct CymaticsRenderParams {
 ///
 /// Bind group layout (all at `@group(2)`):
 /// - `@binding(0)` `resolution: vec4<f32>` — `.xy` = screen (px), `.zw` = sim (texels)
-/// - `@binding(1)` `skew: vec4<f32>` — `.x` = `skewIntensity`, `.yzw` = 0
+/// - `@binding(1)` `skew: vec4<f32>` — `.x` = `skewIntensity`, `.y` = `master_brightness`,
+///   `.z` = user gamma, `.w` = reserved (0)
 /// - `@binding(2)` `cell_tex: texture_2d<f32>` — texture A, `textureLoad` only
 ///
 /// The shader (`assets/shaders/cymatics/render.wgsl`) uses `textureLoad` for
@@ -75,7 +76,8 @@ pub struct CymaticsMaterial {
     /// Packed resolution: `.xy` = screen (px), `.zw` = sim grid (texels).
     #[uniform(0)]
     pub resolution: Vec4,
-    /// Skew intensity: `.x` = v4 `skewIntensity`; `.yzw` = 0.
+    /// Packed visual uniform: `.x` = v4 `skewIntensity`, `.y` = `master_brightness`,
+    /// `.z` = user gamma (`1.0` = identity), `.w` = reserved (0).
     #[uniform(1)]
     pub skew: Vec4,
     /// Ping-pong texture A (`rgba32float`); accessed via `textureLoad` only —
@@ -100,8 +102,10 @@ impl Material2d for CymaticsMaterial {
 /// The mesh is a [`Rectangle`] sized to `window_size`; call
 /// `resize_cymatics_quad` on [`WindowResized`] to keep it synchronised.
 /// The material is initialised with `skew.x = 0` (resting, updated each
-/// frame by `update_cymatics_material`) and `skew.y = master_brightness`
-/// (from settings; default 1.0 so the first frame is not black).
+/// frame by `update_cymatics_material`), `skew.y = master_brightness`
+/// (from settings; default 1.0 so the first frame is not black), and
+/// `skew.z = gamma` (from settings; default 1.0 = identity so the first
+/// frame is not gamma-flashed before `update_cymatics_material` runs).
 pub fn spawn_cymatics_quad(
     commands: &mut Commands<'_, '_>,
     meshes: &mut Assets<Mesh>,
@@ -110,6 +114,7 @@ pub fn spawn_cymatics_quad(
     window_size: Vec2,
     sim_resolution: Vec2,
     master_brightness: f32,
+    gamma: f32,
 ) -> Entity {
     let w = window_size.x.max(1.0);
     let h = window_size.y.max(1.0);
@@ -119,7 +124,11 @@ pub fn spawn_cymatics_quad(
         // skew.x = skewIntensity (updated each frame by update_cymatics_material)
         // skew.y = master_brightness (updated each frame; initialised here to
         //          avoid a black first frame)
-        skew: Vec4::new(0.0, master_brightness, 0.0, 0.0),
+        // skew.z = gamma (updated each frame; initialised to the settings value
+        //          so a persisted non-identity gamma applies from frame 1 and
+        //          the 1.0 default does not flash before the first update)
+        // skew.w = reserved (0)
+        skew: Vec4::new(0.0, master_brightness, gamma, 0.0),
         cell_texture,
     });
     commands

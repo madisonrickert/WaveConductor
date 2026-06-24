@@ -360,6 +360,7 @@ fn spawn_cymatics(
         win,
         sim_resolution,
         settings.master_brightness,
+        settings.gamma,
     );
     // Tag the texture handles onto a CymaticsRoot entity so `OnExit` frees them.
     commands.spawn((textures.clone(), CymaticsRoot));
@@ -500,8 +501,8 @@ fn update_cymatics_sim_params(
 }
 
 /// Update the [`render::CymaticsMaterial`] each frame with the current
-/// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting) and
-/// `master_brightness` (User setting).
+/// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting),
+/// `master_brightness`, and `gamma` (both User settings).
 ///
 /// Runs under the same `sketch_active OR in_screensaver` condition as
 /// [`update_cymatics_sim_params`] so the material reflects the live state
@@ -517,7 +518,7 @@ fn update_cymatics_sim_params(
 /// render world to re-extract and re-upload its 32-byte uniform. Taking that
 /// borrow unconditionally every frame would re-upload an identical uniform on
 /// every frame of the multi-hour at-rest screensaver (where `num_cycles`,
-/// `skew_curve`, and `master_brightness` are all pinned). So this reads the
+/// `skew_curve`, `master_brightness`, and `gamma` are all pinned). So this reads the
 /// current packed `skew` via `materials.get` first and only mutates when the
 /// freshly-packed `Vec4` differs. At rest every input is pinned, so the packed
 /// `Vec4` is bit-stable frame to frame and the exact compare holds (no
@@ -543,10 +544,16 @@ fn update_cymatics_material(
         // non-negative base is always well-defined for positive exponents.
         let skew_intensity = skew_raw.powf(settings.skew_curve);
         // Pack into the skew uniform:
-        //   .x = skew_intensity  (body-colour push toward white)
+        //   .x = skew_intensity   (body-colour push toward white)
         //   .y = master_brightness  (post-render multiplier)
-        //   .zw = 0
-        let new_skew = Vec4::new(skew_intensity, settings.master_brightness, 0.0, 0.0);
+        //   .z = gamma            (per-channel display gamma; 1.0 = identity)
+        //   .w = 0 (reserved)
+        let new_skew = Vec4::new(
+            skew_intensity,
+            settings.master_brightness,
+            settings.gamma,
+            0.0,
+        );
 
         // Skip the mutation (and the Changed flag + re-extract/re-upload it
         // triggers) when the packed uniform is unchanged. The immutable `get`

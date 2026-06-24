@@ -28,7 +28,8 @@
 @group(2) @binding(0) var<uniform> resolution: vec4<f32>;
 // .x = skewIntensity (v4 body-colour push toward white),
 // .y = master_brightness (post-render multiplier; 1.0 = no-op, default),
-// .zw = 0.
+// .z = user gamma (per-channel display gamma; 1.0 = identity, default),
+// .w = reserved (0).
 @group(2) @binding(1) var<uniform> skew: vec4<f32>;
 // Cell texture A (rgba32float): channel x = height, y = velocity,
 // z = accumulated_height, w = unused (simulate.wgsl write contract).
@@ -196,6 +197,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // skew.y = master_brightness (User setting, default 1.0 = no-op). Applied
     // after the vignette blend so it uniformly scales the whole output frame.
     col = col * skew.y;
+    // skew.z = user gamma (User setting; default 1.0 = identity, mirrors
+    // Line/Dots). Display-referred, so it applies after master_brightness and
+    // before the sRGB linearise. `gamma` is a uniform, so this is a uniform
+    // branch (no warp divergence); at 1.0 pow is the identity, skip it. Clamp
+    // >= 0 first so pow is well-defined on any underflowed negative.
+    if skew.z != 1.0 {
+        col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(skew.z));
+    }
     // Linearise the sRGB-authored colour as the final op so Bevy's present-time
     // sRGB encode round-trips to v4's exact display values (see srgb_to_linear).
     return vec4<f32>(srgb_to_linear(col), 1.0);
