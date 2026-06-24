@@ -34,16 +34,18 @@
 use std::num::NonZeroU64;
 
 use bevy::core_pipeline::{Core2d, Core2dSystems};
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::{
     binding_types::{sampler, texture_2d, uniform_buffer_sized},
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferDescriptor,
-    BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, LoadOp,
-    MultisampleState, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderStages, StoreOp, TextureFormat, TextureSampleType, VertexState,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
+    BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, StoreOp, TextureFormat, TextureSampleType,
+    TextureViewId, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::ViewTarget;
@@ -250,8 +252,9 @@ fn remove_dots_post_params_if_absent(
 /// Added to the [`Core2d`] schedule in [`Core2dSystems::EarlyPostProcess`] (so
 /// the scene texture holds the rendered dots grid, and the explode runs in HDR
 /// before bloom/tonemapping). Uploads [`DotsPostParams`] into the persistent
-/// uniform buffer via `queue.write_buffer`, builds a fresh bind group, then
-/// issues a 3-vertex fullscreen-triangle draw.
+/// uniform buffer via `queue.write_buffer`, fetches a bind group cached by the
+/// ping-pong source view (no per-frame allocation), then issues a 3-vertex
+/// fullscreen-triangle draw.
 ///
 /// Gates on [`ExtractedCamera::hdr`] (not the `Hdr` marker component, which is
 /// no longer extracted to the render world as of Bevy 0.19). The pipeline
@@ -268,6 +271,7 @@ pub fn dots_post_process(
     pipeline_res: Option<Res<'_, DotsPostProcessPipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
     render_queue: Res<'_, RenderQueue>,
+    mut bind_group_cache: Local<'_, HashMap<TextureViewId, BindGroup>>,
     mut render_context: RenderContext<'_, '_>,
 ) {
     let (view_target, camera) = view.into_inner();
@@ -301,15 +305,26 @@ pub fn dots_post_process(
 
     let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
 
-    let bind_group = render_context.render_device().create_bind_group(
-        "dots_explode_post_bind_group",
-        &layout,
-        &BindGroupEntries::sequential((
-            pipeline_res.post_params_buffer.as_entire_binding(),
-            source,
-            &pipeline_res.sampler,
-        )),
-    );
+    // Reuse the bind group for this source view if we have built it before.
+    // `post_process_write` cycles `source` between two stable views, so after the
+    // first two frames every frame is a cache hit — no per-frame
+    // `create_bind_group` on the render hot path (the project's
+    // no-hot-path-allocation rule). The other two entries (persistent uniform
+    // buffer + sampler) never change, and `write_buffer` updates the uniform
+    // contents without invalidating the binding. Steady state holds two entries;
+    // a resize recreates the view targets (new ids → fresh entries), leaving the
+    // stale pair resident — a bounded, rare cost for a kiosk app that never resizes.
+    let bind_group = bind_group_cache.entry(source.id()).or_insert_with(|| {
+        render_context.render_device().create_bind_group(
+            "dots_explode_post_bind_group",
+            &layout,
+            &BindGroupEntries::sequential((
+                pipeline_res.post_params_buffer.as_entire_binding(),
+                source,
+                &pipeline_res.sampler,
+            )),
+        )
+    });
 
     let mut pass = render_context
         .command_encoder()
@@ -330,7 +345,7 @@ pub fn dots_post_process(
             multiview_mask: None,
         });
     pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &bind_group, &[]);
+    pass.set_bind_group(0, &*bind_group, &[]);
     pass.draw(0..3, 0..1);
 }
 
