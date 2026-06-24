@@ -1,42 +1,42 @@
-//! Background-sample loading for sketch ambient beds.
+//! Background-sample loading and named sample bank construction.
 //!
-//! Plan 9 Phase B introduces a per-sketch ambient loop that plays alongside
-//! the synth voice graph. The Line sketch ships `line_background.ogg` as the
-//! first user. This module owns:
+//! Provides the asset pipeline that decodes every sketch's encoded audio
+//! samples on the main thread and hands them to the audio engine as a
+//! [`super::sample_bank::SampleBank`]. The looping background bed (e.g.
+//! `line_background.ogg`) is just one named entry; Cymatics adds more in
+//! Task C4.
 //!
-//! 1. [`BackgroundSampleAsset`] — a Bevy resource the binary populates at
-//!    startup with the raw OGG bytes. The audio thread cannot reach Bevy's
-//!    `AssetServer` (it lives in a separate `!Send` cpal callback closure),
-//!    so the main thread reads the file via `std::fs::read` and hands the
-//!    bytes off as a resource the [`super::engine::start_audio_engine`]
-//!    system can pull from `World`.
-//! 2. [`decode_to_interleaved_f32`] — a Vorbis/Ogg decoder built on
-//!    `symphonia 0.5`. Returns interleaved stereo `f32` PCM at the file's
-//!    native sample rate, plus the source sample rate and channel count so
-//!    callers can resample if needed.
+//! ## Types
+//!
+//! - [`EncodedSample`] — one named encoded sample (Ogg/Vorbis bytes).
+//! - [`SampleAssets`] — Bevy resource the binary inserts before `App::run`;
+//!   the engine startup system decodes every entry and builds the bank.
+//! - [`build_sample_bank`] — decode + resample all entries into the engine
+//!   output format and construct a [`super::sample_bank::SampleBank`].
+//!
+//! Decode helpers ([`decode_to_interleaved_f32`], [`resample_and_remix`]) are
+//! unchanged from the original single-background path.
 //!
 //! ## Real-time safety
 //!
-//! Decoding runs on the **main thread** before the cpal callback starts
-//! producing samples. The audio thread only sees a finalized `Vec<f32>` and
-//! reads from it via `playhead` indexing in [`super::dsp::DspHost::render`].
+//! Decoding and resampling run on the **main thread** before the cpal callback
+//! starts producing samples. The audio thread only sees a finalized, immutable
+//! [`super::sample_bank::SampleBank`] and reads from it via index lookups.
 //! No symphonia code runs on the audio thread.
 //!
 //! ## Sample-rate handling
 //!
-//! v4's `line_background.ogg` is 44.1 kHz stereo. macOS commonly reports a
-//! 48 kHz default output stream. We resample with a simple linear
-//! interpolation pass so the loop plays at the correct musical pitch on any
-//! output rate. Linear interpolation introduces a tiny high-frequency
-//! attenuation but is acceptable for an ambient bed; a higher-quality
-//! resampler is Plan 10 polish if needed.
+//! `line_background.ogg` is 44.1 kHz stereo. macOS commonly reports a 48 kHz
+//! default output stream. [`resample_and_remix`] resamples with linear
+//! interpolation so the loop plays at the correct musical pitch on any output
+//! rate. A higher-quality resampler is Plan 10 polish if needed.
 //!
 //! ## Missing-asset fallback
 //!
-//! If the OGG cannot be loaded or decoded, the engine logs a warning and
-//! starts with an empty buffer. The audio thread treats an empty buffer as
-//! "no background sample" and contributes zero to the output mix; the
-//! engine never refuses to start because of a missing or corrupt asset.
+//! If an OGG cannot be loaded or decoded, [`build_sample_bank`] logs a warning
+//! and skips that entry (the engine must always start). An absent
+//! `line_background` entry means the background voice contributes silence;
+//! the engine never refuses to start because of a missing asset.
 
 use std::io::Cursor;
 
@@ -49,31 +49,77 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-/// Raw bytes of a sketch's background-sample asset.
-///
-/// Inserted by the binary crate during `main()` before `App::run`. The
-/// engine startup system reads the bytes, decodes via symphonia, and hands
-/// the PCM buffer to [`super::dsp::DspHost`]. When the resource is absent
-/// (or empty), the engine starts with no background mix.
-#[derive(Resource, Debug, Default, Clone)]
-pub struct BackgroundSampleAsset {
-    /// Encoded bytes (Ogg/Vorbis container). Empty when the asset failed to
-    /// load on the main thread; the engine treats this as "no background".
+/// One encoded sample (Ogg/Vorbis bytes) the binary hands to the engine.
+#[derive(Debug, Clone)]
+pub struct EncodedSample {
+    /// Bank entry name (e.g. `"line_background"`, `"cymatics_kick"`).
+    pub name: &'static str,
+    /// Encoded container bytes. Empty entries are skipped by the bank builder.
     pub bytes: Vec<u8>,
 }
 
-impl BackgroundSampleAsset {
-    /// Construct from owned bytes.
-    #[must_use]
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
-    }
+/// Encoded sample assets the binary inserts before `App::run`.
+///
+/// Replaces the former single `BackgroundSampleAsset`: the engine startup
+/// system decodes every entry once and builds a
+/// [`super::sample_bank::SampleBank`]. The looping background bed is just the
+/// `"line_background"` entry.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct SampleAssets {
+    /// Named encoded samples.
+    pub samples: Vec<EncodedSample>,
+}
 
-    /// True if no encoded bytes are present.
+impl SampleAssets {
+    /// True when no samples are present (engine starts silent).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.samples.is_empty()
     }
+}
+
+/// Decode + resample every entry in `assets` into the engine output format and
+/// build a [`super::sample_bank::SampleBank`]. Decode/resample failures are
+/// logged and skipped (the engine must always start), mirroring the former
+/// single-background path.
+#[must_use]
+pub fn build_sample_bank(
+    assets: &SampleAssets,
+    channels: u16,
+    sample_rate: u32,
+) -> super::sample_bank::SampleBank {
+    use super::sample_bank::{SampleBank, SampleData};
+    let mut entries: Vec<(&'static str, SampleData)> = Vec::new();
+    for asset in &assets.samples {
+        if asset.bytes.is_empty() {
+            continue;
+        }
+        match decode_to_interleaved_f32(&asset.bytes) {
+            Ok(decoded) => {
+                let resampled = resample_and_remix(
+                    &decoded.pcm,
+                    decoded.channels,
+                    decoded.sample_rate,
+                    channels,
+                    sample_rate,
+                );
+                tracing::info!(
+                    name = asset.name,
+                    frames = resampled.len() / usize::from(channels.max(1)),
+                    "decoded sample for bank"
+                );
+                entries.push((asset.name, SampleData::new(resampled, channels)));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    name = asset.name,
+                    ?err,
+                    "sample decode failed; skipping bank entry"
+                );
+            }
+        }
+    }
+    SampleBank::from_samples(entries)
 }
 
 /// Result of [`decode_to_interleaved_f32`]: PCM ready for the audio thread,
@@ -333,6 +379,14 @@ pub fn resample_and_remix(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_sample_bank_decodes_named_entries() {
+        // Encode-free smoke: an empty assets set yields an empty bank.
+        let assets = SampleAssets::default();
+        let bank = build_sample_bank(&assets, 2, 48_000);
+        assert!(bank.index_of("anything").is_none());
+    }
 
     #[test]
     fn decoded_sample_frame_count_handles_stereo() {

@@ -11,7 +11,7 @@ use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use tracing_subscriber::EnvFilter;
-use wc_core::audio::background::BackgroundSampleAsset;
+use wc_core::audio::background::{EncodedSample, SampleAssets};
 use wc_core::CorePlugin;
 use wc_sketches::SketchesPlugin;
 
@@ -28,7 +28,7 @@ fn main() {
         // future sketches can override per-state via `OnEnter`/`OnExit` if
         // they want a different backdrop.
         .insert_resource(ClearColor(Color::BLACK))
-        .insert_resource(load_line_background())
+        .insert_resource(load_sample_assets())
         .add_plugins((
             DefaultPlugins
                 .set(WindowPlugin {
@@ -119,38 +119,42 @@ fn main() {
     app.run();
 }
 
-/// Read the Line background OGG into a `BackgroundSampleAsset` resource.
+/// Read sketch sample assets into a `SampleAssets` resource.
 ///
 /// The audio engine runs in a separate cpal thread that can't reach Bevy's
-/// `AssetServer`, so we load the file synchronously here on the main thread
+/// `AssetServer`, so we load files synchronously here on the main thread
 /// before `App::run()` and stash the raw bytes in a resource the engine's
-/// `Startup` system reads. Failure to read the file logs a warning and yields
-/// an empty asset; the engine treats that as "no background mix" and proceeds
-/// normally.
+/// `Startup` system reads. Per-file load failures are logged as warnings and
+/// skipped; the engine always starts even if assets are missing.
 ///
-/// The path is resolved at runtime via [`wc_core::platform::assets::asset_root`]
-/// so dev, release, and macOS `.app` bundle deployments all locate the sample
+/// Paths are resolved at runtime via [`wc_core::platform::assets::asset_root`]
+/// so dev, release, and macOS `.app` bundle deployments all locate samples
 /// without environment-specific compile-time paths or cwd assumptions.
-fn load_line_background() -> BackgroundSampleAsset {
-    let path = wc_core::platform::assets::asset_root().join("sketches/line/line_background.ogg");
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            tracing::info!(
-                path = %path.display(),
-                size = bytes.len(),
-                "loaded Line background sample"
-            );
-            BackgroundSampleAsset::new(bytes)
+///
+/// Cymatics entries are added in Task C4.
+fn load_sample_assets() -> SampleAssets {
+    let root = wc_core::platform::assets::asset_root();
+    let load = |name: &'static str, rel: &str| -> Option<EncodedSample> {
+        let path = root.join(rel);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                tracing::info!(name, size = bytes.len(), "loaded sample");
+                Some(EncodedSample { name, bytes })
+            }
+            Err(err) => {
+                tracing::warn!(
+                    name,
+                    path = %path.display(),
+                    ?err,
+                    "sample not found; skipping"
+                );
+                None
+            }
         }
-        Err(err) => {
-            tracing::warn!(
-                path = %path.display(),
-                ?err,
-                "Line background sample not found; audio engine will run without it"
-            );
-            BackgroundSampleAsset::default()
-        }
-    }
+    };
+    let mut samples = Vec::new();
+    samples.extend(load("line_background", "sketches/line/line_background.ogg"));
+    SampleAssets { samples }
 }
 
 /// Spawn the primary 2D camera. Required by `bevy_egui`, whose render pass

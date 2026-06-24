@@ -17,32 +17,38 @@
 //!   frees, no recursive structure that could surprise us).
 //!
 //! Plan 9 Phase A wires the Line synth voice graph; Phase B adds background
-//! sample mixing; Phase C/D wire reactivity from `ParticleStats`.
+//! sample mixing via a named [`SampleBank`] and [`LoopVoice`]; Phase C/D wire
+//! reactivity from `ParticleStats`.
 //!
-//! ## Background sample mixing (Phase B)
+//! ## Background sample mixing
 //!
-//! The constructor accepts a pre-decoded, pre-resampled, **interleaved**
-//! `Vec<f32>` of the same channel count as the cpal output. The audio
-//! thread loops the buffer via a `playhead: usize` frame index that wraps
-//! at the buffer's frame count. The mix is:
+//! The constructor accepts a [`SampleBank`] built from the decoded, resampled
+//! assets. The looping background bed is addressed by name
+//! ([`LINE_BACKGROUND_SAMPLE`]); its index is resolved once at construction.
+//! Each render buffer the [`LoopVoice`] steps forward by one frame and wraps
+//! automatically via `rem_euclid`. At `rate == 1.0` and an integer playhead
+//! the fractional part is 0, so reads are bit-exact — identical to the old
+//! `playhead: usize` path. The mix formula per frame is:
 //!
 //! ```text
 //! out = gain · clamp(synth + background · background_volume, -1.0, 1.0)
 //! ```
 //!
 //! The inner clamp prevents output overflow when both sources peak
-//! simultaneously; the outer master `gain` (volume × !muted) is applied
-//! after so that muting still produces silence regardless of source levels.
-//!
-//! `background_volume` is set via `AudioCommand::SetLineParam { key:
-//! "background_volume", value }`. The default on construction is `1.0`
-//! to match v4's `volume: 1.0` on its `AudioClip`.
+//! simultaneously; the outer master `gain` is applied after so that muting
+//! produces silence regardless of source levels.
 
 use fundsp::shared::Shared;
 
 use super::command::AudioCommand;
 use super::dots_synth::DotsSynth;
 use super::line_synth::LineSynth;
+use super::sample_bank::{LoopVoice, SampleBank};
+
+/// Bank entry name for the looping background bed (the `line_background.ogg`
+/// asset). Resolved to an index once at construction so the render loop never
+/// does a string lookup per buffer.
+pub const LINE_BACKGROUND_SAMPLE: &str = "line_background";
 
 /// Default amplitude scalar applied to the background sample. Matches v4
 /// `AudioClip { volume: 1.0 }`. Coupled to the same `Shared<f32>` handle
@@ -52,13 +58,14 @@ const DEFAULT_BACKGROUND_VOLUME: f32 = 1.0;
 /// `SetLineParam` key that routes to the background-sample amplitude
 /// scalar. Kept here rather than in `LineSynth::KNOWN_KEYS` because
 /// background volume is a host-level mixer parameter, not a synth-graph
-/// parameter — the host owns the sample buffer and the playhead.
+/// parameter.
 const BACKGROUND_VOLUME_KEY: &str = "background_volume";
 
 /// DSP host owned by the cpal audio thread.
 ///
-/// All hot-path state is either plain `Copy`/`f32` or an `Option<Box<…>>`
-/// whose presence is checked once per buffer.
+/// All hot-path state is either plain `Copy`/`f32`, a `SampleBank` (immutable
+/// after construction), or an `Option<Box<…>>` whose presence is checked once
+/// per buffer.
 ///
 /// `Debug` is hand-rolled because `fundsp::Shared` does not implement it;
 /// the formatter prints the loaded value via `Shared::value()`.
@@ -78,32 +85,29 @@ pub struct DspHost {
     /// practice only one is active at a time, but both slots are summed
     /// when both happen to be present.
     dots_synth: Option<DotsSynth>,
-    /// Pre-decoded, pre-resampled interleaved PCM for the background
-    /// sample. Layout is `[L, R, L, R, ...]` for stereo, or `[M, M, ...]`
-    /// for mono — channel count always equals `self.channels`. Empty when
-    /// no background asset is available (file missing, decode failed); the
-    /// render path treats an empty buffer as silence.
-    background_pcm: Vec<f32>,
-    /// Current playhead in **frames** (not samples). Wraps at
-    /// `background_pcm.len() / channels` each buffer to loop indefinitely.
-    /// Written once per buffer in [`Self::render`].
-    playhead: usize,
-    /// Amplitude scalar applied to the background sample before it joins
-    /// the synth mix. A `Shared<f32>` so future smoothing (`follow`) can
-    /// be added cleanly; for now the audio thread reads it directly each
-    /// buffer via `Shared::value()`. The value is an atomic load, no
-    /// allocation.
+    /// All decoded samples, immutable after construction.
+    bank: SampleBank,
+    /// Index of the looping background bed in `bank`, or `None` if absent.
+    background_idx: Option<usize>,
+    /// Looping background voice (plays `background_idx` at rate 1.0).
+    background: LoopVoice,
+    /// Background amplitude (the `background_volume` `SetLineParam` key).
     background_volume: Shared,
+    // Cymatics voices added in Task C4.
 }
 
 impl DspHost {
     /// Construct a default-silent host for the given output format.
     ///
-    /// `background_pcm` is the pre-decoded, pre-resampled interleaved PCM
-    /// buffer the audio thread will loop. Its channel count must equal
-    /// `channels`. Pass an empty `Vec` to disable the background mix.
+    /// `bank` is the pre-decoded, pre-resampled named sample bank. The looping
+    /// background bed is the entry named [`LINE_BACKGROUND_SAMPLE`]; if absent
+    /// the background voice remains silent. Pass [`SampleBank::default`] to
+    /// disable all sample playback.
     #[must_use]
-    pub fn new(sample_rate: u32, channels: u16, background_pcm: Vec<f32>) -> Self {
+    pub fn new(sample_rate: u32, channels: u16, bank: SampleBank) -> Self {
+        let background_idx = bank.index_of(LINE_BACKGROUND_SAMPLE);
+        let mut background = LoopVoice::silent();
+        background.set_sample(background_idx);
         Self {
             sample_rate,
             channels,
@@ -111,8 +115,9 @@ impl DspHost {
             muted: false,
             line_synth: None,
             dots_synth: None,
-            background_pcm,
-            playhead: 0,
+            bank,
+            background_idx,
+            background,
             background_volume: Shared::new(DEFAULT_BACKGROUND_VOLUME),
         }
     }
@@ -142,10 +147,10 @@ impl DspHost {
             }
             AudioCommand::SetLineParam { key, value } => {
                 // `background_volume` is a host-level mixer parameter
-                // (it scales the looped PCM buffer this struct owns) and
-                // therefore stays valid regardless of whether the synth
-                // is active. Handle it here before delegating the rest to
-                // the synth's per-graph parameter table.
+                // (it scales the LoopVoice this struct owns) and therefore
+                // stays valid regardless of whether the synth is active.
+                // Handle it here before delegating the rest to the synth's
+                // per-graph parameter table.
                 if key == BACKGROUND_VOLUME_KEY {
                     self.background_volume.set(value.max(0.0));
                 } else if let Some(synth) = &self.line_synth {
@@ -212,11 +217,11 @@ impl DspHost {
         self.background_volume.value()
     }
 
-    /// True if a non-empty background PCM buffer is loaded. When false,
-    /// the background mix contributes zero regardless of volume.
+    /// True if a background sample entry is present in the bank. When false,
+    /// the background voice contributes silence regardless of volume.
     #[must_use]
     pub fn has_background(&self) -> bool {
-        !self.background_pcm.is_empty()
+        self.background_idx.is_some()
     }
 
     /// Render samples into `output`.
@@ -225,75 +230,46 @@ impl DspHost {
     /// for stereo. The buffer length is divisible by `channels`.
     ///
     /// Mixing per frame:
-    /// 1. Pull one mono sample from the Line synth (zero if not active).
-    /// 2. Pull one interleaved frame from the background PCM at `playhead`
-    ///    (zeros if the buffer is empty), scale by `background_volume`.
-    /// 3. Sum synth (broadcast across channels) with the per-channel
-    ///    background sample, clamp to `[-1.0, 1.0]` to avoid output
-    ///    overflow when both sources peak simultaneously.
-    /// 4. Multiply by the master `gain` (`muted ? 0 : volume`).
-    /// 5. Write into the output frame's channel slots.
+    /// 1. Tick the Line synth for one mono sample (zero if not active).
+    /// 2. Tick the Dots synth for one mono sample (zero if not active).
+    /// 3. Zero the frame, then add the background bed via [`LoopVoice::mix_frame`]
+    ///    (scaled by `background_volume`). Zeroing first means cpal's potentially
+    ///    uninitialized output buffer never leaks into the mix, and tests can pass
+    ///    arbitrary initial values and still get deterministic results.
+    /// 4. Broadcast the summed synth sample across channels, add to the
+    ///    per-channel background, clamp to `[-1.0, 1.0]`.
+    /// 5. Multiply by master `gain` (`muted ? 0 : volume`).
     ///
-    /// The playhead advances by one frame per output frame and wraps at
-    /// the buffer's frame count for indefinite looping. When the buffer
-    /// is empty, `playhead` is left at 0.
+    /// The background [`LoopVoice`] advances its playhead by one frame per
+    /// output frame, wrapping at the sample boundary via `rem_euclid`. At
+    /// `rate == 1.0` the fractional part is 0 for integer playheads, giving
+    /// bit-exact reads identical to the old `playhead: usize` path.
     pub fn render(&mut self, output: &mut [f32]) {
-        // Compute the effective gain once per buffer; both volume and mute
-        // are buffer-level (no per-sample envelope yet). The synth applies
-        // its own internal volume scaling via the `volume` Shared param;
-        // the master gain here is the user-facing volume knob plus mute.
         let gain = if self.muted { 0.0 } else { self.volume };
-        // `u16 → usize` is infallible on every target we support; using
-        // `usize::from` keeps the workspace `as_conversions` lint happy
-        // without a fallible `try_from`.
+        // `u16 → usize` is infallible on every target we support.
         let channels = usize::from(self.channels.max(1));
-        let bg_frames = self.background_pcm.len() / channels;
-        // Atomic load once per buffer; the smoothing pass that prevents
-        // audible zipper noise on rapid changes is deferred to the
-        // reactivity-coupling layer (it sets this value at most once per
-        // visual frame, ~16ms).
+        // Atomic load once per buffer; smoothing deferred to the
+        // reactivity-coupling layer (fires at most once per visual frame).
         let bg_volume = self.background_volume.value();
+        // Disjoint-field borrow: resolve the immutable bank reference before
+        // the loop that mutably borrows `self.background`. The bank and voice
+        // fields are distinct, so the borrow checker accepts this.
+        let bg_sample = self.background_idx.and_then(|i| self.bank.sample(i));
 
         for frame in output.chunks_mut(channels) {
-            // Synth contributions — each sketch occupies its own slot; sum
-            // them here. In normal operation only one slot is active at a
-            // time, but the slots are independent and both contribute when
-            // both are present (the final clamp prevents overflow).
-            let line_sample = match self.line_synth.as_mut() {
-                Some(synth) => synth.tick_mono(),
-                None => 0.0,
-            };
-            let dots_sample = match self.dots_synth.as_mut() {
-                Some(synth) => synth.tick_mono(),
-                None => 0.0,
-            };
+            // Tick synths before touching the frame (no interdependence).
+            let line_sample = self.line_synth.as_mut().map_or(0.0, LineSynth::tick_mono);
+            let dots_sample = self.dots_synth.as_mut().map_or(0.0, DotsSynth::tick_mono);
             let synth_sample = line_sample + dots_sample;
-
-            // Background contribution, per channel. Read the current
-            // frame at `playhead` then advance + wrap.
-            if bg_frames > 0 {
-                let base = self.playhead * channels;
-                for (i, slot) in frame.iter_mut().enumerate() {
-                    let bg = self.background_pcm[base + i] * bg_volume;
-                    // Inner clamp guards against summed-peak clipping;
-                    // outer `gain` multiplier never increases magnitude
-                    // since it is in `[0, 1]`.
-                    let mixed = (synth_sample + bg).clamp(-1.0, 1.0);
-                    *slot = mixed * gain;
-                }
-                self.playhead += 1;
-                if self.playhead >= bg_frames {
-                    self.playhead = 0;
-                }
-            } else {
-                // No background; just splat the (clamped) synth across
-                // channels. The clamp here is paranoid — the synth's
-                // internal `limiter` should keep it inside [-1, 1] — but
-                // costs nothing and matches the with-background path.
-                let mixed = synth_sample.clamp(-1.0, 1.0) * gain;
-                for slot in frame.iter_mut() {
-                    *slot = mixed;
-                }
+            // Clear the frame; mix_frame accumulates into it.
+            for slot in frame.iter_mut() {
+                *slot = 0.0;
+            }
+            // Background bed adds one interpolated frame at rate 1.0.
+            self.background.mix_frame(bg_sample, frame, bg_volume, 1.0);
+            // Broadcast synth + clamp sum, apply master gain.
+            for slot in frame.iter_mut() {
+                *slot = (synth_sample + *slot).clamp(-1.0, 1.0) * gain;
             }
         }
     }
@@ -308,13 +284,13 @@ impl core::fmt::Debug for DspHost {
             .field("muted", &self.muted)
             .field("line_synth_active", &self.line_synth.is_some())
             .field("dots_synth_active", &self.dots_synth.is_some())
-            .field(
-                "background_frames",
-                &(self.background_pcm.len() / usize::from(self.channels.max(1))),
-            )
-            .field("playhead", &self.playhead)
+            .field("background_idx", &self.background_idx)
+            .field("background_playhead", &self.background.playhead)
             .field("background_volume", &self.background_volume.value())
-            .finish()
+            // `bank` is intentionally omitted: printing all decoded PCM data
+            // would make debug output extremely large. Use `background_idx` to
+            // identify which bank entry is active.
+            .finish_non_exhaustive()
     }
 }
 

@@ -10,12 +10,52 @@
     clippy::float_cmp,
     reason = "EPSILON comparisons are appropriate for test assertions on clean f32 values"
 )]
+#![allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "tests use small integer frame-index casts (0..4) that are exact in f32"
+)]
+
+use crate::audio::sample_bank::{SampleBank, SampleData};
 
 use super::*;
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Build a stereo bank with a single `"line_background"` entry of N frames
+/// where L = +0.5 and R = -0.5 on every frame.
+fn host_with_synthetic_bg(frames: usize) -> DspHost {
+    DspHost::new(48_000, 2, bank_from_synthetic_stereo(frames))
+}
+
+/// Build a [`SampleBank`] with a `"line_background"` entry holding the synthetic
+/// stereo ramp used by the wrapping and clamping tests.
+fn bank_from_synthetic_stereo(frames: usize) -> SampleBank {
+    SampleBank::from_samples(vec![(
+        LINE_BACKGROUND_SAMPLE,
+        SampleData::new(synthetic_stereo_pcm(frames), 2),
+    )])
+}
+
+/// Build a stereo PCM buffer of N frames where L = +0.5 and R = -0.5.
+fn synthetic_stereo_pcm(frames: usize) -> Vec<f32> {
+    let mut pcm = Vec::with_capacity(frames * 2);
+    for _ in 0..frames {
+        pcm.push(0.5);
+        pcm.push(-0.5);
+    }
+    pcm
+}
+
+// ---------------------------------------------------------------------------
+// Basic lifecycle tests
+// ---------------------------------------------------------------------------
+
 #[test]
 fn default_host_renders_silence() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     let mut buffer = vec![1.0_f32; 256];
     host.render(&mut buffer);
     assert!(buffer.iter().all(|s| s.abs() < f32::EPSILON));
@@ -23,7 +63,7 @@ fn default_host_renders_silence() {
 
 #[test]
 fn set_master_volume_clamps_range() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::SetMasterVolume(1.5));
     assert!((host.volume() - 1.0).abs() < f32::EPSILON);
     host.apply(AudioCommand::SetMasterVolume(-0.2));
@@ -34,7 +74,7 @@ fn set_master_volume_clamps_range() {
 
 #[test]
 fn set_muted_updates_state() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     assert!(!host.muted());
     host.apply(AudioCommand::SetMuted(true));
     assert!(host.muted());
@@ -44,7 +84,7 @@ fn set_muted_updates_state() {
 
 #[test]
 fn muted_render_outputs_zero_even_when_volume_high() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::SetMasterVolume(1.0));
     host.apply(AudioCommand::SetMuted(true));
     // Activate the synth and crank its internal volume up too: muted
@@ -65,7 +105,7 @@ fn muted_render_outputs_zero_even_when_volume_high() {
 
 #[test]
 fn add_line_synth_activates() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddLineSynth);
     assert!(host.line_synth_active());
     // Crank volume so the smoothed source-gain ramps in.
@@ -95,7 +135,7 @@ fn add_line_synth_activates() {
 
 #[test]
 fn remove_line_synth_silences() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddLineSynth);
     host.apply(AudioCommand::SetLineParam {
         key: "volume",
@@ -116,7 +156,7 @@ fn remove_line_synth_silences() {
 
 #[test]
 fn unknown_param_key_drops_gracefully() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddLineSynth);
     // Apply an unknown key; should not panic. Then render to confirm
     // the host is still operational.
@@ -130,7 +170,7 @@ fn unknown_param_key_drops_gracefully() {
 
 #[test]
 fn set_line_param_with_no_synth_does_not_panic() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     // No synth active; SetLineParam should warn-and-drop, never panic.
     host.apply(AudioCommand::SetLineParam {
         key: "volume",
@@ -141,7 +181,7 @@ fn set_line_param_with_no_synth_does_not_panic() {
 
 #[test]
 fn add_line_synth_is_idempotent() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddLineSynth);
     // Set a param so we can detect whether the synth was replaced (a
     // replacement would reset bandpass_freq to its default).
@@ -158,7 +198,7 @@ fn add_line_synth_is_idempotent() {
 
 #[test]
 fn remove_line_synth_is_idempotent() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     // Remove with nothing active should be a no-op.
     host.apply(AudioCommand::RemoveLineSynth);
     assert!(!host.line_synth_active());
@@ -168,25 +208,51 @@ fn remove_line_synth_is_idempotent() {
     assert!(!host.line_synth_active());
 }
 
-// ----- Phase B: background sample mixing -----
+// ---------------------------------------------------------------------------
+// Background sample mixing (SampleBank path)
+// ---------------------------------------------------------------------------
 
-/// Build a deterministic stereo PCM buffer of N frames where L = +0.5
-/// and R = -0.5 on every frame. Lets us verify channel order and
-/// background mixing without depending on the OGG decoder.
-fn synthetic_stereo_pcm(frames: usize) -> Vec<f32> {
-    let mut pcm = Vec::with_capacity(frames * 2);
-    for _ in 0..frames {
-        pcm.push(0.5);
-        pcm.push(-0.5);
-    }
-    pcm
+#[test]
+fn background_loop_is_bit_exact_at_rate_one() {
+    // Bank with a 4-frame stereo ramp under LINE_BACKGROUND_SAMPLE. Values
+    // are scaled to stay in [0, 1) so the render clamp does not interfere
+    // with the assertion (the brief used integer frames 0..4, but 2.0/3.0
+    // would be clamped to 1.0; 0.25 scaling keeps all values in range while
+    // still proving that each frame is read in order without interpolation).
+    let pcm: Vec<f32> = (0..4)
+        .flat_map(|f| [f as f32 * 0.25, f as f32 * 0.25])
+        .collect();
+    let bank = SampleBank::from_samples(vec![(
+        super::LINE_BACKGROUND_SAMPLE,
+        SampleData::new(pcm, 2),
+    )]);
+    let mut host = DspHost::new(48_000, 2, bank);
+    host.apply(AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    });
+    let mut out = vec![0.0_f32; 2 * 6]; // 6 frames
+    host.render(&mut out);
+    // Master volume 1.0, no synth: output == background loop, read in order
+    // with no interpolation (rate 1.0, integer playhead).
+    let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+    assert_eq!(left, vec![0.0, 0.25, 0.5, 0.75, 0.0, 0.25]);
+}
+
+#[test]
+fn no_background_entry_is_silent() {
+    let host_bank = SampleBank::default();
+    let mut host = DspHost::new(48_000, 2, host_bank);
+    let mut out = vec![0.5_f32; 2 * 4];
+    host.render(&mut out);
+    assert!(out.iter().all(|s| *s == 0.0));
 }
 
 #[test]
 fn empty_background_falls_back_to_synth_only() {
-    // With an empty buffer the render path takes the no-background
-    // branch: synth-only output, identical to Phase A behavior.
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    // With an empty bank the render path takes the no-background branch:
+    // synth-only output, identical to pre-SampleBank behavior.
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     assert!(!host.has_background());
     let mut buffer = vec![1.0_f32; 64];
     host.render(&mut buffer);
@@ -197,8 +263,7 @@ fn empty_background_falls_back_to_synth_only() {
 fn background_renders_when_synth_inactive() {
     // Even with no synth, the background should mix into the output
     // at the default volume of 1.0.
-    let pcm = synthetic_stereo_pcm(64);
-    let mut host = DspHost::new(48_000, 2, pcm);
+    let mut host = host_with_synthetic_bg(64);
     assert!(host.has_background());
     let mut buffer = vec![0.0_f32; 128]; // 64 stereo frames
     host.render(&mut buffer);
@@ -211,8 +276,7 @@ fn background_renders_when_synth_inactive() {
 
 #[test]
 fn background_volume_scales_output() {
-    let pcm = synthetic_stereo_pcm(32);
-    let mut host = DspHost::new(48_000, 2, pcm);
+    let mut host = host_with_synthetic_bg(32);
     host.apply(AudioCommand::SetLineParam {
         key: "background_volume",
         value: 0.5,
@@ -229,7 +293,7 @@ fn background_volume_scales_output() {
 
 #[test]
 fn background_volume_clamps_negative_to_zero() {
-    let mut host = DspHost::new(48_000, 2, synthetic_stereo_pcm(8));
+    let mut host = host_with_synthetic_bg(8);
     host.apply(AudioCommand::SetLineParam {
         key: "background_volume",
         value: -0.5,
@@ -248,7 +312,8 @@ fn background_playhead_wraps_at_buffer_end() {
     let mut pcm = synthetic_stereo_pcm(3);
     pcm.push(1.0);
     pcm.push(1.0);
-    let mut host = DspHost::new(48_000, 2, pcm);
+    let bank = SampleBank::from_samples(vec![(LINE_BACKGROUND_SAMPLE, SampleData::new(pcm, 2))]);
+    let mut host = DspHost::new(48_000, 2, bank);
     // Render 10 frames (= 2.5 loops). After 4 frames we should be back
     // at the start of the buffer.
     let mut buffer = vec![0.0_f32; 20];
@@ -271,7 +336,7 @@ fn background_playhead_wraps_at_buffer_end() {
 
 #[test]
 fn muted_zeros_background_too() {
-    let mut host = DspHost::new(48_000, 2, synthetic_stereo_pcm(16));
+    let mut host = host_with_synthetic_bg(16);
     host.apply(AudioCommand::SetMuted(true));
     let mut buffer = vec![0.0_f32; 32];
     host.render(&mut buffer);
@@ -284,8 +349,11 @@ fn background_clamps_when_synth_and_background_peak_together() {
     // the ceiling). Activate the synth and crank its volume so the
     // sum would exceed +1.0 without the clamp; assert that output
     // never exceeds the ceiling.
-    let pcm = vec![1.0_f32; 32]; // 16 stereo frames, both channels +1.0.
-    let mut host = DspHost::new(48_000, 2, pcm);
+    let bank = SampleBank::from_samples(vec![(
+        LINE_BACKGROUND_SAMPLE,
+        SampleData::new(vec![1.0_f32; 32], 2), // 16 stereo frames, both channels +1.0
+    )]);
+    let mut host = DspHost::new(48_000, 2, bank);
     host.apply(AudioCommand::AddLineSynth);
     host.apply(AudioCommand::SetLineParam {
         key: "volume",
@@ -302,7 +370,7 @@ fn background_clamps_when_synth_and_background_peak_together() {
 fn background_volume_key_works_with_no_active_synth() {
     // Regression: background_volume must NOT route through LineSynth,
     // so it has to apply even when the synth is not active.
-    let mut host = DspHost::new(48_000, 2, synthetic_stereo_pcm(4));
+    let mut host = host_with_synthetic_bg(4);
     assert!(!host.line_synth_active());
     host.apply(AudioCommand::SetLineParam {
         key: "background_volume",
@@ -313,11 +381,13 @@ fn background_volume_key_works_with_no_active_synth() {
     assert!(buffer.iter().all(|s| s.abs() < f32::EPSILON));
 }
 
-// ----- Dots synth dispatch tests -----
+// ---------------------------------------------------------------------------
+// Dots synth dispatch tests
+// ---------------------------------------------------------------------------
 
 #[test]
 fn add_dots_synth_activates() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     assert!(!host.dots_synth_active());
     host.apply(AudioCommand::AddDotsSynth);
     assert!(host.dots_synth_active());
@@ -325,7 +395,7 @@ fn add_dots_synth_activates() {
 
 #[test]
 fn add_dots_synth_is_idempotent() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddDotsSynth);
     // Set a non-default param; we cannot read it back via the DspHost public
     // API, so idempotency is verified through active-state only.
@@ -342,7 +412,7 @@ fn add_dots_synth_is_idempotent() {
 
 #[test]
 fn remove_dots_synth_is_idempotent() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     // Remove with nothing active should be a no-op.
     host.apply(AudioCommand::RemoveDotsSynth);
     assert!(!host.dots_synth_active());
@@ -354,7 +424,7 @@ fn remove_dots_synth_is_idempotent() {
 
 #[test]
 fn add_dots_then_set_param_then_remove_sequence() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddDotsSynth);
     assert!(host.dots_synth_active());
     // SetDotsParam must not panic with an active synth.
@@ -386,7 +456,7 @@ fn add_dots_then_set_param_then_remove_sequence() {
 
 #[test]
 fn set_dots_param_with_no_synth_does_not_panic() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     // No synth active; SetDotsParam should warn-and-drop, never panic.
     host.apply(AudioCommand::SetDotsParam {
         key: "volume",
@@ -397,7 +467,7 @@ fn set_dots_param_with_no_synth_does_not_panic() {
 
 #[test]
 fn dots_synth_produces_audio_after_volume_set() {
-    let mut host = DspHost::new(48_000, 2, Vec::new());
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
     host.apply(AudioCommand::AddDotsSynth);
     host.apply(AudioCommand::SetDotsParam {
         key: "volume",
