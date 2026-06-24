@@ -49,9 +49,10 @@ impl Plugin for CorePlugin {
         app.add_plugins(input::HandTrackingPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
-        // Optional frame-rate cap (restores GPU headroom; see the frame_limiter
-        // module docs and docs/runbooks/dots-explode-gpu-saturation.md). Default
-        // off; opt in via the "Display" settings section or WAVECONDUCTOR_FPS_CAP.
+        // Frame-rate cap (restores GPU headroom; see the frame_limiter module
+        // docs and docs/runbooks/dots-explode-gpu-saturation.md). Defaults to
+        // 60 fps; change in the "Display" settings section or via
+        // WAVECONDUCTOR_FPS_CAP (0 = uncapped).
         app.add_plugins(frame_limiter::FrameLimiterPlugin);
         // Visual-debugging scaffold — debug builds only (compiled out of
         // release). DebugPlugin inserts DebugToggles only when a WC_DEBUG_* var

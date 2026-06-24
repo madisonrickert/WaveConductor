@@ -108,8 +108,8 @@ Gotchas:
 The lever is **headroom**, and the way we buy it is a **configurable frame-rate
 cap**: `crates/wc-core/src/frame_limiter/` (commit `3572dfec`). A `Last`-schedule
 system sleeps the main loop to hold at most `FrameLimiterSettings::target_fps`
-(global, persisted, `category = User`, default `0` = uncapped/opt-in, in the
-"Display" panel section). Set it in the panel, or pin it at launch with
+(global, persisted, `category = User`, **default `60` fps**, in the "Display"
+panel section; `0` = uncapped). Change it in the panel, or pin it at launch with
 `WAVECONDUCTOR_FPS_CAP=30`. Sleep-only + drift-free pacing; native only (web is
 rAF-paced). We rolled our own rather than `bevy_framepace` (its newest release
 targets Bevy 0.18; we're on 0.19) — see the module docs.

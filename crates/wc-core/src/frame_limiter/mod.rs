@@ -26,10 +26,12 @@
 //!
 //! ## Configuring
 //!
-//! `target_fps` is a `category = User` setting, default `0.0` = uncapped, so
-//! nothing changes until you opt in. The [`FPS_CAP_ENV`] env var overrides it
-//! at launch (consistent with `WAVECONDUCTOR_START_SKETCH`) for kiosk launch
-//! scripts and the capture harness; the panel value takes over once changed.
+//! `target_fps` is a `category = User` setting; the default is `60.0` (a steady
+//! 60 fps with GPU headroom — even on a 60 Hz display the sleep hands the GPU
+//! idle time that pure vsync does not, which de-saturates it). `0` disables the
+//! cap. The [`FPS_CAP_ENV`] env var overrides it at launch (consistent with
+//! `WAVECONDUCTOR_START_SKETCH`) for kiosk launch scripts and the capture
+//! harness; the panel value takes over once changed.
 
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
@@ -51,14 +53,14 @@ pub const FPS_CAP_ENV: &str = "WAVECONDUCTOR_FPS_CAP";
 #[reflect(Resource, Default)]
 #[settings(storage_key = "frame_limiter")]
 pub struct FrameLimiterSettings {
-    /// Target frames per second. `0` (the default) disables the cap entirely —
-    /// the app runs at the vsync/native rate, so nothing changes until you opt
-    /// in. A positive value sleeps the main loop to hold at most this rate,
-    /// giving the GPU idle time each frame (lower clock, fewer frame-time
-    /// spikes, lower soak power). 30-40 is the useful range for the ambient
-    /// sketches.
+    /// Target frames per second. The default `60` holds the main loop to at most
+    /// 60 fps by sleeping, which gives the GPU idle time each frame (lower clock,
+    /// fewer frame-time spikes, lower soak power) even on a 60 Hz display where
+    /// vsync alone would keep it busier. `0` disables the cap (run at the
+    /// vsync/native rate). 30-40 trades smoothness of motion for even more
+    /// headroom and lower power.
     #[setting(
-        default = 0.0_f32,
+        default = 60.0_f32,
         min = 0.0,
         max = 120.0,
         step = 5.0,
@@ -71,9 +73,10 @@ pub struct FrameLimiterSettings {
     pub target_fps: f32,
 }
 
-/// Serde fallback so a config saved before this field existed loads as uncapped.
+/// Serde fallback so a config saved before this field existed loads at the
+/// default 60 fps cap.
 fn default_target_fps() -> f32 {
-    0.0
+    60.0
 }
 
 /// Plugin: registers [`FrameLimiterSettings`], applies the launch env override,
@@ -169,8 +172,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_fps_defaults_to_uncapped() {
-        assert_eq!(FrameLimiterSettings::default().target_fps, 0.0);
+    fn target_fps_defaults_to_60() {
+        assert_eq!(FrameLimiterSettings::default().target_fps, 60.0);
     }
 
     #[test]
@@ -203,9 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn pre_field_settings_file_loads_uncapped() {
-        // A config saved before this field existed must load as uncapped.
+    fn pre_field_settings_file_loads_with_60_default() {
+        // A config saved before this field existed must load at the 60 fps cap.
         let parsed: FrameLimiterSettings = toml::from_str("").expect("empty settings loads");
-        assert_eq!(parsed.target_fps, 0.0);
+        assert_eq!(parsed.target_fps, 60.0);
     }
 }
