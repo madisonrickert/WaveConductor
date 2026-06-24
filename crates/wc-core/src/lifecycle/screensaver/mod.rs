@@ -125,13 +125,15 @@ fn register_capture_overrides(_app: &mut App) {}
 
 /// `OnEnter(Screensaver)` — insert the [`ScreensaverActive`] marker.
 fn show(mut commands: Commands<'_, '_>) {
-    tracing::info!("screensaver: show");
+    tracing::info!("screensaver: showing — attract mode engaged");
     commands.insert_resource(ScreensaverActive);
 }
 
-/// `OnExit(Screensaver)` — remove the [`ScreensaverActive`] marker.
+/// `OnExit(Screensaver)` — remove the [`ScreensaverActive`] marker. The log
+/// is the operator's unambiguous signal that the screensaver has woken back to
+/// normal interaction.
 fn hide(mut commands: Commands<'_, '_>) {
-    tracing::info!("screensaver: hide");
+    tracing::info!("screensaver: woke — interaction resumed");
     commands.remove_resource::<ScreensaverActive>();
 }
 
