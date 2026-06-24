@@ -37,6 +37,11 @@ impl Plugin for SketchesPlugin {
         >::default());
         app.add_plugins(crate::particles::compute::ParticleComputePlugin);
 
+        // Cymatics ping-pong compute node, registered once here (a `Plugin`
+        // singleton). Inert until the Cymatics sketch inserts `CymaticsSimParams`
+        // on entry, so it costs nothing on other sketches.
+        app.add_plugins(crate::cymatics::compute::CymaticsComputePlugin);
+
         // Shared hand-mesh overlay infra, registered once (like the particle
         // plugins above) so each sketch's `HandMeshPlugin` can be added without
         // re-registering the material or composite node. `MaterialPlugin` and

@@ -5,12 +5,16 @@
 //! - [`sim_params::SimParamsGpu`] / [`sim_params::IterParamsGpu`] are the
 //!   `#[repr(C)]` bytemuck types that map to the WGSL uniform structs.
 //! - [`sim_params::CymaticsSimParams`] is extracted into the render world by
-//!   `ExtractResourcePlugin` (registered in C6's plugin).
+//!   `ExtractResourcePlugin` (registered by [`pipeline::CymaticsComputePlugin`]).
 //! - [`create_cymatics_textures`] allocates the two ping-pong `rgba32float`
 //!   storage textures (A and B) and the stable display texture on sketch entry.
+//! - [`pipeline::CymaticsComputePlugin`] is the render-graph node that advances
+//!   the wave field each frame (the `simulate.wgsl` ping-pong dispatch + blit).
 
+pub mod pipeline;
 pub mod sim_params;
 
+pub use pipeline::CymaticsComputePlugin;
 pub use sim_params::{
     CymaticsSimParams, CymaticsTextures, IterParamsGpu, SimParamsGpu, ITER_PARAMS_STRIDE,
     MAX_ITERATIONS,
