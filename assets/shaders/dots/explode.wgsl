@@ -26,7 +26,12 @@ struct PostParams {
 // inside a loop — non-uniform control flow requires an explicit LOD.
 fn exploded_texture(uv: vec2<f32>, center: vec2<f32>, shrink: f32) -> vec4<f32> {
     let offset = uv - center;
-    let sample_pos = center + normalize(offset) * length(offset) * shrink;
+    // `normalize(offset) * length(offset)` is algebraically just `offset`, so
+    // contracting toward `center` by `shrink` is `center + offset * shrink`.
+    // The original form also produced a NaN at the exact focal-center pixel
+    // (where `offset == 0`, `normalize` is undefined); this form is well-defined
+    // there (it samples `center`) and drops two per-sample sqrt ops.
+    let sample_pos = center + offset * shrink;
     if sample_pos.x < 0.0 || sample_pos.x >= 1.0 ||
        sample_pos.y < 0.0 || sample_pos.y >= 1.0 {
         return vec4<f32>(0.0);

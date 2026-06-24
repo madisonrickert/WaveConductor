@@ -56,6 +56,8 @@ pub use systems::DotsRoot;
 
 use bevy::prelude::*;
 use wc_core::audio::state::AudioState;
+#[cfg(debug_assertions)]
+use wc_core::debug::DebugToggles;
 use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;
@@ -70,8 +72,23 @@ impl Plugin for DotsPlugin {
         // Register DotsSettings with the settings system (panel + persistence).
         app.register_sketch_settings::<settings::DotsSettings>();
 
-        // Explode post-process: render node + uniform extract.
-        app.add_plugins(post_process::DotsPostProcessPlugin);
+        // Explode post-process: render node + uniform extract. In debug builds,
+        // `WC_DEBUG_DISABLE_EXPLODE` skips it for render-stage isolation —
+        // flip it off with the FPS monitor running to measure the explode
+        // pass's full-screen fill-rate cost against the rest of the frame.
+        // `DebugPlugin` (in `CorePlugin`) ran earlier, so `DebugToggles` is
+        // present iff a `WC_DEBUG_*` var was set; absence means "all toggles
+        // off" (and release has no `DebugToggles` at all). `DotsPostParams` is
+        // still inserted `OnEnter(Dots)` regardless, so `update_dots_post_params`
+        // keeps its `ResMut<DotsPostParams>` resource even when the node is gone.
+        #[cfg(debug_assertions)]
+        let register_explode =
+            should_register_explode(app.world().get_resource::<DebugToggles>().copied().as_ref());
+        #[cfg(not(debug_assertions))]
+        let register_explode = true;
+        if register_explode {
+            app.add_plugins(post_process::DotsPostProcessPlugin);
+        }
 
         // Register the picker-tile manifest entry (async screenshot load).
         register_dots_manifest(app);
@@ -315,6 +332,14 @@ fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<hand_mesh::DotsBoneActive>();
 }
 
+/// Whether to register the explode post-process node. On unless
+/// `WC_DEBUG_DISABLE_EXPLODE` is set. Always on in release (no [`DebugToggles`]).
+/// Mirrors Line's `should_register_smear`.
+#[cfg(debug_assertions)]
+fn should_register_explode(toggles: Option<&DebugToggles>) -> bool {
+    !toggles.is_some_and(|t| t.disable_explode)
+}
+
 /// How long the user must stop adjusting a `requires_restart` setting before
 /// the sketch restarts. 500 ms quiescence prevents mid-drag sketch kills when
 /// the user is still adjusting a slider. Mirrors [`crate::line`]'s debounce.
@@ -384,6 +409,34 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use wc_core::sketch::SketchManifest;
+
+    /// `DotsPlugin` decides whether to register the explode post-process node by
+    /// reading `DebugToggles`; this guards the gating predicate. Mirrors Line's
+    /// `render_stage_gating_predicate`.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn explode_gating_predicate() {
+        let all_off = DebugToggles {
+            force_g: None,
+            disable_smear: false,
+            disable_explode: false,
+            disable_bloom: false,
+            disable_bone_composite: false,
+            disable_bone_camera: false,
+            solid_particles: None,
+            force_screensaver: false,
+            force_tier: None,
+        };
+        // No toggles set → node registered.
+        assert!(should_register_explode(None));
+        assert!(should_register_explode(Some(&all_off)));
+        // WC_DEBUG_DISABLE_EXPLODE set → node skipped.
+        let no_explode = DebugToggles {
+            disable_explode: true,
+            ..all_off
+        };
+        assert!(!should_register_explode(Some(&no_explode)));
+    }
 
     /// Verifies that `register_dots_manifest` appends an entry for
     /// `AppState::Dots` with the correct display name.

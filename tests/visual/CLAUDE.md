@@ -131,6 +131,7 @@ the scenario's `[debug]` table or `--debug KEY=VAL` (the launcher re-prefixes
 |-----|--------|
 | `WC_DEBUG_FORCE_G=<f32>` | Pin the Line gravity-smear `g_constant`, eliminating the triangle-wave phase variable (deterministic isolation). Bad float -> ignored. |
 | `WC_DEBUG_DISABLE_SMEAR` | Skip the gravity post-process node (presence = on; value ignored). |
+| `WC_DEBUG_DISABLE_EXPLODE` | Skip the Dots explode (chromatic-aberration) post-process node, isolating its full-screen fill-rate cost (presence = on; value ignored). |
 | `WC_DEBUG_DISABLE_BLOOM` | Zero the main camera bloom intensity. |
 | `WC_DEBUG_DISABLE_BONE_COMPOSITE` | Skip the additive bone-glow composite node. |
 | `WC_DEBUG_DISABLE_BONE_CAMERA` | Do not spawn the off-screen bone camera. |

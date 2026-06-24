@@ -41,6 +41,9 @@ pub struct DebugToggles {
     pub force_g: Option<f32>,
     /// `WC_DEBUG_DISABLE_SMEAR`: skip the gravity post-process node.
     pub disable_smear: bool,
+    /// `WC_DEBUG_DISABLE_EXPLODE`: skip the Dots explode (chromatic-aberration)
+    /// post-process node, isolating that pass's full-screen fill-rate cost.
+    pub disable_explode: bool,
     /// `WC_DEBUG_DISABLE_BLOOM`: zero/disable the main camera bloom.
     pub disable_bloom: bool,
     /// `WC_DEBUG_DISABLE_BONE_COMPOSITE`: skip the bone-composite node.
@@ -81,6 +84,7 @@ impl DebugToggles {
         Self {
             force_g,
             disable_smear: present("WC_DEBUG_DISABLE_SMEAR"),
+            disable_explode: present("WC_DEBUG_DISABLE_EXPLODE"),
             disable_bloom: present("WC_DEBUG_DISABLE_BLOOM"),
             disable_bone_composite: present("WC_DEBUG_DISABLE_BONE_COMPOSITE"),
             disable_bone_camera: present("WC_DEBUG_DISABLE_BONE_CAMERA"),
@@ -186,6 +190,7 @@ mod tests {
         let vars = vec![
             ("WC_DEBUG_FORCE_G".to_string(), "8000".to_string()),
             ("WC_DEBUG_DISABLE_SMEAR".to_string(), "1".to_string()),
+            ("WC_DEBUG_DISABLE_EXPLODE".to_string(), "1".to_string()),
             ("WC_DEBUG_DISABLE_BLOOM".to_string(), String::new()),
             (
                 "WC_DEBUG_SOLID_PARTICLES".to_string(),
@@ -195,6 +200,7 @@ mod tests {
         let t = DebugToggles::from_env_vars(&vars);
         assert_eq!(t.force_g, Some(8000.0));
         assert!(t.disable_smear);
+        assert!(t.disable_explode);
         assert!(t.disable_bloom);
         assert!(!t.disable_bone_composite);
         assert_eq!(t.solid_particles, Some([1.0, 0.0, 1.0, 1.0]));
@@ -219,6 +225,7 @@ mod tests {
         let t = DebugToggles::from_env_vars(&[]);
         assert_eq!(t.force_g, None);
         assert!(!t.disable_smear);
+        assert!(!t.disable_explode);
         assert!(!t.disable_bloom);
         assert!(!t.disable_bone_composite);
         assert!(!t.disable_bone_camera);

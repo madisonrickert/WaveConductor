@@ -244,6 +244,9 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     if t.disable_smear {
         parts.push("\"disable_smear\":true".to_string());
     }
+    if t.disable_explode {
+        parts.push("\"disable_explode\":true".to_string());
+    }
     if t.disable_bloom {
         parts.push("\"disable_bloom\":true".to_string());
     }
@@ -367,6 +370,7 @@ mod tests {
         let toggles = DebugToggles {
             force_g: Some(8000.0),
             disable_smear: true,
+            disable_explode: false,
             disable_bloom: false,
             disable_bone_composite: false,
             disable_bone_camera: false,
