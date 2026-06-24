@@ -11,10 +11,12 @@
 //!    ([`render::spawn_cymatics_quad`], sampling texture A) → tag the texture
 //!    handles onto a [`CymaticsRoot`] entity → insert the initial
 //!    [`compute::CymaticsSimParams`]).
-//! 2. Every `Update` while the sketch is `Active` **or** showing its
-//!    screensaver, [`update_cymatics_sim_params`] packs [`CymaticsState`] into
-//!    the extracted [`compute::CymaticsSimParams`] (centres, alive radius, and
-//!    the per-iteration phase times) and advances the phase clock once.
+//! 2. Every `Update` while the sketch is `Active`, through the `Idle` pre-roll,
+//!    **or** showing its screensaver, [`update_cymatics_sim_params`] packs
+//!    [`CymaticsState`] into the extracted [`compute::CymaticsSimParams`]
+//!    (centres, alive radius, and the per-iteration phase times) and advances
+//!    the phase clock once — so the resting field never freezes during the
+//!    pre-screensaver `Idle` window.
 //! 3. The render world extracts `CymaticsSimParams`;
 //!    [`compute::CymaticsComputePlugin`] advances the wave field on the GPU
 //!    (`assets/shaders/cymatics/simulate.wgsl`), and [`render::CymaticsMaterial`]
@@ -53,7 +55,7 @@ use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
-use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
+use wc_core::sketch::{despawn_with, in_idle, sketch_active, RegisterSketchManifestExt};
 
 use compute::{create_cymatics_textures, CymaticsSimParams, SimParamsGpu, MAX_ITERATIONS};
 use settings::CymaticsSettings;
@@ -233,17 +235,28 @@ impl Plugin for CymaticsPlugin {
                 .run_if(sketch_active(AppState::Cymatics)),
         );
 
-        // Per-frame CPU→GPU bridge. Runs while the sketch is `Active` OR while
-        // its screensaver is showing, so the attract/screensaver mode keeps the
-        // field animating instead of freezing. This is the single system that
-        // advances `CymaticsState::simulation_time` (exactly one system owns it).
+        // Per-frame CPU→GPU bridge. Runs while the sketch is `Active`, through
+        // the 30–60 s `Idle` pre-roll, AND while its screensaver is showing, so
+        // the field keeps animating instead of freezing. This is the single
+        // system that advances `CymaticsState::simulation_time` (exactly one
+        // system owns it).
+        //
+        // The `Idle` leg is a deliberate, narrow exception to "zero systems when
+        // idle": without it the phase clock stops, the wave source `2·sin(time)`
+        // goes constant, and the resting field visibly freezes for the 30 s
+        // before the screensaver (the operator reads that as the screensaver
+        // freezing). Only this bridge is extended into `Idle`; the attract
+        // driver stays `in_screensaver`-only, so through `Idle` `active_radius`
+        // keeps its decayed resting value and the idle veto does not flap.
         app.add_systems(
             Update,
             update_cymatics_sim_params.run_if(
                 // `.or_else` is the non-deprecated equivalent of the run-condition
-                // `or` combinator in this Bevy version (same truth table): run while
-                // `Active` OR while the screensaver is showing.
-                sketch_active(AppState::Cymatics).or_else(in_screensaver(AppState::Cymatics)),
+                // `or` combinator in this Bevy version (same truth table): run
+                // while `Active`, OR through `Idle`, OR while the screensaver shows.
+                sketch_active(AppState::Cymatics)
+                    .or_else(in_idle(AppState::Cymatics))
+                    .or_else(in_screensaver(AppState::Cymatics)),
             ),
         );
 
@@ -526,9 +539,12 @@ fn update_cymatics_sim_params(
 /// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting),
 /// `master_brightness`, and `gamma` (both User settings).
 ///
-/// Runs under the same `sketch_active OR in_screensaver` condition as
-/// [`update_cymatics_sim_params`] so the material reflects the live state
-/// during both active play and the attract screensaver.
+/// Runs under `sketch_active OR in_screensaver` so the material reflects the
+/// live state during both active play and the attract screensaver. Unlike
+/// [`update_cymatics_sim_params`], this is *not* extended into the `Idle`
+/// pre-roll: its inputs (`skew_curve`, `master_brightness`, `gamma`) are all
+/// pinned without interaction, so re-running it through `Idle` would only
+/// re-pack an identical uniform.
 ///
 /// v4 `skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2)`.
 /// The `skew_curve` Dev knob applies an exponent to this raw value before

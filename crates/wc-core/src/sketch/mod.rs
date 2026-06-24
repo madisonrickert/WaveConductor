@@ -17,4 +17,4 @@ pub mod scheduling;
 
 pub use cleanup::despawn_with;
 pub use manifest::{RegisterSketchManifestExt, SketchManifest, SketchManifestEntry};
-pub use scheduling::sketch_active;
+pub use scheduling::{in_idle, sketch_active};
