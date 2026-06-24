@@ -5,6 +5,7 @@
 //! [`wc_core::sketch`].
 
 pub mod dots;
+pub mod hand_mesh;
 pub mod line;
 pub mod particles;
 
