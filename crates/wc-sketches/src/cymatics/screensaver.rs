@@ -123,7 +123,8 @@ impl Plugin for CymaticsScreensaverPlugin {
 ///
 /// Writes `center`, `center2`, `active_radius`, and `num_cycles` each frame.
 /// The `active_radius` is read from `CymaticsSettings::attract_radius` (Dev
-/// knob; default 0.3 — retuned below v4's 0.6 to calm the field). `num_cycles`
+/// knob; default 0.6 = v4's `ATTRACT_ACTIVE_RADIUS` baseline, for wide idle
+/// coverage). `num_cycles`
 /// is read from `CymaticsSettings::attract_cycles` (default 0.1) so the source
 /// phase advances slowly: small smooth per-frame deltas instead of a big
 /// full-screen kick each throttled present (the old "jolt"). Lissajous speeds
@@ -144,8 +145,9 @@ fn drive_cymatics_attract(
     let (c1, c2) = wander_centers(time.elapsed_secs(), &speeds);
     state.center = c1;
     state.center2 = c2;
-    // attract_radius defaults to 0.3 (retuned below v4's ATTRACT_ACTIVE_RADIUS
-    // of 0.6; a smaller mask calms the near-full-screen field).
+    // attract_radius defaults to 0.6 (v4's ATTRACT_ACTIVE_RADIUS baseline) for
+    // wide idle coverage; gentleness comes from the slow attract_cycles rate,
+    // not a small mask. The operator can push it to 0.7–0.8 live.
     state.active_radius = settings.attract_radius;
     // Slow source rate → small smooth per-frame phase deltas = gentle drift.
     // Pinning DEFAULT_NUM_CYCLES (1.002) advanced ~one full ±2 sine cycle per

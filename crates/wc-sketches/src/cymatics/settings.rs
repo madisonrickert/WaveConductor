@@ -327,14 +327,15 @@ pub struct CymaticsSettings {
     pub blub_level: f32,
 
     // ── Screensaver / attract (live, no restart) ──────────────────────────────
-    /// Ambient alive-mask radius held during attract mode. v4's
-    /// `ATTRACT_ACTIVE_RADIUS` was `0.6`, but v4 had no screensaver, so this
-    /// Lissajous mode has no parity baseline and is free to retune for feel: the
-    /// default is lowered to `0.3` to calm the field (a smaller mask = gentler
-    /// near-full-screen energy). `0.1` (the resting floor) would produce a nearly
-    /// invisible mask.
+    /// Ambient alive-mask radius held during attract mode. Default `0.6` matches
+    /// v4's `ATTRACT_ACTIVE_RADIUS` baseline: the core mask radius is
+    /// `attract_radius - 0.2` (= `0.4`) and the outer fade reaches
+    /// `attract_radius + 0.8`, so the idle waves cover much of the screen.
+    /// Gentleness comes from the slow `attract_cycles` source rate, not a small
+    /// mask. The `0.1` to `2.0` range lets the operator push to `0.7`–`0.8` live;
+    /// `0.1` (the resting floor) would produce a nearly invisible mask.
     #[setting(
-        default = 0.3_f32,
+        default = 0.6_f32,
         min = 0.1_f32,
         max = 2.0_f32,
         step = 0.05_f32,
@@ -501,11 +502,11 @@ fn default_blub_level() -> f32 {
     1.0
 }
 
-// Attract / screensaver defaults. `attract_radius` is retuned below v4's 0.6
-// (v4 had no screensaver, so no parity baseline); the Lissajous speeds keep the
-// v4 incommensurate ratios.
+// Attract / screensaver defaults. `attract_radius` = 0.6 is v4's
+// `ATTRACT_ACTIVE_RADIUS` baseline (wide idle coverage; the slow `attract_cycles`
+// rate keeps it gentle); the Lissajous speeds keep the v4 incommensurate ratios.
 fn default_attract_radius() -> f32 {
-    0.3
+    0.6
 }
 
 fn default_attract_cycles() -> f32 {
@@ -670,7 +671,7 @@ mod tests {
             "gamma should fall back to default"
         );
         assert!(
-            (parsed.attract_radius - 0.3).abs() < 1e-6,
+            (parsed.attract_radius - 0.6).abs() < 1e-6,
             "attract_radius should fall back to default"
         );
     }
