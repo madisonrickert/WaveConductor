@@ -71,6 +71,14 @@ pub const MINIMUM_ACTIVE_RADIUS: f32 = 0.1;
 /// the effective cycle count via `slowDown`; see [`update_cymatics_sim_params`].
 pub const DEFAULT_NUM_CYCLES: f32 = 1.002;
 
+/// Upper bound (in phase units) on [`CymaticsState::ramp_time`], the alive-bloom
+/// ramp clock fed to the shader's `(time-500)/500` ramp. That ramp saturates at
+/// `+0.8` once the clock reaches `900`, so capping just past it keeps the clock
+/// bounded over a multi-hour soak (an unbounded f32 would lose precision) while
+/// leaving the already-saturated bloom unchanged. Distinct from the oscillator
+/// phase, which is wrapped mod TAU instead (see [`update_cymatics_sim_params`]).
+const RAMP_TIME_CAP: f32 = 1000.0;
+
 /// Marker component placed on every entity owned by the Cymatics sketch.
 ///
 /// `OnEnter(AppState::Cymatics)` tags the fullscreen quad and the texture-handle
@@ -98,8 +106,21 @@ pub struct CymaticsState {
     /// Decays toward 0 on interaction onset, lowering the effective cycle count
     /// (v4 `slowDownAmount`). Held at 0 until interaction lands (C9).
     pub slow_down: f32,
-    /// Phase clock (v4 `simulationTime`), advanced `N·dt` per frame.
+    /// Oscillator phase clock (v4 `simulationTime`), advanced `N·dt` per frame
+    /// and **wrapped to `[0, TAU)`** each frame. Only the wave source's `sin`
+    /// reads it, and `sin` is periodic, so wrapping is mathematically exact while
+    /// keeping the argument small enough that f32 holds full precision over a
+    /// multi-hour soak (an unbounded clock reaches ~10.9M rad in 8 h, far past
+    /// where f32's 24-bit mantissa loses sub-radian precision). Distinct from
+    /// [`Self::ramp_time`], which the alive-bloom ramp needs unwrapped.
     pub simulation_time: f32,
+    /// Alive-bloom ramp clock — the elapsed-time value fed to the shader's
+    /// `(time-500)/500` bloom ramp. Advanced `N·dt` per frame like
+    /// [`Self::simulation_time`] but **capped at [`RAMP_TIME_CAP`]** rather than
+    /// wrapped: the bloom needs real elapsed time, not phase, and saturates at
+    /// `+0.8` by `900`, so the cap keeps it bounded without changing the
+    /// saturated bloom. Equals `simulation_time` until the phase first wraps.
+    pub ramp_time: f32,
     /// Last frame's primary-centre speed (for the audio coupling), v4
     /// `centerSpeed`. Held at 0 until interaction lands (C9).
     pub center_speed: f32,
@@ -116,6 +137,7 @@ impl Default for CymaticsState {
             num_cycles: DEFAULT_NUM_CYCLES,
             slow_down: 0.0,
             simulation_time: 0.0,
+            ramp_time: 0.0,
             center_speed: 0.0,
         }
     }
@@ -403,10 +425,12 @@ fn spawn_cymatics(
         // `update_cymatics_sim_params`. The constructor lives in `sim_params.rs`
         // because `SimParamsGpu`'s pad field is module-private.
         params: SimParamsGpu::with_resting_physics([vx, vy], MINIMUM_ACTIVE_RADIUS),
-        // Phase scalars; overwritten each frame by `update_cymatics_sim_params`.
-        // Carried as two f32s (not a Vec) so the per-frame extract clone never
-        // allocates — sub-step i's time is `phase_base + i·phase_dt`.
+        // Phase/ramp scalars; overwritten each frame by `update_cymatics_sim_params`.
+        // Carried as scalars (not a Vec) so the per-frame extract clone never
+        // allocates — sub-step i's phase is `phase_base + i·phase_dt`, its ramp
+        // time `ramp_base + i·phase_dt`.
         phase_base: 0.0,
+        ramp_base: 0.0,
         phase_dt: 0.0,
         // Wave-source amplitude; overwritten each frame from the live setting.
         source_amplitude: settings.source_amplitude,
@@ -475,16 +499,51 @@ fn update_cymatics_sim_params(
     let n = sim.iterations.clamp(1, MAX_ITERATIONS as u32);
     let cycles = state.num_cycles / (1.0 + state.slow_down * 3.0);
     let dt = cycles * std::f32::consts::TAU / n as f32;
-    let base = state.simulation_time;
+    // Both clocks at frame start. They are equal until the phase first wraps.
+    let phase_base = state.simulation_time;
+    let ramp_base = state.ramp_time;
 
-    // Store the phase scalars; the render-world prepare step recomputes each
-    // sub-step's time as `phase_base + i·phase_dt` (no per-frame Vec, so the
-    // extract clone never allocates).
-    sim.phase_base = base;
+    // Store the two clock bases; the render-world prepare step recomputes each
+    // sub-step's phase as `phase_base + i·phase_dt` and ramp time as
+    // `ramp_base + i·phase_dt` (no per-frame Vec, so the extract clone never
+    // allocates).
+    sim.phase_base = phase_base;
+    sim.ramp_base = ramp_base;
     sim.phase_dt = dt;
 
-    // Advance the phase clock once per frame (single-owner invariant above).
-    state.simulation_time += n as f32 * dt;
+    // Advance both clocks once per frame (single-owner invariant above), each
+    // bounded so it stays precise/finite over a multi-hour soak: the oscillator
+    // phase wraps mod TAU (sin is periodic → exact, but the argument stays small)
+    // and the alive-bloom clock caps at RAMP_TIME_CAP (the bloom is already
+    // saturated by then). For the first ~900 phase units — before any wrap or cap
+    // bites — both still equal the old unbounded `simulation_time`, so nothing
+    // visible changes in normal use; this only bounds the long-run growth.
+    let advance = n as f32 * dt;
+    let (next_phase, next_ramp) = advance_clocks(phase_base, ramp_base, advance);
+    state.simulation_time = next_phase;
+    state.ramp_time = next_ramp;
+}
+
+/// Advance the two per-frame Cymatics clocks by `advance` (= `N·dt`), returning
+/// `(next_phase, next_ramp)`.
+///
+/// The oscillator phase is wrapped to `[0, TAU)` via `rem_euclid` (sin is
+/// periodic, so wrapping by whole turns is exact, yet the stored value stays
+/// small enough that f32 keeps full precision over an 8-hour soak). The
+/// alive-bloom ramp clock is capped at [`RAMP_TIME_CAP`] instead of wrapped — it
+/// feeds the shader's `(time-500)/500` ramp, which needs real elapsed time and
+/// saturates at `+0.8` by `900`, so capping just past that bounds it without
+/// changing the saturated bloom.
+///
+/// Pure (no world access) so the long-soak boundedness/precision invariants are
+/// unit-testable in a tight in-process loop without ECS overhead;
+/// [`update_cymatics_sim_params`] calls it directly, so the test guards the real
+/// path.
+fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
+    (
+        (phase + advance).rem_euclid(std::f32::consts::TAU),
+        (ramp + advance).min(RAMP_TIME_CAP),
+    )
 }
 
 /// Update the [`render::CymaticsMaterial`] each frame with the current
@@ -675,6 +734,7 @@ mod tests {
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             phase_base: 0.0,
+            ramp_base: 0.0,
             phase_dt: 0.0,
             source_amplitude: 3.0,
             iterations: 20,
@@ -697,10 +757,12 @@ mod tests {
         );
     }
 
-    /// `update_cymatics_sim_params` stores the phase scalars (`phase_base` =
-    /// base, `phase_dt` = dt) and advances `simulation_time` exactly once by
-    /// `N·dt`. Sub-step `i`'s time is reconstructed as `phase_base + i·phase_dt`
-    /// by the render-world prepare step.
+    /// `update_cymatics_sim_params` stores the clock bases (`phase_base` =
+    /// wrapped phase at frame start, `ramp_base` = ramp clock at frame start,
+    /// `phase_dt` = dt) and advances both clocks exactly once: `simulation_time`
+    /// (phase) by `N·dt` then wrapped mod TAU, and `ramp_time` by `N·dt` (here
+    /// `N·dt ≈ 6.3 ≪ RAMP_TIME_CAP`, so the cap does not bite). Sub-step `i`'s
+    /// phase is reconstructed as `phase_base + i·phase_dt` by the prepare step.
     #[test]
     #[allow(
         clippy::as_conversions,
@@ -714,6 +776,7 @@ mod tests {
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             phase_base: 0.0,
+            ramp_base: 0.0,
             phase_dt: 0.0,
             source_amplitude: 3.0,
             iterations: 20,
@@ -736,6 +799,10 @@ mod tests {
             "phase_base must be the base phase (0.0)"
         );
         assert!(
+            sim.ramp_base.abs() < 1e-6,
+            "ramp_base must be the base ramp clock (0.0)"
+        );
+        assert!(
             (sim.phase_dt - dt).abs() < 1e-4,
             "phase_dt must equal the per-sub-step spacing dt"
         );
@@ -751,9 +818,99 @@ mod tests {
         );
 
         let state = world.resource::<CymaticsState>();
+        // 20·dt = 1.002·TAU > TAU, so the phase wraps once: it equals
+        // (20·dt) mod TAU ≈ 0.002·TAU, and stays inside [0, TAU).
+        let wrapped = (20.0 * dt).rem_euclid(std::f32::consts::TAU);
         assert!(
-            (state.simulation_time - 20.0 * dt).abs() < 1e-3,
-            "simulation_time must advance by exactly N·dt once"
+            (state.simulation_time - wrapped).abs() < 1e-3,
+            "simulation_time must advance N·dt then wrap mod TAU (expected {wrapped}, got {})",
+            state.simulation_time
+        );
+        assert!(
+            (0.0..std::f32::consts::TAU).contains(&state.simulation_time),
+            "wrapped phase must stay in [0, TAU)"
+        );
+        // The ramp clock advances by the same N·dt but is NOT wrapped (and here
+        // 20·dt ≈ 6.3 is far below RAMP_TIME_CAP, so it is uncapped).
+        assert!(
+            (state.ramp_time - 20.0 * dt).abs() < 1e-3,
+            "ramp_time must advance by exactly N·dt once (unwrapped, uncapped here)"
+        );
+    }
+
+    /// Soak invariant: over an 8-hour run (60 fps) `advance_clocks` — the
+    /// per-frame core of `update_cymatics_sim_params` — keeps the oscillator
+    /// phase bounded in `[0, TAU)` and full-precision, and the alive-bloom ramp
+    /// clock bounded by `RAMP_TIME_CAP`. An unbounded phase would instead reach
+    /// ~10.9M rad, where f32's 24-bit mantissa can't hold the sub-radian phase
+    /// the wave source's `sin()` needs (it would quantize / go erratic). Runs the
+    /// real helper in a tight in-process loop — no sleeping, no ECS overhead.
+    #[test]
+    fn phase_wraps_and_ramp_stays_bounded_over_long_soak() {
+        let tau32 = std::f32::consts::TAU;
+        // Resting cadence: 20 sub-steps/frame at the default cycle count.
+        let dt = DEFAULT_NUM_CYCLES * tau32 / 20.0;
+        let advance = 20.0 * dt; // N·dt per frame ≈ 1.002·TAU ≈ 6.296 rad.
+        let frames = 60 * 60 * 60 * 8; // 8 h at 60 fps = 1,728,000 frames.
+
+        let mut phase = 0.0_f32; // real path: wrapped via advance_clocks
+        let mut ramp = 0.0_f32; // real path: capped via advance_clocks
+        for _ in 0..frames {
+            let (next_phase, next_ramp) = advance_clocks(phase, ramp, advance);
+            phase = next_phase;
+            ramp = next_ramp;
+            // (1) phase stays bounded in [0, TAU); (2) ramp stays ≤ the cap.
+            assert!(
+                (0.0..tau32).contains(&phase),
+                "phase escaped [0, TAU): {phase}"
+            );
+            assert!(ramp <= RAMP_TIME_CAP, "ramp exceeded RAMP_TIME_CAP: {ramp}");
+        }
+
+        // (1) final phase still bounded; (2) the ramp clock has saturated exactly
+        // at the cap (it passed 900 long ago, so the bloom is pinned at +0.8).
+        assert!(
+            (0.0..tau32).contains(&phase),
+            "final phase must be in [0, TAU), got {phase}"
+        );
+        assert!(
+            (ramp - RAMP_TIME_CAP).abs() < 1e-3,
+            "ramp must saturate at RAMP_TIME_CAP after a long run, got {ramp}"
+        );
+
+        // (3) no precision degradation. The wrapped phase stays small, so `sin()`
+        // is evaluated at full f32 precision and the per-frame advance registers
+        // intact — `(phase + advance) - phase` round-trips back to `advance`.
+        // (Note: the *absolute* phase still drifts slowly over 8 h, as any f32
+        // accumulation does; what matters is that the stored phase never enters
+        // the magnitude where the increment itself is lost — see the contrast.)
+        let s = phase.sin();
+        assert!(
+            s.is_finite() && (-1.0..=1.0).contains(&s),
+            "sin(phase) must stay sane (finite, in [-1, 1]), got {s}"
+        );
+        let wrapped_step = (phase + advance) - phase;
+        assert!(
+            (wrapped_step - advance).abs() < 1e-3,
+            "wrapped phase preserves the per-frame increment ({advance}), got {wrapped_step}"
+        );
+
+        // Contrast: an UNbounded clock reaches the 8-hour magnitude (~10.9M rad,
+        // f64-exact below), where f32's ulp is ≥ 1 rad. The very same `+ advance`
+        // then loses most of the sub-radian increment every frame, so the stored
+        // phase quantizes and the wave source goes erratic — exactly the gap the
+        // wrap closes.
+        let true_phase = f64::from(frames) * f64::from(advance);
+        assert!(
+            true_phase > 1.0e7,
+            "8 h of phase exceeds 10M rad, got {true_phase}"
+        );
+        let soak_mag = 1.088e7_f32; // representative late-soak magnitude; f32 ulp ≈ 1 rad here
+        let corrupted_step = (soak_mag + advance) - soak_mag;
+        assert!(
+            (corrupted_step - advance).abs() > 0.1,
+            "an unbounded f32 clock at soak magnitude corrupts the per-frame increment \
+             (advance {advance}, got {corrupted_step})"
         );
     }
 
@@ -771,6 +928,7 @@ mod tests {
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             phase_base: 0.0,
+            ramp_base: 0.0,
             phase_dt: 0.0,
             source_amplitude: 3.0,
             iterations: 20,

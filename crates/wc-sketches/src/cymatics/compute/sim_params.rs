@@ -137,22 +137,40 @@ pub struct CymaticsTextures {
 /// [`ExtractResource`] clones this into the render world so the compute plugin
 /// (C6) can build its bind group without touching main-world resources.
 ///
-/// The per-iteration phase is carried as two scalars (`phase_base`,
+/// The per-iteration clocks are carried as scalars (`phase_base`, `ramp_base`,
 /// `phase_dt`) rather than a `Vec<f32>` of pre-multiplied times: sub-step `i`'s
-/// time is `phase_base + i·phase_dt`, recomputed where it is written into the
-/// GPU buffer. This keeps the whole resource POD, so the per-frame
+/// phase is `phase_base + i·phase_dt` and its ramp time is
+/// `ramp_base + i·phase_dt`, recomputed where each is written into the GPU
+/// buffer. This keeps the whole resource POD, so the per-frame
 /// `ExtractResource` clone is a cheap field copy (plus two `Handle` ref-count
 /// bumps) with **no heap allocation** — a `Vec` field would otherwise force a
 /// `Vec::clone` (alloc + free) every frame the resource changes, which is every
 /// frame on the steady-state path.
+///
+/// ## Two decoupled clocks
+///
+/// The oscillator phase (feeding `sin`) and the alive-bloom ramp clock (feeding
+/// the shader's `(time-500)/500` ramp) share the same per-sub-step increment
+/// `phase_dt` but are carried separately so each can be bounded its own way over
+/// a multi-hour soak: `phase_base` is wrapped to `[0, TAU)` (sin is periodic, so
+/// this is exact yet keeps the argument small and precise), while `ramp_base` is
+/// a bounded-but-unwrapped elapsed clock (the bloom needs real elapsed time, not
+/// phase). They start equal and only diverge once the phase first wraps.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct CymaticsSimParams {
     /// Constant-per-frame uniform.
     pub params: SimParamsGpu,
-    /// Base phase for sub-step 0 (v4 `simulationTime` at frame start). Sub-step
-    /// `i`'s time is `phase_base + i·phase_dt`.
+    /// Base oscillator phase for sub-step 0 (v4 `simulationTime` at frame start),
+    /// wrapped to `[0, TAU)`. Sub-step `i`'s phase is `phase_base + i·phase_dt`;
+    /// the prepare step computes `wave_signal = source_amplitude·sin(phase)`.
     pub phase_base: f32,
-    /// Per-sub-step phase increment (`cycles·2π / iterations`).
+    /// Base alive-bloom ramp clock for sub-step 0 (the shader's `IterParams.time`
+    /// field). Sub-step `i`'s ramp time is `ramp_base + i·phase_dt`. Bounded but
+    /// un-wrapped: the shader's `(time-500)/500` bloom ramp needs elapsed time,
+    /// not phase. Distinct from `phase_base`, which is wrapped mod TAU for `sin`.
+    pub ramp_base: f32,
+    /// Per-sub-step phase increment (`cycles·2π / iterations`); shared by both
+    /// the phase and the ramp clock.
     pub phase_dt: f32,
     /// Wave-source injection amplitude (`source_amplitude` setting, v4 `2.0`).
     /// Applied CPU-side in the compute prepare step: each sub-step's
