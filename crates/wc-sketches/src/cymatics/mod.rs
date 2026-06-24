@@ -26,9 +26,15 @@
 //! [`crate::SketchesPlugin`] umbrella, not here.
 //!
 //! Mouse/hand interaction (which drives the two wave centres), the faithful
-//! audio coupling derived from the same `CymaticsState`, the wandering attract
-//! mode, and the shared bloomed hand-mesh overlay arrive in later stages; their
-//! systems will slot into the lifecycle and `Update` chain established here.
+//! audio coupling derived from the same `CymaticsState`, and the wandering
+//! attract mode arrive in later stages; their systems will slot into the
+//! lifecycle and `Update` chain established here.
+//!
+//! The shared bloomed hand-mesh overlay is registered in
+//! [`CymaticsPlugin::build`] via [`crate::hand_mesh::HandMeshPlugin`]. Cymatics
+//! renders in the main 2D pass with no post-process node, so no
+//! [`crate::hand_mesh::HandMeshCompositeSet`] ordering edge is needed; the
+//! composite runs in `EarlyPostProcess` after the 2D pass by default.
 
 pub mod compute;
 pub mod render;
@@ -118,6 +124,27 @@ impl Plugin for CymaticsPlugin {
         // Settings (panel + persistence) and the picker-tile manifest entry.
         app.register_sketch_settings::<CymaticsSettings>();
         register_cymatics_manifest(app);
+
+        // Shared wireframe bone overlay (mirrors Line/Dots). Cymatics renders in
+        // the main 2D pass with no post-process node, so no
+        // `HandMeshCompositeSet` ordering edge is needed — the composite runs
+        // in `EarlyPostProcess` after the 2D pass by default (confirmed tolerant
+        // of the absent edge in the hand-mesh integration tests).
+        app.add_plugins(crate::hand_mesh::HandMeshPlugin {
+            config: crate::hand_mesh::HandMeshConfig {
+                app_state: AppState::Cymatics,
+                // Orange `#eb5938` — v4 BASE_BODY_COL (235, 89, 56). Intentionally
+                // matches the render shader's body colour so the bone overlay reads
+                // as part of the same visual palette.
+                bone_color: Color::srgb(
+                    f32::from(0xeb_u8) / 255.0,
+                    f32::from(0x59_u8) / 255.0,
+                    f32::from(0x38_u8) / 255.0,
+                ),
+                glow_intensity: 5.0,
+                bone_radius: 10.0,
+            },
+        });
 
         // Lifecycle: allocate the textures + spawn the quad on enter, despawn
         // and release VRAM on exit. Audio lifecycle joins the same schedules:
@@ -213,15 +240,26 @@ impl Plugin for CymaticsPlugin {
 
 /// Register Cymatics's picker-tile metadata into [`wc_core::sketch::SketchManifest`].
 ///
-/// Minimal C8 registration: the display name only, with a default (unloaded)
-/// screenshot handle so the picker renders the placeholder fill. The real
-/// screenshot asset is loaded in the manifest-tile stage; registration is
-/// idempotent on `state`, so that later registration cleanly overwrites this one.
+/// Factored out of [`CymaticsPlugin::build`] so it is independently
+/// unit-testable without `CymaticsPlugin`'s rendering dependencies (the shared
+/// `CymaticsComputePlugin` and `Material2dPlugin::<CymaticsMaterial>` both
+/// require a full `RenderApp` that `MinimalPlugins` does not provide).
+///
+/// The `AssetServer` load is async; the picker renders the tile as soon as the
+/// image asset finishes loading. Before then the tile shows the dark placeholder
+/// fill defined in `OverlayStyle`. This mirrors the behavior of
+/// [`crate::dots::register_dots_manifest`].
 pub(crate) fn register_cymatics_manifest(app: &mut App) {
+    let asset_server = app.world().resource::<AssetServer>();
+    // Load the picker-tile screenshot as PNG. Bevy's default features include
+    // the `png` image loader; JPEG requires the separate `bevy/jpeg` feature
+    // which is not enabled in this workspace.
+    // v4 calls this sketch "Cymatics" in HomePage.tsx.
+    let screenshot = asset_server.load("sketches/cymatics/screenshot.png");
     app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
         state: AppState::Cymatics,
         display_name: "Cymatics",
-        screenshot: Handle::default(),
+        screenshot,
     });
 }
 
@@ -364,6 +402,7 @@ fn update_cymatics_sim_params(
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+    use wc_core::sketch::SketchManifest;
 
     /// `cymatics_idle_veto`: `false` when absent or at rest, `true` once the
     /// alive-mask radius is meaningfully above its resting value.
@@ -482,5 +521,28 @@ mod tests {
             (state.simulation_time - 20.0 * dt).abs() < 1e-3,
             "simulation_time must advance by exactly N·dt once"
         );
+    }
+
+    /// Verifies that `register_cymatics_manifest` appends an entry for
+    /// `AppState::Cymatics` with the correct display name.
+    ///
+    /// Uses the free-function path rather than constructing the full
+    /// `CymaticsPlugin` because `CymaticsPlugin::build` adds rendering plugins
+    /// that require a real `RenderApp` — unavailable in headless unit tests.
+    /// Mirrors `register_dots_manifest_appends_entry` in `crate::dots::tests`.
+    #[test]
+    fn register_cymatics_manifest_appends_entry() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        // `ImagePlugin` registers `Image` as an asset type so `AssetServer`
+        // can allocate a `Handle<Image>` for the screenshot path.
+        app.add_plugins(bevy::image::ImagePlugin::default());
+        register_cymatics_manifest(&mut app);
+        let manifest = app.world().resource::<SketchManifest>();
+        let entry = manifest
+            .get(AppState::Cymatics)
+            .expect("Cymatics manifest entry should be registered");
+        assert_eq!(entry.display_name, "Cymatics");
     }
 }
