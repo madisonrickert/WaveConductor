@@ -173,7 +173,9 @@ mod tests {
         let p = SimParamsGpu::with_resting_physics([640, 480], 0.1);
         assert_eq!(p.resolution, [640, 480]);
         // Top-left UV convention, no y-flip.
-        assert!((p.center[0] - 0.5).abs() < f32::EPSILON && (p.center[1] - 0.5).abs() < f32::EPSILON);
+        assert!(
+            (p.center[0] - 0.5).abs() < f32::EPSILON && (p.center[1] - 0.5).abs() < f32::EPSILON
+        );
         assert!(
             (p.center2[0] - 0.5).abs() < f32::EPSILON && (p.center2[1] - 0.5).abs() < f32::EPSILON
         );
@@ -181,6 +183,8 @@ mod tests {
         assert!((p.force_multiplier - FORCE_MULTIPLIER).abs() < f32::EPSILON);
         assert!((p.velocity_decay - VELOCITY_DECAY_FACTOR).abs() < f32::EPSILON);
         assert!((p.height_decay - HEIGHT_DECAY_FACTOR).abs() < f32::EPSILON);
-        assert!((p.accumulated_height_decay - ACCUMULATED_HEIGHT_DECAY_FACTOR).abs() < f32::EPSILON);
+        assert!(
+            (p.accumulated_height_decay - ACCUMULATED_HEIGHT_DECAY_FACTOR).abs() < f32::EPSILON
+        );
     }
 }

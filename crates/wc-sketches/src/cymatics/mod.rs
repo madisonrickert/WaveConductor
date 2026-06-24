@@ -213,8 +213,8 @@ fn spawn_cymatics(
     // f32 settings → u32 texel grid: round, floor at 1, fall back to 480 if the
     // (always non-negative) value somehow fails the conversion.
     let vy = u32::try_from((settings.vertical_resolution.round() as i64).max(1)).unwrap_or(480);
-    let vx =
-        u32::try_from(((settings.vertical_resolution * aspect).round() as i64).max(1)).unwrap_or(480);
+    let vx = u32::try_from(((settings.vertical_resolution * aspect).round() as i64).max(1))
+        .unwrap_or(480);
     let textures = create_cymatics_textures(vx, vy, &mut images);
     let sim_resolution = Vec2::new(vx as f32, vy as f32);
 
