@@ -40,7 +40,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
-use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::particle::SimParams;
 
@@ -73,6 +73,13 @@ impl Plugin for ParticleComputePlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+
+        // Explicitly remove the render-world copy when the main-world resource is
+        // gone. `ExtractResourcePlugin` propagates inserts and updates but NOT
+        // removals, so without this `ParticleSimParams` lingers in the render
+        // world after Dots/Line `OnExit`. Mirrors the cymatics fix
+        // (`remove_cymatics_sim_params_if_absent`).
+        render_app.add_systems(ExtractSchedule, remove_particle_sim_params_if_absent);
 
         render_app
             .add_systems(RenderStartup, init_particle_pipeline)
@@ -285,12 +292,28 @@ fn prepare_bind_group(
 /// Runs in the root [`RenderGraph`] schedule before `camera_driver`, so the
 /// particle storage buffer is updated before any 2D pass reads it. A no-op when
 /// the bind group or pipeline isn't ready (sketch inactive / still compiling).
+///
+/// Also gates directly on [`ParticleSimParams`]. `prepare_bind_group` stops the
+/// frame the extracted params are removed on sketch exit (its
+/// `run_if(resource_exists::<ParticleSimParams>)`), but the
+/// [`ParticleComputeBindGroup`] it last produced is **never removed** — so
+/// without this guard the dispatch would keep running the stale (off-screen) sim
+/// every frame after Dots/Line exit, wasting GPU/thermal budget. This direct
+/// `Option` guard mirrors `cymatics_compute`'s `sim` param; together with
+/// [`remove_particle_sim_params_if_absent`] (which clears the render-world copy
+/// on exit) it is what actually stops the dispatch.
 fn particle_compute(
     bind_group: Option<Res<'_, ParticleComputeBindGroup>>,
     pipeline_res: Option<Res<'_, ParticlePipeline>>,
+    sim: Option<Res<'_, ParticleSimParams>>,
     pipeline_cache: Res<'_, PipelineCache>,
     mut render_context: RenderContext<'_, '_>,
 ) {
+    // No extracted params → the sketch has exited; do not dispatch the lingering
+    // bind group (see the doc comment above).
+    if sim.is_none() {
+        return;
+    }
     let Some(bg) = bind_group else {
         return;
     };
@@ -311,4 +334,32 @@ fn particle_compute(
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, &bg.bind_group, &[]);
     pass.dispatch_workgroups(bg.dispatch_size, 1, 1);
+}
+
+/// Removes [`ParticleSimParams`] from the render world when the main-world
+/// source is absent.
+///
+/// [`ExtractResourcePlugin`] propagates inserts and updates from the main world
+/// to the render world each frame, but it does NOT propagate removals: when a
+/// particle sketch's `OnExit` (Dots / Line) removes the main-world
+/// [`ParticleSimParams`], the render-world copy silently persists. This system —
+/// added to the render sub-app's [`ExtractSchedule`] alongside the
+/// `ExtractResourcePlugin` — fills that gap. It mirrors the identical fix in
+/// `cymatics::compute::pipeline`.
+///
+/// When the render-world copy is absent the `prepare_bind_group` system's
+/// `run_if(resource_exists::<ParticleSimParams>)` gate becomes false (no new
+/// bind group is produced) and [`particle_compute`]'s direct `sim` guard turns
+/// the dispatch into a no-op (the stale [`ParticleComputeBindGroup`] is never
+/// removed, so that guard is what actually stops it). The `Handle<ShaderBuffer>`
+/// clone held inside the resource is also dropped, releasing the buffer's asset
+/// reference count.
+fn remove_particle_sim_params_if_absent(
+    mut commands: Commands<'_, '_>,
+    main_resource: Extract<'_, '_, Option<Res<'_, ParticleSimParams>>>,
+    render_resource: Option<Res<'_, ParticleSimParams>>,
+) {
+    if main_resource.is_none() && render_resource.is_some() {
+        commands.remove_resource::<ParticleSimParams>();
+    }
 }
