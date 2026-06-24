@@ -19,12 +19,12 @@ impl Plugin for SketchesPlugin {
     fn build(&self, app: &mut App) {
         // Note: Bevy's `WireframePlugin` is intentionally NOT registered. It
         // requires `WgpuFeatures::POLYGON_MODE_LINE`, which Metal does not
-        // support, so it no-ops on macOS and bones rendered solid. The Line
-        // sketch's `hand_mesh` module instead draws bones as `LineList` meshes
+        // support, so it no-ops on macOS and bones rendered solid. The shared
+        // `hand_mesh` module instead draws bones as `LineList` meshes
         // with a custom `BoneWireframeMaterial` (see
         // `hand_mesh::bone_wireframe`), which is Metal-safe and — unlike the closed
         // wireframe/gizmo pipelines — shader- and post-process-extensible. Its
-        // `MaterialPlugin` is registered by `LineHandMeshPlugin`.
+        // `MaterialPlugin` is registered below in `SketchesPlugin::build`.
 
         // Shared particle plugins: registered once here so multiple sketch
         // plugins (Line, Dots, …) can consume them without triggering Bevy's
