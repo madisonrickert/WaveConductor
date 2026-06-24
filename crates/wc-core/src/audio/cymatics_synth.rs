@@ -125,11 +125,11 @@ impl CymaticsSynth {
         // v4: `oscGain.gain.setTargetAtTime(clamp(osc_volume*0.75, 1e-10, 1), _, 0.016)`.
         // The `×0.75` factor lives in v4's `setOscVolume()`; it is baked here so
         // the coupling layer passes the raw `oscVolumeInput` without prescaling.
-        // `clip_to(1e-10, 1.0)` prevents exact-zero gain (avoids potential silent
-        // +NaN edge cases in the downstream multiplier) while capping at 1.0 to
-        // match v4's `clamp`.
+        // `clip_to(1e-10, 1.0)` computes the clamped target first (matching v4's
+        // inner `clamp(vol*0.75, 1e-10, 1.0)`), then `follow` smooths toward that
+        // clamped target — mirroring v4's `setTargetAtTime(clamp(...), ...)` order.
         let osc_gain =
-            (var(&osc_volume) * 0.75) >> follow(PARAM_SMOOTHING_S) >> clip_to(1.0e-10, 1.0);
+            (var(&osc_volume) * 0.75) >> clip_to(1.0e-10, 1.0) >> follow(PARAM_SMOOTHING_S);
 
         // ----- AM LFO -----
         //
