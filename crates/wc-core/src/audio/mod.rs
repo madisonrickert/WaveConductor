@@ -51,6 +51,7 @@
 
 pub mod background;
 pub mod command;
+pub mod cymatics_synth;
 pub mod dots_synth;
 pub mod dsp;
 pub mod engine;
