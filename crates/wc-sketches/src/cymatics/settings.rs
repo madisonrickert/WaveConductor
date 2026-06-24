@@ -307,12 +307,14 @@ pub struct CymaticsSettings {
     pub blub_level: f32,
 
     // ── Screensaver / attract (live, no restart) ──────────────────────────────
-    /// Ambient alive-mask radius held during attract mode (v4
-    /// `ATTRACT_ACTIVE_RADIUS = 0.6`). Keeps the wave field gently energised
-    /// during the screensaver; `0.1` (the resting floor) would produce a
-    /// nearly invisible mask.
+    /// Ambient alive-mask radius held during attract mode. v4's
+    /// `ATTRACT_ACTIVE_RADIUS` was `0.6`, but v4 had no screensaver, so this
+    /// Lissajous mode has no parity baseline and is free to retune for feel: the
+    /// default is lowered to `0.3` to calm the field (a smaller mask = gentler
+    /// near-full-screen energy). `0.1` (the resting floor) would produce a nearly
+    /// invisible mask.
     #[setting(
-        default = 0.6_f32,
+        default = 0.3_f32,
         min = 0.1_f32,
         max = 2.0_f32,
         step = 0.05_f32,
@@ -322,6 +324,26 @@ pub struct CymaticsSettings {
     )]
     #[serde(default = "default_attract_radius")]
     pub attract_radius: f32,
+
+    /// Wave-source phase rate during attract mode (drives `num_cycles` while the
+    /// screensaver shows). Each rendered frame advances the wave source by this
+    /// many `±2` sine cycles; the present rate is throttled, so a small value
+    /// keeps the per-frame phase delta tiny and the field drifts smoothly.
+    /// Pinning the active-sketch default (`1.002`) here advanced ~one full cycle
+    /// per visible frame — a big discrete full-screen kick (the screensaver
+    /// "jolt"). Clamped to `0.02–0.3` to stay well clear of the `~0.5`/`1.5`
+    /// half-integer rates that invert the source each frame (flicker).
+    #[setting(
+        default = 0.1_f32,
+        min = 0.02_f32,
+        max = 0.3_f32,
+        step = 0.01_f32,
+        label = "Attract source rate",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_cycles")]
+    pub attract_cycles: f32,
 
     /// Lissajous angular speed for centre-1's X component (rad/s). v4 default
     /// `0.043`. Together with `c1_omega_y`, traces a slow incommensurate path
@@ -455,9 +477,15 @@ fn default_blub_level() -> f32 {
     1.0
 }
 
-// Attract / screensaver defaults (v4 constants).
+// Attract / screensaver defaults. `attract_radius` is retuned below v4's 0.6
+// (v4 had no screensaver, so no parity baseline); the Lissajous speeds keep the
+// v4 incommensurate ratios.
 fn default_attract_radius() -> f32 {
-    0.6
+    0.3
+}
+
+fn default_attract_cycles() -> f32 {
+    0.1
 }
 
 fn default_c1_omega_x() -> f32 {
@@ -560,6 +588,10 @@ mod tests {
             "attract_radius"
         );
         assert!(
+            (d.attract_cycles - default_attract_cycles()).abs() < f32::EPSILON,
+            "attract_cycles"
+        );
+        assert!(
             (d.c1_omega_x - default_c1_omega_x()).abs() < f32::EPSILON,
             "c1_omega_x"
         );
@@ -606,7 +638,7 @@ mod tests {
             "master_brightness should fall back to default"
         );
         assert!(
-            (parsed.attract_radius - 0.6).abs() < 1e-6,
+            (parsed.attract_radius - 0.3).abs() < 1e-6,
             "attract_radius should fall back to default"
         );
     }

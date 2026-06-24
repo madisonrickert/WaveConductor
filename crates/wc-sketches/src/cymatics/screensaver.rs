@@ -8,7 +8,7 @@ use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
 
 use super::settings::CymaticsSettings;
-use super::{CymaticsState, DEFAULT_NUM_CYCLES};
+use super::CymaticsState;
 
 // ---------------------------------------------------------------------------
 // Lissajous speed bundle
@@ -123,8 +123,11 @@ impl Plugin for CymaticsScreensaverPlugin {
 ///
 /// Writes `center`, `center2`, `active_radius`, and `num_cycles` each frame.
 /// The `active_radius` is read from `CymaticsSettings::attract_radius` (Dev
-/// knob; default 0.6 matching v4). Lissajous speeds are read from the four
-/// `c[12]_omega_[xy]` Dev knobs.
+/// knob; default 0.3 — retuned below v4's 0.6 to calm the field). `num_cycles`
+/// is read from `CymaticsSettings::attract_cycles` (default 0.1) so the source
+/// phase advances slowly: small smooth per-frame deltas instead of a big
+/// full-screen kick each throttled present (the old "jolt"). Lissajous speeds
+/// are read from the four `c[12]_omega_[xy]` Dev knobs.
 ///
 /// Does **not** advance `simulation_time` — `update_cymatics_sim_params` (C8)
 /// is the sole advancer of that field (single-owner invariant). The GPU sim
@@ -141,9 +144,15 @@ fn drive_cymatics_attract(
     let (c1, c2) = wander_centers(time.elapsed_secs(), &speeds);
     state.center = c1;
     state.center2 = c2;
-    // attract_radius defaults to 0.6 (v4 ATTRACT_ACTIVE_RADIUS).
+    // attract_radius defaults to 0.3 (retuned below v4's ATTRACT_ACTIVE_RADIUS
+    // of 0.6; a smaller mask calms the near-full-screen field).
     state.active_radius = settings.attract_radius;
-    state.num_cycles = DEFAULT_NUM_CYCLES;
+    // Slow source rate → small smooth per-frame phase deltas = gentle drift.
+    // Pinning DEFAULT_NUM_CYCLES (1.002) advanced ~one full ±2 sine cycle per
+    // rendered frame at the throttled present rate — a big discrete full-screen
+    // kick (the "jolt"). attract_cycles is clamped to 0.02–0.3 (settings) to
+    // avoid the ~0.5/1.5 half-integer rates that invert the source each frame.
+    state.num_cycles = settings.attract_cycles;
     // `simulation_time` is advanced by `update_cymatics_sim_params` (C8) which
     // runs under `sketch_active OR in_screensaver`; do not advance it here
     // (single-owner invariant).
