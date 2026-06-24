@@ -6,10 +6,11 @@
 //! 1. `OnEnter(AppState::Cymatics)` runs [`init_cymatics_state`] (insert the
 //!    CPU-side [`CymaticsState`] defaults) then [`spawn_cymatics`] (read
 //!    [`settings::CymaticsSettings`] → derive the sim resolution from the window
-//!    aspect → allocate the ping-pong + display textures
+//!    aspect → allocate the two ping-pong textures
 //!    ([`compute::create_cymatics_textures`]) → spawn the fullscreen quad
-//!    ([`render::spawn_cymatics_quad`]) → tag the texture handles onto a
-//!    [`CymaticsRoot`] entity → insert the initial [`compute::CymaticsSimParams`]).
+//!    ([`render::spawn_cymatics_quad`], sampling texture A) → tag the texture
+//!    handles onto a [`CymaticsRoot`] entity → insert the initial
+//!    [`compute::CymaticsSimParams`]).
 //! 2. Every `Update` while the sketch is `Active` **or** showing its
 //!    screensaver, [`update_cymatics_sim_params`] packs [`CymaticsState`] into
 //!    the extracted [`compute::CymaticsSimParams`] (centres, alive radius, and
@@ -17,7 +18,7 @@
 //! 3. The render world extracts `CymaticsSimParams`;
 //!    [`compute::CymaticsComputePlugin`] advances the wave field on the GPU
 //!    (`assets/shaders/cymatics/simulate.wgsl`), and [`render::CymaticsMaterial`]
-//!    samples the display texture (`assets/shaders/cymatics/render.wgsl`).
+//!    samples texture A directly (`assets/shaders/cymatics/render.wgsl`).
 //! 4. `OnExit(AppState::Cymatics)` despawns the [`CymaticsRoot`] entity tree
 //!    (frees VRAM) and drops [`compute::CymaticsSimParams`] + [`CymaticsState`].
 //!
@@ -72,8 +73,8 @@ pub const DEFAULT_NUM_CYCLES: f32 = 1.002;
 ///
 /// `OnEnter(AppState::Cymatics)` tags the fullscreen quad and the texture-handle
 /// holder with this marker; `OnExit(AppState::Cymatics)` despawns everything
-/// tagged with it via [`wc_core::sketch::despawn_with`], releasing the
-/// ping-pong/display textures' VRAM each enter/exit cycle.
+/// tagged with it via [`wc_core::sketch::despawn_with`], releasing the two
+/// ping-pong textures' VRAM each enter/exit cycle.
 #[derive(Component)]
 pub struct CymaticsRoot;
 
@@ -307,8 +308,9 @@ fn init_cymatics_state(mut commands: Commands<'_, '_>) {
     commands.insert_resource(CymaticsState::default());
 }
 
-/// `OnEnter(AppState::Cymatics)` — allocate the ping-pong/display textures,
-/// spawn the fullscreen quad, and insert the initial [`CymaticsSimParams`].
+/// `OnEnter(AppState::Cymatics)` — allocate the two ping-pong textures, spawn
+/// the fullscreen quad (sampling texture A), and insert the initial
+/// [`CymaticsSimParams`].
 ///
 /// The sim grid resolution follows v4: `vertical_resolution` texels tall ×
 /// `round(vertical_resolution · aspect)` texels wide, using the window aspect.
@@ -344,7 +346,10 @@ fn spawn_cymatics(
         &mut commands,
         &mut meshes,
         &mut materials,
-        textures.display.clone(),
+        // The material samples ping-pong texture A directly: the odd-N
+        // continuity refresh keeps A holding the latest field at frame end, so
+        // no separate display texture (or per-frame blit into it) is needed.
+        textures.a.clone(),
         win,
         sim_resolution,
         settings.master_brightness,
@@ -367,7 +372,6 @@ fn spawn_cymatics(
         iterations,
         tex_a: textures.a,
         tex_b: textures.b,
-        display: textures.display,
         resolution: UVec2::new(vx, vy),
     });
 }
@@ -569,7 +573,6 @@ mod tests {
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
-            display: Handle::default(),
             resolution: UVec2::new(640, 480),
         });
 
@@ -606,7 +609,6 @@ mod tests {
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
-            display: Handle::default(),
             resolution: UVec2::new(640, 480),
         });
 
@@ -667,7 +669,6 @@ mod tests {
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
-            display: Handle::default(),
             resolution: UVec2::new(640, 480),
         });
 

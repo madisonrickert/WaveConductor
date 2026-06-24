@@ -7,7 +7,7 @@
 //! [`CymaticsComputePlugin::build`] wires three pieces into the render world:
 //!
 //! 1. [`ExtractResourcePlugin`] clones [`CymaticsSimParams`] (the per-frame
-//!    uniform, the per-iteration phase times, the ping-pong + display texture
+//!    uniform, the per-iteration phase times, the two ping-pong texture
 //!    handles, and the sub-step count) from the main world each frame.
 //! 2. `init_cymatics_pipeline` ([`RenderStartup`]) builds the bind-group
 //!    layout, queues the compute pipeline, and allocates the two persistent
@@ -20,8 +20,9 @@
 //! 4. `cymatics_compute` runs in the root [`RenderGraph`] schedule before
 //!    `camera_driver`, so the field is current before the 2D pass samples it.
 //!    It dispatches the kernel `iterations` times, alternating `ab`/`ba` and
-//!    binding each sub-step's 256-byte slot via a dynamic offset, then blits
-//!    the final texture into the stable `display` texture.
+//!    binding each sub-step's 256-byte slot via a dynamic offset. The render
+//!    material samples texture A directly, so no display blit is needed — the
+//!    only copy is the odd-N B → A continuity refresh below.
 //!
 //! # Ping-pong contract
 //!
@@ -30,20 +31,22 @@
 //! `read_write`) keeps us off a downlevel feature on the WebGPU-only target; the
 //! A/B alternation is what supplies read-from-one / write-to-the-other. After
 //! `iterations` sub-steps the freshest field is in B when the count is odd and
-//! A when it is even; the final blit copies whichever into `display` so the
-//! renderer always samples one fixed handle regardless of parity.
+//! A when it is even; the odd-N refresh (below) copies B → A so A always holds
+//! the latest field at frame end, and the render material samples A regardless
+//! of parity.
 //!
-//! # Cross-frame continuity
+//! # Cross-frame continuity (and the render source)
 //!
 //! A and B are persistent `RENDER_WORLD` textures that survive across frames,
-//! and the sub-step loop **always reads A first** (`ab`). So the next frame can
-//! only continue from the freshest field if the invariant "texture A holds the
-//! latest simulation state at frame end" holds. It holds automatically for even
-//! `iterations` (the last write lands in A); for odd `iterations` the last write
-//! lands in B, so the node additionally copies B → A after the display blit.
-//! [`frame_blit_plan`] computes both decisions (display source + whether to
-//! refresh A) from the sub-step count; default `iterations` is even, so the
-//! extra copy is off in the shipping config.
+//! and the sub-step loop **always reads A first** (`ab`). So both the next
+//! frame's read-A start AND this frame's render-from-A depend on the invariant
+//! "texture A holds the latest simulation state at frame end". It holds
+//! automatically for even `iterations` (the last write lands in A); for odd
+//! `iterations` the last write lands in B, so the node copies B → A. Because the
+//! material samples A directly (the byte-identical display blit was removed),
+//! this single refresh serves both purposes. [`frame_blit_plan`] decides whether
+//! the refresh is needed from the sub-step count; default `iterations` is even,
+//! so the copy is off in the shipping config.
 
 #![allow(
     clippy::as_conversions,
@@ -134,7 +137,7 @@ impl Plugin for CymaticsComputePlugin {
             );
 
         // Run the N-iteration dispatch in the root `RenderGraph` schedule, before
-        // `camera_driver` runs the per-camera schedules — so `display` holds the
+        // `camera_driver` runs the per-camera schedules — so texture A holds the
         // current field before the 2D pass samples it. (Bevy 0.19 render graph is
         // systems-based; see the migration guide's "Render Graph as Systems".)
         render_app.add_systems(RenderGraph, cymatics_compute.before(camera_driver));
@@ -409,7 +412,8 @@ fn prepare_cymatics_bind_groups(
 }
 
 /// Render-graph node: dispatches the kernel `iterations` times, alternating
-/// bind groups, then blits the final texture into `display`.
+/// bind groups, then (for odd `iterations`) copies B → A so A holds the latest
+/// field at frame end. The render material samples A directly — no display blit.
 ///
 /// Runs in the root [`RenderGraph`] schedule before `camera_driver`. A clean
 /// no-op while the bind groups, pipeline, or sim params are absent (sketch
@@ -461,37 +465,19 @@ fn cymatics_compute(
         }
     }
 
-    let extent = Extent3d {
-        width: sim.resolution.x,
-        height: sim.resolution.y,
-        depth_or_array_layers: 1,
-    };
-
-    // Plan this frame's copies from the sub-step count: `final_is_b` selects the
-    // display blit source (B after an odd count, else A), and `refresh_a`
-    // requests the extra B → A copy that restores cross-frame continuity. See
-    // `frame_blit_plan` for the parity reasoning.
-    let (final_is_b, refresh_a) = frame_blit_plan(bg.iterations);
-
-    // Blit the freshest field into the stable `display` texture so the renderer
-    // samples one fixed handle regardless of parity. Requires COPY_SRC on A/B
-    // and COPY_DST on display (set in C5).
-    let final_handle = if final_is_b { &sim.tex_b } else { &sim.tex_a };
-    if let (Some(src), Some(dst)) = (images.get(final_handle), images.get(&sim.display)) {
-        render_context.command_encoder().copy_texture_to_texture(
-            src.texture.as_image_copy(),
-            dst.texture.as_image_copy(),
-            extent,
-        );
-    }
-
-    // Odd sub-step count: the last write landed in B, but the next frame's loop
-    // reads A first. Copy B → A so A holds the latest state at frame end and the
-    // ping-pong stays continuous across frames. Requires COPY_DST on A (set in
-    // C5). Even counts (the default) already leave the latest state in A — no
-    // copy, no overhead in the shipping config.
-    if refresh_a {
+    // Odd sub-step count: the last write landed in B, but both the next frame's
+    // loop and this frame's render-from-A read A first. Copy B → A so A holds
+    // the latest state at frame end. Requires COPY_DST on A (set in C5). Even
+    // counts (the default) already leave the latest state in A — no copy, no
+    // overhead in the shipping config. See `frame_blit_plan` for the parity
+    // reasoning.
+    if frame_blit_plan(bg.iterations) {
         if let (Some(src), Some(dst)) = (images.get(&sim.tex_b), images.get(&sim.tex_a)) {
+            let extent = Extent3d {
+                width: sim.resolution.x,
+                height: sim.resolution.y,
+                depth_or_array_layers: 1,
+            };
             render_context.command_encoder().copy_texture_to_texture(
                 src.texture.as_image_copy(),
                 dst.texture.as_image_copy(),
@@ -501,24 +487,20 @@ fn cymatics_compute(
     }
 }
 
-/// Returns `(final_is_b, refresh_a)` for an `iterations`-sub-step frame.
+/// Returns whether the odd-N B → A continuity refresh is needed for an
+/// `iterations`-sub-step frame.
 ///
-/// `final_is_b` selects the display blit source: the loop starts `ab` (i=0
-/// writes B, i=1 writes A, …), so the last write lands in B for odd counts and A
-/// for even counts (including 0, where no sub-step ran and A still holds the
-/// prior state). `refresh_a` requests the extra B → A copy that keeps the
-/// persistent texture A holding the latest state across frames — needed exactly
-/// when the final write landed in B (odd `iterations`), since the next frame's
-/// loop reads A first. For even counts A is already current, so no copy.
+/// The loop starts `ab` (i=0 writes B, i=1 writes A, …), so the last write lands
+/// in B for odd counts and A for even counts (including 0, where no sub-step ran
+/// and A still holds the prior state). The persistent texture A must hold the
+/// latest state at frame end — both the next frame's loop and this frame's
+/// render-from-A read A first. So we copy B → A exactly when the final write
+/// landed in B (odd `iterations`); for even counts A is already current.
 ///
 /// Pure so the cross-frame continuity contract is unit-testable without a GPU;
 /// [`cymatics_compute`] uses it directly, so the test guards the real path.
-fn frame_blit_plan(iterations: u32) -> (bool, bool) {
-    let final_is_b = iterations % 2 == 1;
-    // A holds the latest state iff the final write landed in A (even count); when
-    // it landed in B (odd count) we must copy B → A to restore that invariant.
-    let refresh_a = final_is_b;
-    (final_is_b, refresh_a)
+fn frame_blit_plan(iterations: u32) -> bool {
+    iterations % 2 == 1
 }
 
 #[cfg(test)]
@@ -549,24 +531,24 @@ mod tests {
         assert!(u32::try_from(last_offset).is_ok());
     }
 
-    /// Cross-frame ping-pong continuity: the per-frame copy plan must restore
-    /// the "texture A holds the latest state at frame end" invariant for every
+    /// Cross-frame ping-pong continuity: the odd-N refresh must restore the
+    /// "texture A holds the latest state at frame end" invariant for every
     /// parity. The loop reads A first, so odd counts (final write in B) need the
-    /// extra B → A copy; even counts (and 0) already leave the latest in A. This
-    /// is the regression guard for the odd-N divergence the even-default visual
-    /// capture would miss.
+    /// B → A copy; even counts (and 0) already leave the latest in A. This is the
+    /// regression guard for the odd-N divergence the even-default visual capture
+    /// would miss — and now also the source the render material samples.
     #[test]
     fn frame_blit_plan_restores_continuity() {
         // Odd: freshest in B, refresh A from B. N=1 is the degenerate case where
         // only `ab` ever runs, so A would otherwise never be written.
-        assert_eq!(frame_blit_plan(1), (true, true));
-        assert_eq!(frame_blit_plan(3), (true, true));
+        assert!(frame_blit_plan(1));
+        assert!(frame_blit_plan(3));
         // Even: freshest already in A, no extra copy. 20 is the shipping default.
-        assert_eq!(frame_blit_plan(2), (false, false));
-        assert_eq!(frame_blit_plan(20), (false, false));
-        // Zero sub-steps: no dispatch ran, A still holds the prior state. Blit A,
-        // no copy — handled like any even count.
-        assert_eq!(frame_blit_plan(0), (false, false));
+        assert!(!frame_blit_plan(2));
+        assert!(!frame_blit_plan(20));
+        // Zero sub-steps: no dispatch ran, A still holds the prior state. No
+        // copy — handled like any even count.
+        assert!(!frame_blit_plan(0));
     }
 
     /// Dispatch math covers a non-multiple-of-8 resolution by rounding up, so

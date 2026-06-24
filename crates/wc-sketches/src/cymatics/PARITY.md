@@ -92,7 +92,8 @@ v4 GLSL (`simulateCymatics.frag` / `renderCymatics.frag`) used bottom-left origi
 `screenToSimUV` included a `y = 1 - y` flip. v5 uses top-left origin throughout (Bevy-native):
 
 - `simulate.wgsl`: top-left origin; no y-flip anywhere.
-- `render.wgsl`: samples display texture top-left; no y-flip.
+- `render.wgsl`: samples cell texture A top-left; no y-flip. (F1 optimization
+  removed the redundant display texture; the material samples A directly.)
 - `screen_to_sim_uv`: normalises Bevy window-logical coordinates (already top-left) without
   any y-flip.
 - `hand_to_sim_uv` / `palm_mm_to_ndc`: NDC conversion produces top-left UV, no flip.

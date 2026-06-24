@@ -1,5 +1,7 @@
 //! Fullscreen Cymatics render: a window-sized quad with [`CymaticsMaterial`]
-//! sampling the compute display texture.
+//! sampling the compute ping-pong texture A directly (the odd-N continuity
+//! refresh keeps A current at frame end, so there is no separate display
+//! texture to blit into).
 //!
 //! Ports v4 `renderCymatics.frag` lighting via
 //! `assets/shaders/cymatics/render.wgsl`: height-gradient surface normal,
@@ -10,11 +12,11 @@
 //!
 //! ## Texture sampling
 //!
-//! The display texture is `rgba32float`. Linear sampling of 32-bit-float
-//! textures requires the `float32-filterable` WebGPU feature, which this
-//! project does not depend on. `render.wgsl` reads all texels via
-//! `textureLoad` (integer coordinates), so only `TEXTURE_BINDING` usage is
-//! required on the display texture — which [`create_cymatics_textures`] sets.
+//! Texture A is `rgba32float`. Linear sampling of 32-bit-float textures requires
+//! the `float32-filterable` WebGPU feature, which this project does not depend
+//! on. `render.wgsl` reads all texels via `textureLoad` (integer coordinates),
+//! so only `TEXTURE_BINDING` usage is required on the sampled texture — which
+//! [`create_cymatics_textures`] sets on A.
 //!
 //! ## Uniform layout
 //!
@@ -59,12 +61,12 @@ pub struct CymaticsRenderParams {
     _pad: Vec2,
 }
 
-/// Fullscreen material that samples the compute display texture.
+/// Fullscreen material that samples the compute ping-pong texture A.
 ///
 /// Bind group layout (all at `@group(2)`):
 /// - `@binding(0)` `resolution: vec4<f32>` — `.xy` = screen (px), `.zw` = sim (texels)
 /// - `@binding(1)` `skew: vec4<f32>` — `.x` = `skewIntensity`, `.yzw` = 0
-/// - `@binding(2)` `cell_tex: texture_2d<f32>` — display texture, `textureLoad` only
+/// - `@binding(2)` `cell_tex: texture_2d<f32>` — texture A, `textureLoad` only
 ///
 /// The shader (`assets/shaders/cymatics/render.wgsl`) uses `textureLoad` for
 /// all texel accesses; no sampler binding is declared or required.
@@ -76,9 +78,9 @@ pub struct CymaticsMaterial {
     /// Skew intensity: `.x` = v4 `skewIntensity`; `.yzw` = 0.
     #[uniform(1)]
     pub skew: Vec4,
-    /// Display texture (`rgba32float`); accessed via `textureLoad` only —
-    /// no sampler binding generated. The display texture carries only
-    /// `TEXTURE_BINDING` usage, which `textureLoad` requires.
+    /// Ping-pong texture A (`rgba32float`); accessed via `textureLoad` only —
+    /// no sampler binding generated. A carries `TEXTURE_BINDING` usage, which
+    /// `textureLoad` requires, and holds the latest field at frame end.
     #[texture(2)]
     pub cell_texture: Handle<Image>,
 }
@@ -104,7 +106,7 @@ pub fn spawn_cymatics_quad(
     commands: &mut Commands<'_, '_>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<CymaticsMaterial>,
-    display: Handle<Image>,
+    cell_texture: Handle<Image>,
     window_size: Vec2,
     sim_resolution: Vec2,
     master_brightness: f32,
@@ -118,7 +120,7 @@ pub fn spawn_cymatics_quad(
         // skew.y = master_brightness (updated each frame; initialised here to
         //          avoid a black first frame)
         skew: Vec4::new(0.0, master_brightness, 0.0, 0.0),
-        cell_texture: display,
+        cell_texture,
     });
     commands
         .spawn((

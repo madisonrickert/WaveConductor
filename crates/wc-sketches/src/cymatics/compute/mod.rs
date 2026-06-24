@@ -7,9 +7,11 @@
 //! - [`sim_params::CymaticsSimParams`] is extracted into the render world by
 //!   `ExtractResourcePlugin` (registered by [`pipeline::CymaticsComputePlugin`]).
 //! - [`create_cymatics_textures`] allocates the two ping-pong `rgba32float`
-//!   storage textures (A and B) and the stable display texture on sketch entry.
+//!   storage textures (A and B) on sketch entry. The render material samples A
+//!   directly — the odd-N continuity refresh keeps A current at frame end, so
+//!   there is no separate display texture.
 //! - [`pipeline::CymaticsComputePlugin`] is the render-graph node that advances
-//!   the wave field each frame (the `simulate.wgsl` ping-pong dispatch + blit).
+//!   the wave field each frame (the `simulate.wgsl` ping-pong dispatch).
 
 pub mod pipeline;
 pub mod sim_params;
@@ -24,18 +26,20 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
-/// Build the ping-pong + display textures at `width × height`.
+/// Build the two ping-pong textures at `width × height`.
 ///
 /// A and B are `rgba32float` with `STORAGE_BINDING | TEXTURE_BINDING |
-/// COPY_SRC | COPY_DST`: each plays both read and write roles across iterations,
-/// and the final output is the blit source (`COPY_SRC`). `COPY_DST` is required
-/// on A so the compute node can copy the freshest field B → A after an odd
-/// sub-step count, restoring the cross-frame ping-pong invariant ("A holds the
-/// latest state at frame end") that the next frame's read-A start relies on. A
-/// and B share one descriptor, so B carries `COPY_DST` too (unused on B,
-/// harmless). The display texture is `TEXTURE_BINDING | COPY_DST` — sampled by
-/// the material, written by the post-iteration blit. `rgba32float` (not f16)
-/// preserves the small accumulated-height integration values.
+/// COPY_SRC | COPY_DST`: each plays both read and write roles across iterations.
+/// `TEXTURE_BINDING` is what `textureLoad` needs — both the compute read path
+/// and the render material (which samples A directly) read via `textureLoad`.
+/// `COPY_DST` is required on A so the compute node can copy the freshest field
+/// B → A after an odd sub-step count, restoring the cross-frame ping-pong
+/// invariant ("A holds the latest state at frame end") that both the next
+/// frame's read-A start and this frame's render-from-A rely on. `COPY_SRC`
+/// stays on both so B can be the refresh copy source. A and B share one
+/// descriptor, so the usages are symmetric (the refresh only ever copies B → A;
+/// A's `COPY_SRC` and B's `COPY_DST` are unused but harmless). `rgba32float`
+/// (not f16) preserves the small accumulated-height integration values.
 ///
 /// # Early `rgba32float` support note
 ///
@@ -63,11 +67,11 @@ pub fn create_cymatics_textures(
     // Rgba32Float pixel: 4 × f32 = 16 bytes, all zeros (quiescent sim state).
     let zero = [0u8; 16];
 
-    // Ping-pong A and B: storage + texture + copy-src so each can be the
-    // compute write target one iteration and the read source the next, and the
-    // last one written is the blit source for the display copy. COPY_DST lets
-    // the node restore A from B after an odd sub-step count, so A holds the
-    // latest state for the next frame's read-A start (cross-frame continuity).
+    // Ping-pong A and B: storage + texture + copy-src/dst so each can be the
+    // compute write target one iteration and the read source the next. COPY_DST
+    // lets the node restore A from B after an odd sub-step count, so A holds the
+    // latest state for the next frame's read-A start AND for this frame's
+    // render (the material samples A directly via textureLoad — TEXTURE_BINDING).
     let mut ping = Image::new_fill(
         extent,
         TextureDimension::D2,
@@ -80,20 +84,8 @@ pub fn create_cymatics_textures(
         | TextureUsages::COPY_SRC
         | TextureUsages::COPY_DST;
 
-    // Display: receives the final blit (COPY_DST) and is sampled by the
-    // material (TEXTURE_BINDING). No storage — it is never a compute target.
-    let mut display = Image::new_fill(
-        extent,
-        TextureDimension::D2,
-        &zero,
-        TextureFormat::Rgba32Float,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    display.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
-
     let a = images.add(ping.clone());
     let b = images.add(ping);
-    let display = images.add(display);
 
-    CymaticsTextures { a, b, display }
+    CymaticsTextures { a, b }
 }

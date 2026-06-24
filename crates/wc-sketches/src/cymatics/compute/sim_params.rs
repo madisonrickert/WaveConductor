@@ -107,16 +107,19 @@ impl Default for IterParamsGpu {
 // Compile-time guard: `IterParamsGpu` must be exactly the dynamic-offset stride.
 const _: () = assert!(std::mem::size_of::<IterParamsGpu>() == 256);
 
-/// Handles to the ping-pong + display textures. Tagged on [`CymaticsRoot`] and
+/// Handles to the two ping-pong textures. Tagged on [`CymaticsRoot`] and
 /// mirrored into [`CymaticsSimParams`] for the render world.
+///
+/// The odd-N continuity refresh guarantees texture A holds the latest field at
+/// the end of every frame, so the render material samples A directly — there is
+/// no separate display texture to blit into.
 #[derive(Component, Clone)]
 pub struct CymaticsTextures {
-    /// Ping-pong texture A.
+    /// Ping-pong texture A. Holds the latest field at frame end (the material
+    /// samples it directly).
     pub a: Handle<Image>,
     /// Ping-pong texture B.
     pub b: Handle<Image>,
-    /// Stable display texture (final blit target; sampled by the material).
-    pub display: Handle<Image>,
 }
 
 /// Per-frame sim state extracted into the render world each frame.
@@ -136,12 +139,11 @@ pub struct CymaticsSimParams {
     pub iter_times: Vec<f32>,
     /// Sub-steps this frame.
     pub iterations: u32,
-    /// Ping-pong texture A.
+    /// Ping-pong texture A. Holds the latest field at frame end and is the
+    /// texture the render material samples directly (no display blit).
     pub tex_a: Handle<Image>,
     /// Ping-pong texture B.
     pub tex_b: Handle<Image>,
-    /// Display texture (blit target).
-    pub display: Handle<Image>,
     /// Sim resolution in texels.
     pub resolution: UVec2,
 }

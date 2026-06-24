@@ -1,8 +1,10 @@
 // Cymatics fullscreen render -- ports v4 renderCymatics.frag.
 //
-// Samples the display cell texture (rgba32float) via textureLoad (integer
+// Samples the ping-pong cell texture A (rgba32float) via textureLoad (integer
 // texel coordinates, no sampler) to avoid the float32-filterable WebGPU
-// feature that linear sampling of 32-bit-float textures would require.
+// feature that linear sampling of 32-bit-float textures would require. A holds
+// the latest field at frame end (the compute node's odd-N continuity refresh),
+// so the material samples it directly with no separate display texture.
 //
 // Builds a height-gradient surface normal (central difference of abs(height)
 // at ±1 texel, scaled to UV space; matches v4 halfTexelScaleX/Y) and applies
@@ -25,7 +27,7 @@
 // .y = master_brightness (post-render multiplier; 1.0 = no-op, default),
 // .zw = 0.
 @group(2) @binding(1) var<uniform> skew: vec4<f32>;
-// Display texture (rgba32float): channel x = height, y = velocity,
+// Cell texture A (rgba32float): channel x = height, y = velocity,
 // z = accumulated_height, w = unused (simulate.wgsl write contract).
 // Read via textureLoad only -- no sampler binding declared.
 @group(2) @binding(2) var cell_tex: texture_2d<f32>;
