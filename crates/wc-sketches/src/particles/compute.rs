@@ -33,9 +33,10 @@ use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
-    BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
-    Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CachedComputePipelineId,
-    ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, ShaderStages,
+    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+    BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferId, BufferUsages,
+    CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
+    ShaderStages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
@@ -199,11 +200,26 @@ fn init_particle_pipeline(
     });
 }
 
-/// Builds the per-frame bind group for the compute dispatch.
+/// Prepares the bind group for the compute dispatch, reusing it across frames.
 ///
 /// Uploads [`SimParams`] into the persistent uniform buffer on
 /// [`ParticlePipeline`] via `queue.write_buffer` — no per-frame GPU allocation.
 /// Retrieves the GPU particle buffer via `RenderAssets<GpuShaderBuffer>`.
+///
+/// ## Bind-group caching (always-on compute hot path)
+///
+/// Both bound resources — the persistent `sim_params_buffer` and the particle
+/// storage buffer — are stable for the life of a sketch session, so the bind
+/// group is built once per session and reused every frame instead of being
+/// recreated. This is the highest-frequency render-world allocation removed by
+/// the no-hot-path-allocation rule: the compute runs every frame the sim is
+/// active, including the multi-hour idle soak. The particle buffer is recreated
+/// per sketch entry, so the cache keys on its [`Buffer::id`](bevy::render::render_resource::Buffer::id)
+/// and replaces the entry (dropping the old, releasing its buffer reference) on
+/// change. It therefore holds exactly one entry and never retains a stale
+/// buffer across sketch switches (which would be a soak-stability leak).
+/// `dispatch_size` is recomputed each frame (it tracks `particle_count`, which
+/// settings can change) and is cheap.
 fn prepare_bind_group(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
@@ -212,6 +228,7 @@ fn prepare_bind_group(
     sim: Res<'_, ParticleSimParams>,
     buffers: Res<'_, RenderAssets<GpuShaderBuffer>>,
     pipeline: Option<Res<'_, ParticlePipeline>>,
+    mut cached: Local<'_, Option<(BufferId, BindGroup)>>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
@@ -228,24 +245,33 @@ fn prepare_bind_group(
         bytemuck::bytes_of(&sim.params),
     );
 
-    // Retrieve the cached BindGroupLayout from the PipelineCache.
-    let layout: BindGroupLayout =
-        pipeline_cache.get_bind_group_layout(&pipeline.bind_group_layout_descriptor);
-
-    let bind_group = render_device.create_bind_group(
-        "particle_compute_bind_group",
-        &layout,
-        &[
-            BindGroupEntry {
-                binding: 0,
-                resource: pipeline.sim_params_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: particle_buffer.buffer.as_entire_binding(),
-            },
-        ],
-    );
+    // Reuse the bind group while the particle storage buffer is unchanged;
+    // rebuild + replace (releasing the old buffer reference) when the sketch
+    // recreates it. See the system docs.
+    let buffer_id = particle_buffer.buffer.id();
+    let bind_group = match &*cached {
+        Some((id, bg)) if *id == buffer_id => bg.clone(),
+        _ => {
+            let layout: BindGroupLayout =
+                pipeline_cache.get_bind_group_layout(&pipeline.bind_group_layout_descriptor);
+            let bg = render_device.create_bind_group(
+                "particle_compute_bind_group",
+                &layout,
+                &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: pipeline.sim_params_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: particle_buffer.buffer.as_entire_binding(),
+                    },
+                ],
+            );
+            *cached = Some((buffer_id, bg.clone()));
+            bg
+        }
+    };
 
     let dispatch_size = sim.particle_count.div_ceil(WORKGROUP_SIZE);
     commands.insert_resource(ParticleComputeBindGroup {

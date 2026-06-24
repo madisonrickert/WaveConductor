@@ -49,17 +49,18 @@
 )]
 
 use bevy::core_pipeline::{Core2d, Core2dSystems};
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     binding_types::{sampler, texture_2d},
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId,
-    ColorTargetState, ColorWrites, FragmentState, LoadOp, Operations, PipelineCache,
-    PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
-    Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, StoreOp, TextureFormat,
-    TextureSampleType, VertexState,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+    CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, LoadOp, Operations,
+    PipelineCache, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
+    StoreOp, TextureFormat, TextureSampleType, TextureViewId, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::texture::GpuImage;
@@ -218,6 +219,7 @@ pub fn dots_bone_composite(
     gpu_images: Res<'_, RenderAssets<GpuImage>>,
     pipeline_res: Option<Res<'_, DotsBoneCompositePipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
+    mut bind_group_cache: Local<'_, (Option<TextureViewId>, HashMap<TextureViewId, BindGroup>)>,
     mut render_context: RenderContext<'_, '_>,
 ) {
     let (view_target, camera) = view.into_inner();
@@ -256,15 +258,32 @@ pub fn dots_bone_composite(
     let post_process = view_target.post_process_write();
     let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
 
-    let bind_group = render_context.render_device().create_bind_group(
-        "dots_bone_composite_bind_group",
-        &layout,
-        &BindGroupEntries::sequential((
-            post_process.source,
-            &pipeline_res.sampler,
-            &bone_image.texture_view,
-        )),
-    );
+    // Reuse the bind group for this (source view, bone image) combination.
+    // `post_process_write` cycles `source` between two stable views; the bone
+    // image is recreated per Dots entry, so when its view id changes we clear the
+    // per-source entries — dropping the bind groups that referenced the old (now
+    // freed) bone HDR target. Without that eviction the cache would retain a stale
+    // bone image across every re-entry, a soak-stability leak. Steady state holds
+    // two entries (one per source view) for the current bone image.
+    let bone_id = bone_image.texture_view.id();
+    if bind_group_cache.0 != Some(bone_id) {
+        bind_group_cache.1.clear();
+        bind_group_cache.0 = Some(bone_id);
+    }
+    let bind_group = bind_group_cache
+        .1
+        .entry(post_process.source.id())
+        .or_insert_with(|| {
+            render_context.render_device().create_bind_group(
+                "dots_bone_composite_bind_group",
+                &layout,
+                &BindGroupEntries::sequential((
+                    post_process.source,
+                    &pipeline_res.sampler,
+                    &bone_image.texture_view,
+                )),
+            )
+        });
 
     let mut pass = render_context
         .command_encoder()
@@ -288,7 +307,7 @@ pub fn dots_bone_composite(
             multiview_mask: None,
         });
     pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &bind_group, &[]);
+    pass.set_bind_group(0, &*bind_group, &[]);
     pass.draw(0..3, 0..1);
 }
 
