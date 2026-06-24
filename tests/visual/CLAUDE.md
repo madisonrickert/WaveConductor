@@ -61,6 +61,11 @@ Scenarios defined today:
 | `line-synthetic` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
 | `line-synthetic-no-bloom` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | `DISABLE_BLOOM = "1"` |
 | `line-screensaver` | `line` | `mock` | `clean` | `[180, 276, 495, 570, 666, 780, 1320, 1770]` | `FORCE_SCREENSAVER` |
+| `dots-synthetic` | `dots` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
+| `dots-screensaver` | `dots` | `mock` | `clean` | `[60, 180, 360, 600, 900, 1320, 1800]` | `FORCE_SCREENSAVER` |
+| `cymatics-synthetic` | `cymatics` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
+| `cymatics-interacting` | `cymatics` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_CYMATICS_INTERACTION = "1"` |
+| `cymatics-screensaver` | `cymatics` | `mock` | `clean` | `[180, 360, 600, 1200]` | `FORCE_SCREENSAVER = "1"` |
 
 The `line-screensaver` scenario drives Line's attract mode: the "Wandering
 Pulses" choreography
@@ -138,6 +143,7 @@ the scenario's `[debug]` table or `--debug KEY=VAL` (the launcher re-prefixes
 | `WC_DEBUG_SOLID_PARTICLES=<rgba hex>` | Render particles as a flat linear colour instead of the star texel. 6 hex digits (alpha defaults to `ff`) or 8 (`rrggbbaa`), no `#`. Bad/odd-length hex -> ignored. |
 | `WC_DEBUG_FORCE_SCREENSAVER` | Drive `SketchActivity::Screensaver` at startup so a capture lands in attract mode without waiting out the idle timer (presence = on; value ignored). |
 | `WC_DEBUG_FORCE_TIER=<cool\|warm\|hot>` | Pin the screensaver's thermal tier so each tier can be captured deterministically. Unparseable value -> live `ThermalState`. |
+| `WC_DEBUG_FORCE_CYMATICS_INTERACTION` | Force the Cymatics primary centre to be held at UV `(0.5, 0.5)` every frame so `active_radius` grows deterministically without hardware or a real mouse press. Used by the `cymatics-interacting` scenario. Presence = on. |
 
 Flag toggles (`DISABLE_*`) are true whenever their var is present, regardless of
 value — `=1` and `=` both activate them. `FORCE_G` and `SOLID_PARTICLES` are

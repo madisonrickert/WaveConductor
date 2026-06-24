@@ -134,3 +134,56 @@ provider = "synthetic"
 config = "clean"
 frames = [30, 60, 120, 240]
 dt = 0.016666667
+
+# ── Cymatics — interacting mode ──────────────────────────────────────────────
+# Captures the wave field with continuous interaction: FORCE_CYMATICS_INTERACTION
+# forces the primary centre held at UV (0.5, 0.5) throughout, so active_radius
+# grows from the resting floor (0.1 → snapped 0.5 → lerping toward 7.5 at 1%/frame)
+# deterministically without hardware or a real mouse press. Frame spread:
+#   60  (t= 1.0)  early growth: active_radius ≈ 3.7 — mask starting to open
+#  120  (t= 2.0)  mid-growth:   active_radius ≈ 5.4 — field visibly broader
+#  240  (t= 4.0)  late growth:  active_radius ≈ 6.9 — near-full mask
+#  480  (t= 8.0)  settled:      active_radius ≈ 7.4 — close to target 7.5
+#
+# BASELINES ARE OPERATOR-SEEDED: no baseline PNGs are committed from the build
+# session (headless display; all captures render black). After visual confirmation
+# on the deployment machine seed them with:
+#   cargo xtask capture cymatics-interacting --update-baselines
+# then commit the resulting baselines/cymatics-interacting/ PNGs.
+
+[scenarios.cymatics-interacting]
+sketch = "cymatics"
+provider = "synthetic"
+config = "clean"
+frames = [60, 120, 240, 480]
+dt = 0.016666667
+
+[scenarios.cymatics-interacting.debug]
+FORCE_CYMATICS_INTERACTION = "1"
+
+# ── Cymatics — screensaver / attract mode ────────────────────────────────────
+# Forces the app into SketchActivity::Screensaver at startup (FORCE_SCREENSAVER)
+# so the attract visual is captured deterministically. provider = "mock" (silent,
+# no synthetic hand): motion comes from the sketch's Lissajous wander (two centres
+# drifting on slow incommensurate paths, ωx1=0.043/ωy1=0.031, ωx2=0.037/ωy2=0.029,
+# amplitude 0.3 around 0.5, active_radius=0.6, periods 146-217s). The field is a
+# gently evolving concentric ripple pattern sourced from two slowly sweeping
+# positions — visually different from the static idle (cymatics-synthetic) which
+# has a single centre. Frame spread:
+#  180  (t= 3.0)  early attract: Lissajous paths just started to diverge
+#  360  (t= 6.0)  centres moving: two-source interference beginning
+#  600  (t=10.0)  mid-wander:    interference pattern evolving
+# 1200  (t=20.0)  developed:     fully evolved dual-source field
+#
+# BASELINES ARE OPERATOR-SEEDED: same constraint as above. Seed with:
+#   cargo xtask capture cymatics-screensaver --update-baselines
+
+[scenarios.cymatics-screensaver]
+sketch = "cymatics"
+provider = "mock"
+config = "clean"
+frames = [180, 360, 600, 1200]
+dt = 0.016666667
+
+[scenarios.cymatics-screensaver.debug]
+FORCE_SCREENSAVER = "1"

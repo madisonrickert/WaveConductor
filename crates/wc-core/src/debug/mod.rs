@@ -62,6 +62,11 @@ pub struct DebugToggles {
     /// deterministically (the real sensor is hardware/load-dependent). `None`
     /// = use the live `ThermalState`. Unparseable value → `None`.
     pub force_tier: Option<crate::lifecycle::thermal::ThermalTier>,
+    /// `WC_DEBUG_FORCE_CYMATICS_INTERACTION`: in the `cymatics-interacting`
+    /// capture scenario, force the primary centre to be held at UV `(0.5, 0.5)`
+    /// so the interaction state machine grows `active_radius` deterministically
+    /// without hardware or a real mouse press. Presence = on.
+    pub force_cymatics_interaction: bool,
 }
 
 impl DebugToggles {
@@ -91,6 +96,7 @@ impl DebugToggles {
             solid_particles,
             force_screensaver: present("WC_DEBUG_FORCE_SCREENSAVER"),
             force_tier,
+            force_cymatics_interaction: present("WC_DEBUG_FORCE_CYMATICS_INTERACTION"),
         }
     }
 
@@ -230,6 +236,7 @@ mod tests {
         assert!(!t.disable_bone_composite);
         assert!(!t.disable_bone_camera);
         assert_eq!(t.solid_particles, None);
+        assert!(!t.force_cymatics_interaction);
     }
 
     #[test]

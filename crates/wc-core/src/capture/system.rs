@@ -377,6 +377,7 @@ mod tests {
             solid_particles: None,
             force_screensaver: false,
             force_tier: None,
+            force_cymatics_interaction: false,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");

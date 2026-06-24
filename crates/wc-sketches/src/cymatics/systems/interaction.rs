@@ -18,6 +18,7 @@
 //! drives the centres.
 
 use bevy::prelude::*;
+use wc_core::debug::DebugToggles;
 use wc_core::input::pointer::PointerState;
 use wc_core::settings::EguiPointerCaptured;
 
@@ -292,6 +293,12 @@ fn lerp2(a: Vec2, b: Vec2, t: f32) -> Vec2 {
 /// origin, `y` increases downward). The NDC conversion therefore does NOT
 /// flip Y; `screen_to_sim_uv` then maps that directly to a top-left UV,
 /// matching the shader convention.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system — each parameter is a distinct ECS resource; \
+              the system cannot be split without losing the single \
+              step_centers call-site guarantee. Mirrors hand/dots systems."
+)]
 pub fn update_cymatics_centers(
     mut state: ResMut<'_, CymaticsState>,
     window: Single<'_, '_, &Window>,
@@ -301,6 +308,7 @@ pub fn update_cymatics_centers(
     touches: Res<'_, bevy::input::touch::Touches>,
     egui_captured: Option<Res<'_, EguiPointerCaptured>>,
     settings: Res<'_, CymaticsSettings>,
+    debug_toggles: Option<Res<'_, DebugToggles>>,
 ) {
     let win = Vec2::new(window.width().max(1.0), window.height().max(1.0));
     let screen_ar = win.x / win.y;
@@ -325,6 +333,18 @@ pub fn update_cymatics_centers(
         let ndc = Vec2::new(p.x / win.x * 2.0 - 1.0, p.y / win.y * 2.0 - 1.0);
         screen_to_sim_uv(ndc, screen_ar, sim_ar)
     });
+
+    // Debug: WC_DEBUG_FORCE_CYMATICS_INTERACTION forces a deterministic centre
+    // press at UV (0.5, 0.5) for the `cymatics-interacting` capture scenario so
+    // active_radius grows reproducibly without hardware or a real mouse.
+    let (mouse_pressed, mouse_uv) = if debug_toggles
+        .as_ref()
+        .is_some_and(|t| t.force_cymatics_interaction)
+    {
+        (true, Vec2::new(0.5, 0.5))
+    } else {
+        (mouse_pressed, mouse_uv)
+    };
 
     let input = CenterInput {
         mouse_pressed,
