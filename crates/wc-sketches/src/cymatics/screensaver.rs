@@ -16,29 +16,32 @@ use super::CymaticsState;
 
 /// Live-tunable Lissajous angular speeds for the two attract-mode centres.
 ///
-/// Default values reproduce the v4 incommensurate ratios (43:31 for centre 1,
-/// 37:29 for centre 2) so no visual change occurs at the default settings.
-/// Sourced from [`CymaticsSettings`] each frame via
-/// [`LissajousSpeeds::from_settings`].
+/// Default values are 3.5× the v4 Lissajous speeds, scaled by a single common
+/// factor so the v4 incommensurate ratios (43:31 for centre 1, 37:29 for centre
+/// 2, and the cross ratios) are preserved while the two centres wander — and
+/// their ripples interfere — noticeably faster (periods drop from ~145–217 s to
+/// ~42–62 s). These match the [`CymaticsSettings`] defaults, so the live path
+/// (sourced each frame via [`LissajousSpeeds::from_settings`]) agrees with this
+/// `Default`.
 #[derive(Clone, Copy, Debug)]
 pub struct LissajousSpeeds {
-    /// Angular speed for centre-1 X component (rad/s). v4 default `0.043`.
+    /// Angular speed for centre-1 X component (rad/s). Default `0.1505` (3.5× v4's `0.043`).
     pub c1_omega_x: f32,
-    /// Angular speed for centre-1 Y component (rad/s). v4 default `0.031`.
+    /// Angular speed for centre-1 Y component (rad/s). Default `0.1085` (3.5× v4's `0.031`).
     pub c1_omega_y: f32,
-    /// Angular speed for centre-2 X component (rad/s). v4 default `0.037`.
+    /// Angular speed for centre-2 X component (rad/s). Default `0.1295` (3.5× v4's `0.037`).
     pub c2_omega_x: f32,
-    /// Angular speed for centre-2 Y component (rad/s). v4 default `0.029`.
+    /// Angular speed for centre-2 Y component (rad/s). Default `0.1015` (3.5× v4's `0.029`).
     pub c2_omega_y: f32,
 }
 
 impl Default for LissajousSpeeds {
     fn default() -> Self {
         Self {
-            c1_omega_x: 0.043,
-            c1_omega_y: 0.031,
-            c2_omega_x: 0.037,
-            c2_omega_y: 0.029,
+            c1_omega_x: 0.1505,
+            c1_omega_y: 0.1085,
+            c2_omega_x: 0.1295,
+            c2_omega_y: 0.1015,
         }
     }
 }

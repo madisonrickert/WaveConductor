@@ -89,15 +89,16 @@ impl SimParamsGpu {
 ///
 /// Field order is load-bearing and must match the WGSL `struct IterParams`:
 /// `time` at offset 0, `wave_signal` at offset 4. `wave_signal` is the
-/// per-sub-step `2·sin(time)` oscillator value, precomputed CPU-side so the
+/// per-sub-step `amplitude·sin(phase)` oscillator value (amplitude from the
+/// `source_amplitude` setting, v4 default `2.0`), precomputed CPU-side so the
 /// shader does not recompute the same transcendental for every grid cell.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct IterParamsGpu {
     /// `iGlobalTime` for this sub-step.
     pub time: f32,
-    /// Precomputed wave-source oscillator `2·sin(time)` for this sub-step
-    /// (uniform across the dispatch; hoisted out of the per-cell shader).
+    /// Precomputed wave-source oscillator `amplitude·sin(phase)` for this
+    /// sub-step (uniform across the dispatch; hoisted out of the per-cell shader).
     pub wave_signal: f32,
     /// Padding to 256 bytes (dynamic-offset alignment). Never read by the shader.
     _pad: [f32; 62],
@@ -153,6 +154,12 @@ pub struct CymaticsSimParams {
     pub phase_base: f32,
     /// Per-sub-step phase increment (`cycles·2π / iterations`).
     pub phase_dt: f32,
+    /// Wave-source injection amplitude (`source_amplitude` setting, v4 `2.0`).
+    /// Applied CPU-side in the compute prepare step: each sub-step's
+    /// `wave_signal = source_amplitude · sin(phase)`. Kept here (not in the GPU
+    /// `SimParamsGpu` uniform) because it is consumed while packing the
+    /// per-iteration buffer, never read by the shader directly.
+    pub source_amplitude: f32,
     /// Sub-steps this frame.
     pub iterations: u32,
     /// Ping-pong texture A. Holds the latest field at frame end and is the

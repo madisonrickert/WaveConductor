@@ -44,8 +44,9 @@ struct SimParams {
 // slot to the 256-byte dynamic-offset stride (see IterParamsGpu). Field order
 // is load-bearing: time @offset 0, wave_signal @offset 4 — must match
 // IterParamsGpu. `time` is the v4 `iGlobalTime` advanced one sub-step;
-// `wave_signal` is `2·sin(time)` precomputed CPU-side (uniform across the
-// dispatch, so it is hoisted out of the per-cell math below).
+// `wave_signal` is `amplitude·sin(time)` precomputed CPU-side (amplitude is the
+// `source_amplitude` setting, v4 `2.0`; uniform across the dispatch, so it is
+// hoisted out of the per-cell math below).
 struct IterParams {
     time: f32,
     wave_signal: f32,
@@ -141,8 +142,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Drive the two wave sources: blend height toward the shared oscillator
     // signal, weighted by proximity to each centre (only the ~2-texel core).
-    // `wave_signal` (= 2·sin(time)) is uniform across the dispatch, so it is
-    // precomputed CPU-side per sub-step rather than re-evaluated per cell.
+    // `wave_signal` (= amplitude·sin(time)) is uniform across the dispatch, so it
+    // is precomputed CPU-side per sub-step rather than re-evaluated per cell.
     let wave_signal = iter.wave_signal;
     height = mix(height, wave_signal, wave_source_amount(d1, texel_spacing));
     height = mix(height, wave_signal, wave_source_amount(d2, texel_spacing));

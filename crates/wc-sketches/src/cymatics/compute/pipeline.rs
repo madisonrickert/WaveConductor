@@ -349,17 +349,18 @@ fn prepare_cymatics_bind_groups(
     // The time is recomputed from the two phase scalars: sub-step i's time is
     // `phase_base + i·phase_dt`, byte-identical to the old pre-multiplied
     // `iter_times[i]` (`update_cymatics_sim_params` stores `base`/`dt`).
-    // `wave_signal = 2·sin(time)` is the wave-source oscillator, hoisted out of
-    // the per-cell shader (it is uniform across the whole dispatch). The slot
-    // count is clamped to `MAX_ITERATIONS` — the `iter_buffer`'s exact slot
-    // count — so a malformed sub-step count can never `write_buffer` past the
-    // buffer end; the dispatched count below is clamped to the same value. `u16`
-    // holds MAX_ITERATIONS (120) and gives a lossless, lint-clean index → f32.
+    // `wave_signal = source_amplitude·sin(time)` is the wave-source oscillator,
+    // hoisted out of the per-cell shader (it is uniform across the whole
+    // dispatch); the amplitude is the live `source_amplitude` setting (v4 `2.0`).
+    // The slot count is clamped to `MAX_ITERATIONS` — the `iter_buffer`'s exact
+    // slot count — so a malformed sub-step count can never `write_buffer` past
+    // the buffer end; the dispatched count below is clamped to the same value.
+    // `u16` holds MAX_ITERATIONS (120) and gives a lossless, lint-clean index → f32.
     let slot_count = u16::try_from(sim.iterations.min(MAX_ITERATIONS as u32)).unwrap_or(0);
     for i in 0..slot_count {
         let t = sim.phase_base + f32::from(i) * sim.phase_dt;
         // [time, wave_signal] — laid out exactly like IterParamsGpu's head.
-        let head = [t, 2.0 * t.sin()];
+        let head = [t, sim.source_amplitude * t.sin()];
         let offset = u64::from(i) * ITER_PARAMS_STRIDE;
         render_queue
             .0

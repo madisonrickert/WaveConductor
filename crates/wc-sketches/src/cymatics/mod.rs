@@ -235,8 +235,9 @@ impl Plugin for CymaticsPlugin {
         // system owns it).
         //
         // The `Idle` leg is a deliberate, narrow exception to "zero systems when
-        // idle": without it the phase clock stops, the wave source `2·sin(time)`
-        // goes constant, and the resting field visibly freezes for the 30 s
+        // idle": without it the phase clock stops, the wave source
+        // `source_amplitude·sin(time)` goes constant, and the resting field
+        // visibly freezes for the 30 s
         // before the screensaver (the operator reads that as the screensaver
         // freezing). Only this bridge is extended into `Idle`; the attract
         // driver stays `in_screensaver`-only, so through `Idle` `active_radius`
@@ -407,6 +408,8 @@ fn spawn_cymatics(
         // allocates — sub-step i's time is `phase_base + i·phase_dt`.
         phase_base: 0.0,
         phase_dt: 0.0,
+        // Wave-source amplitude; overwritten each frame from the live setting.
+        source_amplitude: settings.source_amplitude,
         iterations,
         tex_a: textures.a,
         tex_b: textures.b,
@@ -462,6 +465,10 @@ fn update_cymatics_sim_params(
     sim.params.velocity_decay = settings.velocity_decay;
     sim.params.height_decay = settings.height_decay;
     sim.params.accumulated_height_decay = settings.accumulated_height_decay;
+
+    // Wave-source amplitude: live setting, applied CPU-side when the prepare
+    // step precomputes each sub-step's `wave_signal = source_amplitude·sin(phase)`.
+    sim.source_amplitude = settings.source_amplitude;
 
     // Defense-in-depth clamp to the compute pipeline's slot count (the dispatch
     // node also clamps); `spawn_cymatics` already clamps at insert time.
@@ -669,6 +676,7 @@ mod tests {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             phase_base: 0.0,
             phase_dt: 0.0,
+            source_amplitude: 3.0,
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
@@ -707,6 +715,7 @@ mod tests {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             phase_base: 0.0,
             phase_dt: 0.0,
+            source_amplitude: 3.0,
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
@@ -763,6 +772,7 @@ mod tests {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             phase_base: 0.0,
             phase_dt: 0.0,
+            source_amplitude: 3.0,
             iterations: 20,
             tex_a: Handle::default(),
             tex_b: Handle::default(),
