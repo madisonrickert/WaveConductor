@@ -43,6 +43,8 @@ pub mod screensaver;
 pub mod settings;
 pub mod systems;
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 use wc_core::audio::state::AudioState;
@@ -173,6 +175,9 @@ impl Plugin for CymaticsPlugin {
             (
                 init_cymatics_state,
                 spawn_cymatics,
+                // Bypass the global AgX tonemap + bloom on the main 2D camera so
+                // the cymatics field matches v4's straight-to-canvas contrast.
+                bypass_cymatics_camera_post,
                 systems::audio_coupling::enter_cymatics_audio,
             )
                 .chain(),
@@ -182,6 +187,8 @@ impl Plugin for CymaticsPlugin {
             (
                 despawn_with::<CymaticsRoot>,
                 remove_cymatics_sim_params,
+                // Restore the global AgX tonemap + bloom for the other sketches.
+                restore_cymatics_camera_post,
                 systems::audio_coupling::exit_cymatics_audio,
             ),
         );
@@ -385,6 +392,54 @@ fn spawn_cymatics(
 fn remove_cymatics_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<CymaticsSimParams>();
     commands.remove_resource::<CymaticsState>();
+}
+
+/// `OnEnter(AppState::Cymatics)` — bypass the global `AgX` tonemap + bloom on the
+/// main 2D camera while Cymatics is showing, reproducing v4's pipeline.
+///
+/// The cymatics render shader is a faithful v4 port: it outputs **finished**,
+/// clamped, display-referred colour (v4 sent it straight to the three.js canvas
+/// with no tonemap and no bloom). v5 renders the cymatics quad through the global
+/// HDR `Camera2d`, which applies `Tonemapping::AgX` + a threshold-0 `Bloom` (see
+/// `spawn_camera` in `waveconductor/src/main.rs`). `AgX`'s lifted toe and the
+/// threshold-0 bloom haze
+/// raise the blacks and flatten contrast — the washed-out look. Setting
+/// tonemapping to [`Tonemapping::None`] and bloom intensity to `0.0` reproduces
+/// v4's straight-to-canvas pipeline; [`restore_cymatics_camera_post`] puts the
+/// defaults back on exit.
+///
+/// Targets the single main 2D camera (`With<Camera2d>`). The hand-mesh overlay is
+/// a separate `Camera3d` (already `Tonemapping::None`) and is intentionally not
+/// touched. The query is iterated, so an empty query (no camera spawned yet) is a
+/// clean no-op rather than a panic.
+///
+/// KNOWN CAVEAT: the hand-mesh bone composite is added in linear HDR expecting
+/// `AgX`'s highlight rolloff, so under `Tonemapping::None` the bright `#eb5938`
+/// bone glow may clip toward white during hand interaction. Flagged for operator
+/// eyeball; lower the cymatics bone `glow_intensity` later if it clips harshly.
+fn bypass_cymatics_camera_post(
+    mut cameras: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut cameras {
+        *tonemapping = Tonemapping::None;
+        bloom.intensity = 0.0;
+    }
+}
+
+/// `OnExit(AppState::Cymatics)` — restore the global `AgX` tonemap + bloom on the
+/// main 2D camera for the other sketches.
+///
+/// Reverses [`bypass_cymatics_camera_post`]. The restored values mirror
+/// `spawn_camera`'s defaults in `waveconductor/src/main.rs` (`Tonemapping::AgX`,
+/// `Bloom.intensity = 0.15`) — keep them in sync if those camera defaults change.
+/// Iterated for the same empty-query safety as the enter system.
+fn restore_cymatics_camera_post(
+    mut cameras: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut cameras {
+        *tonemapping = Tonemapping::AgX;
+        bloom.intensity = 0.15;
+    }
 }
 
 /// Pack [`CymaticsState`] and live physics settings into the extracted
