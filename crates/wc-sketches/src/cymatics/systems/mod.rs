@@ -14,4 +14,4 @@ pub mod hand;
 pub mod interaction;
 
 pub use hand::{update_cymatics_hand_centers, CymaticsHandGrabs};
-pub use interaction::{update_cymatics_centers, CenterInput};
+pub use interaction::{update_cymatics_centers, CenterInput, CenterTuning};

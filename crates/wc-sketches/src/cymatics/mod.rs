@@ -43,14 +43,21 @@ pub mod settings;
 pub mod systems;
 
 use bevy::prelude::*;
+use bevy::sprite_render::MeshMaterial2d;
+use wc_core::audio::state::AudioState;
+use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
 use wc_core::lifecycle::RegisterIdleVetoExt;
-use wc_core::settings::RegisterSketchSettingsExt;
+use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
 use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
 
 use compute::{create_cymatics_textures, CymaticsSimParams, SimParamsGpu, MAX_ITERATIONS};
 use settings::CymaticsSettings;
+
+/// Debounce window before a `requires_restart` settings change triggers the
+/// reload fade. Matches the Dots sketch (`RESTART_DEBOUNCE` in `dots/mod.rs`).
+const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Resting alive-mask radius (v4 `MINIMUM_ACTIVE_RADIUS`). At rest the wave
 /// sources oscillate inside a small mask of this radius; interaction (C9) grows
@@ -125,6 +132,11 @@ impl Plugin for CymaticsPlugin {
         // Settings (panel + persistence) and the picker-tile manifest entry.
         app.register_sketch_settings::<CymaticsSettings>();
         register_cymatics_manifest(app);
+
+        // Restart listener: debounces `requires_restart` settings changes
+        // (vertical_resolution, iterations) and begins the fade-out/reload
+        // cycle. Mirrors `restart_on_dots_settings_change` in `dots/mod.rs`.
+        app.add_systems(Update, restart_on_cymatics_settings_change);
 
         // Shared wireframe bone overlay (mirrors Line/Dots). Cymatics renders in
         // the main 2D pass with no post-process node, so no
@@ -227,6 +239,16 @@ impl Plugin for CymaticsPlugin {
             ),
         );
 
+        // Material knob update: pack skew_intensity (derived from num_cycles +
+        // skew_curve setting) and master_brightness into the render material
+        // each frame. Same run condition as the sim-params bridge.
+        app.add_systems(
+            Update,
+            update_cymatics_material.run_if(
+                sketch_active(AppState::Cymatics).or_else(in_screensaver(AppState::Cymatics)),
+            ),
+        );
+
         // Audio coupling: derive v4 audio params from CymaticsState and push
         // them to the ring each frame. Runs only while `Active` — silent in the
         // screensaver (attract mode drives centres but produces no audio).
@@ -325,6 +347,7 @@ fn spawn_cymatics(
         textures.display.clone(),
         win,
         sim_resolution,
+        settings.master_brightness,
     );
     // Tag the texture handles onto a CymaticsRoot entity so `OnExit` frees them.
     commands.spawn((textures.clone(), CymaticsRoot));
@@ -358,8 +381,8 @@ fn remove_cymatics_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<CymaticsState>();
 }
 
-/// Pack [`CymaticsState`] into the extracted [`CymaticsSimParams`] each frame
-/// and fill the per-iteration phase times.
+/// Pack [`CymaticsState`] and live physics settings into the extracted
+/// [`CymaticsSimParams`] each frame and fill the per-iteration phase times.
 ///
 /// v4: the effective cycle count is `numCycles / (1 + slowDown·3)`, and each of
 /// the `N` sub-steps advances the phase by `dt = cycles·2π/N`. The sub-step
@@ -367,6 +390,10 @@ fn remove_cymatics_sim_params(mut commands: Commands<'_, '_>) {
 /// phase clock by `N·dt` exactly once — this is the **only** system that mutates
 /// [`CymaticsState::simulation_time`] (the audio-coupling stage later takes over
 /// the advance; the invariant is that exactly one system owns it).
+///
+/// Physics fields (`force_multiplier`, `velocity_decay`, `height_decay`,
+/// `accumulated_height_decay`) are now read from `CymaticsSettings` each frame
+/// so Dev knob changes take effect immediately without a restart.
 #[allow(
     clippy::as_conversions,
     clippy::cast_precision_loss,
@@ -377,10 +404,19 @@ fn remove_cymatics_sim_params(mut commands: Commands<'_, '_>) {
 fn update_cymatics_sim_params(
     mut state: ResMut<'_, CymaticsState>,
     mut sim: ResMut<'_, CymaticsSimParams>,
+    settings: Res<'_, CymaticsSettings>,
 ) {
     sim.params.center = state.center.to_array();
     sim.params.center2 = state.center2.to_array();
     sim.params.active_radius = state.active_radius;
+
+    // Physics knobs: read from settings each frame (live, no restart).
+    // `with_resting_physics` seeds these at spawn; the bridge overwrites them
+    // every frame so Dev changes are reflected on the next GPU dispatch.
+    sim.params.force_multiplier = settings.force_multiplier;
+    sim.params.velocity_decay = settings.velocity_decay;
+    sim.params.height_decay = settings.height_decay;
+    sim.params.accumulated_height_decay = settings.accumulated_height_decay;
 
     // Defense-in-depth clamp to the compute pipeline's slot count (the dispatch
     // node also clamps); `spawn_cymatics` already clamps at insert time.
@@ -397,6 +433,91 @@ fn update_cymatics_sim_params(
 
     // Advance the phase clock once per frame (single-owner invariant above).
     state.simulation_time += n as f32 * dt;
+}
+
+/// Update the [`render::CymaticsMaterial`] each frame with the current
+/// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting) and
+/// `master_brightness` (User setting).
+///
+/// Runs under the same `sketch_active OR in_screensaver` condition as
+/// [`update_cymatics_sim_params`] so the material reflects the live state
+/// during both active play and the attract screensaver.
+///
+/// v4 `skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2)`.
+/// The `skew_curve` Dev knob applies an exponent to this raw value before
+/// packing into the uniform, allowing a wider or narrower push range.
+///
+/// ## No-allocation guarantee
+///
+/// All arithmetic is on stack scalars; no per-frame heap allocation.
+fn update_cymatics_material(
+    quad_q: Query<'_, '_, &MeshMaterial2d<render::CymaticsMaterial>, With<CymaticsRoot>>,
+    mut materials: ResMut<'_, Assets<render::CymaticsMaterial>>,
+    settings: Res<'_, CymaticsSettings>,
+    state: Option<Res<'_, CymaticsState>>,
+) {
+    let Some(state) = state else { return };
+    for handle in quad_q.iter() {
+        let Some(mut mat) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+        // v4: skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2).
+        // DEFAULT_NUM_CYCLES = 1.002; at rest, the clamp yields 0.
+        let skew_raw = ((state.num_cycles - DEFAULT_NUM_CYCLES) / 2.0 - 0.5)
+            .max(0.0)
+            .powi(2);
+        // skew_curve exponent: default 1.0 = linear (v4 parity). `powf` with a
+        // non-negative base is always well-defined for positive exponents.
+        let skew_intensity = skew_raw.powf(settings.skew_curve);
+        // Pack into the skew uniform:
+        //   .x = skew_intensity  (body-colour push toward white)
+        //   .y = master_brightness  (post-render multiplier)
+        //   .zw = 0
+        mat.skew = Vec4::new(skew_intensity, settings.master_brightness, 0.0, 0.0);
+    }
+}
+
+/// Listen for [`wc_core::settings::SketchRestart`] events targeted at
+/// `CymaticsSettings` and begin the fade-out/reload cycle after a 500 ms
+/// debounce window.
+///
+/// Only arms when in `AppState::Cymatics` and no reload is already in
+/// progress, preventing double-fires during the return leg. Mirrors
+/// `restart_on_dots_settings_change` in `dots/mod.rs`.
+fn restart_on_cymatics_settings_change(
+    mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
+    time: Res<'_, Time>,
+    current: Res<'_, State<AppState>>,
+    mut reload_state: ResMut<'_, SketchReloadState>,
+    // Optional: absent in headless test harnesses (no cpal audio stream).
+    audio_state: Option<Res<'_, AudioState>>,
+    // Tracks the `Time::elapsed` of the last received restart message;
+    // `None` means no pending restart since the last reload.
+    mut last_change_at: Local<'_, Option<std::time::Duration>>,
+) {
+    // Absorb any new restart messages for our settings key and reset the
+    // debounce timestamp. Only arm when in Cymatics and no reload in progress.
+    let got_message = events
+        .read()
+        .any(|e| e.storage_key == CymaticsSettings::STORAGE_KEY);
+    if got_message && **current == AppState::Cymatics && reload_state.is_idle() {
+        *last_change_at = Some(time.elapsed());
+        tracing::debug!("CymaticsSettings changed — debounce timer reset (500 ms)");
+    }
+
+    // Fire the FadeOut only after 500 ms of no further changes.
+    if let Some(last) = *last_change_at {
+        let elapsed_since = time.elapsed().saturating_sub(last);
+        if elapsed_since >= RESTART_DEBOUNCE
+            && **current == AppState::Cymatics
+            && reload_state.is_idle()
+        {
+            let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
+            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, AppState::Cymatics);
+            *last_change_at = None;
+            tracing::debug!("CymaticsSettings debounce elapsed — beginning reload FadeOut");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -478,6 +599,7 @@ mod tests {
     fn update_fills_iter_times_and_advances_time_once() {
         let mut world = World::new();
         world.insert_resource(CymaticsState::default());
+        world.insert_resource(CymaticsSettings::default());
         world.insert_resource(CymaticsSimParams {
             params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
             iter_times: Vec::with_capacity(MAX_ITERATIONS),
@@ -525,6 +647,39 @@ mod tests {
         assert!(
             (state.simulation_time - 20.0 * dt).abs() < 1e-3,
             "simulation_time must advance by exactly N·dt once"
+        );
+    }
+
+    /// Changing `force_multiplier` in `CymaticsSettings` is reflected in the
+    /// packed `SimParamsGpu` after one run of `update_cymatics_sim_params`.
+    /// Confirms that physics knobs are live (not dead settings).
+    #[test]
+    fn force_multiplier_setting_is_packed_live() {
+        let mut world = World::new();
+        world.insert_resource(CymaticsState::default());
+        world.insert_resource(CymaticsSettings {
+            force_multiplier: 0.5,
+            ..CymaticsSettings::default()
+        });
+        world.insert_resource(CymaticsSimParams {
+            params: SimParamsGpu::with_resting_physics([640, 480], MINIMUM_ACTIVE_RADIUS),
+            iter_times: Vec::with_capacity(MAX_ITERATIONS),
+            iterations: 20,
+            tex_a: Handle::default(),
+            tex_b: Handle::default(),
+            display: Handle::default(),
+            resolution: UVec2::new(640, 480),
+        });
+
+        world
+            .run_system_once(update_cymatics_sim_params)
+            .expect("update_cymatics_sim_params run");
+
+        let sim = world.resource::<CymaticsSimParams>();
+        assert!(
+            (sim.params.force_multiplier - 0.5).abs() < f32::EPSILON,
+            "force_multiplier must be read from settings (expected 0.5, got {})",
+            sim.params.force_multiplier
         );
     }
 

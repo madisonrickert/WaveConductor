@@ -41,6 +41,7 @@ use bevy::prelude::*;
 use wc_core::audio::command::{AudioCommand, CymaticsSampleId};
 use wc_core::audio::ring::AudioCommandSender;
 
+use crate::cymatics::settings::CymaticsSettings;
 use crate::cymatics::CymaticsState;
 
 use super::interaction;
@@ -226,6 +227,7 @@ pub fn drive_cymatics_audio(
     mut state: ResMut<'_, CymaticsState>,
     mut trigger: ResMut<'_, CymaticsTriggerState>,
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
+    settings: Res<'_, CymaticsSettings>,
 ) {
     // Interaction onset: active_radius snaps to MINIMUM_ACTIVE_RADIUS_INTERACTING
     // (0.5) the moment a press/grab starts. The -1e-3 tolerance handles the
@@ -256,15 +258,16 @@ pub fn drive_cymatics_audio(
     // Continuous params: pushed every active frame. A dropped frame holds the
     // previous value for one extra frame (inaudible at 60 fps).
 
-    // `"osc_volume"`: smoothstep swell tied to num_cycles exceeding DEF.
+    // `"osc_volume"`: smoothstep swell × User osc_level trim (default 1.0).
     push_cymatics_audio(
         &mut audio_cmd,
         AudioCommand::SetCymaticsParam {
             key: "osc_volume",
-            value: p.osc_volume,
+            value: p.osc_volume * settings.osc_level,
         },
     );
     // `"osc_freq_scalar"`: effective pitch ratio; includes slow_down effect.
+    // Not scaled by osc_level — frequency is independent of volume.
     push_cymatics_audio(
         &mut audio_cmd,
         AudioCommand::SetCymaticsParam {
@@ -272,12 +275,13 @@ pub fn drive_cymatics_audio(
             value: p.osc_freq_scalar,
         },
     );
-    // `"blub_volume"`: already includes ·0.05; the engine clamps to [0, 0.3].
+    // `"blub_volume"`: already includes ·0.05 (Rule #3); engine clamps [0, 0.3].
+    // blub_level scales on top — still before the engine clamp.
     push_cymatics_audio(
         &mut audio_cmd,
         AudioCommand::SetCymaticsParam {
             key: "blub_volume",
-            value: p.blub_volume,
+            value: p.blub_volume * settings.blub_level,
         },
     );
     // `"blub_rate"`: retrigger rate; engine clamps to [0.5, 4.0].

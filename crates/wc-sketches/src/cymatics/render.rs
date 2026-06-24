@@ -49,10 +49,14 @@ pub struct CymaticsRenderParams {
     pub screen_resolution: Vec2,
     /// Sim grid size in texels — UV-to-texel conversion and gradient scale.
     pub sim_resolution: Vec2,
-    /// v4 `skewIntensity`: pushes the body colour toward white.
+    /// v4 `skewIntensity` (after `skew_curve` exponent): pushes the body
+    /// colour toward white. Set each frame by `update_cymatics_material`.
     pub skew_intensity: f32,
+    /// Post-render brightness multiplier. Packed into `CymaticsMaterial::skew.y`
+    /// and applied in `render.wgsl` as `col * master_brightness`. `1.0` = no-op.
+    pub master_brightness: f32,
     /// Pad to 32 bytes (16-byte-aligned struct). Private: not externally meaningful.
-    _pad: Vec3,
+    _pad: Vec2,
 }
 
 /// Fullscreen material that samples the compute display texture.
@@ -93,8 +97,9 @@ impl Material2d for CymaticsMaterial {
 ///
 /// The mesh is a [`Rectangle`] sized to `window_size`; call
 /// `resize_cymatics_quad` on [`WindowResized`] to keep it synchronised.
-/// The material starts with `skew_intensity = 0` (driven later by the
-/// sketch settings system in Stage 4).
+/// The material is initialised with `skew.x = 0` (resting, updated each
+/// frame by `update_cymatics_material`) and `skew.y = master_brightness`
+/// (from settings; default 1.0 so the first frame is not black).
 pub fn spawn_cymatics_quad(
     commands: &mut Commands<'_, '_>,
     meshes: &mut Assets<Mesh>,
@@ -102,13 +107,17 @@ pub fn spawn_cymatics_quad(
     display: Handle<Image>,
     window_size: Vec2,
     sim_resolution: Vec2,
+    master_brightness: f32,
 ) -> Entity {
     let w = window_size.x.max(1.0);
     let h = window_size.y.max(1.0);
     let mesh = meshes.add(Rectangle::new(w, h));
     let material = materials.add(CymaticsMaterial {
         resolution: Vec4::new(w, h, sim_resolution.x, sim_resolution.y),
-        skew: Vec4::ZERO,
+        // skew.x = skewIntensity (updated each frame by update_cymatics_material)
+        // skew.y = master_brightness (updated each frame; initialised here to
+        //          avoid a black first frame)
+        skew: Vec4::new(0.0, master_brightness, 0.0, 0.0),
         cell_texture: display,
     });
     commands
@@ -127,8 +136,8 @@ mod tests {
 
     #[test]
     fn render_params_is_32_bytes() {
-        // Vec2(8) + Vec2(8) + f32(4) + Vec3(12) = 32 bytes (#[repr(C)], no gap).
-        // Guards against accidentally dropping a field or changing the pad.
+        // Vec2(8) + Vec2(8) + f32(4) + f32(4) + Vec2(8) = 32 bytes (#[repr(C)], no gap).
+        // master_brightness replaced one pad f32 from the old Vec3 pad; total unchanged.
         assert_eq!(std::mem::size_of::<CymaticsRenderParams>(), 32);
     }
 }

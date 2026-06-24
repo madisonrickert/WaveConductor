@@ -21,7 +21,9 @@
 // .xy = screen_resolution (px, for AR correction and vignette),
 // .zw = sim_resolution (texels, for UV-to-texel conversion and gradient scale).
 @group(2) @binding(0) var<uniform> resolution: vec4<f32>;
-// .x = skewIntensity (v4 body-colour push toward white), .yzw = 0.
+// .x = skewIntensity (v4 body-colour push toward white),
+// .y = master_brightness (post-render multiplier; 1.0 = no-op, default),
+// .zw = 0.
 @group(2) @binding(1) var<uniform> skew: vec4<f32>;
 // Display texture (rgba32float): channel x = height, y = velocity,
 // z = accumulated_height, w = unused (simulate.wgsl write contract).
@@ -137,5 +139,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // v4: mix(pow(cymaticsColor, vec3(mix(0.8, 1., vignetteAmount))), colBg, vignetteAmount).
     // Gamma 0.8 brightens the centre; gamma 1.0 at the edge before bg blend.
     let col = mix(pow(cymatics, vec3<f32>(mix(0.8, 1.0, vignette))), bg, vignette);
-    return vec4<f32>(col, 1.0);
+    // skew.y = master_brightness (User setting, default 1.0 = no-op). Applied
+    // after the vignette blend so it uniformly scales the whole output frame.
+    return vec4<f32>(col * skew.y, 1.0);
 }

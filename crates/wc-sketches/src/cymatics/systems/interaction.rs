@@ -21,6 +21,7 @@ use bevy::prelude::*;
 use wc_core::input::pointer::PointerState;
 use wc_core::settings::EguiPointerCaptured;
 
+use crate::cymatics::settings::CymaticsSettings;
 use crate::cymatics::CymaticsState;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,62 @@ pub const INTERACTION_CENTER_LERP_FACTOR: f32 = 0.01;
 
 /// Default `num_cycles` when at rest (v4 `DEFAULT_NUM_CYCLES`).
 pub const DEFAULT_NUM_CYCLES: f32 = 1.002;
+
+// ---------------------------------------------------------------------------
+// Tunable interaction parameters
+// ---------------------------------------------------------------------------
+
+/// Live-tunable interaction parameters sourced from [`CymaticsSettings`].
+///
+/// Default values match the v4 constants so the sketch behaves identically
+/// when no override is set. Passed into [`step_centers`] each frame instead
+/// of referencing the module constants directly, making the parameters
+/// adjustable from the Dev settings panel without a restart.
+#[derive(Clone, Copy, Debug)]
+pub struct CenterTuning {
+    /// Resting alive-mask radius floor. Matches `MINIMUM_ACTIVE_RADIUS`.
+    pub min_radius: f32,
+    /// Radius floor on interaction onset. Matches `MINIMUM_ACTIVE_RADIUS_INTERACTING`.
+    pub interacting_radius: f32,
+    /// Radius lerp target while interacting. Matches `TARGET_ACTIVE_RADIUS_INTERACTING`.
+    pub target_radius: f32,
+    /// Per-frame growth lerp factor toward `target_radius`. Matches
+    /// `ACTIVE_RADIUS_INTERACTING_GROW_FACTOR`.
+    pub grow_factor: f32,
+    /// Per-frame decay lerp factor toward `min_radius` when idle. Matches
+    /// `ACTIVE_RADIUS_IDLE_DECAY_FACTOR`.
+    pub decay_factor: f32,
+    /// Per-frame lerp factor for centre-position tracking. Matches
+    /// `INTERACTION_CENTER_LERP_FACTOR`.
+    pub lerp_factor: f32,
+}
+
+impl Default for CenterTuning {
+    fn default() -> Self {
+        Self {
+            min_radius: MINIMUM_ACTIVE_RADIUS,
+            interacting_radius: MINIMUM_ACTIVE_RADIUS_INTERACTING,
+            target_radius: TARGET_ACTIVE_RADIUS_INTERACTING,
+            grow_factor: ACTIVE_RADIUS_INTERACTING_GROW_FACTOR,
+            decay_factor: ACTIVE_RADIUS_IDLE_DECAY_FACTOR,
+            lerp_factor: INTERACTION_CENTER_LERP_FACTOR,
+        }
+    }
+}
+
+impl CenterTuning {
+    /// Construct from live [`CymaticsSettings`].
+    pub fn from_settings(s: &CymaticsSettings) -> Self {
+        Self {
+            min_radius: s.min_radius,
+            interacting_radius: s.interacting_radius,
+            target_radius: s.target_radius,
+            grow_factor: s.grow_factor,
+            decay_factor: s.decay_factor,
+            lerp_factor: s.lerp_factor,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Per-frame input bundle
@@ -113,7 +170,7 @@ pub fn is_ready_to_sleep(state: &CymaticsState) -> bool {
 ///
 /// That field is owned by `update_cymatics_sim_params` in `cymatics/mod.rs`.
 /// Exactly one system advances the phase clock; this function is not it.
-pub fn step_centers(state: &mut CymaticsState, input: CenterInput, _sim_ar: f32) {
+pub fn step_centers(state: &mut CymaticsState, input: CenterInput, tuning: CenterTuning) {
     let interacting = input.mouse_pressed || input.c1_held || input.c2_held;
 
     if interacting {
@@ -122,21 +179,17 @@ pub fn step_centers(state: &mut CymaticsState, input: CenterInput, _sim_ar: f32)
         state.num_cycles += 0.0003 + (state.num_cycles - DEFAULT_NUM_CYCLES) * 0.0008;
         // v4: snap the radius up to the interacting floor immediately, then
         // lerp toward the target so the mask expands smoothly.
-        if state.active_radius < MINIMUM_ACTIVE_RADIUS_INTERACTING {
-            state.active_radius = MINIMUM_ACTIVE_RADIUS_INTERACTING;
+        if state.active_radius < tuning.interacting_radius {
+            state.active_radius = tuning.interacting_radius;
         }
         state.active_radius = lerp(
             state.active_radius,
-            TARGET_ACTIVE_RADIUS_INTERACTING,
-            ACTIVE_RADIUS_INTERACTING_GROW_FACTOR,
+            tuning.target_radius,
+            tuning.grow_factor,
         );
     } else {
         // v4: radius decays geometrically toward the resting floor.
-        state.active_radius = lerp(
-            state.active_radius,
-            MINIMUM_ACTIVE_RADIUS,
-            ACTIVE_RADIUS_IDLE_DECAY_FACTOR,
-        );
+        state.active_radius = lerp(state.active_radius, tuning.min_radius, tuning.decay_factor);
         // v4: numCycles lerps back toward the resting default (×0.95 each frame).
         state.num_cycles = state.num_cycles * 0.95 + DEFAULT_NUM_CYCLES * 0.05;
     }
@@ -151,10 +204,10 @@ pub fn step_centers(state: &mut CymaticsState, input: CenterInput, _sim_ar: f32)
 
     // Held centres follow their hand position (smooth lerp, not snap).
     if input.c1_held {
-        state.center = lerp2(state.center, wanted_c1, INTERACTION_CENTER_LERP_FACTOR);
+        state.center = lerp2(state.center, wanted_c1, tuning.lerp_factor);
     }
     if input.c2_held {
-        state.center2 = lerp2(state.center2, input.c2_uv, INTERACTION_CENTER_LERP_FACTOR);
+        state.center2 = lerp2(state.center2, input.c2_uv, tuning.lerp_factor);
     }
 
     // Free centres: mirror the other held centre, or follow the mouse when
@@ -163,22 +216,22 @@ pub fn step_centers(state: &mut CymaticsState, input: CenterInput, _sim_ar: f32)
         if input.c2_held {
             // v4: free c1 mirrors c2's current position across the UV centre.
             let mirror = Vec2::new(1.0 - state.center2.x, 1.0 - state.center2.y);
-            state.center = lerp2(state.center, mirror, INTERACTION_CENTER_LERP_FACTOR);
+            state.center = lerp2(state.center, mirror, tuning.lerp_factor);
         } else {
             // v4: no hand grabs — primary centre follows the mouse/touch cursor.
-            state.center = lerp2(state.center, wanted_c1, INTERACTION_CENTER_LERP_FACTOR);
+            state.center = lerp2(state.center, wanted_c1, tuning.lerp_factor);
         }
     }
     if !input.c2_held {
         // v4: free c2 always mirrors c1 (which may just have been updated above).
         let mirror = Vec2::new(1.0 - state.center.x, 1.0 - state.center.y);
-        state.center2 = lerp2(state.center2, mirror, INTERACTION_CENTER_LERP_FACTOR);
+        state.center2 = lerp2(state.center2, mirror, tuning.lerp_factor);
     }
 
     // v4 `centerSpeed`: the primary centre's per-frame displacement estimate.
     // Used by the audio coupling (Task C11) as an excitation magnitude.
     // Formula: distance(wantedC1, c1) * lerpFactor.
-    state.center_speed = wanted_c1.distance(state.center) * INTERACTION_CENTER_LERP_FACTOR;
+    state.center_speed = wanted_c1.distance(state.center) * tuning.lerp_factor;
 
     // v4 `slowDownAmount`: decays ×0.95 per frame; the audio coupling raises it
     // on interaction onset to temporarily lower the effective cycle count.
@@ -247,6 +300,7 @@ pub fn update_cymatics_centers(
     mouse_buttons: Res<'_, bevy::input::ButtonInput<bevy::input::mouse::MouseButton>>,
     touches: Res<'_, bevy::input::touch::Touches>,
     egui_captured: Option<Res<'_, EguiPointerCaptured>>,
+    settings: Res<'_, CymaticsSettings>,
 ) {
     let win = Vec2::new(window.width().max(1.0), window.height().max(1.0));
     let screen_ar = win.x / win.y;
@@ -281,7 +335,8 @@ pub fn update_cymatics_centers(
         c2_uv: hands.c2.unwrap_or(Vec2::new(0.5, 0.5)),
     };
 
-    step_centers(&mut state, input, sim_ar);
+    // Build the tuning struct from live settings (defaults match v4 constants).
+    step_centers(&mut state, input, CenterTuning::from_settings(&settings));
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +367,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..2000 {
-            step_centers(&mut s, idle_input(), 1.0);
+            step_centers(&mut s, idle_input(), CenterTuning::default());
         }
         assert!((s.active_radius - MINIMUM_ACTIVE_RADIUS).abs() < 1e-2);
     }
@@ -325,7 +380,7 @@ mod tests {
             ..idle_input()
         };
         for _ in 0..2000 {
-            step_centers(&mut s, input, 1.0);
+            step_centers(&mut s, input, CenterTuning::default());
         }
         assert!(s.active_radius > 5.0); // approaches TARGET (7.5)
         assert!(s.active_radius >= MINIMUM_ACTIVE_RADIUS_INTERACTING);
@@ -344,7 +399,7 @@ mod tests {
             c2_uv: Vec2::ZERO,
         };
         for _ in 0..3000 {
-            step_centers(&mut s, input, 1.0);
+            step_centers(&mut s, input, CenterTuning::default());
         }
         assert!((s.center.x - 0.3).abs() < 0.05);
         assert!((s.center2.x - 0.7).abs() < 0.05); // 1 - 0.3
@@ -358,7 +413,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..500 {
-            step_centers(&mut s, idle_input(), 1.0);
+            step_centers(&mut s, idle_input(), CenterTuning::default());
         }
         assert!((s.num_cycles - DEFAULT_NUM_CYCLES).abs() < 1e-2);
     }

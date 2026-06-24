@@ -1,9 +1,14 @@
-//! Cymatics settings.
+//! Cymatics settings: full Dev surface for physics, visual, interaction,
+//! audio, and attract knobs.
 //!
-//! This minimal surface (sim grid resolution + sub-step count, both
-//! `requires_restart`) is expanded to the full Dev surface in a later stage.
-//! Both knobs reallocate GPU resources (textures) or change the per-frame
-//! dispatch shape at spawn time, so both restart the sketch on change.
+//! ## Category split
+//!
+//! - **User** (visible without ADVANCED): `master_brightness` (visual
+//!   brightness trim), `osc_level` + `blub_level` (audio volume trims).
+//! - **Dev** (ADVANCED toggle required, resets each launch): all other
+//!   knobs — `vertical_resolution` + `iterations` (`requires_restart`),
+//!   four physics decay/force constants, `skew_curve`, six interaction
+//!   tuning factors, and five attract/Lissajous speeds.
 //!
 //! ## Serde forward-compatibility
 //!
@@ -15,12 +20,33 @@
 //! The `SketchSettings` derive generates the [`Default`] impl from the
 //! `#[setting(default = ...)]` attributes, so there is intentionally no manual
 //! `impl Default` here — adding one would conflict with the derived impl.
+//!
+//! ## Field origins
+//!
+//! - **`vertical_resolution`** / **`iterations`**: already in the minimal
+//!   surface (C8); kept here unchanged. Both restart on change (they allocate
+//!   GPU textures and fix the compute dispatch count at spawn time).
+//! - **Physics fields** (`force_multiplier`, `velocity_decay`, `height_decay`,
+//!   `accumulated_height_decay`): v4 constants in `simulate.wgsl`; now live
+//!   knobs read each frame by `update_cymatics_sim_params`.
+//! - **`skew_curve`**: exponent applied to the raw `skewIntensity` before
+//!   packing into the render material uniform. `1.0` = linear (v4 behaviour).
+//! - **`master_brightness`**: post-render brightness multiplier. `1.0` = no-op.
+//! - **Interaction fields** (`min_radius`, `interacting_radius`, `target_radius`,
+//!   `grow_factor`, `decay_factor`, `lerp_factor`): v4 module constants from
+//!   `index.ts`; now live knobs threaded into `step_centers` via `CenterTuning`.
+//! - **`osc_level`** / **`blub_level`**: per-voice output-gain trims applied
+//!   in `drive_cymatics_audio` on top of the v4 formulas.
+//! - **Attract fields** (`attract_radius`, `c1_omega_x`, `c1_omega_y`,
+//!   `c2_omega_x`, `c2_omega_y`): v4 `ATTRACT_ACTIVE_RADIUS` and the four
+//!   Lissajous angular speeds in `screensaver.rs`; now live knobs for the
+//!   attract wander.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use wc_core_macros::SketchSettings;
 
-/// User-tunable parameters for the Cymatics sketch.
+/// User-tunable and Dev-tunable parameters for the Cymatics sketch.
 ///
 /// Settings are stored as `f32` to match the derive macro's `Number` setting
 /// type (as Dots does); call sites convert to `u32` via a clamped
@@ -29,6 +55,7 @@ use wc_core_macros::SketchSettings;
 #[reflect(Resource, Default)]
 #[settings(storage_key = "cymatics")]
 pub struct CymaticsSettings {
+    // ── Simulation (requires restart) ────────────────────────────────────────
     /// Sim grid vertical resolution in texels. Restart on change (the ping-pong
     /// textures reallocate at spawn time). The horizontal resolution is derived
     /// from this and the window aspect.
@@ -60,11 +87,306 @@ pub struct CymaticsSettings {
     )]
     #[serde(default = "default_iterations")]
     pub iterations: f32,
+
+    // ── Physics (live, no restart) ────────────────────────────────────────────
+    /// Neighbour-force scale baked into each sub-step of the wave integrator
+    /// (v4 `FORCE_MULTIPLIER = 0.25`). Higher values strengthen the neighbour
+    /// coupling; too high causes numeric explosion. Read live each frame by
+    /// `update_cymatics_sim_params`.
+    #[setting(
+        default = 0.25_f32,
+        min = 0.0_f32,
+        max = 2.0_f32,
+        step = 0.01_f32,
+        label = "Force multiplier",
+        section = "Physics",
+        category = Dev
+    )]
+    #[serde(default = "default_force_multiplier")]
+    pub force_multiplier: f32,
+
+    /// Per-sub-step velocity damping factor (v4 `VELOCITY_DECAY_FACTOR = 0.99818`).
+    /// Values closer to `1.0` preserve velocity longer; values closer to `0.9`
+    /// damp it quickly. Read live each frame.
+    #[setting(
+        default = 0.99818_f32,
+        min = 0.9_f32,
+        max = 1.0_f32,
+        step = 0.0001_f32,
+        label = "Velocity decay",
+        section = "Physics",
+        category = Dev
+    )]
+    #[serde(default = "default_velocity_decay")]
+    pub velocity_decay: f32,
+
+    /// Per-sub-step height damping factor (v4 `HEIGHT_DECAY_FACTOR = 0.9999`).
+    /// Controls how quickly the raw wave height attenuates between sub-steps.
+    /// Read live each frame.
+    #[setting(
+        default = 0.9999_f32,
+        min = 0.9_f32,
+        max = 1.0_f32,
+        step = 0.0001_f32,
+        label = "Height decay",
+        section = "Physics",
+        category = Dev
+    )]
+    #[serde(default = "default_height_decay")]
+    pub height_decay: f32,
+
+    /// Per-sub-step accumulated-height decay factor (v4
+    /// `ACCUMULATED_HEIGHT_DECAY_FACTOR = 0.999`). Controls how quickly the
+    /// time-integrated height (channel z of the sim texture) attenuates.
+    /// Read live each frame.
+    #[setting(
+        default = 0.999_f32,
+        min = 0.9_f32,
+        max = 1.0_f32,
+        step = 0.0001_f32,
+        label = "Accum. height decay",
+        section = "Physics",
+        category = Dev
+    )]
+    #[serde(default = "default_accumulated_height_decay")]
+    pub accumulated_height_decay: f32,
+
+    // ── Visual (live, no restart) ─────────────────────────────────────────────
+    /// Post-render brightness multiplier applied to the final output colour.
+    /// `1.0` is a no-op (v4 default). Values above `1.0` brighten the output;
+    /// `0.0` is black. User-visible knob so kiosk operators can trim brightness
+    /// without touching system display settings.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Master brightness",
+        section = "Visual",
+        category = User
+    )]
+    #[serde(default = "default_master_brightness")]
+    pub master_brightness: f32,
+
+    /// Exponent applied to raw `skewIntensity` (derived from `num_cycles`)
+    /// before packing into the render material's skew uniform. `1.0` = linear,
+    /// the v4 default. Values above `1.0` make the body-colour push more
+    /// pronounced near peak interaction; values below `1.0` widen the ramp.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.1_f32,
+        max = 5.0_f32,
+        step = 0.1_f32,
+        label = "Skew curve",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_skew_curve")]
+    pub skew_curve: f32,
+
+    // ── Interaction (live, no restart) ────────────────────────────────────────
+    /// Resting alive-mask radius floor (v4 `MINIMUM_ACTIVE_RADIUS = 0.1`). At
+    /// rest the wave sources oscillate inside a small mask of this radius.
+    #[setting(
+        default = 0.1_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.01_f32,
+        label = "Resting radius",
+        section = "Interaction",
+        category = Dev
+    )]
+    #[serde(default = "default_min_radius")]
+    pub min_radius: f32,
+
+    /// Alive-mask radius floor while interacting (v4
+    /// `MINIMUM_ACTIVE_RADIUS_INTERACTING = 0.5`). The radius snaps to at
+    /// least this value the moment a press or grab begins.
+    #[setting(
+        default = 0.5_f32,
+        min = 0.1_f32,
+        max = 5.0_f32,
+        step = 0.05_f32,
+        label = "Min interacting radius",
+        section = "Interaction",
+        category = Dev
+    )]
+    #[serde(default = "default_interacting_radius")]
+    pub interacting_radius: f32,
+
+    /// Alive-mask radius target while interacting (v4
+    /// `TARGET_ACTIVE_RADIUS_INTERACTING = 7.5`). The radius lerps toward
+    /// this value each frame that interaction is active.
+    #[setting(
+        default = 7.5_f32,
+        min = 0.5_f32,
+        max = 20.0_f32,
+        step = 0.5_f32,
+        label = "Target interacting radius",
+        section = "Interaction",
+        category = Dev
+    )]
+    #[serde(default = "default_target_radius")]
+    pub target_radius: f32,
+
+    /// Per-frame lerp factor for radius growth toward `target_radius` while
+    /// interacting (v4 `ACTIVE_RADIUS_INTERACTING_GROW_FACTOR = 0.01`).
+    /// Higher = faster ramp-up.
+    #[setting(
+        default = 0.01_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "Radius grow factor",
+        section = "Interaction",
+        category = Dev
+    )]
+    #[serde(default = "default_grow_factor")]
+    pub grow_factor: f32,
+
+    /// Per-frame lerp factor for radius decay toward `min_radius` when idle
+    /// (v4 `ACTIVE_RADIUS_IDLE_DECAY_FACTOR = 0.005`). Higher = faster decay
+    /// back to rest.
+    #[setting(
+        default = 0.005_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "Radius decay factor",
+        section = "Interaction",
+        category = Dev
+    )]
+    #[serde(default = "default_decay_factor")]
+    pub decay_factor: f32,
+
+    /// Per-frame lerp factor for centre-position tracking (v4
+    /// `INTERACTION_CENTER_LERP_FACTOR = 0.01`). Higher = centre snaps faster
+    /// to the cursor or hand position.
+    #[setting(
+        default = 0.01_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "Center lerp factor",
+        section = "Interaction",
+        category = Dev
+    )]
+    #[serde(default = "default_lerp_factor")]
+    pub lerp_factor: f32,
+
+    // ── Audio (live, no restart) ──────────────────────────────────────────────
+    /// Output-gain trim for the oscillator voice (`osc_volume`). Applied as a
+    /// multiplier on top of the v4 smoothstep swell formula in
+    /// `drive_cymatics_audio`. `1.0` = unchanged. Adjust to balance the osc
+    /// voice against the blub loop.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 2.0_f32,
+        step = 0.05_f32,
+        label = "Osc volume",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_osc_level")]
+    pub osc_level: f32,
+
+    /// Output-gain trim for the blub loop voice (`blub_volume`). Applied as a
+    /// multiplier in `drive_cymatics_audio` after the v4 formula and the
+    /// mandatory `×0.05` scale (Rule #3). `1.0` = unchanged.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 2.0_f32,
+        step = 0.05_f32,
+        label = "Blub volume",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_blub_level")]
+    pub blub_level: f32,
+
+    // ── Screensaver / attract (live, no restart) ──────────────────────────────
+    /// Ambient alive-mask radius held during attract mode (v4
+    /// `ATTRACT_ACTIVE_RADIUS = 0.6`). Keeps the wave field gently energised
+    /// during the screensaver; `0.1` (the resting floor) would produce a
+    /// nearly invisible mask.
+    #[setting(
+        default = 0.6_f32,
+        min = 0.1_f32,
+        max = 2.0_f32,
+        step = 0.05_f32,
+        label = "Attract radius",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_radius")]
+    pub attract_radius: f32,
+
+    /// Lissajous angular speed for centre-1's X component (rad/s). v4 default
+    /// `0.043`. Together with `c1_omega_y`, traces a slow incommensurate path
+    /// across the sim UV field.
+    #[setting(
+        default = 0.043_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "C1 omega x",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_c1_omega_x")]
+    pub c1_omega_x: f32,
+
+    /// Lissajous angular speed for centre-1's Y component (rad/s). v4 default
+    /// `0.031`. The 43:31 ratio with `c1_omega_x` keeps the centre-1 path
+    /// incommensurate with centre-2.
+    #[setting(
+        default = 0.031_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "C1 omega y",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_c1_omega_y")]
+    pub c1_omega_y: f32,
+
+    /// Lissajous angular speed for centre-2's X component (rad/s). v4 default
+    /// `0.037`. Phase-offset by `+1.7 rad` at t=0 so both centres are
+    /// spatially separated when the screensaver starts.
+    #[setting(
+        default = 0.037_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "C2 omega x",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_c2_omega_x")]
+    pub c2_omega_x: f32,
+
+    /// Lissajous angular speed for centre-2's Y component (rad/s). v4 default
+    /// `0.029`. Phase-offset by `+0.6 rad` at t=0.
+    #[setting(
+        default = 0.029_f32,
+        min = 0.001_f32,
+        max = 0.5_f32,
+        step = 0.001_f32,
+        label = "C2 omega y",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_c2_omega_y")]
+    pub c2_omega_y: f32,
 }
 
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
 // attributes above so a missing-field deserialize lands on the same value the
 // derived `Default` impl produces. Update both sites together.
+
 fn default_vertical_resolution() -> f32 {
     480.0
 }
@@ -73,27 +395,190 @@ fn default_iterations() -> f32 {
     20.0
 }
 
+// Physics defaults (v4 constants).
+fn default_force_multiplier() -> f32 {
+    0.25
+}
+
+fn default_velocity_decay() -> f32 {
+    0.99818
+}
+
+fn default_height_decay() -> f32 {
+    0.9999
+}
+
+fn default_accumulated_height_decay() -> f32 {
+    0.999
+}
+
+// Visual defaults.
+fn default_master_brightness() -> f32 {
+    1.0
+}
+
+fn default_skew_curve() -> f32 {
+    1.0
+}
+
+// Interaction defaults (v4 constants).
+fn default_min_radius() -> f32 {
+    0.1
+}
+
+fn default_interacting_radius() -> f32 {
+    0.5
+}
+
+fn default_target_radius() -> f32 {
+    7.5
+}
+
+fn default_grow_factor() -> f32 {
+    0.01
+}
+
+fn default_decay_factor() -> f32 {
+    0.005
+}
+
+fn default_lerp_factor() -> f32 {
+    0.01
+}
+
+// Audio defaults.
+fn default_osc_level() -> f32 {
+    1.0
+}
+
+fn default_blub_level() -> f32 {
+    1.0
+}
+
+// Attract / screensaver defaults (v4 constants).
+fn default_attract_radius() -> f32 {
+    0.6
+}
+
+fn default_c1_omega_x() -> f32 {
+    0.043
+}
+
+fn default_c1_omega_y() -> f32 {
+    0.031
+}
+
+fn default_c2_omega_x() -> f32 {
+    0.037
+}
+
+fn default_c2_omega_y() -> f32 {
+    0.029
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The derived `Default` must match the per-field serde defaults so the
+    /// The derived `Default` must match every per-field serde default so an
     /// in-memory default and a missing-field deserialize agree.
     #[test]
     fn default_values_match_serde_defaults() {
-        let defaults = CymaticsSettings::default();
+        let d = CymaticsSettings::default();
+
+        // Simulation (restart)
+        assert!((d.vertical_resolution - default_vertical_resolution()).abs() < f32::EPSILON);
+        assert!((d.iterations - default_iterations()).abs() < f32::EPSILON);
+
+        // Physics
         assert!(
-            (defaults.vertical_resolution - default_vertical_resolution()).abs() < f32::EPSILON,
-            "vertical_resolution default mismatch"
+            (d.force_multiplier - default_force_multiplier()).abs() < f32::EPSILON,
+            "force_multiplier default mismatch"
         );
         assert!(
-            (defaults.iterations - default_iterations()).abs() < f32::EPSILON,
-            "iterations default mismatch"
+            (d.velocity_decay - default_velocity_decay()).abs() < f32::EPSILON,
+            "velocity_decay default mismatch"
+        );
+        assert!(
+            (d.height_decay - default_height_decay()).abs() < f32::EPSILON,
+            "height_decay default mismatch"
+        );
+        assert!(
+            (d.accumulated_height_decay - default_accumulated_height_decay()).abs() < f32::EPSILON,
+            "accumulated_height_decay default mismatch"
+        );
+
+        // Visual
+        assert!(
+            (d.master_brightness - default_master_brightness()).abs() < f32::EPSILON,
+            "master_brightness default mismatch"
+        );
+        assert!(
+            (d.skew_curve - default_skew_curve()).abs() < f32::EPSILON,
+            "skew_curve default mismatch"
+        );
+
+        // Interaction
+        assert!(
+            (d.min_radius - default_min_radius()).abs() < f32::EPSILON,
+            "min_radius"
+        );
+        assert!(
+            (d.interacting_radius - default_interacting_radius()).abs() < f32::EPSILON,
+            "interacting_radius"
+        );
+        assert!(
+            (d.target_radius - default_target_radius()).abs() < f32::EPSILON,
+            "target_radius"
+        );
+        assert!(
+            (d.grow_factor - default_grow_factor()).abs() < f32::EPSILON,
+            "grow_factor"
+        );
+        assert!(
+            (d.decay_factor - default_decay_factor()).abs() < f32::EPSILON,
+            "decay_factor"
+        );
+        assert!(
+            (d.lerp_factor - default_lerp_factor()).abs() < f32::EPSILON,
+            "lerp_factor"
+        );
+
+        // Audio
+        assert!(
+            (d.osc_level - default_osc_level()).abs() < f32::EPSILON,
+            "osc_level"
+        );
+        assert!(
+            (d.blub_level - default_blub_level()).abs() < f32::EPSILON,
+            "blub_level"
+        );
+
+        // Screensaver
+        assert!(
+            (d.attract_radius - default_attract_radius()).abs() < f32::EPSILON,
+            "attract_radius"
+        );
+        assert!(
+            (d.c1_omega_x - default_c1_omega_x()).abs() < f32::EPSILON,
+            "c1_omega_x"
+        );
+        assert!(
+            (d.c1_omega_y - default_c1_omega_y()).abs() < f32::EPSILON,
+            "c1_omega_y"
+        );
+        assert!(
+            (d.c2_omega_x - default_c2_omega_x()).abs() < f32::EPSILON,
+            "c2_omega_x"
+        );
+        assert!(
+            (d.c2_omega_y - default_c2_omega_y()).abs() < f32::EPSILON,
+            "c2_omega_y"
         );
     }
 
     /// Legacy persisted TOML missing one field still deserializes the other
-    /// field cleanly via the per-field `#[serde(default)]`.
+    /// fields cleanly via the per-field `#[serde(default)]`.
     #[test]
     #[allow(
         clippy::expect_used,
@@ -111,6 +596,18 @@ mod tests {
         assert!(
             (parsed.iterations - 20.0).abs() < 1e-6,
             "iterations should fall back to default"
+        );
+        assert!(
+            (parsed.force_multiplier - 0.25).abs() < 1e-6,
+            "force_multiplier should fall back to default"
+        );
+        assert!(
+            (parsed.master_brightness - 1.0).abs() < 1e-6,
+            "master_brightness should fall back to default"
+        );
+        assert!(
+            (parsed.attract_radius - 0.6).abs() < 1e-6,
+            "attract_radius should fall back to default"
         );
     }
 }
