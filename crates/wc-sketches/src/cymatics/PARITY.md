@@ -322,3 +322,48 @@ pre-approved by the task reviewers (no re-review needed after applying):
 - C14: change `audio_coupling.rs:404` onset threshold from hardcoded
   `MINIMUM_ACTIVE_RADIUS_INTERACTING` to `settings.interacting_radius` (already in scope) so
   audio onset tracks the live Dev knob.
+
+(All of the above are now applied — commit `fd65f20a`.)
+
+### Optimization pass (F-series, post-port)
+
+Driven by a hot-path + memory audit against the multi-hour thermal-stability target. Each
+landed as a separate, independently-revertable commit and was reviewed (render-graph + POD↔WGSL
+parity scrutiny). They are visually lossless (F1/F2 provably byte-identical; F3 differs by ~1 ULP,
+sub-perceptual). Operator should still confirm with one capture on a real display (the build
+session is headless, so the render-graph change was validated by a clean `app.log` over 240
+frames + `cargo check --release`, not by pixels).
+
+- **F1 (`d3d1d8a9`) — drop the `display` texture; the material samples ping texture A directly.**
+  The odd-N continuity fix already guarantees A holds the latest field at every frame's end
+  (even N: last sub-step writes A; odd N: the `refresh_a` B→A copy, KEPT). The old final→display
+  `copy_texture_to_texture` was a byte copy, so sampling A is identical. Removes one full
+  sim-resolution `rgba32float` texture (~6.25 MiB, ~33% of the sketch's texture VRAM) AND the
+  per-frame full-texture blit (~375 MiB/s at 60 fps). `frame_blit_plan` simplified to
+  `fn(u32) -> bool` (refresh-on-odd-N); its regression test still guards N=1,3 refresh / N=2,20,0
+  no-refresh.
+- **F2 (`3a954da8`) — carry the per-iteration phase as scalars, not a per-frame `Vec`.**
+  `ExtractResourcePlugin` clones `CymaticsSimParams` main→render every frame, and the old
+  `iter_times: Vec<f32>` made that a heap alloc/free per frame (defeating the careful
+  `clear()+push`). Replaced with `phase_base`/`phase_dt`; the bind-group prepare recomputes
+  `phase_base + i*phase_dt` per slot (byte-identical uniform). The resource is now POD, so the
+  extract clone is a memcpy with zero allocation.
+- **F3 (`127c7094`) — precompute the wave-source `2*sin(time)` per sub-step on the CPU.**
+  `iter.time` is uniform across the dispatch, so the per-cell `sin()` recomputed the same value
+  hundreds of thousands of times per sub-step. Now `IterParamsGpu`/the WGSL `IterParams` carry a
+  `wave_signal` field (`time @0, wave_signal @4`, still 256 B), filled CPU-side; the shader reads
+  `iter.wave_signal`. `iter.time` is retained for the cheap (non-transcendental) alive-ramp. The
+  Rust↔WGSL offset parity is guarded by `iter_params_field_offsets_match_wgsl`. CPU-`sin` vs
+  GPU-`sin` differs ~1 ULP, sub-perceptual through the sub-2-texel proximity weight.
+- **F4 (`62eb8757`) — only re-upload the render material when it changes.**
+  `update_cymatics_material` now `get`s + compares the packed `skew` `Vec4` and only takes
+  `get_mut` (which flags the asset `Changed` → re-extract + re-upload) when it actually differs,
+  so the idle screensaver soak (pinned `num_cycles`) stops re-uploading the 32-byte uniform every
+  frame. Exact-equality compare is correct: at rest the recompute is bit-stable; any real knob
+  change flips a bit and fires the upload.
+
+**Not taken (flagged for the operator):** the compute bind-group cache (a render-world `Local`)
+is not cleared on `OnExit`, so it pins ~12.5 MiB of the previous A/B textures from sketch exit
+until the next Cymatics entry. This is bounded (not a growing leak) and mirrors the accepted
+`hand_mesh::bone_composite` cache pattern, so it was left as-is for consistency; tighten only if a
+sketch-switch VRAM spike shows up in soak telemetry.
