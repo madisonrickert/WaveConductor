@@ -93,5 +93,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // are non-negative, but accumulated floating-point adds could underflow
     // slightly; clamp defensively before pow.
     let base = max(col + original, vec4<f32>(0.0));
+    // `gamma` is a uniform, so this is a uniform branch (no warp divergence). The
+    // default gamma is 1.0, where `pow` is the identity — skip the per-channel
+    // exp/log. The compiler cannot fold this away because `gamma` is a runtime
+    // uniform, not a constant.
+    if params.gamma == 1.0 {
+        return base;
+    }
     return pow(base, vec4<f32>(params.gamma));
 }
