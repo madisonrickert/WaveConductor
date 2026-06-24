@@ -10,6 +10,23 @@
 //! Kept deliberately tiny and framework-level (not Line-specific): the Line
 //! attract driver runs its own per-pulse choreography; this is only the
 //! coarse-grained "are we showing attract content, and how strongly" envelope.
+//!
+//! ## Color correction for HDR sketches (read this before porting a new sketch)
+//!
+//! Sketches rendered through the global HDR + `AgX` camera (Cymatics, and any
+//! future HDR sketch port) need a screensaver-only **brightness lift** driven by
+//! this envelope, not just an opacity cross-fade. The reason: a gentle,
+//! low-energy idle/attract field has low *linear* luminance, which lands in
+//! `AgX`'s dark, desaturated toe — so it reads muted / near-black even while it is
+//! animating, whereas active play drives the field bright into `AgX`'s vivid
+//! range. The fix is **presentation, not physics** (raising wave energy to
+//! compensate would fight the "gentle" feel and risk soak instability): multiply
+//! the sketch's master brightness by `1.0 + (attract_brightness - 1.0) *
+//! fade.alpha()` so the calm field lifts up `AgX`'s curve into the vivid range
+//! during the screensaver while staying gentle. At `fade.alpha() == 0` (active)
+//! the factor is `1.0`, so active rendering is unchanged. Dots, Line, and
+//! Cymatics all do this via a per-sketch `attract_brightness` Dev setting; a new
+//! HDR sketch's attract layer should too.
 
 use std::time::Duration;
 
