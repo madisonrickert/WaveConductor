@@ -49,6 +49,7 @@ use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 use wc_core::audio::state::AudioState;
 use wc_core::lifecycle::reload::SketchReloadState;
+use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
@@ -548,7 +549,7 @@ fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
 
 /// Update the [`render::CymaticsMaterial`] each frame with the current
 /// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting),
-/// `master_brightness`, and `gamma` (both User settings).
+/// brightness (`master_brightness` × the screensaver lift), and `gamma`.
 ///
 /// Runs under `sketch_active OR in_screensaver` so the material reflects the
 /// live state during both active play and the attract screensaver. Unlike
@@ -561,17 +562,30 @@ fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
 /// The `skew_curve` Dev knob applies an exponent to this raw value before
 /// packing into the uniform, allowing a wider or narrower push range.
 ///
+/// ## Screensaver brightness lift
+///
+/// The packed `master_brightness` channel is scaled by
+/// `1 + fade.alpha() × (attract_brightness − 1)`. At fade = 0 (Active) the
+/// factor is exactly `1.0`, so active rendering is byte-identical to before
+/// this knob existed; at fade = 1 (Screensaver) it reaches `attract_brightness`,
+/// lifting the gentle linear field up the `AgX` curve so it stays vivid rather
+/// than landing in `AgX`'s dark, desaturated toe. See
+/// [`CymaticsSettings::attract_brightness`].
+///
 /// ## Change-gated upload
 ///
 /// `materials.get_mut` marks the material asset `Changed`, which forces the
 /// render world to re-extract and re-upload its 32-byte uniform. Taking that
 /// borrow unconditionally every frame would re-upload an identical uniform on
-/// every frame of the multi-hour at-rest screensaver (where `num_cycles`,
-/// `skew_curve`, `master_brightness`, and `gamma` are all pinned). So this reads the
+/// every frame of the multi-hour at-rest screensaver. So this reads the
 /// current packed `skew` via `materials.get` first and only mutates when the
-/// freshly-packed `Vec4` differs. At rest every input is pinned, so the packed
-/// `Vec4` is bit-stable frame to frame and the exact compare holds (no
-/// epsilon needed); any real knob change flips a bit and triggers the upload.
+/// freshly-packed `Vec4` differs. The [`ScreensaverFade`] ramp moves
+/// `fade.alpha()` each frame for ~1.5 s on screensaver enter/wake, so the
+/// brightness channel flips a bit and the uniform re-uploads across the ramp;
+/// once the fade settles (a constant `0` or `1`) every input is pinned, the
+/// packed `Vec4` is bit-stable frame to frame, and the exact compare holds (no
+/// epsilon needed). Any real knob change likewise flips a bit and triggers the
+/// upload.
 ///
 /// ## No-allocation guarantee
 ///
@@ -580,9 +594,18 @@ fn update_cymatics_material(
     quad_q: Query<'_, '_, &MeshMaterial2d<render::CymaticsMaterial>, With<CymaticsRoot>>,
     mut materials: ResMut<'_, Assets<render::CymaticsMaterial>>,
     settings: Res<'_, CymaticsSettings>,
+    fade: Res<'_, ScreensaverFade>,
     state: Option<Res<'_, CymaticsState>>,
 ) {
     let Some(state) = state else { return };
+    // Screensaver brightness lift: at fade = 0 (Active) the factor is ×1.0, so
+    // the packed uniform — and therefore the rendered frame — is byte-identical
+    // to before this knob existed. As the screensaver fades in, the factor
+    // ramps toward ×attract_brightness, lifting the whole linear field up the
+    // AgX curve (orange crests reach the vivid shoulder; navy lifts off pure
+    // black) without sharpening the gentle waves — a uniform pre-AgX multiply.
+    let brightness = settings.master_brightness
+        * (1.0 + (settings.attract_brightness - 1.0) * fade.alpha());
     for handle in quad_q.iter() {
         // v4: skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2).
         // DEFAULT_NUM_CYCLES = 1.002; at rest, the clamp yields 0.
@@ -594,15 +617,10 @@ fn update_cymatics_material(
         let skew_intensity = skew_raw.powf(settings.skew_curve);
         // Pack into the skew uniform:
         //   .x = skew_intensity   (body-colour push toward white)
-        //   .y = master_brightness  (post-render multiplier)
+        //   .y = brightness       (master_brightness × screensaver lift)
         //   .z = gamma            (per-channel display gamma; 1.0 = identity)
         //   .w = 0 (reserved)
-        let new_skew = Vec4::new(
-            skew_intensity,
-            settings.master_brightness,
-            settings.gamma,
-            0.0,
-        );
+        let new_skew = Vec4::new(skew_intensity, brightness, settings.gamma, 0.0);
 
         // Skip the mutation (and the Changed flag + re-extract/re-upload it
         // triggers) when the packed uniform is unchanged. The immutable `get`

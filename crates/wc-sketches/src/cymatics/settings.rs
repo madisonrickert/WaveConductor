@@ -388,6 +388,28 @@ pub struct CymaticsSettings {
     #[serde(default = "default_attract_cycles")]
     pub attract_cycles: f32,
 
+    /// Brightness multiplier applied to the rendered field while the
+    /// screensaver shows, so the gentle attract field clears the `AgX`
+    /// tonemapper's dark, desaturated toe instead of reading as muted/navy.
+    /// Folded into the material's `master_brightness` channel as
+    /// `master_brightness × (1 + fade × (attract_brightness − 1))`, so `1.0` is
+    /// a provable no-op (active rendering is byte-identical) and values above
+    /// `1.0` lift the whole linear field up the `AgX` curve. A uniform
+    /// pre-`AgX` multiply: it preserves contrast and does not sharpen the
+    /// waves. Fades in
+    /// with the screensaver envelope and back out after wake. Dev-only knob.
+    #[setting(
+        default = 2.2_f32,
+        min = 1.0_f32,
+        max = 4.0_f32,
+        step = 0.1_f32,
+        label = "Attract brightness",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_brightness")]
+    pub attract_brightness: f32,
+
     /// Lissajous angular speed for centre-1's X component (rad/s). Default
     /// `0.1505` = 3.5× v4's `0.043`: the centres wander (and their ripples
     /// interfere) noticeably within a short watch instead of over ~145 s.
@@ -548,6 +570,10 @@ fn default_attract_cycles() -> f32 {
     0.1
 }
 
+fn default_attract_brightness() -> f32 {
+    2.2
+}
+
 fn default_c1_omega_x() -> f32 {
     0.1505
 }
@@ -660,6 +686,10 @@ mod tests {
             "attract_cycles"
         );
         assert!(
+            (d.attract_brightness - default_attract_brightness()).abs() < f32::EPSILON,
+            "attract_brightness"
+        );
+        assert!(
             (d.c1_omega_x - default_c1_omega_x()).abs() < f32::EPSILON,
             "c1_omega_x"
         );
@@ -712,6 +742,10 @@ mod tests {
         assert!(
             (parsed.attract_radius - 0.6).abs() < 1e-6,
             "attract_radius should fall back to default"
+        );
+        assert!(
+            (parsed.attract_brightness - 2.2).abs() < 1e-6,
+            "attract_brightness should fall back to default"
         );
     }
 }
