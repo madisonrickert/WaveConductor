@@ -120,16 +120,30 @@ impl Plugin for CymaticsPlugin {
         register_cymatics_manifest(app);
 
         // Lifecycle: allocate the textures + spawn the quad on enter, despawn
-        // and release VRAM on exit. Audio + interaction systems join these
-        // schedules in later stages.
+        // and release VRAM on exit. Audio lifecycle joins the same schedules:
+        // `enter_cymatics_audio` builds the synth voice bundle; `exit_cymatics_audio`
+        // tears it down so audio allocations are released between sketch entries.
         app.add_systems(
             OnEnter(AppState::Cymatics),
-            (init_cymatics_state, spawn_cymatics).chain(),
+            (
+                init_cymatics_state,
+                spawn_cymatics,
+                systems::audio_coupling::enter_cymatics_audio,
+            )
+                .chain(),
         );
         app.add_systems(
             OnExit(AppState::Cymatics),
-            (despawn_with::<CymaticsRoot>, remove_cymatics_sim_params),
+            (
+                despawn_with::<CymaticsRoot>,
+                remove_cymatics_sim_params,
+                systems::audio_coupling::exit_cymatics_audio,
+            ),
         );
+
+        // Onset throttle state for kick/risingbass one-shots (persists across
+        // enter/exit cycles so the throttle survives a fast sketch re-entry).
+        app.init_resource::<systems::audio_coupling::CymaticsTriggerState>();
 
         // Idle veto: stay `Active` while the field is still energised (the mask
         // radius is above rest), so the wave keeps integrating until it settles
@@ -170,8 +184,7 @@ impl Plugin for CymaticsPlugin {
         // Per-frame CPU→GPU bridge. Runs while the sketch is `Active` OR while
         // its screensaver is showing, so the attract/screensaver mode keeps the
         // field animating instead of freezing. This is the single system that
-        // advances `CymaticsState::simulation_time` (the audio-coupling system
-        // takes over that advance in a later stage; exactly one system must).
+        // advances `CymaticsState::simulation_time` (exactly one system owns it).
         app.add_systems(
             Update,
             update_cymatics_sim_params.run_if(
@@ -180,6 +193,20 @@ impl Plugin for CymaticsPlugin {
                 // `Active` OR while the screensaver is showing.
                 sketch_active(AppState::Cymatics).or_else(in_screensaver(AppState::Cymatics)),
             ),
+        );
+
+        // Audio coupling: derive v4 audio params from CymaticsState and push
+        // them to the ring each frame. Runs only while `Active` — silent in the
+        // screensaver (attract mode drives centres but produces no audio).
+        // Runs after `update_cymatics_centers` so it reads fresh active_radius
+        // and slow_down values; the onset edge then increments slow_down, which
+        // `update_cymatics_sim_params` (registered above) packs into the GPU
+        // uniform this same frame.
+        app.add_systems(
+            Update,
+            systems::audio_coupling::drive_cymatics_audio
+                .after(systems::update_cymatics_centers)
+                .run_if(sketch_active(AppState::Cymatics)),
         );
     }
 }
