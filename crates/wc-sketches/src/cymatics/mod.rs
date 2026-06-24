@@ -5,6 +5,7 @@
 //! lifecycle) arrives in Stage 4.
 
 pub mod compute;
+pub mod render;
 
 use bevy::prelude::*;
 

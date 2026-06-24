@@ -42,6 +42,12 @@ impl Plugin for SketchesPlugin {
         // on entry, so it costs nothing on other sketches.
         app.add_plugins(crate::cymatics::compute::CymaticsComputePlugin);
 
+        // Cymatics Material2d render material, registered once (a `Plugin`
+        // singleton; adding it twice would panic at startup). The quad is
+        // spawned in Stage 4 (CymaticsPlugin::build); registering here keeps
+        // the material pipeline compiled even before sketch entry.
+        app.add_plugins(Material2dPlugin::<crate::cymatics::render::CymaticsMaterial>::default());
+
         // Shared hand-mesh overlay infra, registered once (like the particle
         // plugins above) so each sketch's `HandMeshPlugin` can be added without
         // re-registering the material or composite node. `MaterialPlugin` and
