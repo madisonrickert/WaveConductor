@@ -2,9 +2,12 @@
 //
 // Samples the ping-pong cell texture A (rgba32float) via textureLoad (integer
 // texel coordinates, no sampler) to avoid the float32-filterable WebGPU
-// feature that linear sampling of 32-bit-float textures would require. A holds
-// the latest field at frame end (the compute node's odd-N continuity refresh),
-// so the material samples it directly with no separate display texture.
+// feature that linear sampling of 32-bit-float textures would require. Linear
+// smoothing is reproduced by hand in `sample_height_bilinear` (a 2x2 textureLoad
+// + lerp), matching the bilinear v4 got from its LinearFilter sampler without
+// binding one. A holds the latest field at frame end (the compute node's odd-N
+// continuity refresh), so the material samples it directly with no separate
+// display texture.
 //
 // Builds a height-gradient surface normal (central difference of abs(height)
 // at ±1 texel, scaled to UV space; matches v4 halfTexelScaleX/Y) and applies
@@ -48,6 +51,31 @@ fn clamp_texel(t: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
     return clamp(t, vec2<i32>(0), dims - vec2<i32>(1));
 }
 
+// Manual bilinear height fetch reproducing v4's LinearFilter sampler.
+//
+// Texture A is `rgba32float`; linear-filtering 32-bit-float textures needs the
+// `float32-filterable` WebGPU feature this project does not depend on, so we
+// cannot bind a real linear sampler. We instead do the 2x2 fetch + lerp by hand
+// with `textureLoad`, which is exactly the bilinear v4 got for free from its
+// `LinearFilter` sampler (v4 index.ts:176-180). The half-texel shift (`- 0.5`)
+// places the four taps on the surrounding texel *centres* so the interpolation
+// is gradient-continuous; nearest `textureLoad` snaps to texel boundaries and
+// shimmers the tightly-packed rings across the fullscreen quad.
+//
+// Reads channel x (height), matching every height tap in `cymatics_color`.
+// ClampToEdge via `clamp_texel` mirrors v4's wrap mode at the grid border.
+fn sample_height_bilinear(uv: vec2<f32>, sim_res: vec2<f32>, dims: vec2<i32>) -> f32 {
+    let p = uv * sim_res - vec2<f32>(0.5);
+    let base = floor(p);
+    let f = p - base;
+    let b = vec2<i32>(base);
+    let h00 = textureLoad(cell_tex, clamp_texel(b + vec2<i32>(0, 0), dims), 0).x;
+    let h10 = textureLoad(cell_tex, clamp_texel(b + vec2<i32>(1, 0), dims), 0).x;
+    let h01 = textureLoad(cell_tex, clamp_texel(b + vec2<i32>(0, 1), dims), 0).x;
+    let h11 = textureLoad(cell_tex, clamp_texel(b + vec2<i32>(1, 1), dims), 0).x;
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
 // Height-gradient surface normal, two-light power-8 specular, and body mix.
 // Ports v4 `color()` verbatim. All arithmetic matches v4 line-for-line.
 //
@@ -64,18 +92,20 @@ fn cymatics_color(uv: vec2<f32>) -> vec3<f32> {
     let sim_res = resolution.zw;
     let dims = vec2<i32>(i32(sim_res.x), i32(sim_res.y));
 
-    // Convert [0, 1] UV to integer texel, clamped inside the grid.
-    let t = clamp_texel(vec2<i32>(uv * sim_res), dims);
+    // One-texel step in UV space (v4's neighbour offset was ±1 texel).
+    let texel = vec2<f32>(1.0) / sim_res;
 
-    // Centre texel: height in channel x.
-    let height = textureLoad(cell_tex, t, 0).x;
+    // Centre height (channel x), bilinear-sampled to match v4's LinearFilter.
+    let height = sample_height_bilinear(uv, sim_res, dims);
 
-    // Neighbour absolute heights for central-difference gradient.
-    // v4 reads abs(.xz) (both height and accumulated), then uses only .x.
-    let hpx = abs(textureLoad(cell_tex, clamp_texel(t + vec2<i32>( 1,  0), dims), 0).x);
-    let hmx = abs(textureLoad(cell_tex, clamp_texel(t + vec2<i32>(-1,  0), dims), 0).x);
-    let hpy = abs(textureLoad(cell_tex, clamp_texel(t + vec2<i32>( 0,  1), dims), 0).x);
-    let hmy = abs(textureLoad(cell_tex, clamp_texel(t + vec2<i32>( 0, -1), dims), 0).x);
+    // Neighbour absolute heights for the central-difference gradient, each
+    // bilinear-sampled at uv ± one texel. v4 read abs(.xz) (height and
+    // accumulated) but used only .x; we read .x and abs *after* interpolation,
+    // exactly as v4 did on top of its filtered fetch.
+    let hpx = abs(sample_height_bilinear(uv + vec2<f32>(texel.x, 0.0), sim_res, dims));
+    let hmx = abs(sample_height_bilinear(uv - vec2<f32>(texel.x, 0.0), sim_res, dims));
+    let hpy = abs(sample_height_bilinear(uv + vec2<f32>(0.0, texel.y), sim_res, dims));
+    let hmy = abs(sample_height_bilinear(uv - vec2<f32>(0.0, texel.y), sim_res, dims));
 
     // Gradient scale: v4 halfTexelScaleX = 0.5 / cellOffset.x = 0.5 * resolution.x.
     // ±1 texel = 1/sim_res in UV, central difference / (2 * 1/sim_res) = sim_res * 0.5.
