@@ -499,17 +499,33 @@ fn add_remove_cymatics_synth_is_idempotent() {
 
 #[test]
 fn trigger_sample_plays_one_shot() {
+    // Kick sample in test_bank: SampleData [0.0, 1.0] (two frames, mono).
+    // Mute the background loop so the kick is the only audio source; the
+    // CymaticsSynth osc_volume defaults to 0.0 (DEFAULT_OSC_VOLUME), keeping
+    // the oscillators and noise near-silent (gain at 1e-10 clip floor).
     let mut host = DspHost::new(48_000, 1, test_bank());
+    host.apply(AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 0.0,
+    });
     host.apply(AudioCommand::AddCymaticsSynth);
     host.apply(AudioCommand::TriggerCymaticsSample(CymaticsSampleId::Kick));
-    // kick = SampleData [0.0, 1.0]; blub silent (volume 0). Render 3 frames.
     let mut out = vec![0.0_f32; 3];
     host.render(&mut out);
-    // Assert the kick onset is present in the mix. The one-shot contributes
-    // frame[0]=0.0 then frame[1]=1.0; with background also in the mix the
-    // assertion stays loose: at least one of the frames is non-negative and
-    // something rendered (not all NaN/Inf).
-    assert!(out[1].abs() > 0.0 || out[0].abs() >= 0.0);
+    // Kick reads frame[0]=0.0, frame[1]=1.0, then deactivates.
+    // The onset frame (frame[1]) must be non-zero — the one-shot is contributing.
+    assert!(
+        out[1].abs() > 0.0,
+        "kick one-shot must contribute at onset frame; out[1] = {}",
+        out[1]
+    );
+    // After the 2-frame shot the output must be near-silent (background muted,
+    // synth at 1e-10 clip floor for only 3 frames ≈ 0 after follow smoother).
+    assert!(
+        out[2].abs() < 1e-6,
+        "output must be near-silent after kick one-shot ends; out[2] = {}",
+        out[2]
+    );
     assert!(out.iter().all(|s| s.is_finite()));
 }
 

@@ -44,6 +44,8 @@ use wc_core::audio::ring::AudioCommandSender;
 use crate::cymatics::settings::CymaticsSettings;
 use crate::cymatics::CymaticsState;
 
+// `interaction` is used only in tests (blub_volume_first_term_is_clamped_at_interacting_radius).
+#[cfg(test)]
 use super::interaction;
 
 // ── Derived per-frame audio parameters ───────────────────────────────────────
@@ -229,10 +231,13 @@ pub fn drive_cymatics_audio(
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
     settings: Res<'_, CymaticsSettings>,
 ) {
-    // Interaction onset: active_radius snaps to MINIMUM_ACTIVE_RADIUS_INTERACTING
-    // (0.5) the moment a press/grab starts. The -1e-3 tolerance handles the
-    // one-frame snap lag when the radius is written and read in the same cycle.
-    let interacting = state.active_radius > interaction::MINIMUM_ACTIVE_RADIUS_INTERACTING - 1e-3;
+    // Interaction onset: active_radius snaps to `settings.interacting_radius`
+    // (default 0.5, matching MINIMUM_ACTIVE_RADIUS_INTERACTING) the moment a
+    // press/grab starts. Using the live setting instead of the constant ensures
+    // the audio onset tracks the Dev `interacting_radius` knob when tuned below
+    // the default. The -1e-3 tolerance handles the one-frame snap lag when the
+    // radius is written and read in the same cycle.
+    let interacting = state.active_radius > settings.interacting_radius - 1e-3;
     trigger.throttle_frames = trigger.throttle_frames.saturating_sub(1);
     let is_onset = interacting && !trigger.was_interacting;
 
@@ -347,12 +352,12 @@ mod tests {
     }
 
     /// `osc_volume` is zero at the default frequency: `smoothstep(1.002; 1.002,
-    /// 1.1002) = 0` because `x == e0`.
+    /// 1.1022) = 0` because `x == e0`.
     #[test]
     fn osc_volume_zero_at_default_frequency() {
         let s = CymaticsState::default();
         let p = audio_params(&s);
-        assert!(p.osc_volume.abs() < 1e-4); // smoothstep(1.002; 1.002, 1.1002) = 0
+        assert!(p.osc_volume.abs() < 1e-4); // smoothstep(1.002; 1.002, 1.1022) = 0
     }
 
     /// `osc_volume` saturates at 0.5 when `num_cycles` reaches the correct upper
@@ -369,6 +374,34 @@ mod tests {
         assert!(
             (p.osc_volume - 0.5).abs() < 1e-4,
             "osc_volume at swell edge 1.1022 must be ≈ 0.5; got {}",
+            p.osc_volume
+        );
+    }
+
+    /// Probes `num_cycles = 1.1010`: above the old wrong swell edge (1.1002) but
+    /// below the correct edge (1.1022 = `DEFAULT_NUM_CYCLES * 1.1`).
+    ///
+    /// With the correct edge, `t ≈ 0.988` and `smoothstep ≈ 0.9996`, giving
+    /// `osc_volume ≈ 0.4998 < 0.4999`. With the old wrong edge, `t` clamps to
+    /// 1.0, giving `osc_volume = 0.5`. A value ≥ 0.4999 here means the swell
+    /// edge has regressed to 1.1002.
+    #[test]
+    fn osc_volume_below_saturated_at_discriminating_edge() {
+        let s = CymaticsState {
+            num_cycles: 1.1010,
+            ..Default::default()
+        };
+        let p = audio_params(&s);
+        assert!(
+            p.osc_volume < 0.4999,
+            "osc_volume at num_cycles=1.1010 must be < 0.4999 with correct swell \
+             edge 1.1022; got {} (≥ 0.4999 suggests edge regressed to 1.1002)",
+            p.osc_volume
+        );
+        // Confirm the volume is in the expected high-ramp neighbourhood, not anomalously low.
+        assert!(
+            p.osc_volume > 0.4,
+            "osc_volume at num_cycles=1.1010 must be > 0.4; got {}",
             p.osc_volume
         );
     }

@@ -162,8 +162,10 @@ mod tests {
         let speeds = LissajousSpeeds::default();
         for &t in &[0.0_f32, 1.5, 7.3, 100.0] {
             let (c1, c2) = wander_centers(t, &speeds);
+            // Pure fn with no hidden state: same elapsed + same speeds → bit-exact same output.
             assert_eq!((c1, c2), wander_centers(t, &speeds)); // deterministic
             for c in [c1, c2] {
+                // Amplitude 0.3 around centre 0.5 → always in [0.2, 0.8] ⊆ [0.0, 1.0].
                 assert!(c.x >= 0.0 && c.x <= 1.0 && c.y >= 0.0 && c.y <= 1.0);
             }
         }

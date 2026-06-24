@@ -155,6 +155,11 @@ pub fn update_cymatics_hand_centers(
     let mut buf = [(false, Vec2::ZERO); 2];
     let mut count = 0usize;
 
+    // INVARIANT: stickiness (hand 0 → c1, hand 1 → c2 across frames) relies on
+    // `Query::iter()` returning `TrackedHand` entities in stable ECS archetype
+    // order; this holds as long as no `TrackedHand` entity adds or removes
+    // components between frames, which the hand-tracking provider guarantees for
+    // an entity's lifetime.
     for (palm, grab) in hand_query.iter().take(2) {
         // v4: grab > grabThreshold is "grabbing". Same threshold as Dots.
         buf[count] = (

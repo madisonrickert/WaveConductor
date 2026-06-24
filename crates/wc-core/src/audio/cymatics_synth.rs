@@ -272,4 +272,78 @@ mod tests {
         }
         assert!(max_abs > 1e-3, "expected audible output, got {max_abs}");
     }
+
+    /// The noise gate opens only when `osc_freq_scalar > 1.002`.
+    ///
+    /// `noise_gain = clamp((scalar − 1.002) × 20, 0, 1)`: exactly 0 at the
+    /// threshold, positive above it. `osc_volume = 0` silences the oscillators
+    /// (gain clips to 1e-10), leaving the noise path as the only meaningful source.
+    #[test]
+    fn noise_gate_threshold_at_1_002() {
+        // At/below threshold: scalar = 1.002 → noise_gain = clamp(0*20, 0,1) = 0.
+        let mut s_at = CymaticsSynth::new(48_000.0);
+        s_at.set_param("osc_volume", 0.0);
+        s_at.set_param("osc_freq_scalar", 1.002);
+        let mut max_at = 0.0_f32;
+        for _ in 0..512 {
+            max_at = max_at.max(s_at.tick_mono().abs());
+        }
+        // Zero noise gain + near-zero osc gain (1e-10 clip floor) → near-silent.
+        assert!(
+            max_at < 1e-3,
+            "at scalar=1.002 noise gate must be closed; got {max_at}"
+        );
+
+        // Above threshold: scalar = 1.1 → noise_gain = clamp(1.96, 0,1) = 1.0.
+        let mut s_above = CymaticsSynth::new(48_000.0);
+        s_above.set_param("osc_volume", 0.0);
+        s_above.set_param("osc_freq_scalar", 1.1);
+        let mut max_above = 0.0_f32;
+        for _ in 0..4_096 {
+            max_above = max_above.max(s_above.tick_mono().abs());
+        }
+        // Bandpass-filtered white noise at full gain should produce audible output.
+        assert!(
+            max_above > 1e-4,
+            "at scalar=1.1 noise gate must be open; got {max_above}"
+        );
+    }
+
+    /// `osc_base = dc(OSC_FREQ_BASE) >> sine()` is wired to the constant 126 Hz
+    /// with no `var(&osc_freq_scalar)` reference. Changing `osc_freq_scalar`
+    /// re-pitches only the five derived oscillators (unison, fifth, sub, `high4`,
+    /// `high4_second`).
+    ///
+    /// Direct pitch assertion is impractical headlessly (requires FFT). We assert
+    /// the structural invariant two ways:
+    ///
+    /// 1. Render at extreme scalar (100.0): derived oscillators alias far above
+    ///    Nyquist; the 126 Hz base still contributes (non-zero peak).
+    /// 2. `set_param("osc_freq_scalar", …)` does not disturb the `osc_volume`
+    ///    Shared, confirming the two parameter paths are independent.
+    #[test]
+    fn osc_base_pitch_is_fixed_independent_of_scalar() {
+        // Extreme scalar: 126*100 >> Nyquist for the derived oscillators; the
+        // 126 Hz base remains audible regardless.
+        let mut s = CymaticsSynth::new(48_000.0);
+        s.set_param("osc_volume", 1.0);
+        s.set_param("osc_freq_scalar", 100.0);
+        let mut max_abs = 0.0_f32;
+        for _ in 0..4_096 {
+            max_abs = max_abs.max(s.tick_mono().abs());
+        }
+        assert!(
+            max_abs > 1e-3,
+            "base oscillator must contribute at extreme scalar=100.0; got {max_abs}"
+        );
+        // Structural independence: writing osc_freq_scalar must not alter osc_volume.
+        let s2 = CymaticsSynth::new(48_000.0);
+        s2.set_param("osc_volume", 0.5);
+        s2.set_param("osc_freq_scalar", 2.0);
+        assert!(
+            (s2.osc_volume.value() - 0.5).abs() < f32::EPSILON,
+            "osc_freq_scalar write must not disturb osc_volume; got {}",
+            s2.osc_volume.value()
+        );
+    }
 }

@@ -247,10 +247,9 @@ pub fn step_centers(state: &mut CymaticsState, input: CenterInput, tuning: Cente
 /// Map a screen-space NDC position to sim UV `[0, 1]` with aspect-ratio
 /// correction.
 ///
-/// `ndc` must be in Bevy-native convention: `(-1, -1)` = top-left,
-/// `(1, 1)` = bottom-right (i.e. `ndc.y = cursor.y / win.y * 2 - 1`, no
-/// Y-flip). The resulting UV is top-left origin, matching `simulate.wgsl` and
-/// `render.wgsl`.
+/// `ndc` is in window-logical / screen-space NDC: `(-1, -1)` = top-left,
+/// `(1, 1)` = bottom-right (Y increases downward). The resulting UV is
+/// top-left origin, matching `simulate.wgsl` and `render.wgsl`.
 ///
 /// When `screen_ar == sim_ar` the output is `cursor / window_size`, a
 /// straight normalise. The `screen_ar / sim_ar` ratio corrects for cases
@@ -408,6 +407,9 @@ mod tests {
         }
         assert!(s.active_radius > 5.0); // approaches TARGET (7.5)
         assert!(s.active_radius >= MINIMUM_ACTIVE_RADIUS_INTERACTING);
+        // The interacting branch increments num_cycles each frame; after 2000
+        // pressed steps it must be strictly above the resting default.
+        assert!(s.num_cycles > DEFAULT_NUM_CYCLES);
     }
 
     #[test]
