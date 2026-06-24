@@ -8,7 +8,8 @@
 //! [`AudioCommandSender`] ring:
 //!
 //! - `"osc_volume"` — synth swell that grows as the wave field enters higher
-//!   harmonics: `clamp(smoothstep(num_cycles, 1.002, 1.1002) × 0.5, 0, 1)`.
+//!   harmonics: `clamp(smoothstep(num_cycles, 1.002, 1.1022) × 0.5, 0, 1)`.
+//!   (1.1022 = `DEFAULT_NUM_CYCLES * 1.1`; v4 `index.ts:357`.)
 //! - `"osc_freq_scalar"` — effective frequency ratio; `slow_down` from interaction
 //!   onset temporarily pulls the pitch down by up to 75%, then decays back to 1.0:
 //!   `(num_cycles / (1 + slow_down × 3)) / 1.002`.
@@ -54,7 +55,8 @@ use super::interaction;
 #[derive(Clone, Copy, Debug)]
 pub struct CymaticsAudioParams {
     /// Synth oscillator volume (`osc_volume`). v4 smoothstep swell tied to
-    /// `num_cycles` exceeding 1.002; saturates at 0.5 when the field reaches 1.1002.
+    /// `num_cycles` exceeding 1.002; saturates at 0.5 when the field reaches 1.1022
+    /// (`DEFAULT_NUM_CYCLES * 1.1`).
     pub osc_volume: f32,
     /// Synth frequency ratio (`osc_freq_scalar`). 1.0 at rest; drops during
     /// interaction onset via `slow_down`, then recovers over ~20 frames.
@@ -117,17 +119,21 @@ pub fn audio_params(s: &CymaticsState) -> CymaticsAudioParams {
     // v4 `DEFAULT_NUM_CYCLES` — nominal resting frequency at which the wave
     // field is a single clean harmonic.
     const DEF: f32 = 1.002;
-    // v4 literal `1.1002` — smoothstep edge where the osc swell saturates.
-    // NB: 1.002 * 1.1 = 1.1022 ≠ 1.1002; v4 used the explicit magic constant.
-    const OSC_SWELL_EDGE: f32 = 1.1002;
+    // v4 `DEFAULT_NUM_CYCLES * 1.1` — smoothstep edge where the osc swell saturates.
+    // 1.002 * 1.1 = 1.1022. (Prior impl had 1.1002, a transcription error; v4
+    // `index.ts:357` uses `DEFAULT_NUM_CYCLES * 1.1`, not the literal 1.1002.)
+    const OSC_SWELL_EDGE: f32 = DEF * 1.1;
 
     // v4 `skewIntensity = pow(max(0, (numCycles - DEF) / 2 - 0.5), 2)`.
     // Suppresses blub_volume at very high cycle counts to prevent over-drive.
     let skew = ((s.num_cycles - DEF) / 2.0 - 0.5).max(0.0).powi(2);
 
     // v4 `blubVolume` (raw, before ·0.05 scale). Term by term:
-    //   pow(map(activeRadius, 0.1, 1, 0.05, 1), 2) * 0.5
-    //       → radius contribution: louder as the alive-mask grows
+    //   clamp(pow(map(activeRadius, 0.1, 1, 0.05, 1), 2), 0, 1) * 0.5
+    //       → radius contribution: louder as the alive-mask grows; the clamp
+    //         prevents over-drive when active_radius reaches 7.5 during
+    //         interaction (mapLinear extrapolates to ~7.86, pow→~61.8 unclamped;
+    //         v4 `index.ts:348` wraps the pow() result in clamp(…, 0, 1))
     //   + abs(numCycles - DEF) * 0.25
     //       → cycle deviation: louder as the field drifts from nominal
     //   - skewIntensity
@@ -135,7 +141,10 @@ pub fn audio_params(s: &CymaticsState) -> CymaticsAudioParams {
     //   + map(centerSpeed, 0, 0.005, 0, 1)
     //       * map(activeRadius, 0.1, 1, 0.12, 1) * 0.4
     //       → motion × radius cross-term: fast centre at large radius is loud
-    let blub_volume_raw = map_linear(s.active_radius, 0.1, 1.0, 0.05, 1.0).powi(2) * 0.5
+    let blub_volume_raw = map_linear(s.active_radius, 0.1, 1.0, 0.05, 1.0)
+        .powi(2)
+        .clamp(0.0, 1.0)
+        * 0.5
         + (s.num_cycles - DEF).abs() * 0.25
         - skew
         + map_linear(s.center_speed, 0.0, 0.005, 0.0, 1.0)
@@ -342,16 +351,46 @@ mod tests {
         assert!(p.osc_volume.abs() < 1e-4); // smoothstep(1.002; 1.002, 1.1002) = 0
     }
 
-    /// `osc_volume` rises above 0.4 when `num_cycles` reaches 1.1002: the
-    /// smoothstep saturates at 1.0, so `osc_volume = 1.0 × 0.5 = 0.5 > 0.4`.
+    /// `osc_volume` saturates at 0.5 when `num_cycles` reaches the correct upper
+    /// swell edge `1.1022` (`DEFAULT_NUM_CYCLES * 1.1`, v4 `index.ts:357`).
+    /// smoothstep = 1.0 at `e1`, so `osc_volume = 1.0 × 0.5 = 0.5`.
     #[test]
-    fn osc_volume_rises_with_num_cycles() {
+    fn osc_volume_saturates_at_correct_swell_edge() {
         let s = CymaticsState {
-            num_cycles: 1.1002,
+            num_cycles: 1.1022, // DEFAULT_NUM_CYCLES * 1.1 = 1.002 * 1.1
             ..Default::default()
         };
         let p = audio_params(&s);
-        assert!(p.osc_volume > 0.4); // smoothstep -> 1, *0.5
+        // smoothstep(e1) = 1.0 → osc_volume = 1.0 * 0.5 = 0.5
+        assert!(
+            (p.osc_volume - 0.5).abs() < 1e-4,
+            "osc_volume at swell edge 1.1022 must be ≈ 0.5; got {}",
+            p.osc_volume
+        );
+    }
+
+    /// `osc_volume` is strictly between 0 and 0.5 at a `num_cycles` value in
+    /// the middle of the swell ramp `(1.002, 1.1022)`, confirming the smoothstep
+    /// is not clipped too early (old wrong edge 1.1002 would saturate ≈ halfway).
+    #[test]
+    fn osc_volume_rises_between_swell_endpoints() {
+        // Midpoint between DEF (1.002) and OSC_SWELL_EDGE (1.1022) ≈ 1.0521.
+        let mid = f32::midpoint(1.002_f32, 1.1022_f32);
+        let s = CymaticsState {
+            num_cycles: mid,
+            ..Default::default()
+        };
+        let p = audio_params(&s);
+        assert!(
+            p.osc_volume > 0.0,
+            "osc_volume must be positive at mid-ramp; got {}",
+            p.osc_volume
+        );
+        assert!(
+            p.osc_volume < 0.5,
+            "osc_volume must not yet saturate at mid-ramp; got {}",
+            p.osc_volume
+        );
     }
 
     /// `blub_rate` increases with `center_speed`: both the `pow(2, map(...))` and
@@ -398,6 +437,34 @@ mod tests {
         assert!(
             p.blub_volume < 0.3,
             "blub_volume at rest must be below the clamp ceiling (0.3); got {}",
+            p.blub_volume
+        );
+    }
+
+    /// At `active_radius = TARGET_ACTIVE_RADIUS_INTERACTING` (7.5), `mapLinear`
+    /// extrapolates to ~7.86 and `powi(2)` gives ~61.8 unclamped. v4
+    /// `index.ts:348` wraps the result in `clamp(pow(...), 0, 1)`, keeping the
+    /// first term contribution to `blub_volume_raw` at `1.0 * 0.5 = 0.5`.
+    /// After the ·0.05 scale: `blub_volume ≈ 0.025`. Without the clamp it
+    /// would be `~30.9 * 0.05 = ~1.545`. This test FAILS if `.clamp(0.0, 1.0)`
+    /// is removed.
+    #[test]
+    fn blub_volume_first_term_is_clamped_at_interacting_radius() {
+        let s = CymaticsState {
+            active_radius: interaction::TARGET_ACTIVE_RADIUS_INTERACTING, // 7.5
+            ..Default::default()
+        };
+        let p = audio_params(&s);
+        // Passes only when the clamp fires: correct ≈ 0.025, unclamped ≈ 1.545.
+        assert!(
+            p.blub_volume < 1.0,
+            "blub_volume must be clamped at interacting radius; got {} (without clamp ≈ 1.545)",
+            p.blub_volume
+        );
+        // Also confirm the value is in v4's expected neighbourhood.
+        assert!(
+            (p.blub_volume - 0.025).abs() < 1e-4,
+            "blub_volume at max interacting radius must be ≈ 0.025; got {}",
             p.blub_volume
         );
     }
