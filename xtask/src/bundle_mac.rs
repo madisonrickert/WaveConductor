@@ -9,17 +9,24 @@
 //!     ├── MacOS/waveconductor         (release binary, mode 0o755)
 //!     ├── MacOS/libLeapC.6.dylib      (vendored Leap SDK runtime)
 //!     ├── MacOS/libLeapC.dylib        (unversioned alias, resolves @loader_path)
+//!     ├── Resources/WaveConductor.icns (app icon, generated from the source PNG)
 //!     ├── Resources/assets/           (workspace assets/, recursive copy)
 //!     ├── Info.plist                  (generated XML property list)
 //!     └── PkgInfo                     (APPL????)
 //! ```
 //!
+//! ## App icon
+//!
+//! The Dock/Finder icon is generated at bundle time from
+//! `assets/app-icons/icon.png` (the 1024×1024 source carried over from v4) using
+//! the stock-macOS `sips` + `iconutil` toolchain — no committed `.icns` blob and
+//! no extra crates. The PNG is the single source of truth; the `.icns` is a
+//! build artifact. `Info.plist` points at it via `CFBundleIconFile`.
+//!
 //! ## Out of scope
 //!
 //! - Code-signing / notarization: needed for distribution off this machine;
 //!   the local kiosk runs unsigned.
-//! - Custom `.icns` icon: ships with the macOS default until an icon asset
-//!   exists.
 
 use std::path::{Path, PathBuf};
 
@@ -123,6 +130,10 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
+    // 2c-bis. Generate the app icon (.icns) into Resources/ from the source PNG.
+    //     Returns the bare icon-file name to reference from Info.plist.
+    let icon_file = build_icns(&root, &resources_dir)?;
+
     // 2d. Write Info.plist.
     let plist_path = contents.join("Info.plist");
     let plist = info_plist(
@@ -132,6 +143,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         CRATE_VERSION,
         CAMERA_USAGE,
         MIN_OS,
+        &icon_file,
     );
     std::fs::write(&plist_path, plist.as_bytes())?;
 
@@ -150,6 +162,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("Bundle assembled: {app_path}");
         println!("  version       {CRATE_VERSION}");
+        println!("  icon          {icon_file}");
         // Display size in MiB with one decimal place using integer arithmetic
         // to avoid a `u64 as f64` precision-loss cast.
         let mib_whole = size_bytes / (1024 * 1024);
@@ -160,7 +173,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("To launch:  open target/WaveConductor.app");
         println!("Note: an unsigned app requires right-click -> Open (or");
         println!("  xattr -dr com.apple.quarantine target/WaveConductor.app) the first time.");
-        println!("Out of scope: code-signing/notarization and a custom .icns icon.");
+        println!("Out of scope: code-signing/notarization.");
     }
 
     Ok(())
@@ -173,6 +186,8 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 /// - Camera permission string (`NSCameraUsageDescription`) — mandatory
 ///   for `MediaPipe` hand-tracking; without it macOS denies camera access
 /// - `LSMinimumSystemVersion` floor
+/// - App icon reference (`CFBundleIconFile`) — the bare icon-file name (with or
+///   without the `.icns` extension) of the icon in `Contents/Resources/`
 ///
 /// The returned string passes `plutil -lint` on macOS.
 pub fn info_plist(
@@ -182,6 +197,7 @@ pub fn info_plist(
     version: &str,
     camera_usage: &str,
     min_os: &str,
+    icon_file: &str,
 ) -> String {
     format!(
         concat!(
@@ -198,6 +214,8 @@ pub fn info_plist(
             "\t<string>{id}</string>\n",
             "\t<key>CFBundleExecutable</key>\n",
             "\t<string>{exe}</string>\n",
+            "\t<key>CFBundleIconFile</key>\n",
+            "\t<string>{icon}</string>\n",
             "\t<key>CFBundlePackageType</key>\n",
             "\t<string>APPL</string>\n",
             "\t<key>CFBundleVersion</key>\n",
@@ -221,6 +239,7 @@ pub fn info_plist(
         ver = version,
         cam = camera_usage,
         min_os = min_os,
+        icon = icon_file,
     )
 }
 
@@ -248,6 +267,93 @@ fn build_release(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         )
     }
+}
+
+/// Generate the macOS `.icns` app icon into `resources_dir` from the source PNG
+/// at `assets/app-icons/icon.png`, returning the bare icon-file name to write
+/// into `Info.plist`'s `CFBundleIconFile` key.
+///
+/// Uses the stock-macOS toolchain only — `sips` to rasterize each required
+/// size into a temporary `.iconset` directory, then `iconutil -c icns` to pack
+/// them. No extra crates and no committed `.icns` blob: the 1024×1024 PNG is the
+/// single source of truth and the `.icns` is a pure build artifact. The scratch
+/// `.iconset` is written under the `.app` (not the source tree) and removed
+/// afterward, so a re-run leaves nothing behind.
+///
+/// macOS-only, which is the bundler's sole target. Returns a clear error if the
+/// source PNG is missing or either tool fails.
+fn build_icns(root: &Path, resources_dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    // (pixel size, file name) per Apple's iconset naming convention. Each `@2x`
+    // entry is the next size up so Retina displays get the denser raster.
+    const VARIANTS: &[(u32, &str)] = &[
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ];
+
+    let src_png = root.join("assets").join("app-icons").join("icon.png");
+    if !src_png.exists() {
+        return Err(format!(
+            "bundle-mac: app icon source not found at {}; expected the 1024x1024 PNG",
+            src_png.display()
+        )
+        .into());
+    }
+
+    // Scratch iconset lives inside the .app dir (resources_dir is
+    // `…/Contents/Resources`), never in the source tree.
+    let iconset = resources_dir.join("WaveConductor.iconset");
+    if iconset.exists() {
+        std::fs::remove_dir_all(&iconset)?;
+    }
+    std::fs::create_dir_all(&iconset)?;
+
+    for (size, name) in VARIANTS {
+        sips_resize(&src_png, *size, &iconset.join(name))?;
+    }
+
+    let icon_file = format!("{BUNDLE_NAME}.icns");
+    let icns_path = resources_dir.join(&icon_file);
+    let status = std::process::Command::new("iconutil")
+        .args(["-c", "icns"])
+        .arg(&iconset)
+        .arg("-o")
+        .arg(&icns_path)
+        .status()
+        .map_err(|e| format!("bundle-mac: cannot run `iconutil` (stock macOS tool): {e}"))?;
+    if !status.success() {
+        return Err(format!("bundle-mac: `iconutil -c icns` failed with {status}").into());
+    }
+
+    // The iconset has served its purpose; leave only the packed .icns behind.
+    std::fs::remove_dir_all(&iconset)?;
+
+    Ok(icon_file)
+}
+
+/// Rasterize `src` to a square `size`×`size` PNG at `out` via `sips`.
+fn sips_resize(src: &Path, size: u32, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // `sips -z <height> <width>` — square, so height == width == size.
+    let status = std::process::Command::new("sips")
+        .arg("-z")
+        .arg(size.to_string())
+        .arg(size.to_string())
+        .arg(src)
+        .arg("--out")
+        .arg(out)
+        .status()
+        .map_err(|e| format!("bundle-mac: cannot run `sips` (stock macOS tool): {e}"))?;
+    if !status.success() {
+        return Err(format!("bundle-mac: `sips` resize to {size}px failed with {status}").into());
+    }
+    Ok(())
 }
 
 /// Recursively copy `src` directory tree into `dst`, creating `dst` as needed.
@@ -417,6 +523,7 @@ mod tests {
             "5.0.0-dev",
             "WaveConductor uses the camera for hand-gesture tracking.",
             "12.0",
+            "WaveConductor.icns",
         )
     }
 
@@ -494,6 +601,19 @@ mod tests {
         assert!(
             true_pos > key_pos,
             "<true/> must follow the NSHighResolutionCapable key"
+        );
+    }
+
+    #[test]
+    fn plist_contains_icon_file() {
+        let p = sample_plist();
+        assert!(
+            p.contains("<key>CFBundleIconFile</key>"),
+            "plist must contain CFBundleIconFile key"
+        );
+        assert!(
+            p.contains("<string>WaveConductor.icns</string>"),
+            "plist must reference the generated .icns file name"
         );
     }
 
