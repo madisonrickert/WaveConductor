@@ -76,14 +76,13 @@ impl Plugin for HandMeshPlugin {
         let config = self.config.clone();
         let state = config.app_state;
 
-        // Always insert per-sketch config + presence on enter.
-        {
-            let cfg = config.clone();
-            app.add_systems(OnEnter(state), move |mut commands: Commands<'_, '_>| {
-                commands.insert_resource(cfg.clone());
-                commands.insert_resource(HandPresence(false));
-            });
-        }
+        // Always insert per-sketch config + presence on enter. The `Fn`
+        // closure re-clones `config` on every entry because `insert_resource`
+        // consumes it; `config` is unused after this, so move it in.
+        app.add_systems(OnEnter(state), move |mut commands: Commands<'_, '_>| {
+            commands.insert_resource(config.clone());
+            commands.insert_resource(HandPresence(false));
+        });
 
         // `WC_DEBUG_DISABLE_BONE_CAMERA` skips the off-screen camera in debug.
         #[cfg(debug_assertions)]

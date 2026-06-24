@@ -55,7 +55,10 @@ Internal name: `Dots`. Display name: "Fabric".
   pre-bloom so the main Bloom + AgX tonemap the bones coherently — known limit #75: no separate
   bloom rolloff), composited additively over the fabric. Incidental fix: Line's bone-composite leak
   (`Handle<Image>` clone keeps GPU texture alive after `OnExit`) fixed for both Line and Dots via
-  `remove_*_hand_mesh_target_if_absent` in `ExtractSchedule`.
+  `remove_*_hand_mesh_target_if_absent` in `ExtractSchedule`. **Superseded 2026-06-24:**
+  `DotsHandMeshPlugin` + `DotsBoneCompositePlugin` were deduplicated (with Line's copies) into the
+  shared `crate::hand_mesh` module; Dots now registers `HandMeshPlugin { config }` with the same
+  ice-blue `#b0d8ff` config plus the global `HandMeshCompositePlugin`.
 
 - **Perceptual parity fixes (shipped 2026-06-22, plan `2026-06-22-dots-perceptual-parity-fixes.md`)** —
   nine tasks closing five gaps Madison found in `cargo rund` testing, settings-panel-first:
