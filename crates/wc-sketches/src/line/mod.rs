@@ -128,8 +128,7 @@ impl Plugin for LinePlugin {
         if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
             render_app.configure_sets(
                 bevy::core_pipeline::Core2d,
-                crate::hand_mesh::HandMeshCompositeSet
-                    .after(post_process::line_post_process),
+                crate::hand_mesh::HandMeshCompositeSet.after(post_process::line_post_process),
             );
         }
 

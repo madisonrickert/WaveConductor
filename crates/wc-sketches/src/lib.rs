@@ -40,9 +40,9 @@ impl Plugin for SketchesPlugin {
         // plugins above) so each sketch's `HandMeshPlugin` can be added without
         // re-registering the material or composite node. `MaterialPlugin` and
         // `HandMeshCompositePlugin` are `Plugin` singletons.
-        app.add_plugins(
-            bevy::pbr::MaterialPlugin::<crate::hand_mesh::BoneWireframeMaterial>::default(),
-        );
+        app.add_plugins(bevy::pbr::MaterialPlugin::<
+            crate::hand_mesh::BoneWireframeMaterial,
+        >::default());
         // `WC_DEBUG_DISABLE_BONE_COMPOSITE` gates the composite globally (debug only).
         #[cfg(debug_assertions)]
         let register_bone_composite = !app

@@ -117,7 +117,10 @@ impl Plugin for HandMeshCompositePlugin {
         );
         render_app.add_systems(
             ExtractSchedule,
-            (remove_hand_mesh_target_if_absent, remove_hand_presence_if_absent),
+            (
+                remove_hand_mesh_target_if_absent,
+                remove_hand_presence_if_absent,
+            ),
         );
     }
 
@@ -240,7 +243,9 @@ pub fn hand_mesh_composite(
         return;
     }
 
-    let Some(target) = target else { return; };
+    let Some(target) = target else {
+        return;
+    };
     // No hands tracked → skip BEFORE post_process_write so the ping-pong is not
     // flipped (prevents stale-bone ghosting). Unconditional for every consumer.
     if !presence.is_some_and(|p| p.0) {

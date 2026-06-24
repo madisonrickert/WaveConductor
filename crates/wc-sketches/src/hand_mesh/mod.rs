@@ -107,7 +107,11 @@ impl Plugin for HandMeshPlugin {
         )
         .add_systems(
             Update,
-            (ensure_bone_meshes, update_bone_transforms, update_hand_presence)
+            (
+                ensure_bone_meshes,
+                update_bone_transforms,
+                update_hand_presence,
+            )
                 .chain()
                 .run_if(sketch_active(state)),
         )
