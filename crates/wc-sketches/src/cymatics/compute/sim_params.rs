@@ -46,6 +46,41 @@ pub struct SimParamsGpu {
     _pad: f32,
 }
 
+/// Neighbour-force scale in the wave integrator (v4 `FORCE_MULTIPLIER`).
+pub const FORCE_MULTIPLIER: f32 = 0.25;
+/// Per-substep velocity damping (v4 `VELOCITY_DECAY_FACTOR`).
+pub const VELOCITY_DECAY_FACTOR: f32 = 0.99818;
+/// Per-substep height damping (v4 `HEIGHT_DECAY_FACTOR`).
+pub const HEIGHT_DECAY_FACTOR: f32 = 0.9999;
+/// Accumulated-height decay (v4 `ACCUMULATED_HEIGHT_DECAY_FACTOR`).
+pub const ACCUMULATED_HEIGHT_DECAY_FACTOR: f32 = 0.999;
+
+impl SimParamsGpu {
+    /// Build the constant-per-frame uniform with the v4 resting physics
+    /// constants, the given grid `resolution` (texels), and `active_radius`.
+    ///
+    /// The centres are seeded at the UV centre `[0.5, 0.5]` in **top-left**
+    /// origin (Bevy-native, no v4-style `y = 1 − y` flip) and are overwritten
+    /// each frame by the sim-params bridge. This constructor lives here rather
+    /// than at the call site because the `_pad` field is module-private; it
+    /// mirrors how `render::spawn_cymatics_quad` packs the private pad of
+    /// [`crate::cymatics::render::CymaticsRenderParams`].
+    #[must_use]
+    pub fn with_resting_physics(resolution: [u32; 2], active_radius: f32) -> Self {
+        Self {
+            center: [0.5, 0.5],
+            center2: [0.5, 0.5],
+            resolution,
+            active_radius,
+            force_multiplier: FORCE_MULTIPLIER,
+            velocity_decay: VELOCITY_DECAY_FACTOR,
+            height_decay: HEIGHT_DECAY_FACTOR,
+            accumulated_height_decay: ACCUMULATED_HEIGHT_DECAY_FACTOR,
+            _pad: 0.0,
+        }
+    }
+}
+
 /// Per-iteration phase uniform, padded to the dynamic-offset stride.
 ///
 /// Sized to exactly 256 bytes so each entry in the per-frame iteration buffer
@@ -131,5 +166,21 @@ mod tests {
         let p = SimParamsGpu::default();
         let bytes = bytemuck::bytes_of(&p);
         assert_eq!(bytes.len(), std::mem::size_of::<SimParamsGpu>());
+    }
+
+    #[test]
+    fn with_resting_physics_carries_v4_constants() {
+        let p = SimParamsGpu::with_resting_physics([640, 480], 0.1);
+        assert_eq!(p.resolution, [640, 480]);
+        // Top-left UV convention, no y-flip.
+        assert!((p.center[0] - 0.5).abs() < f32::EPSILON && (p.center[1] - 0.5).abs() < f32::EPSILON);
+        assert!(
+            (p.center2[0] - 0.5).abs() < f32::EPSILON && (p.center2[1] - 0.5).abs() < f32::EPSILON
+        );
+        assert!((p.active_radius - 0.1).abs() < f32::EPSILON);
+        assert!((p.force_multiplier - FORCE_MULTIPLIER).abs() < f32::EPSILON);
+        assert!((p.velocity_decay - VELOCITY_DECAY_FACTOR).abs() < f32::EPSILON);
+        assert!((p.height_decay - HEIGHT_DECAY_FACTOR).abs() < f32::EPSILON);
+        assert!((p.accumulated_height_decay - ACCUMULATED_HEIGHT_DECAY_FACTOR).abs() < f32::EPSILON);
     }
 }

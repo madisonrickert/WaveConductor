@@ -70,5 +70,9 @@ impl Plugin for SketchesPlugin {
         // Concrete sketch plugins.
         app.add_plugins(line::LinePlugin);
         app.add_plugins(dots::DotsPlugin);
+        // Cymatics lifecycle (textures, quad, sim-params bridge). The shared
+        // compute node + `Material2dPlugin::<CymaticsMaterial>` are registered
+        // above; `CymaticsPlugin` adds the per-sketch lifecycle exactly once.
+        app.add_plugins(cymatics::CymaticsPlugin);
     }
 }
