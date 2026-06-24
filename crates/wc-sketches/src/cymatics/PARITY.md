@@ -80,7 +80,8 @@ choreography)
   spawn time). User-visible (without ADVANCED): `master_brightness`, `osc_level`, `blub_level`.
 
 - **C15 (this task — capture scenarios + PARITY.md)**
-  Three capture scenarios added (`cymatics-synthetic`, `-interacting`, `-screensaver`);
+  Two new capture scenarios added (`cymatics-interacting`, `cymatics-screensaver`);
+  `cymatics-synthetic` was present from the C8 early smoke.
   `WC_DEBUG_FORCE_CYMATICS_INTERACTION` toggle added to drive the interacting scenario
   deterministically. Baselines and AgX palette tuning are operator-deferred (headless session
   cannot produce a foreground display surface; see "Operator follow-ups" below).

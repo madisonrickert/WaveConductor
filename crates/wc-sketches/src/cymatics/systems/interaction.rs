@@ -18,6 +18,7 @@
 //! drives the centres.
 
 use bevy::prelude::*;
+#[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
 use wc_core::input::pointer::PointerState;
 use wc_core::settings::EguiPointerCaptured;
@@ -308,7 +309,9 @@ pub fn update_cymatics_centers(
     touches: Res<'_, bevy::input::touch::Touches>,
     egui_captured: Option<Res<'_, EguiPointerCaptured>>,
     settings: Res<'_, CymaticsSettings>,
-    debug_toggles: Option<Res<'_, DebugToggles>>,
+    // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
+    // only in debug builds). Placed last so the release signature is unchanged.
+    #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, DebugToggles>>,
 ) {
     let win = Vec2::new(window.width().max(1.0), window.height().max(1.0));
     let screen_ar = win.x / win.y;
@@ -337,6 +340,7 @@ pub fn update_cymatics_centers(
     // Debug: WC_DEBUG_FORCE_CYMATICS_INTERACTION forces a deterministic centre
     // press at UV (0.5, 0.5) for the `cymatics-interacting` capture scenario so
     // active_radius grows reproducibly without hardware or a real mouse.
+    #[cfg(debug_assertions)]
     let (mouse_pressed, mouse_uv) = if debug_toggles
         .as_ref()
         .is_some_and(|t| t.force_cymatics_interaction)
