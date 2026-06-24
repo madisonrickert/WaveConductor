@@ -214,7 +214,7 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
         // (it uses `Msaa::Sample4`) — otherwise Bevy gives the two cameras a
         // *shared* intermediate texture (keyed on `(target, usage, hdr, msaa)`)
         // and the overlay's tonemapping corrupts this camera's gravity-smear
-        // post-process. See `wc_sketches::line::hand_mesh`. Keep this `Off`
+        // post-process. See `wc_sketches::hand_mesh`. Keep this `Off`
         // (it was the implicit 2D default anyway) unless you also change the
         // overlay's MSAA to stay distinct.
         Msaa::Off,

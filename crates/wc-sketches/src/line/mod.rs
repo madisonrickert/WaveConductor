@@ -37,9 +37,6 @@
 
 pub mod attractor_visuals;
 pub mod audio_coupling;
-pub mod bone_composite;
-pub mod bone_wireframe;
-pub mod hand_mesh;
 pub mod hash;
 pub mod heatmap;
 pub mod leap_attractors;
@@ -111,17 +108,29 @@ impl Plugin for LinePlugin {
             app.add_plugins(post_process::LinePostProcessPlugin);
         }
 
-        // Wire the additive bone-glow composite node here (hoisted out of
-        // `LineHandMeshPlugin` so `WC_DEBUG_DISABLE_BONE_COMPOSITE` can gate it
-        // at the Line render-stage level). The composite reads `HandMeshTarget`
-        // (extracted from the main world) and no-ops cleanly when that resource
-        // is absent, so registering it independently of the bone camera is safe.
-        #[cfg(debug_assertions)]
-        let register_bone_composite = should_register_bone_composite(toggles.as_ref());
-        #[cfg(not(debug_assertions))]
-        let register_bone_composite = true;
-        if register_bone_composite {
-            app.add_plugins(bone_composite::LineBoneCompositePlugin);
+        // Shared wireframe bone overlay (was LineHandMeshPlugin + LineBoneCompositePlugin;
+        // the composite is now a global plugin gated in SketchesPlugin).
+        app.add_plugins(crate::hand_mesh::HandMeshPlugin {
+            config: crate::hand_mesh::HandMeshConfig {
+                app_state: AppState::Line,
+                // `#add6b6` — unchanged from the old LineHandMesh colour.
+                bone_color: Color::srgb(
+                    f32::from(0xad_u8) / 255.0,
+                    f32::from(0xd6_u8) / 255.0,
+                    f32::from(0xb6_u8) / 255.0,
+                ),
+                glow_intensity: 5.0,
+                bone_radius: 10.0,
+            },
+        });
+        // Order the shared composite after the gravity smear (was the
+        // `.after(line_post_process)` edge inside LineBoneCompositePlugin).
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render_app.configure_sets(
+                bevy::core_pipeline::Core2d,
+                crate::hand_mesh::HandMeshCompositeSet
+                    .after(post_process::line_post_process),
+            );
         }
 
         // Wire per-hand attractors (Plan 11.6 Phase 11.1).
@@ -131,9 +140,6 @@ impl Plugin for LinePlugin {
         // systems are gated on `in_screensaver(AppState::Line)`, so they run
         // only while Line's screensaver is showing — zero cost otherwise.
         app.add_plugins(screensaver::LineScreensaverPlugin);
-
-        // Wire wireframe bone visualization (Plan 11.6 Phase 13).
-        app.add_plugins(hand_mesh::LineHandMeshPlugin);
 
         // Lifecycle: spawn on enter, despawn on exit. Audio lifecycle joins
         // the same `OnEnter`/`OnExit` schedules — `enter_line_audio` builds
@@ -441,13 +447,6 @@ fn should_register_smear(toggles: Option<&DebugToggles>) -> bool {
     !toggles.is_some_and(|t| t.disable_smear)
 }
 
-/// Whether to register the additive bone-composite node. On unless
-/// `WC_DEBUG_DISABLE_BONE_COMPOSITE` is set. Always on in release.
-#[cfg(debug_assertions)]
-fn should_register_bone_composite(toggles: Option<&DebugToggles>) -> bool {
-    !toggles.is_some_and(|t| t.disable_bone_composite)
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -457,8 +456,8 @@ mod tests {
     use super::*;
     use wc_core::sketch::SketchManifest;
 
-    /// `LinePlugin` decides whether to register the bone-composite + smear
-    /// nodes by reading `DebugToggles`; this guards the gating predicate.
+    /// `LinePlugin` decides whether to register the smear node by reading
+    /// `DebugToggles`; this guards the gating predicate.
     #[test]
     #[cfg(debug_assertions)]
     fn render_stage_gating_predicate() {
@@ -475,18 +474,12 @@ mod tests {
             force_tier: None,
         };
         assert!(should_register_smear(Some(&all_off)));
-        assert!(should_register_bone_composite(Some(&all_off)));
         assert!(should_register_smear(None)); // no toggles → everything on
         let no_smear = DebugToggles {
             disable_smear: true,
             ..all_off
         };
         assert!(!should_register_smear(Some(&no_smear)));
-        let no_comp = DebugToggles {
-            disable_bone_composite: true,
-            ..all_off
-        };
-        assert!(!should_register_bone_composite(Some(&no_comp)));
     }
 
     /// `remove_sim_params` must drop `LineSmearFocal` and `LinePostParams` on

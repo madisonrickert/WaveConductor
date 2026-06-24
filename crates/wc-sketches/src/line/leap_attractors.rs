@@ -175,7 +175,7 @@ impl Plugin for LineLeapAttractorsPlugin {
 /// so those hands were added while the state was still `Home` and never got an
 /// attractor (no gravity pull from a hand held up as you entered the sketch).
 /// A `Without<LineHandAttractor>` reconcile is timing-independent and idempotent
-/// — see [`crate::line::hand_mesh::ensure_bone_meshes`], which fixes the
+/// — see [`crate::hand_mesh`], which fixes the
 /// identical issue for the bone visuals.
 fn ensure_line_attractors(
     mut commands: Commands<'_, '_>,

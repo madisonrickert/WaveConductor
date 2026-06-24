@@ -44,7 +44,7 @@ pub struct BoneWireframeMaterial {
     /// Flat **emissive** line color in linear space, written straight to the
     /// overlay camera's HDR target. Values `> 1.0` are intended: the caller
     /// scales the base hue by an intensity (see
-    /// `crate::line::hand_mesh::BONE_GLOW_INTENSITY`) so the HDR overlay's bloom
+    /// [`crate::hand_mesh::HandMeshConfig::glow_intensity`]) so the HDR overlay's bloom
     /// turns the bones into a neon glow. Keep `alpha = 1.0` so bone cores are
     /// opaque for the premultiplied-alpha composite.
     #[uniform(0)]

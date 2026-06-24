@@ -22,7 +22,7 @@ impl Plugin for SketchesPlugin {
         // support, so it no-ops on macOS and bones rendered solid. The Line
         // sketch's `hand_mesh` module instead draws bones as `LineList` meshes
         // with a custom `BoneWireframeMaterial` (see
-        // `line::bone_wireframe`), which is Metal-safe and — unlike the closed
+        // `hand_mesh::bone_wireframe`), which is Metal-safe and — unlike the closed
         // wireframe/gizmo pipelines — shader- and post-process-extensible. Its
         // `MaterialPlugin` is registered by `LineHandMeshPlugin`.
 

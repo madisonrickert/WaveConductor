@@ -306,7 +306,7 @@ fn remove_line_post_params_if_absent(
 /// an HDR camera's intermediate; the body early-returns for any non-HDR camera.
 /// The main Line `Camera2d` is the only Core2d camera, so this matches just it.
 /// (The hand-mesh overlay is a `Camera3d` on the Core3d graph — see
-/// `crate::line::hand_mesh` — so it never reaches this Core2d system regardless
+/// `crate::hand_mesh` — so it never reaches this Core2d system regardless
 /// of its HDR setting.) The gate is kept defensively: an earlier Plan 11.6
 /// design added a second, non-HDR `Camera2d`; without it wgpu panicked on the
 /// `Rgba8UnormSrgb` ↔ `Rgba16Float` attachment mismatch.
