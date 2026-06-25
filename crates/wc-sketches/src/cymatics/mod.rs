@@ -505,8 +505,8 @@ pub(crate) fn update_cymatics_sim_params(
         (Some(_), Some(ping)) => {
             sim.ping_mode = 1;
             sim.ping_base = ping.envelope_tick;
-            sim.ping_amp = [screensaver::PING_STRENGTH, screensaver::PING_STRENGTH];
-            sim.ping_duration = screensaver::PING_DURATION;
+            sim.ping_amp = [settings.ping_strength, settings.ping_strength];
+            sim.ping_duration = settings.ping_duration;
         }
         _ => {
             sim.ping_mode = 0;
@@ -579,7 +579,8 @@ fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
 
 /// Update the [`render::CymaticsMaterial`] each frame with the current
 /// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting),
-/// brightness (`master_brightness` × the screensaver lift), and `gamma`.
+/// brightness (`master_brightness` × the screensaver lift), `gamma`, and the
+/// screensaver saturation factor.
 ///
 /// Runs under `sketch_active OR in_screensaver` so the material reflects the
 /// live state during both active play and the attract screensaver. Unlike
@@ -601,6 +602,15 @@ fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
 /// lifting the gentle linear field up the `AgX` curve so it stays vivid rather
 /// than landing in `AgX`'s dark, desaturated toe. See
 /// [`CymaticsSettings::attract_brightness`].
+///
+/// ## Screensaver saturation
+///
+/// The packed `skew.w` channel carries `1 + fade.alpha() × (attract_saturation −
+/// 1)` — a chroma lever ramped by the same fade alpha. At fade = 0 (Active) it
+/// is exactly `1.0`, so the shader's saturation step is the identity (byte-
+/// identical active rendering); at fade = 1 (Screensaver) it reaches
+/// `attract_saturation`, boosting chroma so the raindrop crests read vivid. See
+/// [`CymaticsSettings::attract_saturation`].
 ///
 /// ## Change-gated upload
 ///
@@ -636,6 +646,13 @@ fn update_cymatics_material(
     // black) without sharpening the gentle waves — a uniform pre-AgX multiply.
     let brightness =
         settings.master_brightness * (1.0 + (settings.attract_brightness - 1.0) * fade.alpha());
+    // Screensaver saturation: ramped by the SAME fade alpha as the brightness
+    // lift. At fade = 0 (Active) the factor is exactly 1.0, so the shader's
+    // saturation step is the identity and the rendered frame stays byte-identical
+    // to before this knob existed; as the screensaver fades in it reaches
+    // `attract_saturation`, pushing chroma so the raindrop ring crests read vivid
+    // through AgX rather than muted.
+    let saturation = 1.0 + (settings.attract_saturation - 1.0) * fade.alpha();
     for handle in quad_q.iter() {
         // v4: skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2).
         // DEFAULT_NUM_CYCLES = 1.002; at rest, the clamp yields 0.
@@ -649,8 +666,8 @@ fn update_cymatics_material(
         //   .x = skew_intensity   (body-colour push toward white)
         //   .y = brightness       (master_brightness × screensaver lift)
         //   .z = gamma            (per-channel display gamma; 1.0 = identity)
-        //   .w = 0 (reserved)
-        let new_skew = Vec4::new(skew_intensity, brightness, settings.gamma, 0.0);
+        //   .w = saturation       (screensaver chroma lever; 1.0 = identity)
+        let new_skew = Vec4::new(skew_intensity, brightness, settings.gamma, saturation);
 
         // Skip the mutation (and the Changed flag + re-extract/re-upload it
         // triggers) when the packed uniform is unchanged. The immutable `get`

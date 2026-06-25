@@ -33,7 +33,8 @@
 // .x = skewIntensity (v4 body-colour push toward white),
 // .y = master_brightness (post-render multiplier; 1.0 = no-op, default),
 // .z = user gamma (per-channel display gamma; 1.0 = identity, default),
-// .w = reserved (0).
+// .w = screensaver saturation (chroma lever ramped by ScreensaverFade;
+//      1.0 = identity / active path, default).
 @group(2) @binding(1) var<uniform> skew: vec4<f32>;
 // Cell texture A (rgba32float): channel x = height, y = velocity,
 // z = accumulated_height, w = unused (simulate.wgsl write contract).
@@ -219,6 +220,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // underflowed negative.
     if skew.z != 1.0 {
         col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(skew.z));
+    }
+    // skew.w = screensaver saturation (Dev knob, ramped by the same ScreensaverFade
+    // alpha as the brightness lift; default 1.0 = identity = active path). Pushes
+    // chroma around luma so the raindrop ring crests read vivid through AgX. A
+    // uniform branch (no warp divergence); at identity skip it so the active frame
+    // is byte-identical (this also preserves the slightly-negative border that the
+    // bg blend can produce, which the max() below would otherwise clamp). max(., 0)
+    // keeps the saturated result non-negative.
+    if skew.w != 1.0 {
+        let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+        col = max(vec3<f32>(luma) + (col - vec3<f32>(luma)) * skew.w, vec3<f32>(0.0));
     }
     // Output linear, scene-referred colour. The global AgX camera tonemap + the
     // sRGB swapchain own the display encode -- no in-shader sRGB encode here.

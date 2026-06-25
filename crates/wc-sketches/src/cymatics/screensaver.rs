@@ -13,7 +13,7 @@ use wc_core::lifecycle::state::AppState;
 
 use super::compute::{CymaticsSimParams, MAX_ITERATIONS};
 use super::settings::CymaticsSettings;
-use super::CymaticsState;
+use super::{CymaticsState, DEFAULT_NUM_CYCLES};
 
 // ---------------------------------------------------------------------------
 // Lissajous speed bundle
@@ -107,19 +107,12 @@ const PHI: f32 = 1.618_034;
 /// attractors draw different intervals and never fire in lock-step.
 const PING_CENTER_OFFSETS: [f32; 2] = [0.0, 0.5];
 
-// Raindrop tuning defaults. Commit 3 promotes these to live Dev knobs
-// (`ping_interval` / `ping_jitter` / `ping_strength` / `ping_duration` in
-// `CymaticsSettings`); until then the scheduler and the hand-off read these
-// module constants so the behaviour is fixed and self-contained.
-
-/// Seconds between drops per attractor (floor of the jittered interval).
-const PING_INTERVAL: f32 = 3.5;
-/// Extra seconds of golden-ratio jitter added on top of [`PING_INTERVAL`].
-const PING_JITTER: f32 = 2.5;
-/// Peak displacement of one raindrop's Hann lobe (drop strength / vividness).
-pub(crate) const PING_STRENGTH: f32 = 4.0;
-/// Raindrop Hann-window length `D` in sub-step ticks (splash length).
-pub(crate) const PING_DURATION: f32 = 30.0;
+/// Initial stagger (seconds) for centre 1's first drop, so the two attractors
+/// don't fire simultaneously on the first screensaver frame. Only the very first
+/// interval; every interval after that comes from the live `ping_interval` /
+/// `ping_jitter` knobs (so this need not track them). Fixed because `Default`
+/// can't read settings.
+const PING_INITIAL_STAGGER: f32 = 1.75;
 
 /// Per-attractor raindrop scheduler state for the Cymatics screensaver.
 ///
@@ -152,10 +145,9 @@ impl Default for CymaticsPingState {
     fn default() -> Self {
         Self {
             // Stagger the first drops: centre 0 fires almost immediately when the
-            // screensaver appears, centre 1 about half a base interval later, so
-            // the two never start in lock-step (the golden-ratio jitter keeps them
-            // desynced thereafter).
-            seconds_until_next_ping: [0.0, PING_INTERVAL * 0.5],
+            // screensaver appears, centre 1 a beat later, so the two never start
+            // in lock-step (the golden-ratio jitter keeps them desynced thereafter).
+            seconds_until_next_ping: [0.0, PING_INITIAL_STAGGER],
             // Both windows start closed (>= any positive duration) so no drop is
             // mid-flight until the first scheduled fire.
             envelope_tick: [f32::MAX, f32::MAX],
@@ -251,21 +243,21 @@ impl Plugin for CymaticsScreensaverPlugin {
 // System
 // ---------------------------------------------------------------------------
 
-/// Drive `CymaticsState` from the Lissajous wander while the screensaver shows.
+/// Drive `CymaticsState` from the Lissajous wander while the raindrop
+/// screensaver shows.
 ///
 /// Writes `center`, `center2`, `active_radius`, and `num_cycles` each frame.
-/// The `active_radius` is read from `CymaticsSettings::attract_radius` (Dev
-/// knob; default 0.6 = v4's `ATTRACT_ACTIVE_RADIUS` baseline, for wide idle
-/// coverage). `num_cycles`
-/// is read from `CymaticsSettings::attract_cycles` (default 0.1) so the source
-/// phase advances slowly: small smooth per-frame deltas instead of a big
-/// full-screen kick each throttled present (the old "jolt"). Lissajous speeds
-/// are read from the four `c[12]_omega_[xy]` Dev knobs.
+/// `active_radius` is read from `CymaticsSettings::attract_radius` (Dev knob;
+/// default 0.5 — a calm, fairly dark pond). The wave source itself is no longer
+/// the continuous oscillator in the screensaver — the raindrop scheduler drives
+/// it via `ping_mode` — so `num_cycles` is pinned to `DEFAULT_NUM_CYCLES` here:
+/// it only keeps the (now source-irrelevant) phase clock at the resting rate and
+/// the render `skew_intensity` at zero. Lissajous speeds come from the four
+/// `c[12]_omega_[xy]` Dev knobs, so successive drops still originate at varied
+/// spots.
 ///
 /// Does **not** advance `simulation_time` — `update_cymatics_sim_params` (C8)
-/// is the sole advancer of that field (single-owner invariant). The GPU sim
-/// therefore keeps animating at the same phase rate as in the active sketch;
-/// only the spatial position of the two wave sources changes.
+/// is the sole advancer of that field (single-owner invariant).
 ///
 /// Per-frame no-allocation guarantee: all arithmetic is on stack scalars.
 fn drive_cymatics_attract(
@@ -277,16 +269,13 @@ fn drive_cymatics_attract(
     let (c1, c2) = wander_centers(time.elapsed_secs(), &speeds);
     state.center = c1;
     state.center2 = c2;
-    // attract_radius defaults to 0.6 (v4's ATTRACT_ACTIVE_RADIUS baseline) for
-    // wide idle coverage; gentleness comes from the slow attract_cycles rate,
-    // not a small mask. The operator can push it to 0.7–0.8 live.
+    // Ambient alive-mask radius (default 0.5 keeps the pond calm and fairly
+    // dark; the raindrop crests carry the energy now). Operator-widenable live.
     state.active_radius = settings.attract_radius;
-    // Slow source rate → small smooth per-frame phase deltas = gentle drift.
-    // Pinning DEFAULT_NUM_CYCLES (1.002) advanced ~one full ±2 sine cycle per
-    // rendered frame at the throttled present rate — a big discrete full-screen
-    // kick (the "jolt"). attract_cycles is clamped to 0.02–0.3 (settings) to
-    // avoid the ~0.5/1.5 half-integer rates that invert the source each frame.
-    state.num_cycles = settings.attract_cycles;
+    // The raindrop scheduler drives the source in the screensaver (ping_mode 1),
+    // so num_cycles no longer shapes it. Pin it to the resting rate so the phase
+    // clock and the render skew_intensity stay neutral.
+    state.num_cycles = DEFAULT_NUM_CYCLES;
     // `simulation_time` is advanced by `update_cymatics_sim_params` (C8) which
     // runs under `sketch_active OR in_screensaver`; do not advance it here
     // (single-owner invariant).
@@ -294,17 +283,17 @@ fn drive_cymatics_attract(
 
 /// Advance the raindrop scheduler for both centres each screensaver frame.
 ///
-/// Sole writer of [`CymaticsPingState`]. Reads `Time` for the frame delta and
+/// Sole writer of [`CymaticsPingState`]. Reads `Time` for the frame delta,
 /// `CymaticsSimParams` for `iterations` (the per-frame sub-step count N, which
 /// the Hann window advances by so its progress is fps-independent — locked to
-/// sub-step ticks, matching the compute prepare loop's slot count). The actual
-/// drop timing/strength/duration are fixed module constants here; Commit 3
-/// promotes them to live Dev knobs.
+/// sub-step ticks, matching the compute prepare loop's slot count), and the live
+/// `ping_interval` / `ping_jitter` Dev knobs for the drop cadence.
 ///
 /// Per-frame no-allocation guarantee: all arithmetic is on stack scalars.
 fn drive_cymatics_pings(
     time: Res<'_, Time>,
     sim: Res<'_, CymaticsSimParams>,
+    settings: Res<'_, CymaticsSettings>,
     mut ping: ResMut<'_, CymaticsPingState>,
 ) {
     let dt = time.delta_secs();
@@ -315,7 +304,7 @@ fn drive_cymatics_pings(
     let cap = u32::try_from(MAX_ITERATIONS).unwrap_or(u32::MAX);
     let n = f32::from(u16::try_from(sim.iterations.min(cap)).unwrap_or(0));
     for c in 0..2 {
-        ping.step(c, dt, n, PING_INTERVAL, PING_JITTER);
+        ping.step(c, dt, n, settings.ping_interval, settings.ping_jitter);
     }
 }
 
@@ -326,6 +315,14 @@ fn drive_cymatics_pings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Representative raindrop tuning for the scheduler tests — the default knob
+    // values. Production reads these live from `CymaticsSettings`; the scheduler
+    // math (`next_ping_interval`, `CymaticsPingState::step`) takes them as args,
+    // so the tests pass these fixed values.
+    const TEST_INTERVAL: f32 = 3.5;
+    const TEST_JITTER: f32 = 2.5;
+    const TEST_DURATION: f32 = 30.0;
 
     #[test]
     fn wander_is_deterministic_and_in_bounds() {
@@ -371,11 +368,11 @@ mod tests {
     fn ping_intervals_stay_in_band() {
         for count in 0..2000u32 {
             for &offset in &PING_CENTER_OFFSETS {
-                let iv = next_ping_interval(count, offset, PING_INTERVAL, PING_JITTER);
+                let iv = next_ping_interval(count, offset, TEST_INTERVAL, TEST_JITTER);
                 assert!(
-                    (PING_INTERVAL..PING_INTERVAL + PING_JITTER).contains(&iv),
-                    "interval {iv} escaped [{PING_INTERVAL}, {})",
-                    PING_INTERVAL + PING_JITTER
+                    (TEST_INTERVAL..TEST_INTERVAL + TEST_JITTER).contains(&iv),
+                    "interval {iv} escaped [{TEST_INTERVAL}, {})",
+                    TEST_INTERVAL + TEST_JITTER
                 );
             }
         }
@@ -391,7 +388,7 @@ mod tests {
             let mut t = 0.0_f32;
             (1..=200u32)
                 .map(|count| {
-                    t += next_ping_interval(count, offset, PING_INTERVAL, PING_JITTER);
+                    t += next_ping_interval(count, offset, TEST_INTERVAL, TEST_JITTER);
                     t
                 })
                 .collect()
@@ -425,23 +422,23 @@ mod tests {
             ping_count: [0, 0],
         };
         // No fire yet: window advances, countdown drops, tick stays past the window.
-        s.step(0, 0.5, 20.0, PING_INTERVAL, PING_JITTER);
+        s.step(0, 0.5, 20.0, TEST_INTERVAL, TEST_JITTER);
         assert!(s.seconds_until_next_ping[0] > 0.0, "still counting down");
-        assert!(s.envelope_tick[0] > PING_DURATION, "window still closed");
+        assert!(s.envelope_tick[0] > TEST_DURATION, "window still closed");
         assert_eq!(s.ping_count[0], 0, "no fire yet");
         // Crossing zero fires: window restarts at 0, count increments, reschedules.
-        s.step(0, 1.0, 20.0, PING_INTERVAL, PING_JITTER);
+        s.step(0, 1.0, 20.0, TEST_INTERVAL, TEST_JITTER);
         assert!(
             s.envelope_tick[0].abs() < f32::EPSILON,
             "fire restarts the Hann window at tick 0 (exact-zero check via epsilon)"
         );
         assert_eq!(s.ping_count[0], 1, "fire increments the drop count");
         assert!(
-            s.seconds_until_next_ping[0] >= PING_INTERVAL,
+            s.seconds_until_next_ping[0] >= TEST_INTERVAL,
             "next drop scheduled at least one base interval out"
         );
         // Advance-first rule: the next frame (no fire) rolls the window to N.
-        s.step(0, 0.001, 20.0, PING_INTERVAL, PING_JITTER);
+        s.step(0, 0.001, 20.0, TEST_INTERVAL, TEST_JITTER);
         assert!(
             (s.envelope_tick[0] - 20.0).abs() < 1e-4,
             "post-fire frame advances the window to N"

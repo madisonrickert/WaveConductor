@@ -9,7 +9,9 @@
 //! - **Dev** (ADVANCED toggle required, resets each launch): all other
 //!   knobs — `vertical_resolution` + `iterations` (`requires_restart`),
 //!   the physics decay/force constants plus `source_amplitude`, `skew_curve`,
-//!   six interaction tuning factors, and five attract/Lissajous speeds.
+//!   six interaction tuning factors, the screensaver raindrop/colour knobs
+//!   (`attract_radius`, `attract_brightness`, `attract_saturation`, and the four
+//!   `ping_*` raindrop knobs), and the four Lissajous speeds.
 //!
 //! ## Serde forward-compatibility
 //!
@@ -46,6 +48,12 @@
 //!   `c2_omega_x`, `c2_omega_y`): v4 `ATTRACT_ACTIVE_RADIUS` and the four
 //!   Lissajous angular speeds in `screensaver.rs`; now live knobs for the
 //!   attract wander.
+//! - **Raindrop fields** (`attract_brightness`, `attract_saturation`,
+//!   `ping_interval`, `ping_jitter`, `ping_strength`, `ping_duration`): the
+//!   screensaver raindrop model — `attract_brightness`/`attract_saturation` lift
+//!   and saturate the rendered field (ramped by `ScreensaverFade`), and the four
+//!   `ping_*` knobs tune the intermittent staggered drops driven by
+//!   `screensaver::drive_cymatics_pings`.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -349,15 +357,15 @@ pub struct CymaticsSettings {
     pub blub_level: f32,
 
     // ── Screensaver / attract (live, no restart) ──────────────────────────────
-    /// Ambient alive-mask radius held during attract mode. Default `0.6` matches
-    /// v4's `ATTRACT_ACTIVE_RADIUS` baseline: the core mask radius is
-    /// `attract_radius - 0.2` (= `0.4`) and the outer fade reaches
-    /// `attract_radius + 0.8`, so the idle waves cover much of the screen.
-    /// Gentleness comes from the slow `attract_cycles` source rate, not a small
-    /// mask. The `0.1` to `2.0` range lets the operator push to `0.7`–`0.8` live;
-    /// `0.1` (the resting floor) would produce a nearly invisible mask.
+    /// Ambient alive-mask radius held during the raindrop screensaver. Default
+    /// `0.5`: the core mask radius is `attract_radius - 0.2` (= `0.3`) and the
+    /// outer fade reaches `attract_radius + 0.8`, keeping the pond calm and
+    /// fairly dark so each raindrop's expanding ring reads as a concentrated
+    /// crest rather than part of a full-screen wash. The `0.1` to `2.0` range
+    /// lets the operator widen it live; `0.1` (the resting floor) would produce a
+    /// nearly invisible mask.
     #[setting(
-        default = 0.6_f32,
+        default = 0.5_f32,
         min = 0.1_f32,
         max = 2.0_f32,
         step = 0.05_f32,
@@ -368,38 +376,19 @@ pub struct CymaticsSettings {
     #[serde(default = "default_attract_radius")]
     pub attract_radius: f32,
 
-    /// Wave-source phase rate during attract mode (drives `num_cycles` while the
-    /// screensaver shows). Each rendered frame advances the wave source by this
-    /// many `±2` sine cycles; the present rate is throttled, so a small value
-    /// keeps the per-frame phase delta tiny and the field drifts smoothly.
-    /// Pinning the active-sketch default (`1.002`) here advanced ~one full cycle
-    /// per visible frame — a big discrete full-screen kick (the screensaver
-    /// "jolt"). Clamped to `0.02–0.3` to stay well clear of the `~0.5`/`1.5`
-    /// half-integer rates that invert the source each frame (flicker).
-    #[setting(
-        default = 0.1_f32,
-        min = 0.02_f32,
-        max = 0.3_f32,
-        step = 0.01_f32,
-        label = "Attract source rate",
-        section = "Screensaver",
-        category = Dev
-    )]
-    #[serde(default = "default_attract_cycles")]
-    pub attract_cycles: f32,
-
     /// Brightness multiplier applied to the rendered field while the
-    /// screensaver shows, so the gentle attract field clears the `AgX`
+    /// screensaver shows, so the raindrop ring crests clear the `AgX`
     /// tonemapper's dark, desaturated toe instead of reading as muted/navy.
     /// Folded into the material's `master_brightness` channel as
     /// `master_brightness × (1 + fade × (attract_brightness − 1))`, so `1.0` is
     /// a provable no-op (active rendering is byte-identical) and values above
     /// `1.0` lift the whole linear field up the `AgX` curve. A uniform
     /// pre-`AgX` multiply: it preserves contrast and does not sharpen the
-    /// waves. Fades in
-    /// with the screensaver envelope and back out after wake. Dev-only knob.
+    /// waves. Default `1.8` — modest, because the raindrop crests now reach HDR
+    /// on their own, so the lift only needs to keep the dark pond off pure black.
+    /// Fades in with the screensaver envelope and back out after wake. Dev-only knob.
     #[setting(
-        default = 2.2_f32,
+        default = 1.8_f32,
         min = 1.0_f32,
         max = 4.0_f32,
         step = 0.1_f32,
@@ -409,6 +398,85 @@ pub struct CymaticsSettings {
     )]
     #[serde(default = "default_attract_brightness")]
     pub attract_brightness: f32,
+
+    /// Screensaver colour saturation — a direct chroma lever for the operator.
+    /// Ramped in with the same `ScreensaverFade` alpha as `attract_brightness`
+    /// and applied in `render.wgsl` as a saturation adjust on the linear colour
+    /// before output. `1.0` is a neutral no-op (active rendering is
+    /// byte-identical); above `1.0` boosts chroma so the raindrop ring crests
+    /// read vividly rather than muted, below `1.0` desaturates. Dev-only knob.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.5_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Attract saturation",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_attract_saturation")]
+    pub attract_saturation: f32,
+
+    /// Seconds between raindrops per attractor (the floor of the jittered
+    /// interval). The screensaver drops one Hann-enveloped source pulse per
+    /// attractor every `ping_interval` to `ping_interval + ping_jitter` seconds,
+    /// staggered so the two attractors never fire in lock-step.
+    #[setting(
+        default = 3.5_f32,
+        min = 1.0_f32,
+        max = 10.0_f32,
+        step = 0.5_f32,
+        label = "Ping interval",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_ping_interval")]
+    pub ping_interval: f32,
+
+    /// Extra seconds of golden-ratio jitter added on top of `ping_interval`, so
+    /// successive drops are irregular and the two attractors desync. `0.0` makes
+    /// the cadence perfectly regular.
+    #[setting(
+        default = 2.5_f32,
+        min = 0.0_f32,
+        max = 6.0_f32,
+        step = 0.5_f32,
+        label = "Ping jitter",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_ping_jitter")]
+    pub ping_jitter: f32,
+
+    /// Raindrop strength — the peak displacement of each drop's Hann pulse.
+    /// Higher values push the ring crests further into HDR so they bloom more
+    /// vividly through `AgX`. Drop strength / vividness.
+    #[setting(
+        default = 4.0_f32,
+        min = 0.5_f32,
+        max = 10.0_f32,
+        step = 0.5_f32,
+        label = "Ping strength",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_ping_strength")]
+    pub ping_strength: f32,
+
+    /// Raindrop splash length in sim sub-steps — the width of each drop's Hann
+    /// window `D`. Locked to sub-steps (not seconds), so the ring expansion is
+    /// fps-independent. Longer = a slower, broader splash.
+    #[setting(
+        default = 30.0_f32,
+        min = 5.0_f32,
+        max = 120.0_f32,
+        step = 1.0_f32,
+        label = "Ping duration",
+        section = "Screensaver",
+        category = Dev
+    )]
+    #[serde(default = "default_ping_duration")]
+    pub ping_duration: f32,
 
     /// Lissajous angular speed for centre-1's X component (rad/s). Default
     /// `0.1505` = 3.5× v4's `0.043`: the centres wander (and their ripples
@@ -556,22 +624,41 @@ fn default_blub_level() -> f32 {
     1.0
 }
 
-// Attract / screensaver defaults. `attract_radius` = 0.6 is v4's
-// `ATTRACT_ACTIVE_RADIUS` baseline (wide idle coverage; the slow `attract_cycles`
-// rate keeps it gentle). The four Lissajous speeds are 3.5× the v4 values so the
-// two centres visibly wander within a short watch; scaling all four by the same
-// factor preserves the v4 incommensurate ratios (43:31, 37:29, and the cross
-// ratios), only shortening the periods from ~145–217 s to ~42–62 s.
+// Attract / screensaver defaults. `attract_radius` = 0.5 keeps the raindrop
+// pond calm and fairly dark; the raindrop knobs (`ping_*`) drive the visible
+// motion now, and `attract_saturation` = 1.0 is a neutral no-op (active
+// rendering byte-identical). The four Lissajous speeds are 3.5× the v4 values so
+// the two centres visibly wander within a short watch; scaling all four by the
+// same factor preserves the v4 incommensurate ratios (43:31, 37:29, and the
+// cross ratios), only shortening the periods from ~145–217 s to ~42–62 s.
 fn default_attract_radius() -> f32 {
-    0.6
-}
-
-fn default_attract_cycles() -> f32 {
-    0.1
+    0.5
 }
 
 fn default_attract_brightness() -> f32 {
-    2.2
+    1.8
+}
+
+fn default_attract_saturation() -> f32 {
+    1.0
+}
+
+// Raindrop ping defaults: drops every 3.5–6.0 s per attractor (3.5 floor +
+// 0.0–2.5 golden-ratio jitter), each a strength-4.0 Hann pulse 30 sub-steps wide.
+fn default_ping_interval() -> f32 {
+    3.5
+}
+
+fn default_ping_jitter() -> f32 {
+    2.5
+}
+
+fn default_ping_strength() -> f32 {
+    4.0
+}
+
+fn default_ping_duration() -> f32 {
+    30.0
 }
 
 fn default_c1_omega_x() -> f32 {
@@ -597,6 +684,12 @@ mod tests {
     /// The derived `Default` must match every per-field serde default so an
     /// in-memory default and a missing-field deserialize agree.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one logical assertion (every setting's default matches its serde \
+                  default), spanning the full field surface; splitting it would only \
+                  fragment the exhaustive check"
+    )]
     fn default_values_match_serde_defaults() {
         let d = CymaticsSettings::default();
 
@@ -682,12 +775,28 @@ mod tests {
             "attract_radius"
         );
         assert!(
-            (d.attract_cycles - default_attract_cycles()).abs() < f32::EPSILON,
-            "attract_cycles"
-        );
-        assert!(
             (d.attract_brightness - default_attract_brightness()).abs() < f32::EPSILON,
             "attract_brightness"
+        );
+        assert!(
+            (d.attract_saturation - default_attract_saturation()).abs() < f32::EPSILON,
+            "attract_saturation"
+        );
+        assert!(
+            (d.ping_interval - default_ping_interval()).abs() < f32::EPSILON,
+            "ping_interval"
+        );
+        assert!(
+            (d.ping_jitter - default_ping_jitter()).abs() < f32::EPSILON,
+            "ping_jitter"
+        );
+        assert!(
+            (d.ping_strength - default_ping_strength()).abs() < f32::EPSILON,
+            "ping_strength"
+        );
+        assert!(
+            (d.ping_duration - default_ping_duration()).abs() < f32::EPSILON,
+            "ping_duration"
         );
         assert!(
             (d.c1_omega_x - default_c1_omega_x()).abs() < f32::EPSILON,
@@ -740,12 +849,20 @@ mod tests {
             "gamma should fall back to default"
         );
         assert!(
-            (parsed.attract_radius - 0.6).abs() < 1e-6,
+            (parsed.attract_radius - 0.5).abs() < 1e-6,
             "attract_radius should fall back to default"
         );
         assert!(
-            (parsed.attract_brightness - 2.2).abs() < 1e-6,
+            (parsed.attract_brightness - 1.8).abs() < 1e-6,
             "attract_brightness should fall back to default"
+        );
+        assert!(
+            (parsed.attract_saturation - 1.0).abs() < 1e-6,
+            "attract_saturation should fall back to default"
+        );
+        assert!(
+            (parsed.ping_interval - 3.5).abs() < 1e-6,
+            "ping_interval should fall back to default"
         );
     }
 }
