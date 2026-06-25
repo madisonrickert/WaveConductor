@@ -241,6 +241,7 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
                 threshold: wc_core::render::BASE_BLOOM_THRESHOLD,
                 threshold_softness: 0.0,
             },
+            composite_mode: wc_core::render::BASE_BLOOM_COMPOSITE.to_bevy(),
             ..Bloom::NATURAL
         },
     ));

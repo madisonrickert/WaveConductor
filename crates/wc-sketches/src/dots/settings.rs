@@ -291,10 +291,13 @@ pub struct DotsSettings {
     #[serde(default = "default_bloom_intensity")]
     pub bloom_intensity: f32,
 
-    /// Bloom prefilter threshold for this sketch. Default `0.7` — only HDR cores
-    /// bloom (crisp midtones + glowing highlights). `0.0` blooms everything.
+    /// Bloom prefilter threshold for this sketch. Default `0.0` — blooms the
+    /// whole frame, which is what the default `EnergyConserving` composite needs
+    /// to conserve energy (a non-zero threshold there would dim the image).
+    /// Raise it only alongside `Additive` composite, where it cleanly gates the
+    /// glow to bright cores.
     #[setting(
-        default = 0.7_f32,
+        default = 0.0_f32,
         min = 0.0_f32,
         max = 3.0_f32,
         step = 0.05_f32,
@@ -304,6 +307,21 @@ pub struct DotsSettings {
     )]
     #[serde(default = "default_bloom_threshold")]
     pub bloom_threshold: f32,
+
+    /// Bloom composite mode for this sketch (main camera). Default
+    /// `EnergyConserving`: the blur is crossfaded into the scene, conserving
+    /// energy while the threshold stays `0.0` (no dimming). Switch to `Additive`
+    /// for a punchy glow that adds on top — pair that with a non-zero threshold
+    /// so only bright cores bloom. Live, no restart.
+    #[setting(
+        default = wc_core::render::BloomComposite::EnergyConserving,
+        ty = Enum,
+        label = "Bloom composite",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_bloom_composite")]
+    pub bloom_composite: wc_core::render::BloomComposite,
 
     // ── Audio ────────────────────────────────────────────────────────────────
     /// Master output gain trim applied after the activity envelope.
@@ -474,7 +492,11 @@ fn default_bloom_intensity() -> f32 {
 }
 
 fn default_bloom_threshold() -> f32 {
-    0.7
+    0.0
+}
+
+fn default_bloom_composite() -> wc_core::render::BloomComposite {
+    wc_core::render::BloomComposite::EnergyConserving
 }
 
 fn default_synth_volume_scale() -> f32 {

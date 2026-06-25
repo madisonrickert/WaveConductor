@@ -688,6 +688,7 @@ fn apply_cymatics_render_profile(
             settings.tonemapping,
             settings.bloom_intensity,
             settings.bloom_threshold,
+            settings.bloom_composite,
         );
     }
 }
