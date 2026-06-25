@@ -17,6 +17,8 @@ use bevy_egui::render::EguiBevyPaintCallback;
 use super::blur::callback::BackdropBlurPaintCallback;
 use super::style::OverlayStyle;
 
+const BACKDROP_BLUR_OPACITY_THRESHOLD: f32 = 0.01;
+
 /// Frame configuration passed to [`backdrop_blur_frame`].
 #[derive(Clone, Copy)]
 pub struct FrameOptions {
@@ -70,19 +72,21 @@ pub fn backdrop_blur_frame(
 
     let painter = ui.painter();
 
-    // 1. Blur callback. The actual render body in BackdropBlurPaintCallback
-    //    bails silently when the blur texture or composite pipeline isn't ready,
-    //    so the tint below always shows through as a fallback.
-    let callback = EguiBevyPaintCallback::new_paint_callback(
-        outer_rect,
-        BackdropBlurPaintCallback {
-            // BackdropBlurPaintCallback stores corner_radius as f32 for
-            // shader uniform upload (physical-pixel conversion happens there).
-            corner_radius: f32::from(options.corner_radius),
-            rect: outer_rect,
-        },
-    );
-    painter.add(callback);
+    // 1. Blur callback. Match the render node's opacity gate: once the chrome
+    // is effectively invisible the blur texture is no longer refreshed, so
+    // continuing to composite it would paint a stale frosted rectangle.
+    if should_paint_backdrop_blur(options.opacity_mul) {
+        let callback = EguiBevyPaintCallback::new_paint_callback(
+            outer_rect,
+            BackdropBlurPaintCallback {
+                // BackdropBlurPaintCallback stores corner_radius as f32 for
+                // shader uniform upload (physical-pixel conversion happens there).
+                corner_radius: f32::from(options.corner_radius),
+                rect: outer_rect,
+            },
+        );
+        painter.add(callback);
+    }
 
     // 2. Translucent tint with stroke, both alpha-multiplied by opacity_mul.
     let fill = scale_alpha(style.panel_fill, options.opacity_mul);
@@ -143,6 +147,15 @@ fn scale_alpha(color: egui::Color32, mul: f32) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
+/// Whether a frosted-glass blur callback should be submitted for this opacity.
+///
+/// Kept in sync with the blur render node's `ExtractedUiOpacity < 0.01` skip
+/// condition so faded chrome cannot keep compositing a stale blur texture.
+#[must_use]
+pub(crate) fn should_paint_backdrop_blur(opacity_mul: f32) -> bool {
+    opacity_mul >= BACKDROP_BLUR_OPACITY_THRESHOLD
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +176,12 @@ mod tests {
     fn scale_alpha_at_zero_opacity_is_invisible() {
         let c = egui::Color32::from_rgba_unmultiplied(20, 40, 60, 200);
         assert_eq!(scale_alpha(c, 0.0).a(), 0);
+    }
+
+    #[test]
+    fn blur_callback_is_skipped_when_opacity_matches_render_node_skip() {
+        assert!(!should_paint_backdrop_blur(0.0));
+        assert!(!should_paint_backdrop_blur(0.009));
+        assert!(should_paint_backdrop_blur(0.01));
     }
 }

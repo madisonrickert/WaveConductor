@@ -27,6 +27,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use super::auto_fade::UiOpacity;
 use super::blur::callback::BackdropBlurPaintCallback;
+use super::frame::should_paint_backdrop_blur;
 use super::style::OverlayStyle;
 use crate::audio::command::AudioCommand;
 use crate::audio::state::AudioState;
@@ -299,18 +300,18 @@ pub fn overlay_icon_button(
 
         let painter = ui.painter();
         // Blur callback: composites the blurred backdrop behind the button.
-        // This is the frosted-glass layer. It is a no-op when the blur texture
-        // or pipeline is not yet ready — the tint below still shows through.
-        // note: intentional deviation from v4's literal CSS — buttons get
-        // backdrop blur in v5 by Madison's request (v4 `.overlay-button` had
-        // no `backdrop-filter`).
-        painter.add(EguiBevyPaintCallback::new_paint_callback(
-            rect,
-            BackdropBlurPaintCallback {
-                corner_radius: f32::from(style.button_corner_radius),
+        // Match the render node's opacity gate so faded buttons cannot keep
+        // painting a stale frosted-glass sample after the blur texture stops
+        // refreshing.
+        if should_paint_backdrop_blur(opacity_mul) {
+            painter.add(EguiBevyPaintCallback::new_paint_callback(
                 rect,
-            },
-        ));
+                BackdropBlurPaintCallback {
+                    corner_radius: f32::from(style.button_corner_radius),
+                    rect,
+                },
+            ));
+        }
 
         // Tint + stroke over the blur. Stroke uses Outside so it remains
         // visible in egui's compositing — Inside can be occluded by the fill.
