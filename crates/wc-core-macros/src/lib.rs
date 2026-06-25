@@ -195,7 +195,10 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
             section: None,
             category: Category::Dev,
             requires_restart: false,
-            kind: Kind::Number,
+            // Inferred from the field type so a `bool` renders as a checkbox
+            // even without an explicit `ty = Boolean`; an explicit `ty` parsed
+            // from the attributes below still overrides this.
+            kind: default_kind_for_type(&field.ty),
             min: None,
             max: None,
             step: None,
@@ -293,6 +296,28 @@ fn parse_setting_attr(
         return Err(meta.error("unknown #[setting(...)] key"));
     }
     Ok(())
+}
+
+/// The [`Kind`] a field defaults to based on its declared type, before any
+/// `#[setting(ty = ...)]` attribute is parsed (which overrides this).
+///
+/// A `bool` field renders as a checkbox, so it defaults to [`Kind::Boolean`];
+/// every other type defaults to [`Kind::Number`] (the numeric slider), matching
+/// the prior behaviour. This stops a `bool` setting from silently falling
+/// through to the numeric renderer — which shows "(unsupported number type)"
+/// because a `bool` cannot downcast to `u32`/`f32`/etc. — when the author omits
+/// `ty = Boolean`.
+fn default_kind_for_type(ty: &syn::Type) -> Kind {
+    if let syn::Type::Path(type_path) = ty {
+        if type_path.qself.is_none() {
+            if let Some(segment) = type_path.path.segments.last() {
+                if segment.ident == "bool" {
+                    return Kind::Boolean;
+                }
+            }
+        }
+    }
+    Kind::Number
 }
 
 fn emit_default(struct_name: &Ident, fields: &[FieldInfo]) -> TokenStream2 {
