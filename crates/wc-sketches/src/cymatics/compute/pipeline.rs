@@ -649,6 +649,55 @@ mod tests {
         assert!(!frame_blit_plan(0));
     }
 
+    /// `ping_envelope` is a single Hann lobe: `0` at both window edges (tick `0`
+    /// and tick `D`), peak `strength` at the centre (`D/2`), monotone up then
+    /// down, never negative, and silent outside `[0, D)` and for a non-positive
+    /// duration. This is the raindrop's one-ring source displacement shape.
+    #[test]
+    fn ping_envelope_is_a_single_hann_lobe() {
+        let d = 30.0_f32;
+        let strength = 4.0_f32;
+        // Zero at both window edges.
+        assert!(
+            ping_envelope(0.0, d, strength).abs() < 1e-6,
+            "envelope must be 0 at tick 0"
+        );
+        assert!(
+            ping_envelope(d, d, strength).abs() < 1e-6,
+            "envelope must be 0 at tick D (window closed)"
+        );
+        // Peak at the centre.
+        assert!(
+            (ping_envelope(d / 2.0, d, strength) - strength).abs() < 1e-4,
+            "envelope must peak at `strength` at D/2"
+        );
+        // Monotone rise then fall around the peak.
+        assert!(ping_envelope(d * 0.25, d, strength) < ping_envelope(d * 0.5, d, strength));
+        assert!(ping_envelope(d * 0.75, d, strength) < ping_envelope(d * 0.5, d, strength));
+        // Silent outside the window and for a degenerate duration (the guard
+        // returns a literal 0.0, so this is an exact-zero check via epsilon).
+        assert!(
+            ping_envelope(-1.0, d, strength).abs() < f32::EPSILON,
+            "negative tick is silent"
+        );
+        assert!(
+            ping_envelope(d + 1.0, d, strength).abs() < f32::EPSILON,
+            "past the window is silent"
+        );
+        assert!(
+            ping_envelope(5.0, 0.0, strength).abs() < f32::EPSILON,
+            "non-positive duration is silent"
+        );
+        // A Hann lobe is non-negative across the whole window.
+        for k in 0..=30u16 {
+            let t = f32::from(k);
+            assert!(
+                ping_envelope(t, d, strength) >= 0.0,
+                "envelope went negative"
+            );
+        }
+    }
+
     /// Dispatch math covers a non-multiple-of-8 resolution by rounding up, so
     /// the last partial tile is still launched (and bound-checked in the shader).
     #[test]

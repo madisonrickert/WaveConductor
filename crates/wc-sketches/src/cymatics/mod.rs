@@ -51,6 +51,7 @@ use wc_core::audio::state::AudioState;
 use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 use wc_core::lifecycle::screensaver::in_screensaver;
+use wc_core::lifecycle::screensaver::ScreensaverActive;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
@@ -480,14 +481,37 @@ fn remove_cymatics_sim_params(mut commands: Commands<'_, '_>) {
     reason = "u32 sub-step index/count → f32 phase math, and the `MAX_ITERATIONS` (120) clamp \
               bound → u32; all values are <= MAX_ITERATIONS"
 )]
-fn update_cymatics_sim_params(
+pub(crate) fn update_cymatics_sim_params(
     mut state: ResMut<'_, CymaticsState>,
     mut sim: ResMut<'_, CymaticsSimParams>,
     settings: Res<'_, CymaticsSettings>,
+    // Raindrop hand-off: both present only while the screensaver shows.
+    // `screensaver_active` marks the screensaver; `ping_state` carries the
+    // per-centre Hann-window ticks the scheduler advanced this frame.
+    screensaver_active: Option<Res<'_, ScreensaverActive>>,
+    ping_state: Option<Res<'_, screensaver::CymaticsPingState>>,
 ) {
     sim.params.center = state.center.to_array();
     sim.params.center2 = state.center2.to_array();
     sim.params.active_radius = state.active_radius;
+
+    // Source mode hand-off. While the screensaver shows, each centre is driven
+    // by its own intermittent raindrop Hann pulse (mode 1): copy the scheduler's
+    // current per-centre window ticks into `ping_base`, and the fixed
+    // strength/duration into `ping_amp`/`ping_duration` (the compute prepare loop
+    // evaluates `ping_envelope` per sub-step from these). In active play and the
+    // idle pre-roll the mode is 0 — the byte-identical shared-oscillator path.
+    match (screensaver_active, ping_state) {
+        (Some(_), Some(ping)) => {
+            sim.ping_mode = 1;
+            sim.ping_base = ping.envelope_tick;
+            sim.ping_amp = [screensaver::PING_STRENGTH, screensaver::PING_STRENGTH];
+            sim.ping_duration = screensaver::PING_DURATION;
+        }
+        _ => {
+            sim.ping_mode = 0;
+        }
+    }
 
     // Physics knobs: read from settings each frame (live, no restart).
     // `with_resting_physics` seeds these at spawn; the bridge overwrites them
