@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::state::SketchActivity;
@@ -166,6 +167,16 @@ impl RegisterIdleVetoExt for App {
     }
 }
 
+/// Message readers consumed by [`reset_on_interaction`].
+#[derive(SystemParam)]
+pub struct InteractionEventReaders<'w, 's> {
+    mouse_motion: MessageReader<'w, 's, bevy::input::mouse::MouseMotion>,
+    mouse_buttons: MessageReader<'w, 's, bevy::input::mouse::MouseButtonInput>,
+    keyboard: MessageReader<'w, 's, bevy::input::keyboard::KeyboardInput>,
+    touch: MessageReader<'w, 's, bevy::input::touch::TouchInput>,
+    hand_tracking: MessageReader<'w, 's, crate::input::state::HandTrackingFrame>,
+}
+
 /// Resets [`InteractionTimer`] whenever any input event is observed.
 ///
 /// Reads mouse, keyboard, touch, and hand-tracking message streams. A
@@ -181,28 +192,103 @@ impl RegisterIdleVetoExt for App {
 pub fn reset_on_interaction(
     time: Res<'_, Time>,
     mut timer: ResMut<'_, InteractionTimer>,
-    mut mouse_motion: MessageReader<'_, '_, bevy::input::mouse::MouseMotion>,
-    mut mouse_buttons: MessageReader<'_, '_, bevy::input::mouse::MouseButtonInput>,
-    mut keyboard: MessageReader<'_, '_, bevy::input::keyboard::KeyboardInput>,
-    mut touch: MessageReader<'_, '_, bevy::input::touch::TouchInput>,
-    mut hand_tracking: MessageReader<'_, '_, crate::input::state::HandTrackingFrame>,
+    activity: Option<Res<'_, State<SketchActivity>>>,
+    mut wake_logged: Local<'_, bool>,
+    mut readers: InteractionEventReaders<'_, '_>,
 ) {
-    let any_event = mouse_motion.read().count() > 0
-        || mouse_buttons.read().count() > 0
-        || keyboard.read().count() > 0
-        || touch.read().count() > 0
-        // A *hand* in the tracking volume is interaction; the empty tracking
-        // frames a running-but-unoccupied Leap streams continuously are not —
-        // otherwise the idle timer never reaches Screensaver while a Leap is
-        // connected. `.filter().count()` (not `.any()`) so the reader cursor
-        // fully drains (see the note above about peeking).
-        || hand_tracking
+    let mut sources = InteractionSources::default();
+    sources.record(
+        InteractionSources::MOUSE_MOTION,
+        readers.mouse_motion.read().count() > 0,
+    );
+    sources.record(
+        InteractionSources::MOUSE_BUTTON,
+        readers.mouse_buttons.read().count() > 0,
+    );
+    sources.record(
+        InteractionSources::KEYBOARD,
+        readers.keyboard.read().count() > 0,
+    );
+    sources.record(InteractionSources::TOUCH, readers.touch.read().count() > 0);
+    // A *hand* in the tracking volume is interaction; the empty tracking
+    // frames a running-but-unoccupied Leap streams continuously are not —
+    // otherwise the idle timer never reaches Screensaver while a Leap is
+    // connected. `.filter().count()` (not `.any()`) so the reader cursor
+    // fully drains (see the note above about peeking).
+    sources.record(
+        InteractionSources::HAND,
+        readers
+            .hand_tracking
             .read()
             .filter(|frame| !frame.hands.is_empty())
             .count()
-            > 0;
-    if any_event {
+            > 0,
+    );
+    let in_screensaver =
+        activity.is_some_and(|activity| *activity.get() == SketchActivity::Screensaver);
+    if !in_screensaver {
+        *wake_logged = false;
+    }
+    if sources.any() {
+        let was_forcing = timer.is_forcing_screensaver();
+        if in_screensaver && !(was_forcing && sources.is_keyboard_only()) {
+            if !*wake_logged {
+                let source = sources.label();
+                tracing::info!("screensaver: wake interaction detected ({source})");
+            }
+            *wake_logged = true;
+        }
         timer.mark(time.elapsed());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct InteractionSources(u8);
+
+impl InteractionSources {
+    const HAND: u8 = 1 << 0;
+    const MOUSE_MOTION: u8 = 1 << 1;
+    const MOUSE_BUTTON: u8 = 1 << 2;
+    const TOUCH: u8 = 1 << 3;
+    const KEYBOARD: u8 = 1 << 4;
+
+    #[cfg(test)]
+    fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    fn record(&mut self, flag: u8, seen: bool) {
+        if seen {
+            self.0 |= flag;
+        }
+    }
+
+    fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    fn any(self) -> bool {
+        self.0 != 0
+    }
+
+    fn is_keyboard_only(self) -> bool {
+        self.0 == Self::KEYBOARD
+    }
+
+    fn label(self) -> &'static str {
+        if self.contains(Self::HAND) {
+            "hand"
+        } else if self.contains(Self::MOUSE_MOTION) {
+            "mouse motion"
+        } else if self.contains(Self::MOUSE_BUTTON) {
+            "mouse button"
+        } else if self.contains(Self::TOUCH) {
+            "touch"
+        } else if self.contains(Self::KEYBOARD) {
+            "keyboard"
+        } else {
+            "unknown"
+        }
     }
 }
 
@@ -306,7 +392,8 @@ fn skip_step(armed: bool, just_pressed: bool, keyboard_active: bool) -> (bool, b
 
 /// Reads [`InteractionTimer`] and transitions [`SketchActivity`] when the
 /// configured thresholds are crossed, unless a registered [`IdleVetoFn`]
-/// in [`IdleVetoes`] keeps the sketch `Active`.
+/// in [`IdleVetoes`] keeps the sketch `Active`. A `Shift+S` force bypasses
+/// vetoes: that chord is an explicit operator command, not an idle timeout.
 ///
 /// Runs as an exclusive system (`world: &mut World`) so the veto callbacks can
 /// read arbitrary world state — Bevy 0.18 does not accept `&World` as a regular
@@ -319,20 +406,22 @@ pub fn advance_activity(world: &mut World) {
     let idle = timer.idle_for(now);
     // The `Shift+S` force flag jumps straight to Screensaver at any uptime;
     // otherwise fall back to the elapsed-idle thresholds.
-    let timeout_target = if timer.is_forcing_screensaver()
-        || idle >= timer.screensaver_threshold + timer.idle_threshold
-    {
-        SketchActivity::Screensaver
-    } else if idle >= timer.idle_threshold {
-        SketchActivity::Idle
-    } else {
-        SketchActivity::Active
-    };
-    let target = if timeout_target != SketchActivity::Active && any_veto_active(world) {
-        SketchActivity::Active
-    } else {
-        timeout_target
-    };
+    let force_screensaver = timer.is_forcing_screensaver();
+    let timeout_target =
+        if force_screensaver || idle >= timer.screensaver_threshold + timer.idle_threshold {
+            SketchActivity::Screensaver
+        } else if idle >= timer.idle_threshold {
+            SketchActivity::Idle
+        } else {
+            SketchActivity::Active
+        };
+    let target =
+        if !force_screensaver && timeout_target != SketchActivity::Active && any_veto_active(world)
+        {
+            SketchActivity::Active
+        } else {
+            timeout_target
+        };
     let Some(current) = world.get_resource::<State<SketchActivity>>() else {
         return; // Not in a sketch state; nothing to do.
     };
@@ -347,6 +436,7 @@ pub fn advance_activity(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::prelude::{App, MinimalPlugins};
 
     #[test]
     fn idle_for_handles_clock_resets() {
@@ -436,5 +526,96 @@ mod tests {
         assert_eq!(skip_step(false, false, false), (false, false));
         // Disarmed but other keys active (normal typing) → must NOT rewind.
         assert_eq!(skip_step(false, false, true), (false, false));
+    }
+
+    fn always_veto(_world: &World) -> bool {
+        true
+    }
+
+    fn activity_test_app(current: SketchActivity) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<InteractionTimer>();
+        app.insert_resource(IdleVetoes {
+            vetoes: vec![always_veto],
+        });
+        app.insert_resource(State::new(current));
+        app.insert_resource(NextState::<SketchActivity>::Unchanged);
+        app
+    }
+
+    #[test]
+    fn advance_activity_respects_veto_for_timeout_screensaver() {
+        let mut app = activity_test_app(SketchActivity::Idle);
+        {
+            let mut timer = app.world_mut().resource_mut::<InteractionTimer>();
+            timer.idle_threshold = Duration::ZERO;
+            timer.screensaver_threshold = Duration::ZERO;
+        }
+
+        advance_activity(app.world_mut());
+
+        assert!(
+            matches!(
+                app.world().resource::<NextState<SketchActivity>>(),
+                NextState::Pending(SketchActivity::Active)
+            ),
+            "normal idle timeout should yield to an active veto"
+        );
+    }
+
+    #[test]
+    fn advance_activity_ignores_veto_for_forced_screensaver() {
+        let mut app = activity_test_app(SketchActivity::Active);
+        let now = app.world().resource::<Time>().elapsed();
+        app.world_mut()
+            .resource_mut::<InteractionTimer>()
+            .rewind_past_screensaver(now);
+
+        advance_activity(app.world_mut());
+
+        assert!(
+            matches!(
+                app.world().resource::<NextState<SketchActivity>>(),
+                NextState::Pending(SketchActivity::Screensaver)
+            ),
+            "Shift+S force must bypass idle vetoes"
+        );
+    }
+
+    #[test]
+    fn interaction_source_prefers_hands_then_pointer_then_keyboard() {
+        assert_eq!(
+            InteractionSources::from_bits(
+                InteractionSources::HAND
+                    | InteractionSources::MOUSE_MOTION
+                    | InteractionSources::KEYBOARD
+            )
+            .label(),
+            "hand"
+        );
+        assert_eq!(
+            InteractionSources::from_bits(
+                InteractionSources::MOUSE_MOTION | InteractionSources::KEYBOARD
+            )
+            .label(),
+            "mouse motion"
+        );
+        assert_eq!(
+            InteractionSources::from_bits(
+                InteractionSources::MOUSE_BUTTON | InteractionSources::KEYBOARD
+            )
+            .label(),
+            "mouse button"
+        );
+        assert_eq!(
+            InteractionSources::from_bits(InteractionSources::TOUCH | InteractionSources::KEYBOARD)
+                .label(),
+            "touch"
+        );
+        assert_eq!(
+            InteractionSources::from_bits(InteractionSources::KEYBOARD).label(),
+            "keyboard"
+        );
     }
 }
