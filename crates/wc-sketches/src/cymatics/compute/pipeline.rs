@@ -341,32 +341,52 @@ fn prepare_cymatics_bind_groups(
         bytemuck::bytes_of(&sim.params),
     );
 
-    // Each sub-step's `(time, wave_signal)` → the leading two f32s of its
-    // 256-byte slot (offsets 0 and 4, matching `IterParamsGpu`). The shader
-    // reads only those two fields, so the slot padding is left untouched;
-    // writing the 8-byte head directly avoids materialising a 256-byte scratch.
+    // Each sub-step's `(time, wave_signal, wave_signal2)` → the leading three
+    // f32s of its 256-byte slot (offsets 0, 4, 8, matching `IterParamsGpu`). The
+    // shader reads only those three fields, so the slot padding is left
+    // untouched; writing the 12-byte head directly avoids materialising a
+    // 256-byte scratch.
     //
     // The two clocks share the per-sub-step increment `phase_dt` but are carried
     // separately so each stays bounded over a multi-hour soak (see
     // `CymaticsSimParams`):
     //   - `phase = phase_base + i·phase_dt` is the oscillator phase, wrapped mod
-    //     TAU upstream; `wave_signal = source_amplitude·sin(phase)` is the
-    //     wave-source value, hoisted out of the per-cell shader (uniform across
-    //     the dispatch). Wrapping keeps `sin`'s argument small and precise.
+    //     TAU upstream; the active source value is `source_amplitude·sin(phase)`,
+    //     hoisted out of the per-cell shader (uniform across the dispatch).
+    //     Wrapping keeps `sin`'s argument small and precise.
     //   - `ramp_t = ramp_base + i·phase_dt` is the bounded alive-bloom clock fed
     //     to the shader's `IterParams.time` (its `(time-500)/500` ramp); it needs
     //     elapsed time, not phase, so it is NOT wrapped (just capped upstream).
+    //
+    // The source mode is branched ONCE outside the per-slot loop:
+    //   - `ping_mode == 0` (active): both centres get the SAME shared oscillator
+    //     value (written into both signal lanes), so the simulation is
+    //     byte-identical to the pre-raindrop single-source path.
+    //   - `ping_mode == 1` (screensaver): each centre gets its own raindrop Hann
+    //     envelope, evaluated per sub-step at `ping_base[c] + i` so the ring
+    //     expansion is locked to sub-steps (fps-independent).
+    //
     // The slot count is clamped to `MAX_ITERATIONS` — the `iter_buffer`'s exact
     // slot count — so a malformed sub-step count can never `write_buffer` past
     // the buffer end; the dispatched count below is clamped to the same value.
     // `u16` holds MAX_ITERATIONS (120) and gives a lossless, lint-clean index → f32.
     let slot_count = u16::try_from(sim.iterations.min(MAX_ITERATIONS as u32)).unwrap_or(0);
+    let screensaver = sim.ping_mode == 1;
     for i in 0..slot_count {
         let step = f32::from(i);
-        let phase = sim.phase_base + step * sim.phase_dt;
         let ramp_t = sim.ramp_base + step * sim.phase_dt;
-        // [time, wave_signal] — laid out exactly like IterParamsGpu's head.
-        let head = [ramp_t, sim.source_amplitude * phase.sin()];
+        // [time, wave_signal, wave_signal2] — laid out exactly like IterParamsGpu's head.
+        let head: [f32; 3] = if screensaver {
+            // Each centre's independent raindrop envelope at this sub-step's tick.
+            let h1 = ping_envelope(sim.ping_base[0] + step, sim.ping_duration, sim.ping_amp[0]);
+            let h2 = ping_envelope(sim.ping_base[1] + step, sim.ping_duration, sim.ping_amp[1]);
+            [ramp_t, h1, h2]
+        } else {
+            // Shared continuous oscillator at both centres (byte-identical path).
+            let phase = sim.phase_base + step * sim.phase_dt;
+            let s = sim.source_amplitude * phase.sin();
+            [ramp_t, s, s]
+        };
         let offset = u64::from(i) * ITER_PARAMS_STRIDE;
         render_queue
             .0
@@ -560,6 +580,25 @@ fn remove_cymatics_sim_params_if_absent(
 /// [`cymatics_compute`] uses it directly, so the test guards the real path.
 fn frame_blit_plan(iterations: u32) -> bool {
     iterations % 2 == 1
+}
+
+/// Single-ring raindrop envelope: one raised-cosine (Hann) lobe of peak height
+/// `strength` over `[0, duration)` sub-step ticks, zero everywhere else.
+///
+/// `strength · sin²(π·tick/duration)` is `0` at `tick = 0` and `tick = duration`
+/// and peaks at `tick = duration/2`, so one fire seeds a single smooth
+/// up-and-back source displacement that launches exactly one outgoing ring; the
+/// medium then rings down via the existing `velocity_decay` / `height_decay`.
+/// Outside the window — and for a non-positive `duration` — the source is quiet.
+///
+/// Pure so the envelope shape is unit-testable without a GPU; the prepare loop
+/// calls it per sub-step in screensaver mode, so the test guards the real path.
+fn ping_envelope(tick: f32, duration: f32, strength: f32) -> f32 {
+    if duration <= 0.0 || tick < 0.0 || tick >= duration {
+        return 0.0;
+    }
+    let s = (std::f32::consts::PI * tick / duration).sin();
+    strength * s * s
 }
 
 #[cfg(test)]

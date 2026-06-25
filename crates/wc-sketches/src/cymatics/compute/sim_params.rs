@@ -85,23 +85,31 @@ impl SimParamsGpu {
 ///
 /// Sized to exactly 256 bytes so each entry in the per-frame iteration buffer
 /// lands on a `min_uniform_buffer_offset_alignment`-aligned boundary. The
-/// 62 padding floats are never read by the shader.
+/// 61 padding floats are never read by the shader.
 ///
 /// Field order is load-bearing and must match the WGSL `struct IterParams`:
-/// `time` at offset 0, `wave_signal` at offset 4. `wave_signal` is the
-/// per-sub-step `amplitude·sin(phase)` oscillator value (amplitude from the
-/// `source_amplitude` setting, v4 default `2.0`), precomputed CPU-side so the
-/// shader does not recompute the same transcendental for every grid cell.
+/// `time` at offset 0, `wave_signal` at offset 4, `wave_signal2` at offset 8.
+/// `wave_signal` / `wave_signal2` are the per-sub-step source values injected at
+/// the two wave centres, precomputed CPU-side so the shader does not recompute
+/// the same transcendental for every grid cell. In active play both hold the
+/// shared oscillator `source_amplitude·sin(phase)` (one source); in the
+/// screensaver each holds its centre's independent raindrop Hann envelope value.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct IterParamsGpu {
     /// `iGlobalTime` for this sub-step.
     pub time: f32,
-    /// Precomputed wave-source oscillator `amplitude·sin(phase)` for this
-    /// sub-step (uniform across the dispatch; hoisted out of the per-cell shader).
+    /// Precomputed source value injected at **centre 1** (`d1`) this sub-step
+    /// (uniform across the dispatch; hoisted out of the per-cell shader). Shared
+    /// oscillator in active play, centre 1's raindrop envelope in the screensaver.
     pub wave_signal: f32,
+    /// Precomputed source value injected at **centre 2** (`d2`) this sub-step.
+    /// Equal to `wave_signal` in active play (both centres share one continuous
+    /// oscillator → byte-identical to the pre-raindrop single-source path); in
+    /// the screensaver it is centre 2's *independent* raindrop envelope value.
+    pub wave_signal2: f32,
     /// Padding to 256 bytes (dynamic-offset alignment). Never read by the shader.
-    _pad: [f32; 62],
+    _pad: [f32; 61],
 }
 
 impl Default for IterParamsGpu {
@@ -109,7 +117,8 @@ impl Default for IterParamsGpu {
         Self {
             time: 0.0,
             wave_signal: 0.0,
-            _pad: [0.0; 62],
+            wave_signal2: 0.0,
+            _pad: [0.0; 61],
         }
     }
 }
@@ -180,6 +189,24 @@ pub struct CymaticsSimParams {
     pub source_amplitude: f32,
     /// Sub-steps this frame.
     pub iterations: u32,
+    /// Source-signal mode for the compute prepare step: `0` = active (both
+    /// centres share the continuous oscillator `source_amplitude·sin(phase)`,
+    /// byte-identical to the pre-raindrop single-source path); `1` = screensaver
+    /// (each centre is driven by its own intermittent raindrop Hann pulse from
+    /// the `ping_*` fields below). Set each frame by `update_cymatics_sim_params`
+    /// from the presence of `ScreensaverActive`.
+    pub ping_mode: u32,
+    /// Per-centre raindrop Hann-window start tick (in sub-step ticks) at this
+    /// frame's sub-step 0. The prepare loop evaluates centre `c`'s envelope at
+    /// `ping_base[c] + i` for sub-step `i`, so the ring expansion is locked to
+    /// sub-steps (fps-independent). Only read when `ping_mode == 1`.
+    pub ping_base: [f32; 2],
+    /// Per-centre raindrop strength (peak displacement of the Hann lobe). Only
+    /// read when `ping_mode == 1`.
+    pub ping_amp: [f32; 2],
+    /// Raindrop Hann-window length `D` in sub-step ticks (shared by both
+    /// centres). Only read when `ping_mode == 1`.
+    pub ping_duration: f32,
     /// Ping-pong texture A. Holds the latest field at frame end and is the
     /// texture the render material samples directly (no display blit).
     pub tex_a: Handle<Image>,
@@ -205,12 +232,14 @@ mod tests {
     }
 
     /// `IterParamsGpu` field offsets must match the WGSL `struct IterParams`
-    /// (`time` @0, `wave_signal` @4). A mismatch would silently bind the wrong
-    /// f32 to each shader field — the C5/C6-style POD↔WGSL parity hazard.
+    /// (`time` @0, `wave_signal` @4, `wave_signal2` @8). A mismatch would
+    /// silently bind the wrong f32 to each shader field — the C5/C6-style
+    /// POD↔WGSL parity hazard.
     #[test]
     fn iter_params_field_offsets_match_wgsl() {
         assert_eq!(std::mem::offset_of!(IterParamsGpu, time), 0);
         assert_eq!(std::mem::offset_of!(IterParamsGpu, wave_signal), 4);
+        assert_eq!(std::mem::offset_of!(IterParamsGpu, wave_signal2), 8);
     }
 
     #[test]
