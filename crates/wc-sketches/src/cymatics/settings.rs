@@ -377,15 +377,15 @@ pub struct CymaticsSettings {
     pub attract_radius: f32,
 
     /// Brightness multiplier applied to the rendered field while the
-    /// screensaver shows, so the raindrop ring crests clear the `AgX`
-    /// tonemapper's dark, desaturated toe instead of reading as muted/navy.
-    /// Folded into the material's `master_brightness` channel as
-    /// `master_brightness × (1 + fade × (attract_brightness − 1))`, so `1.0` is
-    /// a provable no-op (active rendering is byte-identical) and values above
-    /// `1.0` lift the whole linear field up the `AgX` curve. A uniform
-    /// pre-`AgX` multiply: it preserves contrast and does not sharpen the
-    /// waves. Default `1.2` — modest, because the raindrop crests now reach HDR
-    /// on their own, so the lift only needs to keep the dark pond off pure black.
+    /// screensaver shows. Folded into the material's `master_brightness` channel
+    /// as `master_brightness × (1 + fade × (attract_brightness − 1))`, so `1.0`
+    /// is a provable no-op (active rendering is byte-identical) and values above
+    /// `1.0` lift the whole linear field up the `AgX` curve. Default `1.2` —
+    /// deliberately small: a larger lift pushes the orange ring crests into
+    /// `AgX`'s highlight shoulder, which *desaturates* them toward white (this
+    /// was making the muting worse). The crests reach vivid HDR via their own
+    /// source energy (`ping_strength`), so this only needs to keep the dark pond
+    /// off pure black; chroma is restored by `attract_saturation`, not brightness.
     /// Fades in with the screensaver envelope and back out after wake. Dev-only knob.
     #[setting(
         default = 1.2_f32,
@@ -399,12 +399,15 @@ pub struct CymaticsSettings {
     #[serde(default = "default_attract_brightness")]
     pub attract_brightness: f32,
 
-    /// Screensaver colour saturation — a direct chroma lever for the operator.
-    /// Ramped in with the same `ScreensaverFade` alpha as `attract_brightness`
-    /// and applied in `render.wgsl` as a saturation adjust on the linear colour
-    /// before output. `1.0` is a neutral no-op (active rendering is
-    /// byte-identical); above `1.0` boosts chroma so the raindrop ring crests
-    /// read vividly rather than muted, below `1.0` desaturates. Dev-only knob.
+    /// Screensaver colour saturation — the primary fix for `AgX`'s muting of the
+    /// gentle field (brightness can't add chroma). Ramped in with the same
+    /// `ScreensaverFade` alpha as `attract_brightness` and applied in
+    /// `render.wgsl` as a luma-preserving saturation adjust on the linear colour
+    /// before output. Default `1.5` so it *actively* de-mutes out of the box, not
+    /// just as a neutral lever; above `1.0` boosts chroma, below `1.0`
+    /// desaturates. Active rendering stays byte-identical regardless of this
+    /// default: in active play `fade.alpha()` is `0`, so the effective factor
+    /// resolves to `1.0` and the shader skips the saturation step. Dev-only knob.
     #[setting(
         default = 1.5_f32,
         min = 0.5_f32,

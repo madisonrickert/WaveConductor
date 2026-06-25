@@ -34,7 +34,8 @@
 // .y = master_brightness (post-render multiplier; 1.0 = no-op, default),
 // .z = user gamma (per-channel display gamma; 1.0 = identity, default),
 // .w = screensaver saturation (chroma lever ramped by ScreensaverFade;
-//      1.0 = identity / active path, default).
+//      1.0 = identity, which is the value in the active path since fade = 0;
+//      the screensaver default lifts it above 1.0 to de-mute the field).
 @group(2) @binding(1) var<uniform> skew: vec4<f32>;
 // Cell texture A (rgba32float): channel x = height, y = velocity,
 // z = accumulated_height, w = unused (simulate.wgsl write contract).
