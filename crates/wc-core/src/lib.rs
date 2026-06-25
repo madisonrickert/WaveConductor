@@ -29,6 +29,7 @@ pub mod frame_limiter;
 pub mod input;
 pub mod lifecycle;
 pub mod platform;
+pub mod render;
 pub mod settings;
 pub mod sketch;
 /// Image template library (native-only, behind the `templates` feature).

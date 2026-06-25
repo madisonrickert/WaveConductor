@@ -53,12 +53,14 @@ pub mod template_adjustments_store;
 
 pub use systems::LineRoot;
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use wc_core::audio::state::AudioState;
 #[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
 use wc_core::lifecycle::reload::SketchReloadState;
-use wc_core::lifecycle::state::AppState;
+use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
 #[cfg(feature = "templates")]
 use wc_core::settings::RegisterDockSectionExt;
@@ -108,29 +110,8 @@ impl Plugin for LinePlugin {
             app.add_plugins(post_process::LinePostProcessPlugin);
         }
 
-        // Shared wireframe bone overlay (was LineHandMeshPlugin + LineBoneCompositePlugin;
-        // the composite is now a global plugin gated in SketchesPlugin).
-        app.add_plugins(crate::hand_mesh::HandMeshPlugin {
-            config: crate::hand_mesh::HandMeshConfig {
-                app_state: AppState::Line,
-                // `#add6b6` — unchanged from the old LineHandMesh colour.
-                bone_color: Color::srgb(
-                    f32::from(0xad_u8) / 255.0,
-                    f32::from(0xd6_u8) / 255.0,
-                    f32::from(0xb6_u8) / 255.0,
-                ),
-                glow_intensity: 5.0,
-                bone_radius: 10.0,
-            },
-        });
-        // Order the shared composite after the gravity smear (was the
-        // `.after(line_post_process)` edge inside LineBoneCompositePlugin).
-        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
-            render_app.configure_sets(
-                bevy::core_pipeline::Core2d,
-                crate::hand_mesh::HandMeshCompositeSet.after(post_process::line_post_process),
-            );
-        }
+        // Shared wireframe bone overlay + its composite ordering.
+        register_line_hand_mesh_overlay(app);
 
         // Wire per-hand attractors (Plan 11.6 Phase 11.1).
         app.add_plugins(leap_attractors::LineLeapAttractorsPlugin);
@@ -162,6 +143,14 @@ impl Plugin for LinePlugin {
         app.add_systems(
             OnExit(AppState::Line),
             (despawn_with::<LineRoot>, remove_sim_params, exit_line_audio),
+        );
+        app.add_systems(
+            OnEnter(SketchActivity::Screensaver),
+            enter_line_screensaver_audio.run_if(in_state(AppState::Line)),
+        );
+        app.add_systems(
+            OnExit(SketchActivity::Screensaver),
+            exit_line_screensaver_audio.run_if(in_state(AppState::Line)),
         );
 
         // Mouse attractor state (independent of sketch active/idle so the
@@ -237,10 +226,57 @@ impl Plugin for LinePlugin {
             ),
         );
 
+        // Camera render profile (apply each frame + reset to SDR on exit).
+        register_line_render_profile(app);
+
         // Restart listener: begins the FadeOut phase of the reload overlay when
         // a requires_restart setting changes. The overlay's `drive_reload_state`
         // system (in wc-core) drives the full FadeOut → Switch → FadeIn cycle.
         app.add_systems(Update, restart_on_settings_change);
+    }
+}
+
+/// Register Line's camera render-profile systems: apply its tonemapping + bloom
+/// each frame while Line is active (covers Active/Idle/Screensaver, since
+/// `in_state(AppState::Line)` holds for all three sub-states), and reset the
+/// camera to the SDR base on exit so Home/picker renders un-tonemapped.
+///
+/// Factored out of [`LinePlugin::build`] so that method stays within the line
+/// limit.
+fn register_line_render_profile(app: &mut App) {
+    app.add_systems(
+        Update,
+        apply_line_render_profile.run_if(in_state(AppState::Line)),
+    );
+    app.add_systems(OnExit(AppState::Line), reset_line_render_profile);
+}
+
+/// Register Line's shared wireframe bone overlay ([`crate::hand_mesh::HandMeshPlugin`])
+/// and order its composite after the gravity-smear post-process. Factored out of
+/// [`LinePlugin::build`] to keep that method within the line limit.
+fn register_line_hand_mesh_overlay(app: &mut App) {
+    // Shared wireframe bone overlay (was LineHandMeshPlugin + LineBoneCompositePlugin;
+    // the composite is now a global plugin gated in SketchesPlugin).
+    app.add_plugins(crate::hand_mesh::HandMeshPlugin {
+        config: crate::hand_mesh::HandMeshConfig {
+            app_state: AppState::Line,
+            // `#add6b6` — unchanged from the old LineHandMesh colour.
+            bone_color: Color::srgb(
+                f32::from(0xad_u8) / 255.0,
+                f32::from(0xd6_u8) / 255.0,
+                f32::from(0xb6_u8) / 255.0,
+            ),
+            glow_intensity: 5.0,
+            bone_radius: 10.0,
+        },
+    });
+    // Order the shared composite after the gravity smear (was the
+    // `.after(line_post_process)` edge inside LineBoneCompositePlugin).
+    if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render_app.configure_sets(
+            bevy::core_pipeline::Core2d,
+            crate::hand_mesh::HandMeshCompositeSet.after(post_process::line_post_process),
+        );
     }
 }
 
@@ -426,6 +462,51 @@ fn exit_line_audio(
     }
 }
 
+/// `OnEnter(SketchActivity::Screensaver)` while Line is loaded — mute Line's
+/// sketch-owned audio parameters. The screensaver lifecycle is shared, but Line
+/// owns the background bed and synth volume semantics, so the hook is registered
+/// here at the sketch seam.
+fn enter_line_screensaver_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::SetLineParam {
+        key: "volume",
+        value: 0.0,
+    }) {
+        tracing::warn!("audio command ring full on Line screensaver entry; volume mute dropped");
+    }
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 0.0,
+    }) {
+        tracing::warn!(
+            "audio command ring full on Line screensaver entry; background_volume mute dropped"
+        );
+    }
+}
+
+/// `OnExit(SketchActivity::Screensaver)` while Line is loaded — restore the
+/// Line-owned background bed. The active audio coupling system drives synth
+/// volume again on the next `Active` update.
+fn exit_line_screensaver_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    }) {
+        tracing::warn!(
+            "audio command ring full on Line screensaver exit; background_volume restore dropped"
+        );
+    }
+}
+
 /// `OnEnter(AppState::Line)` -- insert [`post_process::LinePostParams`] with
 /// zeroed defaults. [`systems::update_sim_params`] and
 /// [`audio_coupling::drive_audio_and_shader`] overwrite all fields with live
@@ -437,6 +518,34 @@ fn exit_line_audio(
 /// `insert_dots_post_params` pattern in [`crate::dots`].
 fn insert_line_post_params(mut commands: Commands<'_, '_>) {
     commands.insert_resource(post_process::LinePostParams::default());
+}
+
+/// Write Line's tonemapping + bloom settings onto the main camera each frame
+/// while Line is active (live dev-panel tuning). Change-gated inside
+/// `set_camera_render_profile`, so an unchanged profile is a no-op.
+fn apply_line_render_profile(
+    settings: Res<'_, settings::LineSettings>,
+    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut camera {
+        wc_core::render::set_camera_render_profile(
+            &mut tonemapping,
+            &mut bloom,
+            settings.tonemapping,
+            settings.bloom_intensity,
+            settings.bloom_threshold,
+        );
+    }
+}
+
+/// `OnExit(AppState::Line)` — restore the SDR camera base so Home/picker is
+/// un-tonemapped.
+fn reset_line_render_profile(
+    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut camera {
+        wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
+    }
 }
 
 /// Whether to register the gravity-smear post-process node. On unless

@@ -51,12 +51,14 @@ pub mod systems;
 
 pub use systems::DotsRoot;
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use wc_core::audio::state::AudioState;
 #[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
 use wc_core::lifecycle::reload::SketchReloadState;
-use wc_core::lifecycle::state::AppState;
+use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
 use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
@@ -112,7 +114,12 @@ impl Plugin for DotsPlugin {
                 despawn_with::<DotsRoot>,
                 remove_dots_sim_params,
                 exit_dots_audio,
+                reset_dots_render_profile,
             ),
+        );
+        app.add_systems(
+            OnEnter(SketchActivity::Screensaver),
+            enter_dots_screensaver_audio.run_if(in_state(AppState::Dots)),
         );
 
         // Mouse attractor state (persists across frames; updated each frame in
@@ -159,6 +166,13 @@ impl Plugin for DotsPlugin {
             systems::update_dots_post_params
                 .after(hand_attractors::update_dots_hand_attractors)
                 .run_if(sketch_active(AppState::Dots)),
+        );
+
+        // Apply Dots' tonemapping + bloom profile onto the main camera each
+        // frame while Dots is active (live dev-panel tuning).
+        app.add_systems(
+            Update,
+            apply_dots_render_profile.run_if(in_state(AppState::Dots)),
         );
 
         // Hand attractors (D5) wired here.
@@ -278,6 +292,23 @@ fn exit_dots_audio(
     }
 }
 
+/// `OnEnter(SketchActivity::Screensaver)` while Dots is loaded — mute the
+/// Dots-owned synth volume at the sketch seam. `drive_dots_audio` resumes
+/// writing the live envelope after screensaver exit.
+fn enter_dots_screensaver_audio(
+    audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
+) {
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    if let Err(_dropped) = audio_cmd.push(wc_core::audio::command::AudioCommand::SetDotsParam {
+        key: "volume",
+        value: 0.0,
+    }) {
+        tracing::warn!("audio command ring full on Dots screensaver entry; volume mute dropped");
+    }
+}
+
 /// `OnEnter(AppState::Dots)` — insert [`post_process::DotsPostParams`] and
 /// [`systems::DotsExplodeFocal`] with static seed values.
 /// [`systems::update_dots_post_params`] overwrites these every frame with live
@@ -325,6 +356,34 @@ fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<post_process::DotsPostParams>();
     commands.remove_resource::<systems::DotsExplodeFocal>();
+}
+
+/// Write Dots' tonemapping + bloom settings onto the main camera each frame
+/// while Dots is active (live dev-panel tuning). Change-gated inside
+/// `set_camera_render_profile`, so an unchanged profile is a no-op.
+fn apply_dots_render_profile(
+    settings: Res<'_, settings::DotsSettings>,
+    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut camera {
+        wc_core::render::set_camera_render_profile(
+            &mut tonemapping,
+            &mut bloom,
+            settings.tonemapping,
+            settings.bloom_intensity,
+            settings.bloom_threshold,
+        );
+    }
+}
+
+/// `OnExit(AppState::Dots)` — restore the SDR camera base so Home/picker is
+/// un-tonemapped.
+fn reset_dots_render_profile(
+    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut camera {
+        wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
+    }
 }
 
 /// Whether to register the explode post-process node. On unless

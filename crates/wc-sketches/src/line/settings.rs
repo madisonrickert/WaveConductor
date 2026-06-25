@@ -35,6 +35,11 @@
 //! - **`gravity_constant`** — strength of the pull toward attractors (v4
 //!   `GRAVITY_CONSTANT`, default 280).
 //! - **`gamma`** — per-channel gamma curve on the post-process pass.
+//! - **`tonemapping`** — camera tonemapping operator while Line is active. Default
+//!   `ReinhardLuminance` (chroma-preserving "neon glow"). Dev-only knob.
+//! - **`bloom_intensity`** — bloom intensity for the main camera. Default `0.35`. Dev-only knob.
+//! - **`bloom_threshold`** — bloom prefilter threshold. Default `0.7` (only HDR cores glow).
+//!   Dev-only knob.
 //! - **`palette_mode`** — psychedelic color-palette driver: `Off` / `Velocity`
 //!   / `Spectrum`. `Off` is the bit-exact pre-palette path.
 //! - **`palette_strength`** — crossfade from the image-influence color (0) to the
@@ -193,6 +198,47 @@ pub struct LineSettings {
     )]
     #[serde(default = "default_gamma")]
     pub gamma: f32,
+
+    /// Camera tonemapping operator for this sketch. Default `ReinhardLuminance`
+    /// (chroma-preserving "neon glow"). Applied to the main camera while Line
+    /// is active; Home resets to SDR. Live, no restart.
+    #[setting(
+        default = wc_core::render::TonemapChoice::ReinhardLuminance,
+        ty = Enum,
+        label = "Tonemapping",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_tonemapping")]
+    pub tonemapping: wc_core::render::TonemapChoice,
+
+    /// Bloom intensity for this sketch (main camera). Default `0.35` — stronger
+    /// glow than the SDR base 0.15. Live, no restart.
+    #[setting(
+        default = 0.35_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Bloom intensity",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_bloom_intensity")]
+    pub bloom_intensity: f32,
+
+    /// Bloom prefilter threshold for this sketch. Default `0.7` — only HDR cores
+    /// bloom (crisp midtones + glowing highlights). `0.0` blooms everything.
+    #[setting(
+        default = 0.7_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Bloom threshold",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_bloom_threshold")]
+    pub bloom_threshold: f32,
 
     /// Psychedelic color-palette mode: which per-particle property drives the
     /// particle hue. `Off` (default) leaves color exactly as the pre-palette
@@ -604,6 +650,16 @@ fn default_synth_distance_falloff() -> f32 {
     1.0
 }
 
+fn default_tonemapping() -> wc_core::render::TonemapChoice {
+    wc_core::render::TonemapChoice::ReinhardLuminance
+}
+fn default_bloom_intensity() -> f32 {
+    0.35
+}
+fn default_bloom_threshold() -> f32 {
+    0.7
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +733,19 @@ mod tests {
         assert!(
             (parsed.smear_focal_smoothing - 0.25).abs() < 1e-6,
             "smear_focal_smoothing not default"
+        );
+        assert_eq!(
+            parsed.tonemapping,
+            default_tonemapping(),
+            "tonemapping default mismatch"
+        );
+        assert!(
+            (parsed.bloom_intensity - default_bloom_intensity()).abs() < f32::EPSILON,
+            "bloom_intensity"
+        );
+        assert!(
+            (parsed.bloom_threshold - default_bloom_threshold()).abs() < f32::EPSILON,
+            "bloom_threshold"
         );
     }
 

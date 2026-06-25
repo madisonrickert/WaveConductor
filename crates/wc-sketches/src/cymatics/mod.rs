@@ -45,11 +45,12 @@ pub mod screensaver;
 pub mod settings;
 pub mod systems;
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
 use wc_core::audio::state::AudioState;
 use wc_core::lifecycle::reload::SketchReloadState;
-use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::screensaver::ScreensaverActive;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
@@ -209,7 +210,13 @@ impl Plugin for CymaticsPlugin {
                 despawn_with::<CymaticsRoot>,
                 remove_cymatics_sim_params,
                 systems::audio_coupling::exit_cymatics_audio,
+                reset_cymatics_render_profile,
             ),
+        );
+        app.add_systems(
+            OnEnter(SketchActivity::Screensaver),
+            systems::audio_coupling::enter_cymatics_screensaver_audio
+                .run_if(in_state(AppState::Cymatics)),
         );
 
         // Onset throttle state for kick/risingbass one-shots (persists across
@@ -279,12 +286,28 @@ impl Plugin for CymaticsPlugin {
         );
 
         // Material knob update: pack skew_intensity (derived from num_cycles +
-        // skew_curve setting) and master_brightness into the render material
-        // each frame. Same run condition as the sim-params bridge.
+        // skew_curve setting), brightness, and gamma into the render material
+        // each frame. Runs through Idle too so changes track immediately across
+        // the screensaver transition.
         app.add_systems(
             Update,
             update_cymatics_material.run_if(
-                sketch_active(AppState::Cymatics).or_else(in_screensaver(AppState::Cymatics)),
+                sketch_active(AppState::Cymatics)
+                    .or_else(in_idle(AppState::Cymatics))
+                    .or_else(in_screensaver(AppState::Cymatics)),
+            ),
+        );
+
+        // Camera render profile: write tonemapping + bloom settings onto the
+        // main camera each frame while Cymatics is active, through idle, or
+        // during the screensaver so the profile is consistent across the full
+        // lifecycle. Change-gated inside `set_camera_render_profile`.
+        app.add_systems(
+            Update,
+            apply_cymatics_render_profile.run_if(
+                sketch_active(AppState::Cymatics)
+                    .or_else(in_idle(AppState::Cymatics))
+                    .or_else(in_screensaver(AppState::Cymatics)),
             ),
         );
 
@@ -579,38 +602,17 @@ fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
 
 /// Update the [`render::CymaticsMaterial`] each frame with the current
 /// `skew_intensity` (derived from `num_cycles` + `skew_curve` setting),
-/// brightness (`master_brightness` × the screensaver lift), `gamma`, and the
-/// screensaver saturation factor.
+/// `master_brightness`, and `gamma`. The screensaver brightness lift and
+/// saturation compensation have been removed; `skew.w` (formerly screensaver
+/// saturation) is now pinned to `1.0` and ignored by the shader.
 ///
-/// Runs under `sketch_active OR in_screensaver` so the material reflects the
-/// live state during both active play and the attract screensaver. Unlike
-/// [`update_cymatics_sim_params`], this is *not* extended into the `Idle`
-/// pre-roll: its inputs (`skew_curve`, `master_brightness`, `gamma`) are all
-/// pinned without interaction, so re-running it through `Idle` would only
-/// re-pack an identical uniform.
+/// Runs under `sketch_active OR in_idle OR in_screensaver` so the material
+/// reflects the live state during active play, the idle pre-roll, and the
+/// attract screensaver.
 ///
 /// v4 `skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2)`.
 /// The `skew_curve` Dev knob applies an exponent to this raw value before
 /// packing into the uniform, allowing a wider or narrower push range.
-///
-/// ## Screensaver brightness lift
-///
-/// The packed `master_brightness` channel is scaled by
-/// `1 + fade.alpha() × (attract_brightness − 1)`. At fade = 0 (Active) the
-/// factor is exactly `1.0`, so active rendering is byte-identical to before
-/// this knob existed; at fade = 1 (Screensaver) it reaches `attract_brightness`,
-/// lifting the gentle linear field up the `AgX` curve so it stays vivid rather
-/// than landing in `AgX`'s dark, desaturated toe. See
-/// [`CymaticsSettings::attract_brightness`].
-///
-/// ## Screensaver saturation
-///
-/// The packed `skew.w` channel carries `1 + fade.alpha() × (attract_saturation −
-/// 1)` — a chroma lever ramped by the same fade alpha. At fade = 0 (Active) it
-/// is exactly `1.0`, so the shader's saturation step is the identity (byte-
-/// identical active rendering); at fade = 1 (Screensaver) it reaches
-/// `attract_saturation`, boosting chroma so the raindrop crests read vivid. See
-/// [`CymaticsSettings::attract_saturation`].
 ///
 /// ## Change-gated upload
 ///
@@ -619,13 +621,10 @@ fn advance_clocks(phase: f32, ramp: f32, advance: f32) -> (f32, f32) {
 /// borrow unconditionally every frame would re-upload an identical uniform on
 /// every frame of the multi-hour at-rest screensaver. So this reads the
 /// current packed `skew` via `materials.get` first and only mutates when the
-/// freshly-packed `Vec4` differs. The [`ScreensaverFade`] ramp moves
-/// `fade.alpha()` each frame for ~1.5 s on screensaver enter/wake, so the
-/// brightness channel flips a bit and the uniform re-uploads across the ramp;
-/// once the fade settles (a constant `0` or `1`) every input is pinned, the
-/// packed `Vec4` is bit-stable frame to frame, and the exact compare holds (no
-/// epsilon needed). Any real knob change likewise flips a bit and triggers the
-/// upload.
+/// freshly-packed `Vec4` differs. Every input is pinned when the settings are
+/// unchanged, so the packed `Vec4` is bit-stable frame to frame and the exact
+/// compare holds (no epsilon needed). Any real knob change flips a bit and
+/// triggers the upload.
 ///
 /// ## No-allocation guarantee
 ///
@@ -634,25 +633,15 @@ fn update_cymatics_material(
     quad_q: Query<'_, '_, &MeshMaterial2d<render::CymaticsMaterial>, With<CymaticsRoot>>,
     mut materials: ResMut<'_, Assets<render::CymaticsMaterial>>,
     settings: Res<'_, CymaticsSettings>,
-    fade: Res<'_, ScreensaverFade>,
     state: Option<Res<'_, CymaticsState>>,
 ) {
     let Some(state) = state else { return };
-    // Screensaver brightness lift: at fade = 0 (Active) the factor is ×1.0, so
-    // the packed uniform — and therefore the rendered frame — is byte-identical
-    // to before this knob existed. As the screensaver fades in, the factor
-    // ramps toward ×attract_brightness, lifting the whole linear field up the
-    // AgX curve (orange crests reach the vivid shoulder; navy lifts off pure
-    // black) without sharpening the gentle waves — a uniform pre-AgX multiply.
-    let brightness =
-        settings.master_brightness * (1.0 + (settings.attract_brightness - 1.0) * fade.alpha());
-    // Screensaver saturation: ramped by the SAME fade alpha as the brightness
-    // lift. At fade = 0 (Active) the factor is exactly 1.0, so the shader's
-    // saturation step is the identity and the rendered frame stays byte-identical
-    // to before this knob existed; as the screensaver fades in it reaches
-    // `attract_saturation`, pushing chroma so the raindrop ring crests read vivid
-    // through AgX rather than muted.
-    let saturation = 1.0 + (settings.attract_saturation - 1.0) * fade.alpha();
+    // Brightness is the plain master setting now — the screensaver brightness
+    // lift was a workaround for the AgX-bypass bug (fixed in the blur node) and
+    // for AgX's muting (gone now that the operator-chosen tonemap is applied
+    // consistently). `skew.w` (formerly screensaver saturation) is pinned to the
+    // identity 1.0 and ignored by the shader.
+    let brightness = settings.master_brightness;
     for handle in quad_q.iter() {
         // v4: skewIntensity = pow(max(0, (numCycles - 1.002) / 2 - 0.5), 2).
         // DEFAULT_NUM_CYCLES = 1.002; at rest, the clamp yields 0.
@@ -664,10 +653,10 @@ fn update_cymatics_material(
         let skew_intensity = skew_raw.powf(settings.skew_curve);
         // Pack into the skew uniform:
         //   .x = skew_intensity   (body-colour push toward white)
-        //   .y = brightness       (master_brightness × screensaver lift)
+        //   .y = brightness       (plain master_brightness)
         //   .z = gamma            (per-channel display gamma; 1.0 = identity)
-        //   .w = saturation       (screensaver chroma lever; 1.0 = identity)
-        let new_skew = Vec4::new(skew_intensity, brightness, settings.gamma, saturation);
+        //   .w = 1.0              (unused — formerly screensaver saturation; removed)
+        let new_skew = Vec4::new(skew_intensity, brightness, settings.gamma, 1.0);
 
         // Skip the mutation (and the Changed flag + re-extract/re-upload it
         // triggers) when the packed uniform is unchanged. The immutable `get`
@@ -682,6 +671,34 @@ fn update_cymatics_material(
         if let Some(mut mat) = materials.get_mut(&handle.0) {
             mat.skew = new_skew;
         }
+    }
+}
+
+/// Write Cymatics' tonemapping + bloom settings onto the main camera each frame
+/// while Cymatics is active (live dev-panel tuning). Change-gated inside
+/// `set_camera_render_profile`, so an unchanged profile is a no-op.
+fn apply_cymatics_render_profile(
+    settings: Res<'_, CymaticsSettings>,
+    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut camera {
+        wc_core::render::set_camera_render_profile(
+            &mut tonemapping,
+            &mut bloom,
+            settings.tonemapping,
+            settings.bloom_intensity,
+            settings.bloom_threshold,
+        );
+    }
+}
+
+/// `OnExit(AppState::Cymatics)` — restore the SDR camera base so Home/picker is
+/// un-tonemapped.
+fn reset_cymatics_render_profile(
+    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
+) {
+    for (mut tonemapping, mut bloom) in &mut camera {
+        wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
     }
 }
 

@@ -264,6 +264,47 @@ pub struct DotsSettings {
     #[serde(default = "default_explode_focal_smoothing")]
     pub explode_focal_smoothing: f32,
 
+    /// Camera tonemapping operator for this sketch. Default `ReinhardLuminance`
+    /// (chroma-preserving "neon glow"). Applied to the main camera while Dots
+    /// is active; Home resets to SDR. Live, no restart.
+    #[setting(
+        default = wc_core::render::TonemapChoice::ReinhardLuminance,
+        ty = Enum,
+        label = "Tonemapping",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_tonemapping")]
+    pub tonemapping: wc_core::render::TonemapChoice,
+
+    /// Bloom intensity for this sketch (main camera). Default `0.35` — stronger
+    /// glow than the SDR base 0.15. Live, no restart.
+    #[setting(
+        default = 0.35_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Bloom intensity",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_bloom_intensity")]
+    pub bloom_intensity: f32,
+
+    /// Bloom prefilter threshold for this sketch. Default `0.7` — only HDR cores
+    /// bloom (crisp midtones + glowing highlights). `0.0` blooms everything.
+    #[setting(
+        default = 0.7_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Bloom threshold",
+        section = "Visual",
+        category = Dev
+    )]
+    #[serde(default = "default_bloom_threshold")]
+    pub bloom_threshold: f32,
+
     // ── Audio ────────────────────────────────────────────────────────────────
     /// Master output gain trim applied after the activity envelope.
     /// 1.0 = unchanged. Adjust to balance kiosk loudness without touching
@@ -424,6 +465,18 @@ fn default_explode_focal_smoothing() -> f32 {
     0.25
 }
 
+fn default_tonemapping() -> wc_core::render::TonemapChoice {
+    wc_core::render::TonemapChoice::ReinhardLuminance
+}
+
+fn default_bloom_intensity() -> f32 {
+    0.35
+}
+
+fn default_bloom_threshold() -> f32 {
+    0.7
+}
+
 fn default_synth_volume_scale() -> f32 {
     1.0
 }
@@ -522,6 +575,19 @@ mod tests {
             (defaults.explode_focal_smoothing - default_explode_focal_smoothing()).abs()
                 < f32::EPSILON,
             "explode_focal_smoothing default mismatch"
+        );
+        assert_eq!(
+            defaults.tonemapping,
+            default_tonemapping(),
+            "tonemapping default mismatch"
+        );
+        assert!(
+            (defaults.bloom_intensity - default_bloom_intensity()).abs() < f32::EPSILON,
+            "bloom_intensity"
+        );
+        assert!(
+            (defaults.bloom_threshold - default_bloom_threshold()).abs() < f32::EPSILON,
+            "bloom_threshold"
         );
         // Audio fields added in task 4.
         assert!((defaults.synth_volume_scale - default_synth_volume_scale()).abs() < f32::EPSILON);

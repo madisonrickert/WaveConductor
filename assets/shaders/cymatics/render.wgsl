@@ -33,9 +33,7 @@
 // .x = skewIntensity (v4 body-colour push toward white),
 // .y = master_brightness (post-render multiplier; 1.0 = no-op, default),
 // .z = user gamma (per-channel display gamma; 1.0 = identity, default),
-// .w = screensaver saturation (chroma lever ramped by ScreensaverFade;
-//      1.0 = identity, which is the value in the active path since fade = 0;
-//      the screensaver default lifts it above 1.0 to de-mute the field).
+// .w = unused (formerly screensaver saturation; removed).
 @group(2) @binding(1) var<uniform> skew: vec4<f32>;
 // Cell texture A (rgba32float): channel x = height, y = velocity,
 // z = accumulated_height, w = unused (simulate.wgsl write contract).
@@ -204,8 +202,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         0.0, 1.0,
     );
 
-    // Radial dark background: v4 colBg = vec3(0.25 - length(normCoord) * 0.2).
-    let bg = vec3<f32>(0.25 - length(norm_coord) * 0.2);
+    // Radial dark background. v4 used neutral gray here; in v5 attract mode the
+    // calm, low-radius field exposes much more background, so keeping it neutral
+    // reads as a gray cast. Blend the same radial value toward the Cymatics base
+    // hue instead of relying on a screensaver-only saturation boost.
+    let bg_radial = 0.25 - length(norm_coord) * 0.2;
+    let bg = mix(vec3<f32>(bg_radial), srgb_to_linear(BASE_COL) * 8.0, 0.75);
 
     // v4: mix(pow(cymaticsColor, vec3(mix(0.8, 1., vignetteAmount))), colBg, vignetteAmount).
     // Gamma 0.8 brightens the centre; gamma 1.0 at the edge before bg blend.
@@ -221,17 +223,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // underflowed negative.
     if skew.z != 1.0 {
         col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(skew.z));
-    }
-    // skew.w = screensaver saturation (Dev knob, ramped by the same ScreensaverFade
-    // alpha as the brightness lift; default 1.0 = identity = active path). Pushes
-    // chroma around luma so the raindrop ring crests read vivid through AgX. A
-    // uniform branch (no warp divergence); at identity skip it so the active frame
-    // is byte-identical (this also preserves the slightly-negative border that the
-    // bg blend can produce, which the max() below would otherwise clamp). max(., 0)
-    // keeps the saturated result non-negative.
-    if skew.w != 1.0 {
-        let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
-        col = max(vec3<f32>(luma) + (col - vec3<f32>(luma)) * skew.w, vec3<f32>(0.0));
     }
     // Output linear, scene-referred colour. The global AgX camera tonemap + the
     // sRGB swapchain own the display encode -- no in-shader sRGB encode here.

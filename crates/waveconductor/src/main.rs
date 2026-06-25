@@ -229,13 +229,16 @@ fn spawn_camera(mut commands: Commands<'_, '_>) {
         // (it was the implicit 2D default anyway) unless you also change the
         // overlay's MSAA to stay distinct.
         Msaa::Off,
-        // See module-level comment for why AgX over TonyMcMapface.
-        Tonemapping::AgX,
+        // SDR base: Home/picker render un-tonemapped (their art is already SDR).
+        // Each sketch overrides this on enter via its render-profile apply
+        // system (see `wc_core::render`); `WC_DEBUG_TONEMAP` still overrides for
+        // auditioning (debug builds only).
+        debug_tonemapping(),
         Bloom {
-            intensity: 0.15,
+            intensity: wc_core::render::BASE_BLOOM_INTENSITY,
             low_frequency_boost: 0.7,
             prefilter: BloomPrefilter {
-                threshold: 0.0,
+                threshold: wc_core::render::BASE_BLOOM_THRESHOLD,
                 threshold_softness: 0.0,
             },
             ..Bloom::NATURAL
@@ -267,6 +270,54 @@ fn apply_debug_bloom_toggle(
             bloom.intensity = 0.0;
         }
     }
+}
+
+/// Resolve the main camera's tonemapping operator.
+///
+/// Production/unset default is [`Tonemapping::None`] (the SDR base; sketches
+/// override per-sketch via their render-profile apply systems). Debug builds
+/// honour the `WC_DEBUG_TONEMAP` spike-test override so a different operator
+/// can be auditioned at launch without recompiling:
+///
+/// - `none` — [`Tonemapping::None`]: no highlight rolloff (bright values clip).
+///   The SDR base; same as the default.
+/// - `tony` — [`Tonemapping::TonyMcMapface`]: a filmic curve that desaturates
+///   highlights and shadows.
+/// - `reinhard` — [`Tonemapping::ReinhardLuminance`]: chroma-preserving "neon
+///   glow" curve.
+/// - anything else / unset — [`Tonemapping::None`] (SDR base; sketches apply
+///   their own operator on enter).
+///
+/// The override is global to this camera, so it also affects the base look of
+/// Home and the picker for the duration of the test. Revert by unsetting the
+/// variable.
+#[cfg(debug_assertions)]
+fn debug_tonemapping() -> Tonemapping {
+    match std::env::var("WC_DEBUG_TONEMAP")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("none") => {
+            tracing::warn!("WC_DEBUG_TONEMAP=none — tonemapping disabled (highlights clip)");
+            Tonemapping::None
+        }
+        Some("tony") => {
+            tracing::warn!("WC_DEBUG_TONEMAP=tony — TonyMcMapface tonemap (spike test)");
+            Tonemapping::TonyMcMapface
+        }
+        Some("reinhard") => {
+            tracing::warn!("WC_DEBUG_TONEMAP=reinhard — ReinhardLuminance tonemap (spike test)");
+            Tonemapping::ReinhardLuminance
+        }
+        _ => Tonemapping::None,
+    }
+}
+
+/// Release build: always [`Tonemapping::None`] (SDR base; the spike-test override compiles out).
+#[cfg(not(debug_assertions))]
+fn debug_tonemapping() -> Tonemapping {
+    Tonemapping::None
 }
 
 /// Apply the optional `WAVECONDUCTOR_START_SKETCH` override: when set to a
