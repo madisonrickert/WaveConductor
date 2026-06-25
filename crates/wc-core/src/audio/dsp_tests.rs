@@ -228,14 +228,16 @@ fn background_loop_is_bit_exact_at_rate_one() {
         SampleData::new(pcm, 2),
     )]);
     let mut host = DspHost::new(48_000, 2, bank);
+    host.apply(AudioCommand::AddLineSynth);
     host.apply(AudioCommand::SetLineParam {
         key: "background_volume",
         value: 1.0,
     });
     let mut out = vec![0.0_f32; 2 * 6]; // 6 frames
     host.render(&mut out);
-    // Master volume 1.0, no synth: output == background loop, read in order
-    // with no interpolation (rate 1.0, integer playhead).
+    // Master volume 1.0, Line active but synth volume defaulting silent:
+    // output == background loop, read in order with no interpolation
+    // (rate 1.0, integer playhead).
     let left: Vec<f32> = out.iter().step_by(2).copied().collect();
     assert_eq!(left, vec![0.0, 0.25, 0.5, 0.75, 0.0, 0.25]);
 }
@@ -261,14 +263,26 @@ fn empty_background_falls_back_to_synth_only() {
 }
 
 #[test]
-fn background_renders_when_synth_inactive() {
-    // Even with no synth, the background should mix into the output
-    // at the default volume of 1.0.
+fn background_is_silent_until_line_restores_volume() {
+    // The background bed starts silent. Line owns the restore/mute writes in its
+    // sketch lifecycle; other sketches should never inherit the drone by default.
     let mut host = host_with_synthetic_bg(64);
     assert!(host.has_background());
     let mut buffer = vec![0.0_f32; 128]; // 64 stereo frames
     host.render(&mut buffer);
-    // L channel = +0.5, R channel = -0.5 (master gain = 1.0).
+    assert!(buffer.iter().all(|s| s.abs() < f32::EPSILON));
+}
+
+#[test]
+fn background_renders_after_line_restores_volume() {
+    let mut host = host_with_synthetic_bg(64);
+    host.apply(AudioCommand::AddLineSynth);
+    host.apply(AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    });
+    let mut buffer = vec![0.0_f32; 128]; // 64 stereo frames
+    host.render(&mut buffer);
     for frame in buffer.chunks(2) {
         assert!((frame[0] - 0.5).abs() < f32::EPSILON);
         assert!((frame[1] + 0.5).abs() < f32::EPSILON);
@@ -278,6 +292,7 @@ fn background_renders_when_synth_inactive() {
 #[test]
 fn background_volume_scales_output() {
     let mut host = host_with_synthetic_bg(32);
+    host.apply(AudioCommand::AddLineSynth);
     host.apply(AudioCommand::SetLineParam {
         key: "background_volume",
         value: 0.5,
@@ -315,6 +330,11 @@ fn background_playhead_wraps_at_buffer_end() {
     pcm.push(1.0);
     let bank = SampleBank::from_samples(vec![(LINE_BACKGROUND_SAMPLE, SampleData::new(pcm, 2))]);
     let mut host = DspHost::new(48_000, 2, bank);
+    host.apply(AudioCommand::AddLineSynth);
+    host.apply(AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    });
     // Render 10 frames (= 2.5 loops). After 4 frames we should be back
     // at the start of the buffer.
     let mut buffer = vec![0.0_f32; 20];
@@ -338,6 +358,11 @@ fn background_playhead_wraps_at_buffer_end() {
 #[test]
 fn muted_zeros_background_too() {
     let mut host = host_with_synthetic_bg(16);
+    host.apply(AudioCommand::AddLineSynth);
+    host.apply(AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    });
     host.apply(AudioCommand::SetMuted(true));
     let mut buffer = vec![0.0_f32; 32];
     host.render(&mut buffer);
@@ -357,6 +382,10 @@ fn background_clamps_when_synth_and_background_peak_together() {
     let mut host = DspHost::new(48_000, 2, bank);
     host.apply(AudioCommand::AddLineSynth);
     host.apply(AudioCommand::SetLineParam {
+        key: "background_volume",
+        value: 1.0,
+    });
+    host.apply(AudioCommand::SetLineParam {
         key: "volume",
         value: 1.0,
     });
@@ -375,11 +404,15 @@ fn background_volume_key_works_with_no_active_synth() {
     assert!(!host.line_synth_active());
     host.apply(AudioCommand::SetLineParam {
         key: "background_volume",
-        value: 0.0,
+        value: 0.75,
     });
+    assert!((host.background_volume() - 0.75).abs() < f32::EPSILON);
     let mut buffer = vec![1.0_f32; 8];
     host.render(&mut buffer);
-    assert!(buffer.iter().all(|s| s.abs() < f32::EPSILON));
+    for frame in buffer.chunks(2) {
+        assert!((frame[0] - 0.375).abs() < f32::EPSILON);
+        assert!((frame[1] + 0.375).abs() < f32::EPSILON);
+    }
 }
 
 // ---------------------------------------------------------------------------

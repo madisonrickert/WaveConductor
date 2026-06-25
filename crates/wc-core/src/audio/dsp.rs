@@ -32,7 +32,7 @@
 //! `playhead: usize` path. The mix formula per frame is:
 //!
 //! ```text
-//! out = gain · clamp(synth + background · background_volume, -1.0, 1.0)
+//! out = gain · clamp(synth + line_background · background_volume, -1.0, 1.0)
 //! ```
 //!
 //! The inner clamp prevents output overflow when both sources peak
@@ -52,10 +52,10 @@ use super::sample_bank::{LoopVoice, OneShotVoice, SampleBank};
 /// does a string lookup per buffer.
 pub const LINE_BACKGROUND_SAMPLE: &str = "line_background";
 
-/// Default amplitude scalar applied to the background sample. Matches v4
-/// `AudioClip { volume: 1.0 }`. Coupled to the same `Shared<f32>` handle
-/// that `SetLineParam { key: "background_volume" }` writes.
-const DEFAULT_BACKGROUND_VOLUME: f32 = 1.0;
+/// Default amplitude scalar applied to the background sample. Starts silent so
+/// non-Line sketches cannot play the Line drone before Line has set its own
+/// mixer parameter.
+const DEFAULT_BACKGROUND_VOLUME: f32 = 0.0;
 
 /// `SetLineParam` key that routes to the background-sample amplitude
 /// scalar. Kept here rather than in `LineSynth::KNOWN_KEYS` because
@@ -317,7 +317,7 @@ impl DspHost {
         self.dots_synth.is_some()
     }
 
-    /// Current background-sample amplitude scalar. Reflects the most
+    /// Current Line background-sample amplitude scalar. Reflects the most
     /// recent `SetLineParam { key: "background_volume" }` write the audio
     /// thread has observed.
     #[must_use]
@@ -340,10 +340,11 @@ impl DspHost {
     /// Mixing per frame:
     /// 1. Tick the Line synth for one mono sample (zero if not active).
     /// 2. Tick the Dots synth for one mono sample (zero if not active).
-    /// 3. Zero the frame, then add the background bed via [`LoopVoice::mix_frame`]
-    ///    (scaled by `background_volume`). Zeroing first means cpal's potentially
-    ///    uninitialized output buffer never leaks into the mix, and tests can pass
-    ///    arbitrary initial values and still get deterministic results.
+    /// 3. Zero the frame, then add the Line background bed via
+    ///    [`LoopVoice::mix_frame`] (scaled by `background_volume`). Zeroing
+    ///    first means cpal's potentially uninitialized output buffer never
+    ///    leaks into the mix, and tests can pass arbitrary initial values and
+    ///    still get deterministic results.
     /// 4. If Cymatics is active, tick its synth, add the blub loop, and add any
     ///    in-flight kick/risingbass one-shots — all accumulating into the frame.
     /// 5. Broadcast the summed Line+Dots synth sample across channels, add to the
