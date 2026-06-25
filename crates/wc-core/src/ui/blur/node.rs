@@ -3,18 +3,21 @@
 //! ## Source strategy
 //!
 //! [`backdrop_blur`] is a render system in the `Core2d` schedule. It reads the
-//! primary camera's [`ViewTarget`] via a [`ViewQuery`] and calls
-//! [`ViewTarget::post_process_write`] to get a ping-pong write token whose
-//! `source` field is the post-tonemap LDR colour attachment for the current
-//! frame — no separate extraction or one-frame lag.
+//! primary camera's [`ViewTarget`] via a [`ViewQuery`] and samples its
+//! `main_texture_view()` — the post-tonemap colour attachment for the current
+//! frame — with no separate extraction or one-frame lag.
 //!
-//! The `ViewTarget` is left in a post-process-written state after the node runs.
-//! Downstream nodes (egui, upscaling) that also use the `ViewTarget` will see
-//! the blurred-then-restored image as their source. To avoid corrupting the
-//! `ViewTarget`, this node reads from `source` and writes only to the
-//! [`BackdropBlurTexture`] (an independent texture). The `ViewTarget` is not
-//! written back to — the `post_process_write()` token is dropped without calling
-//! any write-back methods.
+//! It must NOT use `post_process_write()` to obtain that view. That call flips
+//! the `ViewTarget`'s ping-pong buffers as a side effect, and because this node
+//! only *reads* the frame (its blur output goes to the independent
+//! [`BackdropBlurTexture`]) the flip is never balanced by a write-back. The
+//! stray flip left the *pre-tonemap* buffer as the frame's main attachment, so
+//! the camera's tonemap (`AgX`) was effectively bypassed and the un-tonemapped
+//! image was presented. And because the node is gated on UI opacity, the bypass
+//! toggled with the chrome auto-fade: vivid (pre-tonemap) while the chrome
+//! showed, then a sudden mute to the real tonemapped image the instant it faded.
+//! `main_texture_view()` is a plain read with no ping-pong side effect, so the
+//! tonemap always lands.
 //!
 //! ## Kawase chain
 //!
@@ -316,13 +319,15 @@ pub fn backdrop_blur(
 
     // --- Source ---
     //
-    // `post_process_write` gives access to the post-tonemap colour via a
-    // ping-pong token. We only read `source`; we do NOT write back via the
-    // token (the blur output goes to `BackdropBlurTexture`, a separate
-    // texture). The token is dropped unused — safe, no write-back is called.
+    // Read the post-tonemap colour with `main_texture_view()`, NOT
+    // `post_process_write()`. The latter flips the ViewTarget's ping-pong as a
+    // side effect; this node only reads (its blur goes to a separate texture),
+    // so the unbalanced flip left the PRE-tonemap buffer as the displayed frame
+    // — bypassing the camera's AgX tonemap whenever this node ran.
+    // `main_texture_view()` reads the same attachment with no side effect, so the
+    // tonemap always lands.
     let view_target = view.into_inner();
-    let post_process = view_target.post_process_write();
-    let source_view: &TextureView = post_process.source;
+    let source_view: &TextureView = view_target.main_texture_view();
 
     // Source full resolution (derived from scratch.half_extent * 2).
     let full_res = UVec2::new(scratch.half_extent.x * 2, scratch.half_extent.y * 2);
