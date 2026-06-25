@@ -384,11 +384,11 @@ pub struct CymaticsSettings {
     /// a provable no-op (active rendering is byte-identical) and values above
     /// `1.0` lift the whole linear field up the `AgX` curve. A uniform
     /// pre-`AgX` multiply: it preserves contrast and does not sharpen the
-    /// waves. Default `1.8` — modest, because the raindrop crests now reach HDR
+    /// waves. Default `1.2` — modest, because the raindrop crests now reach HDR
     /// on their own, so the lift only needs to keep the dark pond off pure black.
     /// Fades in with the screensaver envelope and back out after wake. Dev-only knob.
     #[setting(
-        default = 1.8_f32,
+        default = 1.2_f32,
         min = 1.0_f32,
         max = 4.0_f32,
         step = 0.1_f32,
@@ -406,7 +406,7 @@ pub struct CymaticsSettings {
     /// byte-identical); above `1.0` boosts chroma so the raindrop ring crests
     /// read vividly rather than muted, below `1.0` desaturates. Dev-only knob.
     #[setting(
-        default = 1.0_f32,
+        default = 1.5_f32,
         min = 0.5_f32,
         max = 3.0_f32,
         step = 0.05_f32,
@@ -626,8 +626,12 @@ fn default_blub_level() -> f32 {
 
 // Attract / screensaver defaults. `attract_radius` = 0.5 keeps the raindrop
 // pond calm and fairly dark; the raindrop knobs (`ping_*`) drive the visible
-// motion now, and `attract_saturation` = 1.0 is a neutral no-op (active
-// rendering byte-identical). The four Lissajous speeds are 3.5× the v4 values so
+// motion now; `attract_saturation` = 1.5 counters `AgX`'s desaturation so the
+// screensaver colours read vivid (the real fix for the muted look — brightness
+// can't add chroma), and `attract_brightness` = 1.2 stays low because a bigger
+// lift just pushes the crests into `AgX`'s desaturating shoulder. Active
+// rendering is byte-identical regardless: both fold through `fade.alpha()` = 0
+// while active. The four Lissajous speeds are 3.5× the v4 values so
 // the two centres visibly wander within a short watch; scaling all four by the
 // same factor preserves the v4 incommensurate ratios (43:31, 37:29, and the
 // cross ratios), only shortening the periods from ~145–217 s to ~42–62 s.
@@ -636,11 +640,11 @@ fn default_attract_radius() -> f32 {
 }
 
 fn default_attract_brightness() -> f32 {
-    1.8
+    1.2
 }
 
 fn default_attract_saturation() -> f32 {
-    1.0
+    1.5
 }
 
 // Raindrop ping defaults: drops every 3.5–6.0 s per attractor (3.5 floor +
@@ -853,11 +857,11 @@ mod tests {
             "attract_radius should fall back to default"
         );
         assert!(
-            (parsed.attract_brightness - 1.8).abs() < 1e-6,
+            (parsed.attract_brightness - 1.2).abs() < 1e-6,
             "attract_brightness should fall back to default"
         );
         assert!(
-            (parsed.attract_saturation - 1.0).abs() < 1e-6,
+            (parsed.attract_saturation - 1.5).abs() < 1e-6,
             "attract_saturation should fall back to default"
         );
         assert!(
