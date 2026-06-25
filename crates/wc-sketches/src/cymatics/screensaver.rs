@@ -112,7 +112,13 @@ const PING_CENTER_OFFSETS: [f32; 2] = [0.0, 0.5];
 /// interval; every interval after that comes from the live `ping_interval` /
 /// `ping_jitter` knobs (so this need not track them). Fixed because `Default`
 /// can't read settings.
-const PING_INITIAL_STAGGER: f32 = 1.75;
+const PING_INITIAL_STAGGER: f32 = 7.5;
+
+/// Seconds for the screensaver alive-mask radius to settle to the calm pond
+/// radius after entry. A forced `Shift+S` can enter while the field is still
+/// wide open, so snapping directly to `attract_radius` visibly collapses the
+/// saturated field into the neutral vignette/background.
+const ATTRACT_RADIUS_SETTLE_SECS: f32 = 1.5;
 
 /// Per-attractor raindrop scheduler state for the Cymatics screensaver.
 ///
@@ -270,8 +276,14 @@ fn drive_cymatics_attract(
     state.center = c1;
     state.center2 = c2;
     // Ambient alive-mask radius (default 0.5 keeps the pond calm and fairly
-    // dark; the raindrop crests carry the energy now). Operator-widenable live.
-    state.active_radius = settings.attract_radius;
+    // dark; the raindrop crests carry the energy now). Approach it smoothly so
+    // forced screensaver entry from active interaction does not hard-collapse a
+    // wide, saturated field into the neutral vignette/background.
+    state.active_radius = approach_attract_radius(
+        state.active_radius,
+        settings.attract_radius,
+        time.delta_secs(),
+    );
     // The raindrop scheduler drives the source in the screensaver (ping_mode 1),
     // so num_cycles no longer shapes it. Pin it to the resting rate so the phase
     // clock and the render skew_intensity stay neutral.
@@ -308,6 +320,20 @@ fn drive_cymatics_pings(
     }
 }
 
+/// Exponentially approach the attract alive-mask radius.
+///
+/// The time constant is chosen so one full [`ATTRACT_RADIUS_SETTLE_SECS`] step
+/// closes about 99% of the remaining gap, matching the UI fade convention while
+/// remaining frame-rate independent under the screensaver's present-rate cap.
+fn approach_attract_radius(current: f32, target: f32, dt_secs: f32) -> f32 {
+    if ATTRACT_RADIUS_SETTLE_SECS <= 0.0 {
+        return target;
+    }
+    let tau = ATTRACT_RADIUS_SETTLE_SECS / 4.605_170_2;
+    let blend = 1.0 - (-dt_secs.max(0.0) / tau).exp();
+    current + (target - current) * blend
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -320,8 +346,8 @@ mod tests {
     // values. Production reads these live from `CymaticsSettings`; the scheduler
     // math (`next_ping_interval`, `CymaticsPingState::step`) takes them as args,
     // so the tests pass these fixed values.
-    const TEST_INTERVAL: f32 = 3.5;
-    const TEST_JITTER: f32 = 2.5;
+    const TEST_INTERVAL: f32 = 15.0;
+    const TEST_JITTER: f32 = 5.0;
     const TEST_DURATION: f32 = 30.0;
 
     #[test]
@@ -442,6 +468,24 @@ mod tests {
         assert!(
             (s.envelope_tick[0] - 20.0).abs() < 1e-4,
             "post-fire frame advances the window to N"
+        );
+    }
+
+    #[test]
+    fn attract_radius_approach_is_smooth_and_frame_rate_independent() {
+        let current = 7.5;
+        let target = 0.5;
+
+        let halfway = approach_attract_radius(current, target, ATTRACT_RADIUS_SETTLE_SECS * 0.5);
+        assert!(
+            halfway < current && halfway > target,
+            "radius should move toward target without snapping ({halfway})"
+        );
+
+        let settled = approach_attract_radius(current, target, ATTRACT_RADIUS_SETTLE_SECS);
+        assert!(
+            (settled - target).abs() < (current - target) * 0.02,
+            "one settle duration should close ~99% of the gap (got {settled})"
         );
     }
 }
