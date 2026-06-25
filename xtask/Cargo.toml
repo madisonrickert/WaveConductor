@@ -16,6 +16,9 @@ image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# WGSL frontend + validator (the same crate wgpu/Bevy use; already in the graph
+# transitively via bevy_render at v29). `wgsl-in` enables `naga::front::wgsl`.
+naga = { version = "29", features = ["wgsl-in"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

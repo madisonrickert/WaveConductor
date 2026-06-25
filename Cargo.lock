@@ -8611,6 +8611,7 @@ dependencies = [
  "clap",
  "ignore",
  "image",
+ "naga",
  "regex",
  "serde",
  "serde_json",

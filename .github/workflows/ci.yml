@@ -59,6 +59,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask check-secrets
 
+  validate-shaders:
+    name: validate-shaders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+      # No Bevy build deps needed: xtask depends only on naga + CLI crates, not
+      # the app's alsa/udev/wayland stack (same as the check-secrets job).
+      - run: cargo xtask validate-shaders
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

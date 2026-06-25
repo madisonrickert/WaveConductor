@@ -11,6 +11,7 @@ mod bundle_mac;
 mod capture;
 mod check_secrets;
 mod manifest;
+mod validate_shaders;
 
 use clap::{Parser, Subcommand};
 
@@ -31,6 +32,9 @@ enum Command {
     Capture(capture::Args),
     /// Build the release binary and assemble a self-contained WaveConductor.app.
     BundleMac(bundle_mac::Args),
+    /// Parse + validate WGSL shaders with naga (self-contained shaders;
+    /// `#import` shaders are runtime-validated).
+    ValidateShaders(validate_shaders::Args),
 }
 
 fn main() {
@@ -43,6 +47,7 @@ fn main() {
         Command::CheckSecrets(args) => check_secrets::run(args),
         Command::Capture(args) => capture::run(args),
         Command::BundleMac(args) => bundle_mac::run(args),
+        Command::ValidateShaders(args) => validate_shaders::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");

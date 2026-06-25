@@ -40,6 +40,11 @@ const SUBCOMMANDS: &[Entry] = &[
         name: "bundle-mac",
         description: "Build the release binary and assemble a self-contained WaveConductor.app.",
     },
+    Entry {
+        name: "validate-shaders",
+        description:
+            "Parse + validate WGSL shaders with naga (self-contained; #import shaders skipped).",
+    },
 ];
 
 /// Execute the manifest subcommand.
