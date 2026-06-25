@@ -84,7 +84,10 @@ impl Plugin for ScreensaverPlugin {
         app.add_systems(Update, fade::drive_screensaver_fade);
 
         // Enter/exit lifecycle.
-        app.add_systems(OnEnter(SketchActivity::Screensaver), show);
+        app.add_systems(
+            OnEnter(SketchActivity::Screensaver),
+            (show, close_settings_panels),
+        );
         app.add_systems(OnExit(SketchActivity::Screensaver), hide);
 
         // Per-tier present-rate throttle + capture overrides (kept out of this
@@ -127,6 +130,18 @@ fn register_capture_overrides(_app: &mut App) {}
 fn show(mut commands: Commands<'_, '_>) {
     tracing::info!("screensaver: showing — attract mode engaged");
     commands.insert_resource(ScreensaverActive);
+}
+
+/// `OnEnter(Screensaver)` — close the user-facing settings panel so attract
+/// mode is a clean kiosk surface. Optional resources keep this lifecycle hook
+/// usable in tests that install the screensaver framework without the UI plugin.
+fn close_settings_panels(user_panel: Option<ResMut<'_, crate::ui::buttons::SettingsPanelVisible>>) {
+    if let Some(mut user_panel) = user_panel {
+        if user_panel.0 {
+            tracing::info!("screensaver: closing settings panel");
+        }
+        user_panel.0 = false;
+    }
 }
 
 /// `OnExit(Screensaver)` — remove the [`ScreensaverActive`] marker. The log
@@ -307,6 +322,17 @@ fn apply_present_rate(
         react_to_window_events: true,
     };
     if winit.focused_mode != desired {
+        let fps = if wait.is_zero() {
+            f64::INFINITY
+        } else {
+            1.0 / wait.as_secs_f64()
+        };
+        tracing::info!(
+            tier = ?tier,
+            wait_ms = wait.as_secs_f64() * 1000.0,
+            fps,
+            "screensaver: present-rate throttle active"
+        );
         winit.focused_mode = desired;
         winit.unfocused_mode = desired;
     }
@@ -332,6 +358,7 @@ fn restore_present_rate(
         (default.focused_mode, default.unfocused_mode)
     };
     if winit.focused_mode != focused || winit.unfocused_mode != unfocused {
+        tracing::info!("screensaver: present-rate throttle restored");
         winit.focused_mode = focused;
         winit.unfocused_mode = unfocused;
     }
