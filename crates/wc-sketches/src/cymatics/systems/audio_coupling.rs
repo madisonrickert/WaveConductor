@@ -211,6 +211,29 @@ pub fn exit_cymatics_audio(audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>
     }
 }
 
+/// `OnEnter(SketchActivity::Screensaver)` while Cymatics is loaded — mute the
+/// Cymatics-owned continuous voices. The attract screensaver keeps the visual
+/// wave alive but should not preserve stale active-play audio parameters.
+pub fn enter_cymatics_screensaver_audio(audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>) {
+    let Some(mut audio_cmd) = audio_cmd else {
+        return;
+    };
+    push_cymatics_audio(
+        &mut audio_cmd,
+        AudioCommand::SetCymaticsParam {
+            key: "osc_volume",
+            value: 0.0,
+        },
+    );
+    push_cymatics_audio(
+        &mut audio_cmd,
+        AudioCommand::SetCymaticsParam {
+            key: "blub_volume",
+            value: 0.0,
+        },
+    );
+}
+
 // ── Per-frame system ──────────────────────────────────────────────────────────
 
 /// `Update` system: push derived v4 audio parameters each frame and fire
