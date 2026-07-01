@@ -10,6 +10,19 @@
 
 Interactive art gallery built with React, Three.js/WebGL, and Web Audio. Features generative visualizations that respond to mouse, touch, and Leap Motion hand tracking. Runs as a website or a self-contained Electron desktop app.
 
+## Coming in v5: a from-scratch Rust port
+
+The next major version is a ground-up rewrite in Rust on the [Bevy](https://bevyengine.org/) engine, in active development on the [`v5-alpha`](https://github.com/madisonrickert/WaveConductor/tree/v5-alpha) branch. It trades the React / Three.js / WebGL / Electron stack for a single native binary, built around the gallery-kiosk install as its design target: multi-hour unattended thermal stability over peak frame rate.
+
+Highlights in progress:
+
+- **Native cross-platform binaries** for macOS, Windows, and Linux, replacing the Electron wrapper.
+- **Compute-shader particle simulation** on a WebGPU-class GPU (Metal, DX12, or Vulkan), with no WebGL2 or CPU fallback.
+- **GPU-accelerated hand tracking** through an in-process MediaPipe pipeline on ONNX Runtime (CoreML on macOS, DirectML on Windows), alongside direct LeapC device support.
+- **Multi-hour soak stability** from per-platform thermal sensing and a frame-rate governor for unattended, day-long runs.
+
+The current shipping release is v4, documented below. Early v5 alpha builds appear on the [Releases](../../releases) page, marked as pre-releases.
+
 ## Features
 
 - **5 interactive sketches** — generative visualizations built with Three.js/WebGL, each with unique physics and rendering
