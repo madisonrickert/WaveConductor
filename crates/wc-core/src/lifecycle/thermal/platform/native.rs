@@ -39,7 +39,7 @@
 //! its generic component list mixes NVMe/WiFi/chipset sensors that must be
 //! filtered by name anyway. The cross-platform breadth is moot here (the NUC is
 //! Linux; Apple-Silicon returns empty from `sysinfo` regardless and uses
-//! [`super::macos`] once the optional macOS sensor dependency is enabled).
+//! `super::macos` once the optional macOS sensor dependency is enabled).
 
 use std::fs;
 use std::path::Path;
@@ -164,6 +164,7 @@ fn read_cpu_thermal_zones() -> Option<f32> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
     use super::*;
 

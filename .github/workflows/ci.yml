@@ -96,9 +96,13 @@ jobs:
     runs-on: ubuntu-latest
     # leaprs links LeapC; point at the Linux vendor tree (the .cargo/config.toml
     # default is the macOS path). Absolute so the linker resolves it regardless
-    # of the build's working directory.
+    # of the build's working directory. LD_LIBRARY_PATH covers runtime: CI sets
+    # RUSTFLAGS=-D warnings, which overrides the per-target rpath rustflags in
+    # .cargo/config.toml, so the test binary has no baked Leap rpath and would
+    # otherwise fail to load libLeapC.so.6 (exit 127) when nextest lists tests.
     env:
       LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
+      LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -146,6 +150,16 @@ jobs:
         with:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@v2
+      # RUSTFLAGS=-D warnings drops the config rpath (see test-linux); point the
+      # runtime loader at the vendored Leap lib per OS so the test binary loads.
+      - name: Leap runtime lib path
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "DYLD_FALLBACK_LIBRARY_PATH=$GITHUB_WORKSPACE/vendor/leapc/${{ matrix.leap }}" >> "$GITHUB_ENV"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/vendor/leapc/${{ matrix.leap }}" >> "$GITHUB_PATH"
+          fi
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features

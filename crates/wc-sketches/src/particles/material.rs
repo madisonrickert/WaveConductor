@@ -55,7 +55,7 @@ pub struct ParticleMaterial {
     /// brightness lift (`ScreensaverFade × (LineSettings::attract_brightness −
     /// 1)`), applied as `rgb *= 1 + y` so the calm field's whites clear the
     /// `AgX` tonemapper's white knee; `z`/`w` reserved (zero). Driven by
-    /// [`crate::line::screensaver::drive_attract_color`]; spawned at (and driven
+    /// `crate::line::screensaver::drive_attract_color`; spawned at (and driven
     /// back to) [`Self::attract_color_off`] outside attract, where `x = y = 0`
     /// makes both the tint (`mix(rgb, _, 0.0)`) and the lift (`rgb * 1.0`)
     /// provable no-ops — Active rendering is unchanged.

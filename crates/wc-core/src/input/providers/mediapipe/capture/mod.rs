@@ -104,7 +104,7 @@ pub trait FrameSource {
     /// shedding sensor/ISP work beyond the worker's decode-skipping. Called by
     /// the worker only on transitions (edge-triggered), never per frame.
     ///
-    /// Default: no-op. Implemented by [`AvfFrameSource`] on macOS; a documented
+    /// Default: no-op. Implemented by `AvfFrameSource` on macOS; a documented
     /// follow-up for the nokhwa V4L2/MediaFoundation backends.
     fn set_capture_throttle(&mut self, _throttled: bool) {}
 }

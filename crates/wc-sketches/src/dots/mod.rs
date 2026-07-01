@@ -10,7 +10,7 @@
 //!    [`crate::particles::sim_cpu::CpuMirror`] with the initial grid layout.
 //! 2. Every `Update` while `sketch_active(AppState::Dots)` is true:
 //!    - a. [`systems::update_dots_sim_params`] writes the current
-//!      [`DotsSettings`] values into `ParticleSimParams` (drag, stationary
+//!      `DotsSettings` values into `ParticleSimParams` (drag, stationary
 //!      spring, size scale — no attractor in D2).
 //!    - b. [`systems::update_dots_post_params`] writes [`post_process::DotsPostParams`]
 //!      from the live cursor (v4 UV convention), window resolution, and
@@ -248,7 +248,7 @@ pub(crate) fn register_dots_manifest(app: &mut App) {
 /// `SketchActivity::Active` so [`systems::decay_dots_mouse_attractor`] continues
 /// to fire until the attractor is fully released.
 ///
-/// Mirrors [`crate::line::line_idle_veto`] for the Line sketch.
+/// Mirrors `crate::line::line_idle_veto` for the Line sketch.
 fn dots_idle_veto(world: &World) -> bool {
     world
         .get_resource::<systems::DotsMouseAttractorState>()
@@ -265,7 +265,7 @@ fn dots_idle_veto(world: &World) -> bool {
 /// will be set up correctly on the next successful command delivery.
 ///
 /// Early-returns cleanly when `AudioCommandSender` is absent (headless tests:
-/// no cpal device). Mirrors [`crate::line::enter_line_audio`].
+/// no cpal device). Mirrors `crate::line::enter_line_audio`.
 fn enter_dots_audio(
     audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
 ) {
@@ -287,7 +287,7 @@ fn enter_dots_audio(
 /// dropped — the synth will be cleaned up on the next successful command.
 ///
 /// Early-returns cleanly when `AudioCommandSender` is absent (headless tests).
-/// Mirrors [`crate::line::exit_line_audio`].
+/// Mirrors `crate::line::exit_line_audio`.
 fn exit_dots_audio(
     audio_cmd: Option<bevy::ecs::system::NonSendMut<'_, wc_core::audio::ring::AudioCommandSender>>,
 ) {
@@ -451,7 +451,7 @@ const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(5
 /// which sets `phase = FadeOut`. The `drive_reload_state` system (registered in
 /// `wc-core`'s `LifecyclePlugin`) owns all subsequent phase transitions:
 /// `FadeOut` → Switch (sets `NextState::Home`) → `FadeIn` (sets
-/// `NextState::Dots`). Mirrors [`crate::line::restart_on_settings_change`].
+/// `NextState::Dots`). Mirrors `crate::line::restart_on_settings_change`.
 fn restart_on_dots_settings_change(
     mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
     time: Res<'_, Time>,
