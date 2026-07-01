@@ -53,6 +53,7 @@ pub mod template_adjustments_store;
 
 pub use systems::LineRoot;
 
+use crate::particles::material::ParticleMaterial;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -247,6 +248,10 @@ fn register_line_render_profile(app: &mut App) {
     app.add_systems(
         Update,
         apply_line_render_profile.run_if(in_state(AppState::Line)),
+    );
+    app.add_systems(
+        Update,
+        drive_line_master_brightness.run_if(in_state(AppState::Line)),
     );
     app.add_systems(OnExit(AppState::Line), reset_line_render_profile);
 }
@@ -546,6 +551,36 @@ fn reset_line_render_profile(
 ) {
     for (mut tonemapping, mut bloom) in &mut camera {
         wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
+    }
+}
+
+/// Write Line's `master_brightness` setting onto the particle render material
+/// each frame while Line is active (covers Active/Idle/Screensaver via
+/// `in_state(AppState::Line)`), so the dev-panel exposure knob is live. The
+/// brightness rides `render_params.x` and is multiplied onto the particle rgb
+/// before the post-process gamma; the always-on HDR headroom layered under it is
+/// the render shader's `PARTICLE_EMISSIVE` constant.
+///
+/// Change-gated like [`systems::palette::drive_palette`]: a read-only `get`
+/// compares the freshly-packed `render_params` against the material's current
+/// value and only takes the `get_mut` borrow (which marks the asset `Changed` →
+/// re-extract/re-upload) when they differ, so the settled multi-hour screensaver
+/// re-uploads nothing.
+fn drive_line_master_brightness(
+    settings: Res<'_, settings::LineSettings>,
+    roots: Query<'_, '_, &MeshMaterial2d<ParticleMaterial>, With<LineRoot>>,
+    mut materials: ResMut<'_, Assets<ParticleMaterial>>,
+) {
+    let target = ParticleMaterial::render_params(settings.master_brightness);
+    for handle in &roots {
+        let differs = materials
+            .get(&handle.0)
+            .is_some_and(|m| m.render_params != target);
+        if differs {
+            if let Some(mut material) = materials.get_mut(&handle.0) {
+                material.render_params = target;
+            }
+        }
     }
 }
 

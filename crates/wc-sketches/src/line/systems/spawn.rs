@@ -250,6 +250,9 @@ pub fn spawn_line(
         // Palette off at spawn (mode index 0); the palette driver writes the
         // active LineSettings palette values each frame (change-gated).
         palette_params: ParticleMaterial::palette_off(),
+        // master_brightness = 1.0 (no-op) at spawn; `drive_line_master_brightness`
+        // writes the live LineSettings value each frame (change-gated).
+        render_params: ParticleMaterial::render_params_default(),
     });
 
     // Build a flat mesh with `count * 6` vertices (all at origin).

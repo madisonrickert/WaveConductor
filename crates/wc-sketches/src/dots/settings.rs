@@ -146,6 +146,26 @@ pub struct DotsSettings {
     #[serde(default = "default_fabric_tension")]
     pub fabric_tension: f32,
 
+    /// Pre-tonemap exposure multiplier on the particle rgb. `1.0` is the
+    /// identity (no-op); above `1.0` lifts the whole grid's brightness onto a
+    /// higher part of the camera's tonemap curve (and pushes the HDR cores
+    /// further into the bloom/highlight region), below `1.0` dims it. Applied at
+    /// the particle source via the render material's `render_params.x` lane,
+    /// before the post-process `gamma` (brightness-then-gamma, matching Cymatics
+    /// and Line). Read live each frame by `drive_dots_master_brightness`; no
+    /// restart. Mirrors the Cymatics/Line `master_brightness` knob.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Master brightness",
+        section = "Visual",
+        category = User
+    )]
+    #[serde(default = "default_master_brightness")]
+    pub master_brightness: f32,
+
     /// Per-channel gamma curve applied as a final visual correction.
     /// v4 default = 1.0 (identity). Read live every frame in `post_params.rs`,
     /// so no restart is required.
@@ -455,6 +475,10 @@ fn default_fabric_tension() -> f32 {
     1.0
 }
 
+fn default_master_brightness() -> f32 {
+    1.0
+}
+
 fn default_gamma() -> f32 {
     1.0
 }
@@ -550,6 +574,10 @@ mod tests {
             "dot_spacing not preserved"
         );
         assert!(
+            (parsed.master_brightness - 1.0).abs() < 1e-6,
+            "master_brightness should fall back to default"
+        );
+        assert!(
             (parsed.gamma - 1.0).abs() < 1e-6,
             "gamma should fall back to default"
         );
@@ -571,6 +599,10 @@ mod tests {
         assert!(
             (defaults.fabric_tension - default_fabric_tension()).abs() < f32::EPSILON,
             "fabric_tension default mismatch"
+        );
+        assert!(
+            (defaults.master_brightness - default_master_brightness()).abs() < f32::EPSILON,
+            "master_brightness default mismatch"
         );
         assert!((defaults.gamma - default_gamma()).abs() < f32::EPSILON);
         assert!(

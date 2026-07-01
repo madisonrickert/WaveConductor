@@ -139,6 +139,7 @@ mod tests {
             attract_color: ParticleMaterial::attract_color_off(),
             template_color: ParticleMaterial::template_color_off(),
             palette_params: ParticleMaterial::palette_off(),
+            render_params: ParticleMaterial::render_params_default(),
         };
         let handle = assets.add(material);
         world.insert_resource(assets);

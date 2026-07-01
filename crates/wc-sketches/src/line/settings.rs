@@ -186,6 +186,26 @@ pub struct LineSettings {
     #[serde(default = "default_gravity_constant")]
     pub gravity_constant: f32,
 
+    /// Pre-tonemap exposure multiplier on the particle rgb. `1.0` is the
+    /// identity (no-op); above `1.0` lifts the whole field's brightness onto a
+    /// higher part of the camera's tonemap curve (and pushes the HDR cores
+    /// further into the bloom/highlight region), below `1.0` dims it. Applied at
+    /// the particle source via the render material's `render_params.x` lane,
+    /// before the post-process `gamma` (brightness-then-gamma, matching Cymatics
+    /// and Dots). Read live each frame by `drive_line_master_brightness`; no
+    /// restart. Mirrors the Cymatics/Dots `master_brightness` knob.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Master brightness",
+        section = "Visual",
+        category = User
+    )]
+    #[serde(default = "default_master_brightness")]
+    pub master_brightness: f32,
+
     /// Per-channel gamma curve applied as the final step of the gravity-smear
     /// post-process. v4 default = 1.0.
     #[setting(
@@ -584,6 +604,10 @@ fn default_gravity_constant() -> f32 {
     280.0
 }
 
+fn default_master_brightness() -> f32 {
+    1.0
+}
+
 fn default_gamma() -> f32 {
     1.0
 }
@@ -715,6 +739,10 @@ mod tests {
         assert!(
             (parsed.gravity_constant - 320.0).abs() < 1e-6,
             "gravity_constant not preserved"
+        );
+        assert!(
+            (parsed.master_brightness - 1.0).abs() < 1e-6,
+            "master_brightness not default"
         );
         assert!((parsed.gamma - 1.0).abs() < 1e-6, "gamma not default");
         assert!(

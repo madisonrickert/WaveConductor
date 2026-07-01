@@ -45,6 +45,24 @@ struct Particle {
 // x = 0 (Vec4(0), the Active/no-palette value) skips the palette branch below,
 // so color is the pre-palette path bit-exactly.
 @group(2) @binding(6) var<uniform> palette_params: vec4<f32>;
+// Render params (ParticleMaterial::render_params). x = master_brightness, the
+// per-sketch User exposure knob (Line/Dots), applied as a final linear multiply
+// on the particle rgb BEFORE the post-process gamma — the same brightness-then-
+// gamma order Cymatics uses. `1.0` is a bit-exact no-op (rgb * 1.0 == rgb).
+// y/z/w reserved (zero).
+@group(2) @binding(7) var<uniform> render_params: vec4<f32>;
+
+// HDR emissive headroom. The star sprite's centre texel tops out at ~0.89
+// (RGBA(228,221,222,237)/255), so un-multiplied particle cores never reach 1.0
+// and the camera's tonemap (which reserves the top of the displayable range for
+// scene values above 1.0) rolls them off into dim, washed highlights. Scaling
+// the rgb by this constant lifts the bright cores above 1.0 into real HDR
+// highlights — they bloom and survive the tonemap shoulder — while the soft
+// falloff edges stay sub-1.0, so only the cores glow (the "neon" look). This is
+// fixed art (the always-on baseline that makes particles HDR-native);
+// master_brightness above is the live exposure trim layered on top. Tune via
+// capture review.
+const PARTICLE_EMISSIVE: f32 = 1.5;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -220,7 +238,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // (and the gravity smear that samples them) back into AgX's white region,
     // so whites stay white. `attract_color.y == 0` (Active) is a bit-exact
     // no-op; the lift ramps in/out with the screensaver fade.
-    let rgb = tinted * (1.0 + attract_color.y);
+    //
+    // PARTICLE_EMISSIVE (fixed HDR headroom) and render_params.x
+    // (master_brightness, live exposure; 1.0 = no-op) are the final linear
+    // multiplies, applied here at the source so the gravity-smear / explode
+    // post-process and the camera tonemap all see the lifted cores.
+    let rgb = tinted * (1.0 + attract_color.y) * (PARTICLE_EMISSIVE * render_params.x);
     // Final alpha = sprite-alpha × particle-alpha so quad corners fade smoothly.
     return vec4<f32>(rgb, texel.a * in.alpha);
 }

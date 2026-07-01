@@ -77,6 +77,17 @@ pub struct ParticleMaterial {
     /// branch is skipped and color is the pre-palette path bit-exactly.
     #[uniform(6)]
     pub palette_params: Vec4,
+    /// Render params: `x` = `master_brightness`, the per-sketch User exposure
+    /// knob (Line/Dots), multiplied onto the particle rgb in the render shader
+    /// before the post-process gamma (brightness-then-gamma, matching Cymatics).
+    /// `y`/`z`/`w` reserved (zero). The render-no-op value
+    /// ([`Self::render_params_default`]) is `Vec4(1, 0, 0, 0)`: `rgb * 1.0 == rgb`.
+    /// A per-frame driver writes `x` from each sketch's `master_brightness`
+    /// setting (change-gated). Note this lane is the live exposure trim only; the
+    /// always-on HDR headroom that makes cores exceed 1.0 is the
+    /// `PARTICLE_EMISSIVE` constant in `assets/shaders/particles/render.wgsl`.
+    #[uniform(7)]
+    pub render_params: Vec4,
 }
 
 impl ParticleMaterial {
@@ -103,6 +114,23 @@ impl ParticleMaterial {
     /// by the spawn site, the palette driver, and tests.
     pub fn palette_off() -> Vec4 {
         Vec4::ZERO
+    }
+
+    /// The `render_params` value meaning "no exposure trim" (`master_brightness
+    /// == 1.0`), a bit-exact render no-op (`rgb * 1.0 == rgb`). Seeded at spawn;
+    /// the per-sketch driver overwrites `x` from the live `master_brightness`
+    /// setting each frame. Shared by the spawn sites and tests.
+    pub fn render_params_default() -> Vec4 {
+        Vec4::new(1.0, 0.0, 0.0, 0.0)
+    }
+
+    /// Pack the `render_params` uniform from a sketch's `master_brightness`
+    /// setting: `x` = brightness (clamped to `>= 0` so a stray negative never
+    /// inverts the rgb), `y`/`z`/`w` = 0. `master_brightness == 1.0` yields
+    /// [`Self::render_params_default`] — a bit-exact render no-op. Shared by
+    /// Line's and Dots' master-brightness drivers.
+    pub fn render_params(master_brightness: f32) -> Vec4 {
+        Vec4::new(master_brightness.max(0.0), 0.0, 0.0, 0.0)
     }
 
     /// Pack the attract-mode color uniform: `x` = velocity-tint strength (scaled by
@@ -160,6 +188,31 @@ mod tests {
     fn default_palette_params_is_off() {
         // mode channel (x) == 0 means "palette off" — the shader branch is skipped.
         assert_eq!(ParticleMaterial::palette_off(), Vec4::ZERO);
+    }
+
+    #[test]
+    fn render_params_default_is_unit_brightness() {
+        // x (master_brightness) == 1.0 is the render no-op (rgb * 1.0 == rgb);
+        // the reserved lanes are zero.
+        assert_eq!(
+            ParticleMaterial::render_params_default(),
+            Vec4::new(1.0, 0.0, 0.0, 0.0)
+        );
+        // The packer at brightness 1.0 must equal the default exactly.
+        assert_eq!(
+            ParticleMaterial::render_params(1.0),
+            ParticleMaterial::render_params_default()
+        );
+    }
+
+    #[test]
+    fn render_params_packs_and_clamps() {
+        // Brightness rides the x lane; reserved lanes stay zero.
+        let up = ParticleMaterial::render_params(2.2);
+        assert!((up.x - 2.2).abs() < 1e-6);
+        assert_eq!((up.y, up.z, up.w), (0.0, 0.0, 0.0));
+        // A stray negative clamps to zero (black) instead of inverting the rgb.
+        assert_eq!(ParticleMaterial::render_params(-1.0), Vec4::ZERO);
     }
 
     #[test]

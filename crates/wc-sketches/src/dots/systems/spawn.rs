@@ -179,11 +179,14 @@ pub fn spawn_dots(
     let material_handle = materials.add(ParticleMaterial {
         particles: particles_handle.clone(),
         star_texture,
-        // All four feature uniforms at their off-sentinels at spawn.
+        // All feature uniforms at their off-sentinels at spawn.
         solid_color: ParticleMaterial::solid_off(),
         attract_color: ParticleMaterial::attract_color_off(),
         template_color: ParticleMaterial::template_color_off(),
         palette_params: ParticleMaterial::palette_off(),
+        // master_brightness = 1.0 (no-op) at spawn; `drive_dots_master_brightness`
+        // writes the live DotsSettings value each frame (change-gated).
+        render_params: ParticleMaterial::render_params_default(),
     });
 
     // Flat mesh: count * 6 dummy vertices. The vertex shader derives particle
