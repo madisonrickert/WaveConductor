@@ -34,7 +34,7 @@
 //!   the `FadeOut` phase. The `drive_reload_state` system drives all subsequent
 //!   phase transitions.
 //!
-//! `drive_reload_state` (registered by [`ReloadOverlayPlugin`]):
+//! `drive_reload_state` (registered by `ReloadOverlayPlugin`):
 //! - Runs each `Update` frame.
 //! - Advances phase transitions, sets `NextState<AppState>` as needed, and
 //!   pushes `AudioCommand::SetMasterVolume` continuously during fade phases.

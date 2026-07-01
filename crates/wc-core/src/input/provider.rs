@@ -123,7 +123,7 @@ impl ProviderRegistry {
     /// Register a provider. Idempotent on ID — re-registering the same
     /// ID replaces the previous entry (useful for tests).
     ///
-    /// Calls [`HandTrackingProvider::start`] eagerly and logs the result.
+    /// Calls `HandTrackingProvider::start` eagerly and logs the result.
     /// If `start` returns an error, the provider is still registered so
     /// `Res<ProviderRegistry>` is always populated; callers that need to
     /// confirm readiness should check the provider's `status()`.

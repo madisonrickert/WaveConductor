@@ -363,7 +363,7 @@ pub(crate) fn register_cymatics_manifest(app: &mut App) {
 ///
 /// The veto's only legitimate job is to hold `Active` while the field rings
 /// down from a *real* interaction. Once `SketchActivity::Screensaver` is up the
-/// attract driver ([`screensaver::drive_cymatics_attract`]) writes
+/// attract driver (`screensaver::drive_cymatics_attract`) writes
 /// `active_radius` itself (≥ `attract_radius`), which the radius check below
 /// would read as "still energised" and veto — bouncing the state straight back
 /// to `Active`. `step_centers` then decays the radius for ~10 s until the veto

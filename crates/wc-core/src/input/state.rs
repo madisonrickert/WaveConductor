@@ -19,7 +19,7 @@ pub const MAX_HANDS: usize = 2;
 /// Current snapshot of all active hands.
 ///
 /// Updated each `PreUpdate` by [`crate::input::systems::mirror_state_resource`]
-/// from the current [`TrackedHand`] entity query.
+/// from the current [`crate::input::entity::TrackedHand`] entity query.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct HandTrackingState {
     /// Active hands as of [`Self::timestamp`]. Provider order; do not assume

@@ -160,7 +160,7 @@ impl Plugin for DotsLeapAttractorsPlugin {
 /// [`DotsHandAttractor`] to every [`TrackedHand`] that doesn't already have one.
 ///
 /// Timing-independent and idempotent — mirrors
-/// [`crate::line::leap_attractors::ensure_line_attractors`]. The
+/// `crate::line::leap_attractors::ensure_line_attractors`. The
 /// `Without<DotsHandAttractor>` query catches hands that were already being
 /// tracked when Dots became active (hand-tracking runs in `PreUpdate`, before
 /// the `StateTransition`, so those hands were added before the `OnEnter` and

@@ -237,7 +237,7 @@ fn push_audio(sender: &mut AudioCommandSender, command: AudioCommand) {
 /// visual modulation. The `8/π²` prefactor normalises peak amplitude to ±1.
 ///
 /// `pub(crate)`: the Line attract driver
-/// ([`crate::line::screensaver::drive_line_attract`]) drives its smear with
+/// (`crate::line::screensaver::drive_line_attract`) drives its smear with
 /// the same wave so the attract-mode glow matches the live rest state
 /// exactly (no brightness step at the Active → Screensaver boundary).
 pub(crate) fn triangle_wave_approx(t: f32) -> f32 {

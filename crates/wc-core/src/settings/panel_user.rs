@@ -1543,7 +1543,7 @@ fn render_enum(
 
 /// Write `variant` (a unit-variant name) into a reflected enum field.
 ///
-/// Applies a payload-less [`bevy::reflect::DynamicEnum`], which is exactly
+/// Applies a payload-less [`bevy::reflect::enums::DynamicEnum`], which is exactly
 /// the variant-switch operation `Reflect`-derived enums support for unit
 /// variants. Returns `true` on success. Failure (a payload variant or a name
 /// the enum doesn't have) leaves the field unchanged and logs a warning that

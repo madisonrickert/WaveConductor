@@ -15,7 +15,7 @@
 //! `draw_volume_button`, and `sync_volume_muted`. This module provides the
 //! shared primitive, touch-detection resource, and all draw systems.
 //! Plan 11.5 Bug 1 refactored all three draw systems from `&mut World` to
-//! typed [`SystemParam`] signatures so click events are processed correctly.
+//! typed `SystemParam` signatures so click events are processed correctly.
 
 use std::time::Duration;
 
@@ -136,7 +136,7 @@ pub struct SettingsPanelVisible(pub bool);
 /// `NextState<AppState>` to `Home`. Button size scales with [`PointerCoarse`]
 /// (32 px fine / 44 px coarse). Icon: [`egui_phosphor::regular::HOUSE`].
 ///
-/// Uses the standard [`SystemParam`] signature (not `&mut World`) so that
+/// Uses the standard `SystemParam` signature (not `&mut World`) so that
 /// [`bevy_egui::EguiContexts`] and [`NextState`] are held as ordinary
 /// typed borrows, avoiding any potential exclusive-world ordering issues that
 /// could prevent click events from being processed correctly.
@@ -194,7 +194,7 @@ pub fn draw_home_button(
 /// Hidden on [`AppState::Home`] — sketch chrome is not shown on the picker page,
 /// matching v4's behaviour where only active sketch pages show the cog.
 ///
-/// Uses the standard [`SystemParam`] signature (not `&mut World`) so that
+/// Uses the standard `SystemParam` signature (not `&mut World`) so that
 /// [`bevy_egui::EguiContexts`] and [`SettingsPanelVisible`] are held as ordinary
 /// typed borrows, avoiding any potential exclusive-world ordering issues that
 /// could prevent click events from being processed correctly.
@@ -251,7 +251,7 @@ pub fn draw_settings_button(
 /// Allocates a `size × size` rect with click sense, animates the background
 /// fill between [`OverlayStyle::button_fill_inactive`] and
 /// [`OverlayStyle::button_fill_hovered`] via `ctx.animate_value_with_time`,
-/// paints a [`backdrop_blur_frame`] (frosted glass + tint + stroke), then
+/// paints a [`backdrop_blur_frame`](super::frame::backdrop_blur_frame) (frosted glass + tint + stroke), then
 /// centres the icon glyph at `size * 0.5` font points. All colours are
 /// alpha-scaled by `opacity_mul` so the auto-fade system can dim the whole
 /// chrome surface uniformly.

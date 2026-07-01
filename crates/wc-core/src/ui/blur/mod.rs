@@ -135,7 +135,7 @@ impl Plugin for BackdropBlurPlugin {
     /// Initialise render-app resources that depend on `PipelineCache` and
     /// `AssetServer` being fully set up. Called after all `build` methods
     /// complete, matching the pattern used by
-    /// [`LinePostProcessPlugin`](crate::line::post_process::LinePostProcessPlugin).
+    /// `LinePostProcessPlugin`.
     fn finish(&self, app: &mut App) {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

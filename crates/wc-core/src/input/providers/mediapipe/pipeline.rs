@@ -153,7 +153,7 @@ pub struct PipelineConfig {
     /// Calibration gain `k` for the size-estimated hand depth (the camera
     /// focal length in square-side units — see
     /// [`super::coords::estimate_depth`]). `<= 0` disables the estimator and
-    /// pins depth to [`MEDIAPIPE_DEPTH_PROXY_MM`] (the live-set rollback knob).
+    /// pins depth to [`super::coords::MEDIAPIPE_DEPTH_PROXY_MM`] (the live-set rollback knob).
     /// Live-tunable from the dev panel
     /// (`HandTrackingSettings::depth_calibration_k`); refreshed each frame from
     /// the shared [`MediaPipeLiveTuning`].

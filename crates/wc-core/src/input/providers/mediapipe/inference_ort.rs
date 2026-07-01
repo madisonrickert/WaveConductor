@@ -1,6 +1,6 @@
 //! ONNX Runtime (`ort`) inference backend for the MediaPipe hand-tracking pipeline.
 //!
-//! [`OrtInference`] is the sole concrete [`HandInference`] implementation. It
+//! `OrtInference` is the sole concrete [`HandInference`] implementation. It
 //! registers a platform GPU execution provider so the conv-heavy palm and landmark
 //! models run off the CPU: `CoreML` on macOS (GPU/Neural Engine; measured ~164 ms
 //! CPU-only down to well under the 33 ms/frame budget at 30 Hz) and `DirectML` on

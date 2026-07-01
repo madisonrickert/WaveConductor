@@ -8,15 +8,15 @@
 //! Leap-device-millimetre convention the Leap provider uses, so every downstream
 //! consumer is unchanged.
 //!
-//! Data flow: [`HandTrackingProvider::start`] loads the two ONNX models, opens a
-//! [`capture::FrameSource`] (a real webcam under the
+//! Data flow: `HandTrackingProvider::start` loads the two ONNX models, opens a
+//! `capture::FrameSource` (a real webcam under the
 //! `hand-tracking-mediapipe-camera` feature, or an injected mock in tests), and
-//! spawns a [`worker`] thread that runs the [`pipeline::Pipeline`] at a capped
+//! spawns a `worker` thread that runs the `pipeline::Pipeline` at a capped
 //! rate and pushes completed [`crate::input::hand::Hand`] frames onto a
 //! lock-free `rtrb` ring. `poll` non-blockingly drains that ring on the Bevy
 //! main thread. While the sketch sits in `Idle`/`Screensaver`,
-//! [`apply_mediapipe_idle_throttle`] lowers the cap to
-//! [`worker::IDLE_INFERENCE_HZ`] (4 Hz) to shed sustained thermal load;
+//! `apply_mediapipe_idle_throttle` lowers the cap to
+//! `worker::IDLE_INFERENCE_HZ` (4 Hz) to shed sustained thermal load;
 //! a hand on a throttled frame still emits and wakes the app (~300 ms worst
 //! case — see the constant's docs).
 //!
@@ -70,7 +70,7 @@ pub struct MediaPipeConfig {
     /// Inference rate cap, in Hz. Hand tracking does not need full frame rate;
     /// capping leaves CPU headroom for the render thread and lowers heat.
     pub max_inference_hz: u32,
-    /// Apply render-rate One-Euro smoothing (see [`smoothing`]). On by default;
+    /// Apply render-rate One-Euro smoothing (see `smoothing`). On by default;
     /// turn off to expose the raw inference poses at the backend's cadence (for A/B comparison
     /// during tuning). This on/off escape hatch is the only smoothing knob still
     /// read from an env var at startup (`WAVECONDUCTOR_HAND_SMOOTHING=off`); the
@@ -78,20 +78,20 @@ pub struct MediaPipeConfig {
     /// [`crate::settings::HandTrackingSettings`] (dev panel, no restart).
     pub smoothing: bool,
     /// Rest deadzone for the grab signal so a relaxed-open hand reads exactly
-    /// `0` (see [`pipeline::PipelineConfig::grab_rest_deadzone`]). Seeded from and
+    /// `0` (see `pipeline::PipelineConfig::grab_rest_deadzone`). Seeded from and
     /// kept in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
     pub grab_rest_deadzone: f32,
     /// Calibration gain `k` for the size-estimated hand depth; `<= 0` disables
     /// the estimator and pins depth to the fixed 120 mm proxy (see
-    /// [`pipeline::PipelineConfig::depth_calibration_k`]). Seeded from and kept
+    /// `pipeline::PipelineConfig::depth_calibration_k`). Seeded from and kept
     /// in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
     pub depth_calibration_k: f32,
     /// One-Euro minimum cutoff (Hz) for render-rate smoothing — the at-rest
-    /// smoothing strength (see [`smoothing::DEFAULT_MIN_CUTOFF`]). Seeded from and
+    /// smoothing strength (see `smoothing::DEFAULT_MIN_CUTOFF`). Seeded from and
     /// kept in sync with [`crate::settings::HandTrackingSettings`] (dev panel).
     pub smoothing_min_cutoff: f32,
     /// One-Euro speed coefficient for render-rate smoothing (see
-    /// [`smoothing::DEFAULT_BETA`]). Seeded from and kept in sync with
+    /// `smoothing::DEFAULT_BETA`). Seeded from and kept in sync with
     /// [`crate::settings::HandTrackingSettings`] (dev panel).
     pub smoothing_beta: f32,
     /// Directory holding `palm_detection.onnx` and `hand_landmark.onnx`.
@@ -121,7 +121,7 @@ impl Default for MediaPipeConfig {
 /// Construct with [`Self::new`], register in the
 /// [`crate::input::provider::ProviderRegistry`] as
 /// [`crate::input::provider::ProviderRole::Primary`]. The registry calls
-/// [`HandTrackingProvider::start`] eagerly.
+/// `HandTrackingProvider::start` eagerly.
 pub struct MediaPipeProvider {
     config: MediaPipeConfig,
     /// Shared status snapshot, written by `poll` from worker messages and read
@@ -171,7 +171,7 @@ struct Runtime {
 
 impl MediaPipeProvider {
     /// Construct a provider. Does not open the camera or load models; that
-    /// happens in [`HandTrackingProvider::start`].
+    /// happens in `HandTrackingProvider::start`.
     #[must_use]
     pub fn new(config: MediaPipeConfig) -> Self {
         let smoother = HandSmoother::new(config.smoothing_min_cutoff, config.smoothing_beta);
@@ -206,8 +206,8 @@ impl MediaPipeProvider {
     }
 
     /// Live-set the idle inference throttle (shared with the running worker:
-    /// `true` caps inference at [`worker::IDLE_INFERENCE_HZ`]). Mirrors the
-    /// `SketchActivity` state — see [`apply_mediapipe_idle_throttle`]. Cheap
+    /// `true` caps inference at `worker::IDLE_INFERENCE_HZ`). Mirrors the
+    /// `SketchActivity` state — see `apply_mediapipe_idle_throttle`. Cheap
     /// and lock-free (one Relaxed atomic store); safe to call every frame.
     pub fn set_idle_throttle(&self, idle: bool) {
         self.live_tuning.set_idle_throttle(idle);
@@ -233,12 +233,12 @@ impl MediaPipeProvider {
         &self.config
     }
 
-    /// Set the horizontal mirror. Applies on the next [`HandTrackingProvider::start`].
+    /// Set the horizontal mirror. Applies on the next `HandTrackingProvider::start`.
     pub fn set_mirror(&mut self, mirror: bool) {
         self.config.mirror = mirror;
     }
 
-    /// Set the camera index. Applies on the next [`HandTrackingProvider::start`].
+    /// Set the camera index. Applies on the next `HandTrackingProvider::start`.
     pub fn set_camera_index(&mut self, index: u32) {
         self.config.camera_index = index;
     }
@@ -322,7 +322,7 @@ fn idle_throttle_for_activity(activity: Option<&crate::lifecycle::state::SketchA
 /// running `MediaPipe` provider's idle-throttle flag.
 ///
 /// `Idle`/`Screensaver` → the worker caps inference at
-/// [`worker::IDLE_INFERENCE_HZ`]; `Active` (or Home, where the sub-state is
+/// `worker::IDLE_INFERENCE_HZ`; `Active` (or Home, where the sub-state is
 /// absent) → full rate. The store is **unconditional every frame** rather than
 /// change-gated: it is one Relaxed atomic store behind a registry downcast (no
 /// allocation, no lock), and the unconditional write makes provider rebuilds

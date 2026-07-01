@@ -7,7 +7,7 @@
 //! behind the portable [`TemperatureSensor`] trait: any construction or sampling
 //! error degrades to `None` (→ `ThermalState` holds Cool/Schedule) rather than
 //! panicking. This is a dev-platform convenience; the deployment NUC uses
-//! [`super::native`].
+//! `super::native`.
 //!
 //! ## Blocking
 //!

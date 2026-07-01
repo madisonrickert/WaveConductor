@@ -92,8 +92,9 @@ pub(super) struct BlurUniforms {
 /// Cached render-pipeline state for the dual-Kawase backdrop blur.
 ///
 /// Lives in the [`RenderApp`]; created once via [`FromWorld`] in
-/// [`BackdropBlurPlugin::finish`]. The bind-group layout descriptor and queued
-/// pipeline IDs are reused every frame — no per-frame GPU allocation.
+/// [`BackdropBlurPlugin::finish`](super::BackdropBlurPlugin). The bind-group
+/// layout descriptor and queued pipeline IDs are reused every frame — no
+/// per-frame GPU allocation.
 ///
 /// The live [`BindGroupLayout`] object is retrieved at bind-group creation
 /// time via [`PipelineCache::get_bind_group_layout`].
@@ -478,7 +479,7 @@ pub fn backdrop_blur(
 /// Extract `UiOpacity::current` from the main world into [`ExtractedUiOpacity`]
 /// in the render world each frame.
 ///
-/// Registered in [`ExtractSchedule`] by [`BackdropBlurPlugin::setup_render_app`].
+/// Registered in [`ExtractSchedule`] by [`BackdropBlurPlugin::setup_render_app`](super::BackdropBlurPlugin).
 pub fn extract_ui_opacity(
     mut commands: Commands<'_, '_>,
     opacity: Extract<'_, '_, Res<'_, crate::ui::auto_fade::UiOpacity>>,
@@ -492,7 +493,7 @@ pub fn extract_ui_opacity(
 /// counter rather than depending on actual GPU draw calls, which require a
 /// real render device and GPU adapter.
 ///
-/// Registered in [`RenderSystems::Prepare`] by [`BackdropBlurPlugin::setup_render_app`].
+/// Registered in [`RenderSystems::Prepare`] by [`BackdropBlurPlugin::setup_render_app`](super::BackdropBlurPlugin).
 pub fn prepare_blur_run_count(
     enabled: Res<'_, BackdropBlurEnabled>,
     opacity: Res<'_, ExtractedUiOpacity>,
@@ -506,7 +507,7 @@ pub fn prepare_blur_run_count(
 /// Add the blur system to the `Core2d` schedule and register extraction +
 /// prepare systems.
 ///
-/// Called from [`BackdropBlurPlugin::setup_render_app`]. Ordered after
+/// Called from [`BackdropBlurPlugin::setup_render_app`](super::BackdropBlurPlugin). Ordered after
 /// [`Core2dSystems::PostProcess`] (so it reads the post-tonemap LDR colour) and
 /// before `bevy_egui`'s pass (so panels composite over the fresh blur with no
 /// one-frame lag). The blur writes only to [`BackdropBlurTexture`]; the view
@@ -526,7 +527,7 @@ pub(super) fn setup_render_graph(render_app: &mut bevy::app::SubApp) {
 
 /// Register the extraction and prepare systems in the given render sub-app.
 ///
-/// Called from [`BackdropBlurPlugin::setup_render_app`].
+/// Called from [`BackdropBlurPlugin::setup_render_app`](super::BackdropBlurPlugin).
 pub(super) fn setup_render_systems(render_app: &mut bevy::app::SubApp) {
     render_app
         .init_resource::<BlurNodeRunCount>()

@@ -54,8 +54,8 @@ const COMPOSITE_SHADER: &str = "shaders/backdrop_blur/composite.wgsl";
 /// Cached render-pipeline state for the blur-composite paint callback.
 ///
 /// Lives in the [`RenderApp`]; created once via [`FromWorld`] in
-/// [`BackdropBlurPlugin::finish`]. The bind-group layout descriptor and queued
-/// pipeline ID are reused every frame.
+/// [`BackdropBlurPlugin::finish`](super::BackdropBlurPlugin). The bind-group
+/// layout descriptor and queued pipeline ID are reused every frame.
 ///
 /// The live [`BindGroupLayout`] object is retrieved at bind-group creation
 /// time via [`PipelineCache::get_bind_group_layout`], matching the pattern

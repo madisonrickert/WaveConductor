@@ -1,6 +1,6 @@
 //! # wc-core-macros
 //!
-//! Proc-macro crate paired with [`wc-core`]. Exports the
+//! Proc-macro crate paired with `wc-core`. Exports the
 //! `#[derive(SketchSettings)]` derive macro.
 //!
 //! The runtime types referenced by the macro output (`SketchSettings`,

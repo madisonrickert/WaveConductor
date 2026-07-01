@@ -343,7 +343,7 @@ pub fn apply_provider_choice(
     control.last_applied = choice;
 }
 
-/// Publish the coarse [`HandTrackingActivation`] cue the settings panel reads.
+/// Publish the coarse [`HandTrackingActivation`](wc_core::input::activation::HandTrackingActivation) cue the settings panel reads.
 ///
 /// Composes the watch bookkeeping this module owns with the registry-derived
 /// state from [`wc_core::input::activation::activation_from_registry`]: while a

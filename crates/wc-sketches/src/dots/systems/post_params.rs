@@ -36,7 +36,7 @@
 //! `(mouseX / width, (height − mouseY) / height)`. The explode shader was
 //! ported to match v4's UV, so the same flip is applied here so the spiral
 //! centers on the physical cursor. The exact formula is tested in
-//! [`tests::i_mouse_v4_uv_formula_with_known_cursor`].
+//! `tests::i_mouse_v4_uv_formula_with_known_cursor`.
 //!
 //! ## No-cursor guard
 //!

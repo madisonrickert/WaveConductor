@@ -67,7 +67,7 @@ impl LissajousSpeeds {
 // Pure Lissajous path
 // ---------------------------------------------------------------------------
 
-/// Two slow incommensurate Lissajous paths in [0,1]².
+/// Two slow incommensurate Lissajous paths in \[0,1\]².
 ///
 /// The angular frequencies in `speeds` should be chosen so no pair is
 /// rationally related; the pattern therefore does not visibly repeat over a

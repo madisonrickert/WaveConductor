@@ -26,9 +26,9 @@ pub const ITER_PARAMS_STRIDE: u64 = 256;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct SimParamsGpu {
-    /// Primary wave-source centre, UV [0,1].
+    /// Primary wave-source centre, UV `[0,1]`.
     pub center: [f32; 2],
-    /// Secondary wave-source centre, UV [0,1].
+    /// Secondary wave-source centre, UV `[0,1]`.
     pub center2: [f32; 2],
     /// Sim grid size in texels (w, h).
     pub resolution: [u32; 2],
@@ -126,7 +126,7 @@ impl Default for IterParamsGpu {
 // Compile-time guard: `IterParamsGpu` must be exactly the dynamic-offset stride.
 const _: () = assert!(std::mem::size_of::<IterParamsGpu>() == 256);
 
-/// Handles to the two ping-pong textures. Tagged on [`CymaticsRoot`] and
+/// Handles to the two ping-pong textures. Tagged on [`crate::cymatics::CymaticsRoot`] and
 /// mirrored into [`CymaticsSimParams`] for the render world.
 ///
 /// The odd-N continuity refresh guarantees texture A holds the latest field at

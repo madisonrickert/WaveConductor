@@ -101,7 +101,7 @@ impl Material2d for CymaticsMaterial {
 /// Spawn the window-sized fullscreen quad tagged [`CymaticsRoot`].
 ///
 /// The mesh is a [`Rectangle`] sized to `window_size`; call
-/// `resize_cymatics_quad` on [`WindowResized`] to keep it synchronised.
+/// `resize_cymatics_quad` on [`bevy::window::WindowResized`] to keep it synchronised.
 /// The material is initialised with `skew.x = 0` (resting, updated each
 /// frame by `update_cymatics_material`), `skew.y = master_brightness`
 /// (from settings; default 1.0 so the first frame is not black),

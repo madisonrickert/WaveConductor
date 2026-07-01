@@ -66,7 +66,7 @@ pub enum SettingKind {
 ///
 /// Enum settings must consist solely of unit variants (no tuple or struct
 /// payloads): the `ComboBox` writes a selection back through reflection as a
-/// payload-less [`bevy::reflect::DynamicEnum`], which cannot construct a
+/// payload-less [`bevy::reflect::enums::DynamicEnum`], which cannot construct a
 /// payload variant. A proc macro cannot see the enum's definition (only the
 /// field's type name), so this cannot be a compile error; instead this
 /// function fails loudly in debug builds — the `debug_assert!`s below fire
