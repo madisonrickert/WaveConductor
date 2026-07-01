@@ -47,7 +47,7 @@ jobs:
       # regardless of the build's working directory.
       LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/${{ matrix.leap }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -92,7 +92,7 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "${{ matrix.app_path }}" -DestinationPath "${{ matrix.asset }}" -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
@@ -108,7 +108,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

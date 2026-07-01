@@ -16,6 +16,12 @@ ignore = [
     # safe upgrade until bevy_console's derive chain drops it. Re-evaluate on
     # the next bevy_console bump.
     "RUSTSEC-2024-0370",
+    # `ttf-parser` was declared unmaintained by its author (will not receive
+    # further fixes). Pulled in transitively by the Bevy text/font stack
+    # (bevy_text → cosmic-text → rustybuzz/ttf-parser). "Unmaintained", not a
+    # vulnerability; no safe upgrade until the text stack migrates off it.
+    # Re-evaluate on the next bevy/cosmic-text bump.
+    "RUSTSEC-2026-0192",
 ]
 
 [licenses]

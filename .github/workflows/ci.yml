@@ -23,7 +23,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
@@ -34,7 +34,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
@@ -52,7 +52,7 @@ jobs:
     name: check-secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
@@ -63,7 +63,7 @@ jobs:
     name: validate-shaders
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
@@ -76,7 +76,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --workspace --all-features
@@ -85,7 +85,7 @@ jobs:
     name: cargo-audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -94,8 +94,13 @@ jobs:
   test-linux:
     name: test (ubuntu-latest)
     runs-on: ubuntu-latest
+    # leaprs links LeapC; point at the Linux vendor tree (the .cargo/config.toml
+    # default is the macOS path). Absolute so the linker resolves it regardless
+    # of the build's working directory.
+    env:
+      LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
@@ -109,6 +114,10 @@ jobs:
           sudo apt-get install -y \
             libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      # The vendored tree ships libLeapC.so.6 but `-lLeapC` needs an unversioned
+      # libLeapC.so at link time (macOS vendors its alias; Windows links LeapC.lib).
+      - name: Provide unversioned LeapC soname
+        run: ln -sf libLeapC.so.6 vendor/leapc/linux-x86_64/libLeapC.so
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
@@ -122,9 +131,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-latest
+            leap: macos-aarch64
+          - os: windows-latest
+            leap: windows-x86_64
+    # leaprs links LeapC; override the .cargo/config.toml macOS default per runner
+    # (macos-latest is arm64; windows needs the LeapC.lib import library).
+    env:
+      LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/${{ matrix.leap }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
@@ -139,7 +156,7 @@ jobs:
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
