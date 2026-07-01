@@ -41,6 +41,14 @@ const SUBCOMMANDS: &[Entry] = &[
         description: "Build the release binary and assemble a self-contained WaveConductor.app.",
     },
     Entry {
+        name: "bundle-linux",
+        description: "Build the release binary and assemble a self-contained Linux staging dir.",
+    },
+    Entry {
+        name: "bundle-windows",
+        description: "Build the release binary and assemble a self-contained Windows staging dir.",
+    },
+    Entry {
         name: "validate-shaders",
         description:
             "Parse + validate WGSL shaders with naga (self-contained; #import shaders skipped).",

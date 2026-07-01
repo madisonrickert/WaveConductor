@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "5.0.0-dev"
+version = "5.0.0-alpha.1"
 edition = "2021"
 license = "MIT"
 authors = ["Madison Rickert <3495636+madisonrickert@users.noreply.github.com>"]
@@ -166,12 +166,17 @@ rand = "0.10"
 leaprs = { version = "0.2.2", default-features = false, features = ["gemini"] }
 # ONNX Runtime for the in-process MediaPipe webcam hand-tracking provider
 # (behind `hand-tracking-mediapipe`). Wraps the C++ ONNX Runtime — `download-binaries`
-# ships the prebuilt lib + CoreML EP on macOS (GPU/Neural Engine inference). Measured
-# improvement over the previous pure-Rust path: palm.run drops from ~164 ms to well
-# under the 33 ms/frame budget at 30 Hz. The two-stage palm→landmark glue (anchors,
-# NMS, ROI) is implemented in `wc-core/src/input/providers/mediapipe/`. The prebuilt
-# binary is subject to the CDLA-Permissive-2.0 license, allowed in deny.toml.
-ort = { version = "=2.0.0-rc.12", features = ["coreml", "download-binaries"] }
+# ships the prebuilt lib for every target. Measured improvement over the previous
+# pure-Rust path: palm.run drops from ~164 ms to well under the 33 ms/frame budget at
+# 30 Hz. The two-stage palm→landmark glue (anchors, NMS, ROI) is implemented in
+# `wc-core/src/input/providers/mediapipe/`. The prebuilt binary is subject to the
+# CDLA-Permissive-2.0 license, allowed in deny.toml.
+#
+# EP features are selected PER TARGET in `wc-core/Cargo.toml`, not here: `coreml`
+# on macOS (GPU/Neural Engine) and `directml` on Windows (vendor-neutral DX12,
+# covering AMD/Intel iGPUs). Enabling an EP feature on a platform that cannot build
+# it would break `--all-features` CI there, so the base dep carries neither.
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
 # Cross-platform webcam capture for the MediaPipe provider's production
 # `FrameSource` (behind `hand-tracking-mediapipe-camera`; AVFoundation / V4L2 /
 # MediaFoundation). Kept in a sub-feature so the inference/glue stay buildable
@@ -188,9 +193,9 @@ serde_json = "1"
 # wasm-only web bindings (used by settings persistence on web targets)
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
 # Workspace-internal crates
-wc-core = { version = "5.0.0-dev", path = "crates/wc-core" }
-wc-core-macros = { version = "5.0.0-dev", path = "crates/wc-core-macros" }
-wc-sketches = { version = "5.0.0-dev", path = "crates/wc-sketches" }
+wc-core = { version = "5.0.0-alpha.1", path = "crates/wc-core" }
+wc-core-macros = { version = "5.0.0-alpha.1", path = "crates/wc-core-macros" }
+wc-sketches = { version = "5.0.0-alpha.1", path = "crates/wc-sketches" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

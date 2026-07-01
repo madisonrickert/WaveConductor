@@ -7,7 +7,7 @@
 
 #![allow(clippy::print_stdout, reason = "xtask is a CLI; printing is its job")]
 
-mod bundle_mac;
+mod bundle;
 mod capture;
 mod check_secrets;
 mod manifest;
@@ -30,8 +30,12 @@ enum Command {
     CheckSecrets(check_secrets::Args),
     /// Deterministic visual capture + baseline regression for a scenario.
     Capture(capture::Args),
-    /// Build the release binary and assemble a self-contained WaveConductor.app.
-    BundleMac(bundle_mac::Args),
+    /// Build the release binary and assemble a self-contained WaveConductor.app (macOS).
+    BundleMac(bundle::mac::Args),
+    /// Build the release binary and assemble a self-contained Linux staging dir.
+    BundleLinux(bundle::linux::Args),
+    /// Build the release binary and assemble a self-contained Windows staging dir.
+    BundleWindows(bundle::windows::Args),
     /// Parse + validate WGSL shaders with naga (self-contained shaders;
     /// `#import` shaders are runtime-validated).
     ValidateShaders(validate_shaders::Args),
@@ -46,7 +50,9 @@ fn main() {
         }
         Command::CheckSecrets(args) => check_secrets::run(args),
         Command::Capture(args) => capture::run(args),
-        Command::BundleMac(args) => bundle_mac::run(args),
+        Command::BundleMac(args) => bundle::mac::run(args),
+        Command::BundleLinux(args) => bundle::linux::run(args),
+        Command::BundleWindows(args) => bundle::windows::run(args),
         Command::ValidateShaders(args) => validate_shaders::run(args),
     };
     if let Err(e) = result {

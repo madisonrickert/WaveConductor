@@ -7,26 +7,30 @@
 //!
 //! ## Feature gating
 //!
-//! Real sensing is enabled by the `thermal-sensor` cargo feature. It pulls in NO
-//! dependency: the Linux reader uses `std::fs` directly. When the feature is
-//! **off** (the wc-core default), the reader modules are not compiled and
-//! [`create_sensor`] always returns `None`, so the thermal state holds
-//! Cool/Schedule — the design's intended no-sensor degradation. When the feature
-//! is **on**:
+//! Real sensing is enabled by the `thermal-sensor` cargo feature (plus the
+//! per-OS `thermal-sensor-macos` / `thermal-sensor-windows` features for the
+//! platforms whose readers need an optional dependency). When no real reader is
+//! compiled, [`create_sensor`] returns `None`, so the thermal state holds
+//! Cool/Schedule — the design's intended no-sensor degradation.
 //!
-//! - **Linux** → [`native::SysfsThermalSensor`] reads the hottest CPU/SoC
-//!   temperature from the kernel `hwmon` / `thermal_zone` sysfs (zero deps).
-//! - **Windows** → compiles, but the sysfs paths are absent so it returns
-//!   `None` (Windows is not a deployment target; a future WMI reader could slot
-//!   in here).
+//! - **Linux** (`thermal-sensor`) → [`native::SysfsThermalSensor`] reads the
+//!   hottest CPU/SoC temperature from the kernel `hwmon` / `thermal_zone` sysfs
+//!   (zero deps).
+//! - **Windows** (`thermal-sensor-windows`) → [`windows::WddmThermalSensor`] reads
+//!   the iGPU/SoC die temperature via the no-admin WDDM `D3DKMT` adapter-perf-data
+//!   query as a coarse throttle proxy (reliable no-admin CPU-die temps are not
+//!   available on consumer Windows). Without the feature, Windows falls to the
+//!   `native` reader, whose sysfs paths are absent, so it returns `None`.
 //! - **wasm** → `None` (no thermal API in the browser).
-//! - **macOS** → `None` *unless* the separate `thermal-sensor-macos` feature is
-//!   also enabled, in which case [`macos::MacmonSensor`] reads the Apple-Silicon
-//!   `SoC` temperature via `macmon` (Apple `IOReport`, no sudo). Plain
-//!   `thermal-sensor` compiles on macOS and falls through to `None`.
+//! - **macOS** → `None` *unless* `thermal-sensor-macos` is enabled, in which case
+//!   [`macos::MacmonSensor`] reads the Apple-Silicon `SoC` temperature via
+//!   `macmon` (Apple `IOReport`, no sudo). Plain `thermal-sensor` compiles on
+//!   macOS and falls through to `None`.
 //!
 //! Exactly one `create_sensor` body is compiled, selected by `cfg`, so there are
-//! no unreachable-expression warnings across the feature/target matrix.
+//! no unreachable-expression warnings across the feature/target matrix. The
+//! Linux/`native` arm explicitly yields to the Windows arm (`not(all(windows +
+//! thermal-sensor-windows))`) so the two never both define `create_sensor`.
 
 #[cfg(all(feature = "thermal-sensor-macos", target_os = "macos"))]
 mod macos;
@@ -34,9 +38,13 @@ mod macos;
 #[cfg(all(
     feature = "thermal-sensor",
     not(target_os = "macos"),
-    not(target_arch = "wasm32")
+    not(target_arch = "wasm32"),
+    not(all(feature = "thermal-sensor-windows", target_os = "windows"))
 ))]
 mod native;
+
+#[cfg(all(feature = "thermal-sensor-windows", target_os = "windows"))]
+mod windows;
 
 use super::sensor::TemperatureSensor;
 
@@ -49,13 +57,25 @@ pub fn create_sensor() -> Option<Box<dyn TemperatureSensor>> {
     Some(boxed)
 }
 
-/// Linux/Windows + `thermal-sensor`: use the zero-dependency sysfs reader.
-/// `None` if the OS exposes no readable CPU/SoC temperature (e.g. Windows, where
-/// the Linux sysfs paths are absent).
+/// Windows + `thermal-sensor-windows`: try the no-admin WDDM `D3DKMT` sensor.
+/// `None` when no adapter exposes a temperature (common on integrated GPUs), so
+/// the monitor degrades to its schedule fallback.
+#[cfg(all(feature = "thermal-sensor-windows", target_os = "windows"))]
+#[must_use]
+pub fn create_sensor() -> Option<Box<dyn TemperatureSensor>> {
+    let sensor = windows::WddmThermalSensor::new()?;
+    let boxed: Box<dyn TemperatureSensor> = Box::new(sensor);
+    Some(boxed)
+}
+
+/// Linux (and Windows without `thermal-sensor-windows`) + `thermal-sensor`: use
+/// the zero-dependency sysfs reader. `None` if the OS exposes no readable CPU/SoC
+/// temperature (e.g. Windows, where the Linux sysfs paths are absent).
 #[cfg(all(
     feature = "thermal-sensor",
     not(target_os = "macos"),
-    not(target_arch = "wasm32")
+    not(target_arch = "wasm32"),
+    not(all(feature = "thermal-sensor-windows", target_os = "windows"))
 ))]
 #[must_use]
 pub fn create_sensor() -> Option<Box<dyn TemperatureSensor>> {
@@ -70,9 +90,11 @@ pub fn create_sensor() -> Option<Box<dyn TemperatureSensor>> {
     all(
         feature = "thermal-sensor",
         not(target_os = "macos"),
-        not(target_arch = "wasm32")
+        not(target_arch = "wasm32"),
+        not(all(feature = "thermal-sensor-windows", target_os = "windows"))
     ),
-    all(feature = "thermal-sensor-macos", target_os = "macos")
+    all(feature = "thermal-sensor-macos", target_os = "macos"),
+    all(feature = "thermal-sensor-windows", target_os = "windows")
 )))]
 #[must_use]
 pub fn create_sensor() -> Option<Box<dyn TemperatureSensor>> {

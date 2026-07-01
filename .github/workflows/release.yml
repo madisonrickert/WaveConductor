@@ -1,0 +1,153 @@
+name: Release
+
+# Builds the cross-platform v5 alpha and publishes a GitHub pre-release.
+#
+# - Push a `v*` tag  -> build all three platforms, then publish a pre-release with
+#   the archives attached.
+# - `workflow_dispatch` -> build all three platforms only (no publish). Use this as
+#   a dry-run to validate the Windows/macOS release builds before pushing the real
+#   tag (the cross-platform builds are otherwise first exercised at tag time).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # One-shot CI build: incremental metadata is dead weight and bloats the cache.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundle: bundle-mac
+            leap: macos-aarch64
+            app_path: target/WaveConductor.app
+            asset: WaveConductor-macos-arm64.zip
+          - os: windows-latest
+            bundle: bundle-windows
+            leap: windows-x86_64
+            app_path: target/dist/windows-x86_64/WaveConductor
+            asset: WaveConductor-windows-x86_64.zip
+          - os: ubuntu-latest
+            bundle: bundle-linux
+            leap: linux-x86_64
+            app_path: target/dist/linux-x86_64/WaveConductor
+            asset: WaveConductor-linux-x86_64.tar.gz
+    env:
+      # `leaprs`'s build.rs reads this to find LeapC for linking. The
+      # `.cargo/config.toml` default points at macos-aarch64; override per runner
+      # (its `force = false` lets this env win). Absolute so the linker resolves it
+      # regardless of the build's working directory.
+      LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/${{ matrix.leap }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Linux-only: Bevy's native build deps + the mold linker (matches ci.yml).
+      - name: Install Linux build deps for Bevy
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      # Linux-only: the vendored tree ships `libLeapC.so.6` but `-lLeapC` needs an
+      # unversioned `libLeapC.so` at link time. macOS vendors its unversioned alias
+      # already; Windows links against `LeapC.lib`.
+      - name: Provide unversioned LeapC soname (Linux link)
+        if: runner.os == 'Linux'
+        run: ln -sf libLeapC.so.6 vendor/leapc/linux-x86_64/libLeapC.so
+
+      # Build the release binary, then assemble the platform staging layout. The
+      # bundler runs `cargo build -p waveconductor --release` itself; keeping it one
+      # step means LEAPSDK_LIB_PATH applies to the build.
+      - name: Build + bundle
+        run: cargo xtask ${{ matrix.bundle }}
+
+      - name: Archive (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent "${{ matrix.app_path }}" "${{ matrix.asset }}"
+
+      - name: Archive (Linux)
+        if: runner.os == 'Linux'
+        run: tar czf "${{ matrix.asset }}" -C target/dist/linux-x86_64 WaveConductor
+
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "${{ matrix.app_path }}" -DestinationPath "${{ matrix.asset }}" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: publish pre-release
+    needs: build
+    # Only publish when a tag triggered the run; workflow_dispatch stays a dry-run.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          cat > NOTES.md <<'EOF'
+          First cross-platform alpha of the v5 Rust + Bevy rewrite. Unsigned
+          pre-release binaries for macOS (Apple Silicon), Windows (x86_64), and
+          Linux (x86_64).
+
+          Downloads:
+          - macOS (Apple Silicon): WaveConductor-macos-arm64.zip
+          - Windows (x86_64): WaveConductor-windows-x86_64.zip
+          - Linux (x86_64): WaveConductor-linux-x86_64.tar.gz
+
+          Requirements: a WebGPU-capable GPU (Metal / DX12 / Vulkan 1.2+). Hand
+          tracking is optional and needs the Ultraleap tracking service running.
+
+          Notes:
+          - Unsigned builds. macOS: right-click the app and choose Open (or run
+            xattr -dr com.apple.quarantine). Windows: SmartScreen may warn, so click
+            More info, then Run anyway.
+          - GPU inference acceleration: CoreML on macOS, DirectML on Windows
+            (AMD/Intel integrated GPUs), CPU on Linux.
+          - Windows temperature telemetry reads the WDDM adapter temperature as a
+            coarse throttle proxy and may be unavailable on some integrated GPUs.
+          - The 8-hour thermal soak gate is deferred for this alpha. This is a
+            pre-release for testing, not a soak-verified release.
+          - Intel Mac and web/WASM targets are not part of this alpha.
+          EOF
+
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          --repo "${{ github.repository }}"
+          --title "WaveConductor ${{ github.ref_name }}"
+          --notes-file NOTES.md
+          --prerelease
+          dist/*

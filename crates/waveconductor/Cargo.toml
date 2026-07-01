@@ -31,8 +31,9 @@ hand-tracking-gestures = [
 # real binary needs a real webcam) and the sketch hand-consumers. Additive to
 # `hand-tracking-gestures`, and in `default`: the deployment binary ships both
 # backends and the runtime "Tracking provider" setting decides which one runs
-# — see `src/hand_providers.rs`. The ort/CoreML inference backend is unconditional —
-# it is part of `wc-core/hand-tracking-mediapipe`.
+# — see `src/hand_providers.rs`. The ort inference backend is part of
+# `wc-core/hand-tracking-mediapipe`; its GPU execution provider is selected per
+# platform (CoreML on macOS, DirectML on Windows, CPU on Linux).
 hand-tracking-mediapipe = [
     "wc-core/hand-tracking-mediapipe-camera",
     "wc-sketches/hand-tracking-gestures",
@@ -43,7 +44,8 @@ bevy = { workspace = true }
 bevy_egui = { workspace = true }
 # `thermal-sensor` gives the deployment binary real OS temperature readings. On
 # the Linux NUC this reads the hottest hardware component via zero-dependency
-# sysfs probing; macOS adds `thermal-sensor-macos` below for Apple Silicon.
+# sysfs probing; macOS adds `thermal-sensor-macos` (Apple Silicon) and Windows
+# adds `thermal-sensor-windows` (WDDM D3DKMT) in their target tables below.
 wc-core = { workspace = true, features = ["thermal-sensor", "templates"] }
 wc-sketches = { workspace = true, features = ["templates"] }
 tracing = { workspace = true }
@@ -56,3 +58,6 @@ leaprs = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wc-core = { workspace = true, features = ["thermal-sensor", "thermal-sensor-macos"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wc-core = { workspace = true, features = ["thermal-sensor", "thermal-sensor-windows"] }

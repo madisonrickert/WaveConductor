@@ -1,11 +1,12 @@
 //! ONNX Runtime (`ort`) inference backend for the MediaPipe hand-tracking pipeline.
 //!
-//! [`OrtInference`] is the sole concrete [`HandInference`] implementation. On macOS
-//! it registers the `CoreML` execution provider so the conv-heavy palm and landmark
-//! models run on the GPU/Neural Engine (measured improvement from ~164 ms CPU-only
-//! to well under the 33 ms/frame budget at 30 Hz). ONNX Runtime falls back to CPU
-//! for any op CoreML cannot handle, so load never fails closed on an unsupported
-//! operator.
+//! [`OrtInference`] is the sole concrete [`HandInference`] implementation. It
+//! registers a platform GPU execution provider so the conv-heavy palm and landmark
+//! models run off the CPU: `CoreML` on macOS (GPU/Neural Engine; measured ~164 ms
+//! CPU-only down to well under the 33 ms/frame budget at 30 Hz) and `DirectML` on
+//! Windows (vendor-neutral DX12, covering AMD/Intel integrated GPUs). Other targets
+//! (Linux) run on ONNX Runtime's CPU EP. ONNX Runtime falls back to CPU for any op
+//! the EP cannot place, so load never fails closed on an unsupported operator.
 //!
 //! `ort` ships the C++ ONNX Runtime as a prebuilt native binary downloaded at build
 //! time (`download-binaries` feature). The binary is subject to the
@@ -14,20 +15,32 @@
 //! The same vendored `.onnx` models used throughout the pipeline work without
 //! conversion; only the backend changes.
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 use ort::ep::coreml::ComputeUnits;
-use ort::ep::{CoreML, ExecutionProvider};
-use ort::session::builder::GraphOptimizationLevel;
+#[cfg(target_os = "macos")]
+use ort::ep::CoreML;
+#[cfg(target_os = "windows")]
+use ort::ep::DirectML;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use ort::ep::ExecutionProvider;
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 use ort::value::TensorRef;
 
 use super::inference::{HandInference, InferenceError, Tensor};
 
-/// Backend label when the `CoreML` execution provider registered successfully.
-const BACKEND_COREML: &str = "ort/CoreML";
-/// Backend label when `CoreML` registration failed and the session runs on CPU.
+/// Backend label when the session runs on ONNX Runtime's CPU execution provider
+/// (no GPU EP for this target, or the EP failed to register and fell back).
 const BACKEND_CPU: &str = "ort/CPU";
+/// Backend label when the macOS `CoreML` execution provider registered.
+#[cfg(target_os = "macos")]
+const BACKEND_COREML: &str = "ort/CoreML";
+/// Backend label when the Windows `DirectML` execution provider registered.
+#[cfg(target_os = "windows")]
+const BACKEND_DIRECTML: &str = "ort/DirectML";
 
 /// `ort`-backed inference for one ONNX model stage.
 ///
@@ -47,70 +60,38 @@ pub struct OrtInference {
 }
 
 impl OrtInference {
-    /// Load an ONNX model from its bytes, registering the `CoreML` execution
-    /// provider (ONNX Runtime falls back to CPU for any unsupported op).
-    ///
-    /// `CoreML` runs in its default `NeuralNetwork` model format. The newer
-    /// `MLProgram` format covers a few more ops in principle, but its stricter
-    /// parser rejects these vendored `MediaPipe` graphs at compile time: the build
-    /// fails on a fused `Conv` op with `Required param 'pad' is missing`. Even
-    /// patched it only reaches 27 `CoreML` partitions — worse than
-    /// `NeuralNetwork`'s 6 once the palm model's `PReLU` slopes are reshaped to the
-    /// `[C, 1, 1]` shape the EP accepts — so we stay on `NeuralNetwork`. `Core ML`
-    /// places each segment on ANE/GPU/CPU itself, and the compiled artifact is
-    /// cached on disk per model ([`coreml_cache_dir`]) to skip recompiling every
-    /// launch.
+    /// Load an ONNX model from its bytes, registering the platform GPU execution
+    /// provider (see [`register_accelerator`]). ONNX Runtime falls back to CPU for
+    /// any op the EP cannot place, so load never fails closed.
     ///
     /// The session's CPU thread pool is capped to two intra-op threads with
     /// spin-waiting disabled: two sessions (palm + landmark) each own a pool, and
     /// ONNX Runtime's default spin-wait kept whole cores busy between frames at
-    /// our `<= 30 Hz` cadence even when most of the graph was on `Core ML`. This
-    /// is independent of model format and is the main idle-CPU fix.
+    /// our `<= 30 Hz` cadence even when most of the graph was on the GPU. This is
+    /// independent of EP/model format and is the main idle-CPU fix.
     ///
     /// # Errors
     /// Returns [`InferenceError::Load`] if the session cannot be built or the
     /// model has no input.
     pub fn load(model_bytes: &[u8]) -> Result<Self, InferenceError> {
-        let mut coreml = CoreML::default()
-            // ALL lets Core ML place each segment on ANE/GPU/CPU as it sees fit
-            // (the default, set explicitly). The default NeuralNetwork model
-            // format is kept deliberately — see the doc comment: MLProgram fails
-            // to compile these vendored models.
-            .with_compute_units(ComputeUnits::All);
-        // Core ML compiles each model to a native artifact on first load; caching
-        // it on disk avoids paying that compile every launch. A missing cache dir
-        // is non-fatal — we just recompile each run.
-        if let Some(cache) = coreml_cache_dir(model_bytes) {
-            coreml = coreml.with_model_cache_dir(cache.display());
-        }
-
-        // Two-phase build: `ExecutionProvider::register` takes `&mut
-        // SessionBuilder` (unlike the by-value builder methods), so the EP is
-        // registered separately and its outcome recorded as an observable
-        // backend label.
+        // Two sessions (palm + landmark) each own a CPU thread pool; capping
+        // intra-op threads and disabling spin-waiting stops idle inference from
+        // burning whole cores between frames at our cadence.
         let mut builder = Session::builder()
             .map_err(load_err)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(load_err)?
-            // Two sessions (palm + landmark) each own a CPU thread pool; capping
-            // intra-op threads and disabling spin-waiting stops idle inference
-            // from burning whole cores between frames at our cadence.
             .with_intra_threads(2)
             .map_err(load_err)?
             .with_intra_op_spinning(false)
             .map_err(load_err)?;
 
-        // `Ok(())` means the EP attached to the session options, NOT that every
-        // node runs on CoreML — the graph is partitioned at commit and any
-        // unsupported op still falls to the CPU. The label reflects registration
-        // success, not whole-graph placement (see [`Self::backend`]).
-        let backend = match coreml.register(&mut builder) {
-            Ok(()) => BACKEND_COREML,
-            Err(e) => {
-                tracing::warn!("CoreML EP registration failed; running on CPU: {e}");
-                BACKEND_CPU
-            }
-        };
+        // Register the platform GPU execution provider on the builder. `Ok`
+        // registration means the EP attached to the session options, NOT that
+        // every node runs on it — the graph is partitioned at commit and any
+        // unsupported op still falls to the CPU. The returned label reflects
+        // registration success, not whole-graph placement (see [`Self::backend`]).
+        let backend = register_accelerator(&mut builder, model_bytes);
 
         let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
 
@@ -134,11 +115,12 @@ impl OrtInference {
         })
     }
 
-    /// The inference backend this session registered: [`BACKEND_COREML`]
-    /// (`"ort/CoreML"`) when the `CoreML` execution provider attached, or
-    /// [`BACKEND_CPU`] (`"ort/CPU"`) when it fell back.
+    /// The inference backend this session registered: `"ort/CoreML"` (macOS) or
+    /// `"ort/DirectML"` (Windows) when the platform GPU EP attached, or
+    /// [`BACKEND_CPU`] (`"ort/CPU"`) when there is no GPU EP for the target or it
+    /// fell back.
     ///
-    /// This reflects registration success, not whole-graph placement: `CoreML` may
+    /// This reflects registration success, not whole-graph placement: the EP may
     /// still partition unsupported ops back onto the CPU at commit time. To
     /// confirm what actually ran where on a given host, run with
     /// `ORT_LOG=verbose RUST_LOG=ort=trace` and read the node-placement dump.
@@ -162,6 +144,64 @@ fn run_err<R>(e: ort::Error<R>) -> InferenceError {
     InferenceError::Run(e.to_string())
 }
 
+/// Register the macOS `CoreML` execution provider on `builder`, returning the
+/// backend label (`CoreML` on success, CPU on a graceful fallback).
+///
+/// `CoreML` runs in its default `NeuralNetwork` model format. The newer
+/// `MLProgram` format covers a few more ops in principle, but its stricter parser
+/// rejects these vendored `MediaPipe` graphs at compile time: the build fails on a
+/// fused `Conv` op with `Required param 'pad' is missing`. Even patched it only
+/// reaches 27 `CoreML` partitions — worse than `NeuralNetwork`'s 6 once the palm
+/// model's `PReLU` slopes are reshaped to the `[C, 1, 1]` shape the EP accepts — so
+/// we stay on `NeuralNetwork`. `Core ML` places each segment on ANE/GPU/CPU itself,
+/// and the compiled artifact is cached on disk per model ([`coreml_cache_dir`]) to
+/// skip recompiling every launch.
+#[cfg(target_os = "macos")]
+fn register_accelerator(builder: &mut SessionBuilder, model_bytes: &[u8]) -> &'static str {
+    let mut coreml = CoreML::default()
+        // ALL lets Core ML place each segment on ANE/GPU/CPU as it sees fit (the
+        // default, set explicitly). NeuralNetwork model format is kept deliberately
+        // — see the doc comment: MLProgram fails to compile these vendored models.
+        .with_compute_units(ComputeUnits::All);
+    // Core ML compiles each model to a native artifact on first load; caching it on
+    // disk avoids paying that compile every launch. A missing cache dir is
+    // non-fatal — we just recompile each run.
+    if let Some(cache) = coreml_cache_dir(model_bytes) {
+        coreml = coreml.with_model_cache_dir(cache.display());
+    }
+    match coreml.register(builder) {
+        Ok(()) => BACKEND_COREML,
+        Err(e) => {
+            tracing::warn!("CoreML EP registration failed; running on CPU: {e}");
+            BACKEND_CPU
+        }
+    }
+}
+
+/// Register the Windows `DirectML` execution provider on `builder`, returning the
+/// backend label (`DirectML` on success, CPU on a graceful fallback).
+///
+/// DirectML is the vendor-neutral DX12 EP, so one path accelerates AMD and Intel
+/// integrated GPUs alike. Registration fails gracefully to the CPU EP on a host
+/// with no DX12 device (e.g. a GPU-less CI runner).
+#[cfg(target_os = "windows")]
+fn register_accelerator(builder: &mut SessionBuilder, _model_bytes: &[u8]) -> &'static str {
+    match DirectML::default().register(builder) {
+        Ok(()) => BACKEND_DIRECTML,
+        Err(e) => {
+            tracing::warn!("DirectML EP registration failed; running on CPU: {e}");
+            BACKEND_CPU
+        }
+    }
+}
+
+/// No GPU execution provider for this target (e.g. Linux): the session runs on
+/// ONNX Runtime's CPU EP. `builder` is left untouched.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn register_accelerator(_builder: &mut SessionBuilder, _model_bytes: &[u8]) -> &'static str {
+    BACKEND_CPU
+}
+
 /// Compute a stable per-model cache key from the model bytes.
 ///
 /// ONNX Runtime's `CoreML` EP names its compiled-artifact subdirectory by a
@@ -178,6 +218,9 @@ fn run_err<R>(e: ort::Error<R>) -> InferenceError {
 /// wrote the cache reads it back), so a `std` hasher suffices and adds no
 /// dependency. A toolchain change that alters the hash merely forces a one-time
 /// recompile, which is harmless.
+///
+/// macOS-only: the on-disk EP artifact cache is a `CoreML` concern.
+#[cfg(target_os = "macos")]
 fn model_cache_key(model_bytes: &[u8]) -> String {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -203,6 +246,7 @@ fn model_cache_key(model_bytes: &[u8]) -> String {
 /// Returns `None` when caching is disabled, no cache dir is available, or it
 /// cannot be created; the caller then loads without a cache (recompiling the
 /// Core ML artifact each run) rather than failing.
+#[cfg(target_os = "macos")]
 fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
     if cfg!(test) {
         return None;
@@ -283,6 +327,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn coreml_cache_key_is_per_model_and_deterministic() {
         // Regression: ONNX Runtime's CoreML EP reuses one on-disk cache key
@@ -319,15 +364,24 @@ mod tests {
         // an empty or bogus string in diagnostics.
         let model = OrtInference::load(&model_bytes("palm_detection.onnx")).expect("load via ort");
         let backend = model.backend();
-        assert!(
-            backend == BACKEND_COREML || backend == BACKEND_CPU,
-            "unexpected backend label {backend:?}"
-        );
-        // On macOS the CoreML EP is compiled in (the `coreml` ort feature) and
-        // must register against these vendored models — load succeeded above, so
-        // anything but CoreML here means a real registration regression.
+        // The label must be observable and one of the known states, so a silent
+        // CPU fallback (the 240% CPU symptom) is never hidden behind a bogus string
+        // in diagnostics. Which GPU EP is expected depends on the target: CoreML on
+        // macOS (compiled in via the `coreml` ort feature; load succeeded above, so
+        // anything else is a real registration regression), DirectML-or-CPU on
+        // Windows (CPU when the runner has no DX12 device), CPU elsewhere.
         #[cfg(target_os = "macos")]
         assert_eq!(backend, BACKEND_COREML, "CoreML must register on macOS");
+        #[cfg(target_os = "windows")]
+        assert!(
+            backend == BACKEND_DIRECTML || backend == BACKEND_CPU,
+            "Windows backend must be DirectML or CPU fallback, got {backend:?}"
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(
+            backend, BACKEND_CPU,
+            "non-accelerated targets use the CPU EP"
+        );
     }
 
     #[test]

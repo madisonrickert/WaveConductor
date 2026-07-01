@@ -55,6 +55,14 @@ thermal-sensor = []
 # compiles cleanly on macOS by never touching `macmon`; macOS dev builds opt in
 # through this separate feature.
 thermal-sensor-macos = ["dep:macmon"]
+# Windows SoC temperature sensing via the WDDM D3DKMT adapter-perf-data query
+# (`platform::windows::WddmThermalSensor`). No admin and no new crate beyond the
+# `windows` bindings already transitively in the graph. Reliable no-admin CPU-die
+# temps are not achievable on consumer Windows (every accurate source needs a
+# ring-0 driver), so this reads the iGPU/SoC die temperature as a coarse throttle
+# proxy and returns None (→ Cool/Schedule fallback) when a driver reports 0. Plain
+# `thermal-sensor` compiles on Windows and falls through to None.
+thermal-sensor-windows = ["dep:windows"]
 # Image template library: content-addressed cache + manifest + thumbnails for
 # the spawn-template picker. Native-only (uses `rfd`/`image`); mirrors the
 # `hand-tracking-mediapipe` pattern of a feature that pulls optional native deps.
@@ -107,6 +115,10 @@ nokhwa = { workspace = true, optional = true }
 # IOReport/IOKit APIs; construction/sampling errors are contained by
 # `platform::macos::MacmonSensor`.
 macmon = { version = "=0.7.0", optional = true }
+# ort CoreML execution provider (GPU/Neural Engine inference). macOS-only feature
+# so it never reaches Windows/Linux `--all-features` builds. Unions with the base
+# `ort` dep declared under the non-wasm target table. See inference_ort.rs.
+ort = { workspace = true, optional = true, features = ["coreml"] }
 # macOS webcam capture via AVFoundation on the maintained `objc2` framework
 # bindings (replaces nokhwa's unmaintained `objc 0.2`/`core-video-sys` backend on
 # macOS). All optional + gated by `hand-tracking-mediapipe-camera`. The
@@ -159,6 +171,20 @@ objc2-core-media = { version = "0.3", optional = true, default-features = false,
 ] }
 dispatch2 = { version = "0.3", optional = true, default-features = false, features = [
     "std",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows GPU inference: the ort DirectML execution provider (vendor-neutral DX12,
+# covering AMD Radeon 780M and Intel Arc/Iris Xe iGPUs). Windows-only feature, so
+# it never reaches macOS/Linux `--all-features` builds. Unions with the base `ort`
+# dep declared under the non-wasm target table. See inference_ort.rs.
+ort = { workspace = true, optional = true, features = ["directml"] }
+# WDDM adapter temperature (D3DKMT) for the Windows thermal sensor. Reuses the
+# `windows` crate already resolved transitively in the graph (0.62); only these two
+# feature modules are new. Optional + gated by `thermal-sensor-windows`.
+windows = { version = "0.62", optional = true, features = [
+    "Wdk_Graphics_Direct3D", # D3DKMTEnumAdapters2 / D3DKMTQueryAdapterInfo + structs
+    "Win32_Foundation",      # NTSTATUS, LUID, BOOL referenced by those structs
 ] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

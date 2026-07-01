@@ -14,7 +14,15 @@ use std::process::Command;
 /// Canonical list of subcommands the manifest should expose. Update both this
 /// list and `xtask/src/manifest.rs::SUBCOMMANDS` together whenever `Command` in
 /// `xtask/src/main.rs` gains or loses a variant.
-const EXPECTED_SUBCOMMANDS: &[&str] = &["manifest", "check-secrets", "capture", "bundle-mac"];
+const EXPECTED_SUBCOMMANDS: &[&str] = &[
+    "manifest",
+    "check-secrets",
+    "capture",
+    "bundle-mac",
+    "bundle-linux",
+    "bundle-windows",
+    "validate-shaders",
+];
 
 #[test]
 fn manifest_human_output_lists_every_subcommand() {

@@ -28,9 +28,11 @@
 //! - Code-signing / notarization: needed for distribution off this machine;
 //!   the local kiosk runs unsigned.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::Args as ClapArgs;
+
+use super::common;
 
 /// Arguments for the bundle-mac subcommand.
 #[derive(ClapArgs)]
@@ -48,10 +50,10 @@ pub struct Args {
 const BUNDLE_ID: &str = "com.madisonrickert.waveconductor";
 
 /// Bundle display + short name.
-const BUNDLE_NAME: &str = "WaveConductor";
+const BUNDLE_NAME: &str = common::APP_NAME;
 
 /// Binary name (matches `[[bin]]` in the waveconductor Cargo.toml).
-const BUNDLE_EXE: &str = "waveconductor";
+const BUNDLE_EXE: &str = common::BIN_NAME;
 
 /// Minimum macOS version required to launch the app.
 const MIN_OS: &str = "12.0";
@@ -67,14 +69,14 @@ const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Execute the bundle-mac subcommand.
 pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let root = workspace_root();
+    let root = common::workspace_root();
     let target = root.join("target");
     let app_dir = target.join("WaveConductor.app");
     let contents = app_dir.join("Contents");
 
     // 1. Build the release binary (unless caller opted out).
     if !args.skip_build {
-        build_release(&root)?;
+        common::build_release(&root)?;
     }
 
     let release_bin = target.join("release").join(BUNDLE_EXE);
@@ -110,7 +112,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             dst_bin.display()
         )
     })?;
-    set_executable(&dst_bin)?;
+    common::set_executable(&dst_bin)?;
 
     // 2b. Copy the vendored Leap SDK dylib next to the binary so that the
     //     binary's `@loader_path/libLeapC.6.dylib` rpath resolves at launch.
@@ -122,7 +124,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     //     `Contents/Resources/assets` — so this destination is load-bearing.
     let src_assets = root.join("assets");
     let dst_assets = resources_dir.join("assets");
-    let asset_count = copy_dir_all(&src_assets, &dst_assets).map_err(|e| {
+    let asset_count = common::copy_dir_all(&src_assets, &dst_assets).map_err(|e| {
         format!(
             "bundle-mac: cannot copy assets {} -> {}: {e}",
             src_assets.display(),
@@ -151,7 +153,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(contents.join("PkgInfo"), b"APPL????")?;
 
     // 3. Compute bundle byte size for the report.
-    let size_bytes = dir_size(&app_dir)?;
+    let size_bytes = common::dir_size(&app_dir)?;
 
     // 4. Emit the report.
     let app_path = app_dir.display().to_string();
@@ -245,30 +247,6 @@ pub fn info_plist(
 
 // ---- private helpers -------------------------------------------------------
 
-/// Workspace root: parent of the xtask crate dir (`CARGO_MANIFEST_DIR`).
-fn workspace_root() -> PathBuf {
-    std::env::var("CARGO_MANIFEST_DIR")
-        .ok()
-        .and_then(|d| PathBuf::from(d).parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Shell out to `cargo build -p waveconductor --release`.
-fn build_release(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let status = std::process::Command::new("cargo")
-        .current_dir(root)
-        .args(["build", "-p", "waveconductor", "--release"])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(
-            format!("bundle-mac: `cargo build -p waveconductor --release` failed with {status}")
-                .into(),
-        )
-    }
-}
-
 /// Generate the macOS `.icns` app icon into `resources_dir` from the source PNG
 /// at `assets/app-icons/icon.png`, returning the bare icon-file name to write
 /// into `Info.plist`'s `CFBundleIconFile` key.
@@ -356,29 +334,6 @@ fn sips_resize(src: &Path, size: u32, out: &Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// Recursively copy `src` directory tree into `dst`, creating `dst` as needed.
-///
-/// Returns the number of regular files copied. Symbolic links are skipped;
-/// the workspace `assets/` tree contains no symlinks.
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<u64, Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(dst)?;
-    let mut count = 0_u64;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            count += copy_dir_all(&src_path, &dst_path)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&src_path, &dst_path)?;
-            count += 1;
-        }
-        // Symlinks are intentionally skipped (not expected in assets/).
-    }
-    Ok(count)
-}
-
 /// Map a Rust target architecture name to the vendor subdirectory that holds
 /// the prebuilt Leap SDK libraries for that architecture.
 ///
@@ -414,56 +369,10 @@ fn copy_leap_dylib(root: &Path, dst_dir: &Path) -> Result<(), Box<dyn std::error
     let vendor_dir = root.join("vendor").join("leapc").join(subdir);
 
     for name in &["libLeapC.6.dylib", "libLeapC.dylib"] {
-        let src = vendor_dir.join(name);
-        if !src.exists() {
-            return Err(format!(
-                "bundle-mac: vendored dylib not found at {}; \
-                 re-run `git lfs pull` or restore the vendor tree",
-                src.display()
-            )
-            .into());
-        }
-        // Read via `read` (not symlink-following `copy`) so that if `libLeapC.dylib`
-        // is a symlink we copy the actual bytes rather than creating another symlink.
-        let bytes = std::fs::read(&src)
-            .map_err(|e| format!("bundle-mac: cannot read {}: {e}", src.display()))?;
-        let dst = dst_dir.join(name);
-        std::fs::write(&dst, &bytes)
-            .map_err(|e| format!("bundle-mac: cannot write {}: {e}", dst.display()))?;
+        common::copy_leap_lib(&vendor_dir.join(name), &dst_dir.join(name))?;
     }
 
     Ok(())
-}
-
-/// Set the executable bit (Unix mode 0o755) on a file.
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-/// No-op on non-Unix platforms (xtask is a dev-only tool; macOS is the target).
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
-/// Walk `dir` recursively and return the sum of sizes of all regular files.
-fn dir_size(dir: &Path) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut total = 0_u64;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            total += dir_size(&entry.path())?;
-        } else if file_type.is_file() {
-            total += entry.metadata()?.len();
-        }
-    }
-    Ok(total)
 }
 
 #[cfg(test)]
