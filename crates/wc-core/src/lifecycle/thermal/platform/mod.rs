@@ -13,17 +13,17 @@
 //! compiled, [`create_sensor`] returns `None`, so the thermal state holds
 //! Cool/Schedule — the design's intended no-sensor degradation.
 //!
-//! - **Linux** (`thermal-sensor`) → [`native::SysfsThermalSensor`] reads the
+//! - **Linux** (`thermal-sensor`) → `native::SysfsThermalSensor` reads the
 //!   hottest CPU/SoC temperature from the kernel `hwmon` / `thermal_zone` sysfs
 //!   (zero deps).
-//! - **Windows** (`thermal-sensor-windows`) → [`windows::WddmThermalSensor`] reads
+//! - **Windows** (`thermal-sensor-windows`) → `windows::WddmThermalSensor` reads
 //!   the iGPU/SoC die temperature via the no-admin WDDM `D3DKMT` adapter-perf-data
 //!   query as a coarse throttle proxy (reliable no-admin CPU-die temps are not
 //!   available on consumer Windows). Without the feature, Windows falls to the
 //!   `native` reader, whose sysfs paths are absent, so it returns `None`.
 //! - **wasm** → `None` (no thermal API in the browser).
 //! - **macOS** → `None` *unless* `thermal-sensor-macos` is enabled, in which case
-//!   [`macos::MacmonSensor`] reads the Apple-Silicon `SoC` temperature via
+//!   `macos::MacmonSensor` reads the Apple-Silicon `SoC` temperature via
 //!   `macmon` (Apple `IOReport`, no sudo). Plain `thermal-sensor` compiles on
 //!   macOS and falls through to `None`.
 //!

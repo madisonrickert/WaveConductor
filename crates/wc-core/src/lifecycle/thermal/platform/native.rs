@@ -3,7 +3,7 @@
 //! Reads the kernel's `hwmon` / `thermal_zone` sysfs interface directly with
 //! `std::fs` — no crate, no MSRV pin, no build-time native dependency, no
 //! `unsafe`. For a coarse "hottest CPU/SoC component, every few seconds" signal
-//! on a known Linux x86_64 box, this is the most robust option for an unattended
+//! on a known Linux `x86_64` box, this is the most robust option for an unattended
 //! multi-day appliance: there is nothing in the supply chain to break.
 //!
 //! ## What it reads
@@ -19,7 +19,7 @@
 //!    "Package id 0" aggregate; taking the max also covers per-core sensors.
 //!    This skips the noise a naive "read all thermal zones" pass trips on
 //!    (`nvme`, `iwlwifi`, `acpitz`, chipset sensors).
-//! 2. **Fallback — thermal_zone by type.** Some kernels expose the package temp
+//! 2. **Fallback — `thermal_zone` by type.** Some kernels expose the package temp
 //!    via an `x86_pkg_temp` thermal zone but not via an hwmon `coretemp` chip
 //!    (depends on which modules are loaded). The fallback catches that;
 //!    `acpitz` is included last because it reads socket-adjacent, not die —
@@ -52,7 +52,7 @@ use crate::lifecycle::thermal::sensor::TemperatureSensor;
 const PLAUSIBLE_C: std::ops::RangeInclusive<f32> = -40.0..=150.0;
 
 /// hwmon driver `name` values trusted as a real CPU/SoC temperature source.
-/// Intel → `coretemp`; AMD → `k10temp`/`zenpower`; many ARM SoCs → `cpu_thermal`.
+/// Intel → `coretemp`; AMD → `k10temp`/`zenpower`; many ARM `SoCs` → `cpu_thermal`.
 fn is_cpu_chip(name: &str) -> bool {
     matches!(name, "coretemp" | "k10temp" | "zenpower" | "cpu_thermal")
 }
