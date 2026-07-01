@@ -1,8 +1,8 @@
 //! Cymatics attract mode: the two wave centres drift on slow incommensurate
 //! Lissajous paths while each intermittently drops a single "raindrop" — one
 //! Hann-enveloped source pulse that launches one expanding ring on the otherwise
-//! calm field. [`drive_cymatics_attract`] positions the centres and holds the
-//! ambient alive-mask radius; [`drive_cymatics_pings`] schedules the staggered
+//! calm field. `drive_cymatics_attract` positions the centres and holds the
+//! ambient alive-mask radius; `drive_cymatics_pings` schedules the staggered
 //! drops via [`CymaticsPingState`]. Both are gated on
 //! `in_screensaver(AppState::Cymatics)` (zero systems otherwise); audio coupling
 //! is gated off (the coupling chain is `sketch_active`-only).
@@ -122,10 +122,10 @@ const ATTRACT_RADIUS_SETTLE_SECS: f32 = 1.5;
 
 /// Per-attractor raindrop scheduler state for the Cymatics screensaver.
 ///
-/// One entry per wave centre. [`drive_cymatics_pings`] is the sole writer: it
+/// One entry per wave centre. `drive_cymatics_pings` is the sole writer: it
 /// counts down to each centre's next drop, fires by restarting that centre's
 /// Hann window (`envelope_tick = 0`), and rolls the window forward one frame's
-/// worth of sub-steps. [`super::update_cymatics_sim_params`] reads
+/// worth of sub-steps. `super::update_cymatics_sim_params` reads
 /// `envelope_tick` into the GPU `ping_base` so the compute prepare loop can
 /// evaluate the per-sub-step envelope.
 ///

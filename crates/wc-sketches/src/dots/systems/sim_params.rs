@@ -10,12 +10,12 @@
 //! Tracked-hand [`crate::dots::hand_attractors::DotsHandAttractor`] entries are
 //! appended after the mouse attractor (same threshold/bake/cap as the Line path).
 //!
-//! The pure baker [`bake_dots_sim_params`] assembles all [`SimParams`] fields
+//! The pure baker `bake_dots_sim_params` assembles all [`SimParams`] fields
 //! from the attractor array, gate, and turbulence inputs. The live writer
 //! [`update_dots_sim_params`] calls it with [`DotsAttractGate::OFF`] and
 //! [`DotsTurbulence::OFF`] so the active (non-attract) path is provably
 //! unchanged. The coming D6a screensaver driver (Task 2) will call
-//! [`bake_dots_sim_params`] directly with live gate and turbulence values.
+//! `bake_dots_sim_params` directly with live gate and turbulence values.
 
 #![allow(
     clippy::as_conversions,
@@ -63,7 +63,7 @@ pub const V4_DOTS_INERTIAL_DRAG: f32 = 0.23913643334;
 /// place. Not used in D2 (no attractors yet).
 pub const DOTS_GRAVITY_CONSTANT: f32 = 100.0;
 
-/// Window geometry the param-baker needs. Bundled so [`bake_dots_sim_params`]
+/// Window geometry the param-baker needs. Bundled so `bake_dots_sim_params`
 /// takes one window argument, and so the screensaver's attract writer (Task 2)
 /// builds it the same way. Mirrors Line's [`crate::line::systems::sim_params::WindowGeom`].
 #[derive(Clone, Copy, Debug)]
@@ -213,7 +213,7 @@ pub(crate) fn bake_dots_sim_params(
 /// `Update` — gated by `sketch_active(AppState::Dots)`.
 ///
 /// Collects the live attractors (mouse + tracked hands), then delegates
-/// full [`SimParams`] assembly to the shared [`bake_dots_sim_params`] baker with
+/// full [`SimParams`] assembly to the shared `bake_dots_sim_params` baker with
 /// [`DotsAttractGate::OFF`] and [`DotsTurbulence::OFF`], so the attract-only
 /// lifetime respawn, fraction kill, and noise turbulence never run during live
 /// interaction. The output is written to [`ParticleSimParams`] for the render

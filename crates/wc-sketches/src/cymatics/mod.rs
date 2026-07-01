@@ -3,8 +3,8 @@
 //!
 //! ## Data flow (wired so far)
 //!
-//! 1. `OnEnter(AppState::Cymatics)` runs [`init_cymatics_state`] (insert the
-//!    CPU-side [`CymaticsState`] defaults) then [`spawn_cymatics`] (read
+//! 1. `OnEnter(AppState::Cymatics)` runs `init_cymatics_state` (insert the
+//!    CPU-side [`CymaticsState`] defaults) then `spawn_cymatics` (read
 //!    [`settings::CymaticsSettings`] → derive the sim resolution from the window
 //!    aspect → allocate the two ping-pong textures
 //!    ([`compute::create_cymatics_textures`]) → spawn the fullscreen quad
@@ -12,7 +12,7 @@
 //!    handles onto a [`CymaticsRoot`] entity → insert the initial
 //!    [`compute::CymaticsSimParams`]).
 //! 2. Every `Update` while the sketch is `Active`, through the `Idle` pre-roll,
-//!    **or** showing its screensaver, [`update_cymatics_sim_params`] packs
+//!    **or** showing its screensaver, `update_cymatics_sim_params` packs
 //!    [`CymaticsState`] into the extracted [`compute::CymaticsSimParams`]
 //!    (centres, alive radius, and the per-iteration phase times) and advances
 //!    the phase clock once — so the resting field never freezes during the
@@ -71,7 +71,7 @@ const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(5
 pub const MINIMUM_ACTIVE_RADIUS: f32 = 0.1;
 
 /// Resting wave-frequency control (v4 default `numCycles`). Interaction lowers
-/// the effective cycle count via `slowDown`; see [`update_cymatics_sim_params`].
+/// the effective cycle count via `slowDown`; see `update_cymatics_sim_params`.
 pub const DEFAULT_NUM_CYCLES: f32 = 1.002;
 
 /// Upper bound (in phase units) on [`CymaticsState::ramp_time`], the alive-bloom
@@ -94,7 +94,7 @@ pub struct CymaticsRoot;
 /// CPU-side interaction state (v4 `index.ts` instance vars). Units match v4.
 ///
 /// At C8 the interaction systems are not yet wired, so these hold their resting
-/// defaults; [`update_cymatics_sim_params`] packs them into the GPU uniform and
+/// defaults; `update_cymatics_sim_params` packs them into the GPU uniform and
 /// advances [`CymaticsState::simulation_time`] each frame.
 #[derive(Resource, Debug, Clone)]
 pub struct CymaticsState {
@@ -119,7 +119,7 @@ pub struct CymaticsState {
     pub simulation_time: f32,
     /// Alive-bloom ramp clock — the elapsed-time value fed to the shader's
     /// `(time-500)/500` bloom ramp. Advanced `N·dt` per frame like
-    /// [`Self::simulation_time`] but **capped at [`RAMP_TIME_CAP`]** rather than
+    /// [`Self::simulation_time`] but **capped at `RAMP_TIME_CAP`** rather than
     /// wrapped: the bloom needs real elapsed time, not phase, and saturates at
     /// `+0.8` by `900`, so the cap keeps it bounded without changing the
     /// saturated bloom. Equals `simulation_time` until the phase first wraps.

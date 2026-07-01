@@ -2,7 +2,7 @@
 //!
 //! The [`TemperatureSensor`] trait is the seam between the platform-specific
 //! reader (a zero-dependency `std::fs` sysfs reader on Linux; `macmon` on Apple
-//! Silicon when its macOS feature is enabled — see [`super::platform`]) and the
+//! Silicon when its macOS feature is enabled — see `super::platform`) and the
 //! platform-agnostic sampler loop here. Sampling runs on a dedicated OS thread
 //! so a blocking reader (the macOS `macmon` sampler) never stalls the Bevy main
 //! thread; readings are published over a `std::sync::mpsc` channel the

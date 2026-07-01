@@ -30,7 +30,7 @@
 //! `clamp((scalar−1.002)·20, 0, 1)`. The `1/Q` factor renormalizes fundsp's
 //! Simper-SVF bandpass (peak gain = Q, not normalized) back to v4's unity-peak
 //! `BiquadFilterNode` level; the `20 kHz` cap keeps the SVF below Nyquist so a
-//! sustained grip can't diverge it to NaN (see [`NOISE_CUTOFF_MAX_HZ`]).
+//! sustained grip can't diverge it to NaN (see `NOISE_CUTOFF_MAX_HZ`).
 
 use fundsp::prelude::*;
 

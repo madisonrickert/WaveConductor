@@ -86,7 +86,7 @@ impl InteractionTimer {
     /// [`advance_activity`] targets `Screensaver` on its next run. The
     /// `Shift+S` skip ([`skip_to_screensaver`]) calls this every armed frame.
     ///
-    /// Also raises [`Self::force_screensaver`]. Past ~60 s of uptime the rewind
+    /// Also raises `Self::force_screensaver`. Past ~60 s of uptime the rewind
     /// alone is enough (`idle_for` reads as a full 60 s and grows from there,
     /// so the screensaver also *holds* after the skip disarms). Within the
     /// first 60 s the subtraction saturates to zero and `idle_for(now) = now`

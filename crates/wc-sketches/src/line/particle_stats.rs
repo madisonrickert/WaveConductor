@@ -107,7 +107,7 @@ impl EnvelopeRates {
 pub struct ParticleStats {
     /// RMS speed across all particles, in world-pixel units per second.
     /// Approximated: snaps up on press, decays slowly on release via
-    /// [`ATTACK_RATE_FAST`] / [`RELEASE_RATE_SLOW`] envelopes.
+    /// `ATTACK_RATE_FAST` / `RELEASE_RATE_SLOW` envelopes.
     pub average_vel: f32,
     /// 2D variance length `sqrt(varX² + varY²)` over particle positions.
     /// Approximated: high at rest (particles spread along spawn line),

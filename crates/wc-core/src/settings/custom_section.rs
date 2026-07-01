@@ -1,6 +1,6 @@
 //! A render-only escape hatch for sketch-contributed settings UI.
 //!
-//! The reflection-driven panel ([`super::panel_user`]) renders every flat
+//! The reflection-driven panel (`super::panel_user`) renders every flat
 //! [`super::trait_def::SketchSettings`] field automatically. Some settings,
 //! though, cannot be expressed as a fixed table of named fields — e.g. a
 //! variable-cardinality, hash-keyed map of sub-records (the Line per-image

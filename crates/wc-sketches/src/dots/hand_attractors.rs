@@ -61,9 +61,9 @@ pub const DOTS_HAND_POWER_FLOOR: f32 = 0.05;
 #[derive(Component, Debug, Default, Clone, Copy, Reflect)]
 #[reflect(Component)]
 pub struct DotsHandAttractor {
-    /// Current attractor power, advanced each frame by [`dots_leap_power`].
+    /// Current attractor power, advanced each frame by `dots_leap_power`.
     pub power: f32,
-    /// World-space position derived from [`dots_palm_to_world`].
+    /// World-space position derived from `dots_palm_to_world`.
     pub position: Vec2,
 }
 

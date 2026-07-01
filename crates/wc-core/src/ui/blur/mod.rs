@@ -70,7 +70,7 @@ pub struct BackdropBlurTexture {
 
 /// Intermediate scratch textures for the dual-Kawase downsample/upsample chain.
 ///
-/// Allocated alongside [`BackdropBlurTexture`] in [`ensure_blur_texture`].
+/// Allocated alongside [`BackdropBlurTexture`] in `ensure_blur_texture`.
 /// Three levels: half, quarter, and eighth of the primary viewport's physical
 /// resolution.
 ///
@@ -100,7 +100,7 @@ pub struct BackdropBlurScratch {
 ///
 /// Inserts [`BackdropBlurEnabled`] into the main world and wires the
 /// [`ExtractResourcePlugin`] so the render app sees the toggle each frame.
-/// Also registers [`ensure_blur_texture`] in the render app so the
+/// Also registers `ensure_blur_texture` in the render app so the
 /// half-resolution [`BackdropBlurTexture`] and [`BackdropBlurScratch`] are
 /// allocated on first frame and resized on window-resize events.
 pub struct BackdropBlurPlugin;

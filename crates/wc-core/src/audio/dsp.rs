@@ -18,7 +18,7 @@
 //!
 //! Plan 9 Phase A wires the Line synth voice graph; Phase B adds background
 //! sample mixing via a named [`SampleBank`] and [`LoopVoice`]; Task C4 adds
-//! the Cymatics voice bundle ([`CymaticsVoices`]) with its synth, looping blub,
+//! the Cymatics voice bundle (`CymaticsVoices`) with its synth, looping blub,
 //! and kick/risingbass one-shots.
 //!
 //! ## Background sample mixing

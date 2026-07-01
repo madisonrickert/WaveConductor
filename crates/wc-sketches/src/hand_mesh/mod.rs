@@ -36,7 +36,7 @@ pub const HAND_MESH_LAYER_INDEX: usize = 1;
 pub const HAND_MESH_LAYER: RenderLayers = RenderLayers::layer(HAND_MESH_LAYER_INDEX);
 
 /// Per-sketch configuration for the hand-mesh overlay. Inserted on
-/// `OnEnter(config.app_state)`, read by [`ensure_bone_meshes`], removed on exit.
+/// `OnEnter(config.app_state)`, read by `ensure_bone_meshes`, removed on exit.
 #[derive(Resource, Clone)]
 pub struct HandMeshConfig {
     /// Sketch this overlay belongs to.

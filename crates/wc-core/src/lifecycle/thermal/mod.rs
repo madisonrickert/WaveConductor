@@ -19,7 +19,7 @@
 //!    `std::sync::mpsc` channel — sampling never blocks the Bevy main thread
 //!    (the macOS `macmon` sampler blocks for its window; the Linux sysfs read is
 //!    cheap but still kept off-thread for uniformity).
-//! 2. [`drain_thermal_readings`] runs once per main-schedule frame, draining all
+//! 2. `drain_thermal_readings` runs once per main-schedule frame, draining all
 //!    pending readings, taking the most recent, and applying **asymmetric
 //!    hysteresis** ([`ThermalThresholds`]) so the tier never flaps at a
 //!    boundary.

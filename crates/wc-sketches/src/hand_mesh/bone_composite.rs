@@ -20,7 +20,7 @@
 //! ## Wiring
 //!
 //! [`HandMeshTarget`] holds the off-screen image handle; it is inserted on
-//! `OnEnter` by [`super::spawn_hand_mesh_camera`] and removed on exit.
+//! `OnEnter` by `super::spawn_hand_mesh_camera` and removed on exit.
 //! [`ExtractResourcePlugin`] mirrors it into the render world. The node no-ops
 //! cleanly whenever the resource (or its GPU image) is absent — so it costs
 //! nothing outside the active sketch and during the brief window before the
@@ -31,10 +31,10 @@
 //! Bevy 0.19's `ExtractResourcePlugin` propagates inserts and updates but **not**
 //! removals. After `OnExit` removes [`HandMeshTarget`] from the main world, the
 //! render-world copy would linger, keeping the composite running on other sketches
-//! with a stale bone image. The [`remove_hand_mesh_target_if_absent`] system
+//! with a stale bone image. The `remove_hand_mesh_target_if_absent` system
 //! (registered in [`ExtractSchedule`]) issues the explicit `remove_resource` when
 //! the main-world source is absent. The same D3 pattern is applied to
-//! [`HandPresence`] via [`remove_hand_presence_if_absent`].
+//! [`HandPresence`] via `remove_hand_presence_if_absent`.
 //!
 //! **Known limitation (carry-forward #75):** bones bypass the main camera's
 //! bloom rolloff — they are added into the scene before bloom runs, so

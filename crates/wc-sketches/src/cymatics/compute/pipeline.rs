@@ -45,7 +45,7 @@
 //! automatically for even `iterations` (the last write lands in A); for odd
 //! `iterations` the last write lands in B, so the node copies B → A. Because the
 //! material samples A directly (the byte-identical display blit was removed),
-//! this single refresh serves both purposes. [`frame_blit_plan`] decides whether
+//! this single refresh serves both purposes. `frame_blit_plan` decides whether
 //! the refresh is needed from the sub-step count; default `iterations` is even,
 //! so the copy is off in the shipping config.
 

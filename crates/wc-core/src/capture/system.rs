@@ -59,7 +59,7 @@ pub struct CaptureState {
     pub captured: usize,
     /// `Some(remaining)` once the last scheduled frame has been dispatched: a
     /// per-tick countdown of grace frames before `AppExit`. `None` while frames
-    /// are still being captured. See [`EXIT_GRACE_FRAMES`].
+    /// are still being captured. See `EXIT_GRACE_FRAMES`.
     pub exit_grace: Option<u32>,
     /// True after `AppExit` has been requested, so we request it only once.
     pub exit_requested: bool,

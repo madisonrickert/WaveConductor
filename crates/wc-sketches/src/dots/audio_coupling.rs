@@ -13,7 +13,7 @@
 //! [`DotsMouseAttractorState::power`] and [`super::hand_attractors::DotsHandAttractor::power`]
 //! stands in for all three v4 control signals. The envelope rises toward 1.0
 //! while any attractor is active (mouse `power > 0.0` OR any hand power above
-//! [`HAND_ACTIVITY_THRESHOLD`]) and decays toward 0.0 after all release.
+//! `HAND_ACTIVITY_THRESHOLD`) and decays toward 0.0 after all release.
 //! "Loudest hand wins": the max over all tracked hands is used so a second,
 //! farther hand cannot duck a near grab — mirrors Line's `update_hand_audio_drive`
 //! pattern. Volume, bandpass cutoff, and LFO depth all derive from this single
@@ -219,7 +219,7 @@ pub(crate) fn dots_lfo_depth(bandpass_freq: f32) -> f32 {
 /// `Res<DotsAudioEnvelope>`.
 ///
 /// The envelope target is "any active attractor": it rises while the mouse is
-/// active OR any [`DotsHandAttractor`] power exceeds [`HAND_ACTIVITY_THRESHOLD`].
+/// active OR any [`DotsHandAttractor`] power exceeds `HAND_ACTIVITY_THRESHOLD`.
 /// The loudest hand wins (max over all hands) so a second, farther hand cannot
 /// duck a near grab — mirrors Line's `update_hand_audio_drive` pattern.
 ///

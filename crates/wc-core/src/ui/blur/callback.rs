@@ -24,7 +24,7 @@
 //! | 1      | filtering sampler           | FRAGMENT   |
 //! | 2      | uniform buffer (`CompositeUniforms`) | FRAGMENT |
 //!
-//! A fresh per-frame [`CompositeUniforms`] buffer is uploaded for each panel
+//! A fresh per-frame `CompositeUniforms` buffer is uploaded for each panel
 //! rect (32 bytes; acceptable once-per-visible-panel cost).
 
 #![allow(
@@ -242,7 +242,7 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
     ///    world; bail silently if either is missing.
     /// 2. Convert the egui-point rect to physical-pixel UVs using
     ///    `info.pixels_per_point` and `info.screen_size_px`.
-    /// 3. Upload a 32-byte [`CompositeUniforms`] buffer with the UV rect,
+    /// 3. Upload a 32-byte `CompositeUniforms` buffer with the UV rect,
     ///    half-extent, and corner radius.
     /// 4. Build a transient bind group and issue `draw(0..6, 0..1)`.
     ///    The vertex shader triangulates the quad from a const array indexed

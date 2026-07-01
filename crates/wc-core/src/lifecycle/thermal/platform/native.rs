@@ -203,7 +203,7 @@ mod tests {
     fn read_millidegrees_parses_and_bounds() {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
-        write!(f, "52000\n").expect("write");
+        writeln!(f, "52000").expect("write");
         assert_eq!(read_millidegrees(f.path()), Some(52.0));
 
         let mut bogus = tempfile::NamedTempFile::new().expect("tempfile");

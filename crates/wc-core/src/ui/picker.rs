@@ -4,11 +4,11 @@
 //! each variant up in the [`SketchManifest`] resource, and renders one
 //! tile per cell of a 3×2 grid:
 //!
-//! - **Registered** sketch → [`render_active_tile`]: screenshot background
+//! - **Registered** sketch → `render_active_tile`: screenshot background
 //!   via `EguiUserTextures`, Orbitron name overlay with gradient fade,
 //!   sheen-on-hover sweep. Clickable; sets `NextState<AppState>` to the
 //!   entry's target state.
-//! - **Unregistered** sketch → [`render_placeholder_tile`]: dark fill,
+//! - **Unregistered** sketch → `render_placeholder_tile`: dark fill,
 //!   greyed sketch name in Orbitron, "Coming soon" subtitle. Inert.
 //!
 //! The grid has 6 cells; the 6th stays empty.

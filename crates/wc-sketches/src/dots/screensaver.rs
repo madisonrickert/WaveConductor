@@ -13,7 +13,7 @@
 //! is gated on `sketch_active(AppState::Dots)` and does not run here, so this
 //! is the param *producer* during attract. It supplies the noise-turbulence
 //! parameters for the continuous slow-morph drift, baking everything via the
-//! shared [`crate::dots::systems::sim_params::bake_dots_sim_params`] baker
+//! shared `crate::dots::systems::sim_params::bake_dots_sim_params` baker
 //! (Condition A1 — one baker, two writers, cannot drift).
 //!
 //! ## Why Dots' driver is simpler than Line's

@@ -17,7 +17,7 @@
 //!
 //! 1. [`spawn_attractor_visual`] spawns a group (parent + 10 [`AttractorRing`]
 //!    children under [`LineRoot`]) for every source whose power exceeds
-//!    [`VISUAL_POWER_EPSILON`] and that doesn't already have a visual.
+//!    `VISUAL_POWER_EPSILON` and that doesn't already have a visual.
 //! 2. [`animate_attractor_visual`] runs every frame, updating each group's
 //!    translation + scale from its source's position + power and advancing each
 //!    ring's transform along its gimbal axis.
@@ -405,7 +405,7 @@ fn spawn_ring_group(
 /// - Group translation tracks `MouseAttractorState.position`.
 /// - Group scale tracks `sqrt(power) / 5` (uniform).
 /// - Per-ring transform is recomputed from its (gimbal, phi, base scale)
-///   triple via [`ring_transform_for_gimbal`]. `phi` advances per frame by
+///   triple via `ring_transform_for_gimbal`. `phi` advances per frame by
 ///   `(10 - index)/20 × GIMBAL_RATE[gimbal] × power`.
 ///
 /// Per-frame (not per-second) rate is deliberate: it preserves the v4

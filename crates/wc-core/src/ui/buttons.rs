@@ -7,7 +7,7 @@
 //!
 //! ## Data flow
 //!
-//! `TouchInput` messages → [`update_pointer_coarse`] → [`PointerCoarse`] resource.
+//! `TouchInput` messages → `update_pointer_coarse` → [`PointerCoarse`] resource.
 //! [`overlay_icon_button`] reads [`OverlayStyle`] constants and the egui
 //! animation clock to produce a hover-animated, alpha-scaled button widget.
 //! Task 14 adds `SettingsPanelVisible`, `draw_home_button`, and
@@ -55,8 +55,8 @@ pub(crate) struct LastTouchAt(Duration);
 /// (CSS doesn't time out, but we want a graceful revert on hybrid devices).
 const TOUCH_COARSE_HOLD: Duration = Duration::from_secs(1);
 
-/// Plugin: inserts [`PointerCoarse`] + [`LastTouchAt`] resources and
-/// registers [`update_pointer_coarse`].
+/// Plugin: inserts [`PointerCoarse`] + `LastTouchAt` resources and
+/// registers `update_pointer_coarse`.
 ///
 /// `OverlayButtonsPlugin::build` also adds egui draw systems once Tasks 14
 /// and 15 land; for now only the touch-detection half ships.
