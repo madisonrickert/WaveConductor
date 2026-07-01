@@ -29,6 +29,11 @@
 //!
 //! Units: `D3DKMT_ADAPTER_PERFDATA::Temperature` is deci-Celsius (`°C = raw / 10`).
 
+// The workspace lint `unsafe_code = "deny"` is lifted for this FFI module (the
+// same pattern as `capture::avfoundation` and `providers::leap_native`). Every
+// `unsafe` block below is a raw D3DKMT syscall and carries its own SAFETY comment.
+#![allow(unsafe_code)]
+
 use std::ffi::c_void;
 
 use windows::Wdk::Graphics::Direct3D::{
@@ -119,7 +124,9 @@ fn enumerate_adapters() -> Vec<u32> {
     }
 
     // The second call may fill fewer entries than the first reported.
-    let filled = usize::try_from(desc.NumAdapters).unwrap_or(0).min(infos.len());
+    let filled = usize::try_from(desc.NumAdapters)
+        .unwrap_or(0)
+        .min(infos.len());
     infos[..filled].iter().map(|info| info.hAdapter).collect()
 }
 
