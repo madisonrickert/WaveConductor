@@ -89,10 +89,10 @@ pub fn default_bindings() -> InputBindings {
     use WaveConductorAction as A;
     InputBindings(vec![
         (A::SelectLine, Key(KeyCode::Digit1)),
-        // Digit2 and Digit5 are intentionally absent here — see the
-        // `SelectDots`/`SelectCymatics` doc comments in `super::actions` for
-        // why (AUDIT.md T5: the Flame/Waves seams they used to select are
-        // de-routed from live input).
+        (A::SelectFlame, Key(KeyCode::Digit2)),
+        // Digit5 is intentionally absent here — see the `SelectCymatics` doc
+        // comment in `super::actions` for why (AUDIT.md T5: the Waves seam
+        // it used to select is de-routed from live input).
         (A::SelectDots, Key(KeyCode::Digit3)),
         (A::SelectCymatics, Key(KeyCode::Digit4)),
         (A::NavigatePrev, Key(KeyCode::KeyZ)),

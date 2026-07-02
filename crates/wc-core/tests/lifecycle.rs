@@ -81,17 +81,24 @@ fn next_and_prev_cycle_through_sketches() {
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line
     );
-    // Line → next → Dots
+    // Line → next → Flame
+    press_key(&mut app, KeyCode::KeyX);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Flame
+    );
+    // Flame → next → Dots
     press_key(&mut app, KeyCode::KeyX);
     app.update();
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Dots
     );
-    // Wrap around: SKETCH_ORDER has 3 entries (Line, Dots, Cymatics — Flame
-    // and Waves are de-routed seams, AUDIT.md T5), so 3 nexts from Dots
-    // should land back on Dots.
-    for _ in 0..3 {
+    // Wrap around: SKETCH_ORDER has 4 entries (Line, Flame, Dots, Cymatics —
+    // Waves is a de-routed seam, AUDIT.md T5), so 4 nexts from Dots should
+    // land back on Dots.
+    for _ in 0..4 {
         press_key(&mut app, KeyCode::KeyX);
         app.update();
     }
@@ -99,12 +106,12 @@ fn next_and_prev_cycle_through_sketches() {
         *app.world().resource::<State<AppState>>().get(),
         AppState::Dots
     );
-    // Prev from Dots → Line (Z key)
+    // Prev from Dots → Flame (Z key)
     press_key(&mut app, KeyCode::KeyZ);
     app.update();
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
-        AppState::Line
+        AppState::Flame
     );
 }
 

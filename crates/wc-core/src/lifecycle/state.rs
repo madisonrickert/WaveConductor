@@ -25,15 +25,16 @@ impl AppState {
     ///
     /// `Home` is not part of the cycle; it is the entry/exit point only.
     ///
-    /// `Flame` and `Waves` are deliberately absent (`AUDIT.md` T5): both
-    /// `AppState` variants and their [`SketchActivity`] `#[source]` wiring
-    /// stay in place as seams for future sketches, but neither has an
-    /// implemented plugin or a registered [`crate::sketch::SketchManifest`]
-    /// entry yet, so cycling into either would land on a black screen. Once a
-    /// real plugin exists for one of them, add it back here (the
-    /// `sketch_order_entries_are_all_known_implemented_sketches` test in
-    /// `tests/ui_picker.rs` guards against re-adding a placeholder by mistake).
-    pub const SKETCH_ORDER: [Self; 3] = [Self::Line, Self::Dots, Self::Cymatics];
+    /// `Waves` is deliberately absent (`AUDIT.md` T5): the `AppState` variant
+    /// and its [`SketchActivity`] `#[source]` wiring stay in place as a seam
+    /// for a future sketch, but it has no implemented plugin or registered
+    /// [`crate::sketch::SketchManifest`] entry yet, so cycling into it would
+    /// land on a black screen. `Flame` re-entered the cycle in the
+    /// 2026-07-02 flame port. Once a real plugin exists for `Waves`, add it
+    /// back here (the `sketch_order_entries_are_all_known_implemented_sketches`
+    /// test in `tests/ui_picker.rs` guards against re-adding a placeholder by
+    /// mistake).
+    pub const SKETCH_ORDER: [Self; 4] = [Self::Line, Self::Flame, Self::Dots, Self::Cymatics];
 
     /// Whether this state represents an active sketch (i.e. not `Home`).
     #[must_use]
@@ -44,9 +45,9 @@ impl AppState {
     /// Parse a sketch name (case-insensitive, surrounding whitespace ignored)
     /// into its [`AppState`]. Returns `None` for unknown names, for `home`
     /// (Home is the implicit default, not a navigable sketch target here),
-    /// and for `flame`/`waves` — those `AppState` variants are reserved seams
-    /// (`AUDIT.md` T5) with no implemented sketch behind them yet, so parsing
-    /// them intentionally fails closed rather than accepting a name that
+    /// and for `waves` — that `AppState` variant is a reserved seam
+    /// (`AUDIT.md` T5) with no implemented sketch behind it yet, so parsing
+    /// it intentionally fails closed rather than accepting a name that
     /// would boot straight into a black screen.
     ///
     /// Backs the `WAVECONDUCTOR_START_SKETCH` startup override (see the binary
@@ -56,6 +57,7 @@ impl AppState {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "line" => Some(Self::Line),
+            "flame" => Some(Self::Flame),
             "dots" => Some(Self::Dots),
             "cymatics" => Some(Self::Cymatics),
             _ => None,
@@ -71,21 +73,21 @@ impl AppState {
     /// `next_prev_cycle_matches_sketch_order` test cross-checks the match
     /// arms against [`Self::SKETCH_ORDER`].
     ///
-    /// `Flame` and `Waves` are unreachable from live input (not in
-    /// [`Self::SKETCH_ORDER`], no picker tile, no key binding — `AUDIT.md` T5),
-    /// so their arms below are dead in practice; they exist only so this
-    /// remains a total function over every `AppState` variant. Each is
-    /// grouped into the live-cycle arm it would defensively fall through to
-    /// (rather than looping to itself) in case a future dev-only entry point
-    /// ever lands on it directly — `Waves` alongside the wrap-around back to
-    /// `Line`, `Flame` alongside the step into `Dots`. Grouping them with `|`
-    /// (instead of separate identical-body arms) also keeps
+    /// `Waves` is unreachable from live input (not in [`Self::SKETCH_ORDER`],
+    /// no picker tile, no key binding — `AUDIT.md` T5), so its arm below is
+    /// dead in practice; it exists only so this remains a total function
+    /// over every `AppState` variant. It is grouped into the live-cycle arm
+    /// it would defensively fall through to (rather than looping to itself)
+    /// in case a future dev-only entry point ever lands on it directly —
+    /// alongside the wrap-around back to `Line`. Grouping it with `|`
+    /// (instead of a separate identical-body arm) also keeps
     /// `clippy::match_same_arms` quiet.
     #[must_use]
     pub fn next_sketch(self) -> Self {
         match self {
             Self::Home | Self::Cymatics | Self::Waves => Self::Line,
-            Self::Line | Self::Flame => Self::Dots,
+            Self::Line => Self::Flame,
+            Self::Flame => Self::Dots,
             Self::Dots => Self::Cymatics,
         }
     }
@@ -94,13 +96,14 @@ impl AppState {
     /// sketch when called on `Home`.
     ///
     /// See [`Self::next_sketch`] for why this is an exhaustive `match` and
-    /// why the `Flame`/`Waves` arms are unreachable-but-present and grouped
-    /// with `|` into a live arm.
+    /// why the `Waves` arm is unreachable-but-present and grouped with `|`
+    /// into a live arm.
     #[must_use]
     pub fn prev_sketch(self) -> Self {
         match self {
             Self::Home | Self::Line | Self::Waves => Self::Cymatics,
-            Self::Dots | Self::Flame => Self::Line,
+            Self::Flame => Self::Line,
+            Self::Dots => Self::Flame,
             Self::Cymatics => Self::Dots,
         }
     }
@@ -126,13 +129,13 @@ mod tests {
 
     #[test]
     fn next_sketch_wraps() {
-        assert_eq!(AppState::Line.next_sketch(), AppState::Dots);
+        assert_eq!(AppState::Line.next_sketch(), AppState::Flame);
         assert_eq!(AppState::Cymatics.next_sketch(), AppState::Line);
     }
 
     #[test]
     fn prev_sketch_wraps() {
-        assert_eq!(AppState::Dots.prev_sketch(), AppState::Line);
+        assert_eq!(AppState::Flame.prev_sketch(), AppState::Line);
         assert_eq!(AppState::Line.prev_sketch(), AppState::Cymatics);
     }
 
@@ -142,16 +145,12 @@ mod tests {
         assert_eq!(AppState::Home.prev_sketch(), AppState::Cymatics);
     }
 
-    /// `Flame`/`Waves` are unreachable from live input (`AUDIT.md` T5) but the
-    /// `AppState` variants and their `next_sketch`/`prev_sketch` arms stay in
-    /// place as seams; this pins their (currently unreachable) routing so a
-    /// future edit can't silently change it without a test failure.
+    /// Waves stays a de-routed seam (2026-07 audit T5); Flame re-entered the
+    /// cycle in the 2026-07-02 flame port.
     #[test]
-    fn flame_and_waves_arms_are_present_but_unreachable_from_the_cycle() {
-        assert!(!AppState::SKETCH_ORDER.contains(&AppState::Flame));
+    fn waves_arms_are_present_but_unreachable_from_the_cycle() {
+        assert!(AppState::SKETCH_ORDER.contains(&AppState::Flame));
         assert!(!AppState::SKETCH_ORDER.contains(&AppState::Waves));
-        assert_eq!(AppState::Flame.next_sketch(), AppState::Dots);
-        assert_eq!(AppState::Flame.prev_sketch(), AppState::Line);
         assert_eq!(AppState::Waves.next_sketch(), AppState::Line);
         assert_eq!(AppState::Waves.prev_sketch(), AppState::Cymatics);
     }
@@ -169,12 +168,12 @@ mod tests {
         assert_eq!(AppState::from_name("line"), Some(AppState::Line));
         assert_eq!(AppState::from_name("  DOTS  "), Some(AppState::Dots));
         assert_eq!(AppState::from_name("Cymatics"), Some(AppState::Cymatics));
-        // Home, unknown names, and the reserved-but-unimplemented Flame/Waves
-        // seams (AUDIT.md T5) all yield None — the caller (the binary's
+        assert_eq!(AppState::from_name("Flame"), Some(AppState::Flame));
+        // Home, unknown names, and the reserved-but-unimplemented Waves seam
+        // (AUDIT.md T5) all yield None — the caller (the binary's
         // WAVECONDUCTOR_START_SKETCH handling) warns and falls back to Home.
         assert_eq!(AppState::from_name("home"), None);
         assert_eq!(AppState::from_name("nope"), None);
-        assert_eq!(AppState::from_name("Flame"), None);
         assert_eq!(AppState::from_name("waves"), None);
     }
 
