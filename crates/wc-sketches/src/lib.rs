@@ -43,6 +43,11 @@ impl Plugin for SketchesPlugin {
         // on entry, so it costs nothing on other sketches.
         app.add_plugins(crate::cymatics::compute::CymaticsComputePlugin);
 
+        // Flame level-parallel IFS compute node, registered once here (a `Plugin`
+        // singleton). Inert until the Flame sketch inserts `FlameSimParams` on
+        // entry, so it costs nothing on other sketches.
+        app.add_plugins(crate::flame::compute::pipeline::FlameComputePlugin);
+
         // Cymatics Material2d render material, registered once (a `Plugin`
         // singleton; adding it twice would panic at startup). The quad is
         // spawned in Stage 4 (CymaticsPlugin::build); registering here keeps
