@@ -28,10 +28,10 @@ The installation drives a **projector** — the kiosk's display is projected, no
 The orderable list. Five phases in priority order; within each, slugs roughly in dependency order. **Re-prioritise by editing here** — the slugs are stable, so nothing downstream renumbers.
 
 **Phase 1 — Desktop v4 parity** *(optimise opportunistically; leave architectural hooks open)*
-- 1.A Screensaver / attract / compute-saver: `screensaver-attract` · **`leap-deep-idle-state` (current main priority)** · `leap-watchdog-recovery`
+- 1.A Screensaver / attract / compute-saver / kiosk robustness: `screensaver-attract` · **`leap-deep-idle-state` (current main priority)** · `leap-watchdog-recovery` · `audio-device-failover` · `leap-sdk-archive`
 - 1.B Port the remaining four sketches: `sketch-flame` → `sketch-dots` → `sketch-cymatics` → (`mic-fft` →) `sketch-waves`
 - Close Line: `line-parity-signoff`
-- Opportunistic / anytime (not phase-gated): `dev-velocity-build` · `thermal-seam-generalization` · `perf-soak-telemetry`
+- Opportunistic / anytime (not phase-gated): `dev-velocity-build` · `thermal-seam-generalization` · `perf-soak-telemetry` · `soak-test-command`
 
 **Phase 2 — Deep optimisation pass** *(after parity / better-than-v4)*
 - `perf-soak-telemetry` → `frametime-percentiles` → `perf-governor` → `dynamic-resolution`
@@ -111,6 +111,19 @@ Why it's a standalone requirement (not just cleanup for our own duty cycle): a w
 - **Still open / on-device:** does rung 2 (USB reset) clear it on Linux/Windows; does rung 3 ever clear a *daemon-state* freeze caught before it becomes a device-session wedge; exact service/unit names per OS; the Windows SCM-ACL grant (dedicated research pass); whether `uhubctl`/PPPS actually power-cycles on macOS. Plus the **alerting** path — surface "needs physical replug" to the operator when the ladder is exhausted.
 - *Leap path only — compiles out on iPad (in-process Apple Vision; no external service to wedge).*
 
+### `audio-device-failover` — unattended audio survival + device selection (1.A)
+
+*The audio analog of `leap-watchdog-recovery`: the installation must not run silent for hours if the output device disappears. Foundation shipped in the 2026-07 repo-audit fixes (AUDIT T8): a mid-run cpal stream error now propagates to `AudioState` as `AudioStatus::Errored` through a lock-free flag, instead of being swallowed by the error callback.* Two increments on that foundation:
+
+- **Graceful failover (kiosk robustness).** On `Errored` (device unplugged / slept / format change), tear down and rebuild the cpal stream against the current default device, re-attaching the existing fundsp+rtrb graph and sample bank, with bounded retries and backoff — the install recovers audio on its own rather than needing a manual restart.
+- **Device / driver selection (feature).** A DAW-style output-device (and, where the host exposes it, driver/API) picker in the settings UI, with the chosen device persisted; hot-unplug of the selected device falls back to default and surfaces the change.
+
+Prior art: DAW audio-engine UX. cpal already enumerates devices; the lock-free ring + `Copy`-only command shape established for the synth graph is the template for rebuilding the stream without touching the real-time path.
+
+### `leap-sdk-archive` — Ultraleap SDK availability hedge (1.A, ops)
+
+*Belt-and-suspenders for the decision (AUDIT §6) to keep vendoring the LeapC binaries in-repo. Ultraleap is effectively abandonware; the real risk is not licensing but that the SDK **stops being distributed at all**.* Keep an **offsite archive of the original Ultraleap SDK installers** (all three desktop platforms + the exact 6.2.0 version the vendored `vendor/leapc/` binaries came from), outside this repo, so the vendored copies can be regenerated or re-verified if they're ever lost or corrupted. Pure ops, no code. Pairs with `leap-watchdog-recovery` (the *runtime* failure mode); this covers the *supply* failure mode.
+
 ### `sketch-flame` / `sketch-dots` / `sketch-cymatics` / `sketch-waves` (1.B)
 
 The remaining four v4 sketches. Each ships its own `PARITY.md`, absorbs accumulated carry-forwards, and registers a screensaver attract performer. Per-sketch character (design spec §8 + the universal audio-coupling pattern):
@@ -124,6 +137,8 @@ The remaining four v4 sketches. Each ships its own `PARITY.md`, absorbs accumula
 
 Order is provisional — the actual sequence depends on which sketch's data demands surface architectural gaps soonest.
 
+> **Re-entry checklist (2026-07 audit, T5).** `AppState::Flame` and `AppState::Waves` and their `SketchActivity` source seams still exist, but were **de-routed from all live input** — removed from `SKETCH_ORDER`, the picker, and the `Select*` bindings, and the `WAVECONDUCTOR_START_SKETCH` env falls back to Home for those names — so a stray keypress can no longer land on a black screen. Bringing either online is the reverse: register its plugin + manifest, re-add it to `SKETCH_ORDER`, restore its picker tile and binding, and author its screensaver attract performer. The "every `SKETCH_ORDER` entry has a registered manifest" test (added by T5, in `crates/wc-core/tests/lifecycle.rs`) is the guard — it fails if a variant re-enters the cycle unimplemented.
+
 ### `mic-fft`
 
 Microphone capture + `rustfft` path, deferred from the audio scaffolding (Plan 4). Prerequisite for `sketch-waves` (audio is the *input* there, not the output).
@@ -135,6 +150,7 @@ Cheap-and-compounding or leave-a-hook-open items that can land anytime during Ph
 - **`dev-velocity-build`** — `bevy/dynamic_linking` behind a dev-only flag/alias (never release/WASM; spike against the vendored-LeapC rpath first) + a fast linker (`mold`/`lld` on Linux, *appended* to the existing per-target `rustflags`; skip `sold`/`zld` on macOS — Apple's `ld` is already fast). CF #85 (**shipped 2026-05-30** — `cargo rund` alias; coexistence spike passed on Apple Silicon), #86 (open). Build profiles themselves are already done (`[profile.release]` fat-LTO + `codegen-units=1` + `panic=abort` + `strip`; deps at opt-3 in dev).
 - **`thermal-seam-generalization`** — make the thermal sensor seam source-agnostic (`tier`-producing alongside `°C`-producing) so the Linux-sysfs/macmon °C path and the iOS `ProcessInfo.thermalState` enum path are two backends behind one `ThermalState`. The `ThermalState` *resource* already absorbs a new `ThermalSource`; the sensor abstraction doesn't (it's `read_celsius -> Option<f32>` all the way down). Worth doing regardless of device — it's the generalisation the v5 thermal thesis rests on. CF #90.
 - **`perf-soak-telemetry`** — listed in Phase 2, but it's the gating evidence for both the optimisation phase and the iOS go/no-go, so it can be built opportunistically as soon as a candidate device exists.
+- **`soak-test-command`** — convert the release-gate 8-hour soak from a manual procedure into an agent-operable `cargo xtask soak-test` subcommand (launch + duration + thermal / FPS / RSS logging + a summary verdict), following the harness's dispatcher + `--json` pattern. AGENTS.md / README now document the soak honestly as a manual procedure and flag this command as planned-not-implemented (audit T6); this item *is* that command. Overlaps `perf-soak-telemetry` (the full-render soak it would drive) and the Release-gate soak.
 
 ---
 
