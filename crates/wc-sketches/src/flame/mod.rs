@@ -14,6 +14,7 @@
 //! wired in later stages of the port plan.
 
 pub mod branches;
+pub mod compute;
 pub mod levels;
 pub mod settings;
 
