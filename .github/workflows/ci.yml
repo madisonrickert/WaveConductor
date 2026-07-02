@@ -81,14 +81,11 @@ jobs:
         with:
           arguments: --workspace --all-features
 
-  audit:
-    name: cargo-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+  # (The separate `cargo-audit` job was retired 2026-07-02: it read the same
+  # RustSec DB as `cargo deny check` above but did NOT honor deny.toml's ignore
+  # list, so a transitively-forced-but-not-exploitable advisory had to be
+  # ignored in two places. `deny` is now the single advisory gate. See
+  # docs/runbooks/ci-cost-review.md.)
 
   # Linux tests run on every push/PR for fast feedback.
   test-linux:

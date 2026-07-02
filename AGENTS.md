@@ -16,7 +16,7 @@ Run the gates CI enforces (`.github/workflows/ci.yml`) before claiming work done
 - `cargo clippy --all-targets --all-features --workspace -- -D warnings` — lints are hard errors.
 - `cargo nextest run --workspace --all-features` — tests (CI's runner). nextest does **not** run doctests; cover those with `cargo test --doc --workspace`. If nextest is absent, `cargo test --workspace --all-features` is a superset fallback.
 - `cargo doc --no-deps --workspace --document-private-items` — rustdoc build; CI's `doc` job runs it with `RUSTDOCFLAGS="-D warnings"`, so broken intra-doc links are hard errors and the doc build is clean.
-- `cargo deny check` — advisories, licenses, bans, sources (CI also runs `cargo audit`, which `deny`'s advisory check largely subsumes).
+- `cargo deny check` — advisories, licenses, bans, sources. The single advisory gate: it reads the RustSec DB and honors `deny.toml` ignores (the redundant standalone `cargo audit` CI job was retired 2026-07-02 — it didn't honor those ignores; see `docs/runbooks/ci-cost-review.md`).
 - `cargo xtask check-secrets` — blocks developer home-directory paths (`/Users/...`, `/home/...`, `C:\Users\...`), email addresses, and secret prefixes (AWS `AKIA...` keys, GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` tokens, `sk-` API keys, bearer tokens). It scans the whole tree except `vendor/`, `target/`, `.git/`, and the `docs/superpowers/` dated planning archive — living `docs/` (`docs/adr`, `docs/runbooks`, README) and `tests/` are scanned like any other tree.
 - Rendered-sketch output: `cargo xtask capture <scenario>` — see the **Visual testing** section below and `tests/visual/CLAUDE.md`.
 

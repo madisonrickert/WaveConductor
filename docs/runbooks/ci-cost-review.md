@@ -1,0 +1,42 @@
+# CI cost review (T13)
+
+*Reviewed 2026-07-02 against `.github/workflows/ci.yml` @ the v5-alpha audit-fix batch. Scope: AUDIT.md T13 — measure per-job runner cost, cache effectiveness, and triggers; decide whether any PR-level cross-platform step fits the budget (AUDIT §6: "the priority is a cost dive; right-sizing, possibly less, not more").*
+
+## Headline finding: the repo is public, so runner minutes are free
+
+`madisonrickert/WaveConductor` is a **public** repository. GitHub-hosted Actions minutes are **unmetered for public repos** on the standard runners — including the 10×-billed `macos-latest` and 2×-billed `windows-latest` that the cross-platform job uses. The per-minute *billing multipliers* only apply to private repos and metered plans.
+
+So the premise behind AUDIT §6's "the last release's cross-platform CI overran the intended budget" no longer holds as a **dollar** cost: either the repo was private at the time, or "budget" meant wall-clock / queue time rather than money. Either way, on a public repo there is no $ ceiling to right-size against.
+
+That reframes the review: the remaining cost levers are **wall-clock feedback time**, **runner-queue contention**, and **redundancy** — not money.
+
+## Trigger map (who runs when)
+
+| Trigger | Jobs that run |
+| --- | --- |
+| PR to `main` / `v5-alpha` | fmt, clippy, check-secrets, validate-shaders, deny, test-linux, doc — **Linux only** |
+| Push to `v5-alpha` | same set — **Linux only** |
+| Push to `main` | the Linux set **+ test-cross-platform** (macOS + Windows) |
+| Tag `v*` | the Linux set **+ test-cross-platform** |
+
+PRs are already Linux-only — the cross-platform matrix is gated by `if: github.event_name == 'push' && (ref == main || tag)`. This is the correct scoping and needs no change. `concurrency: cancel-in-progress` already kills superseded runs on the same ref.
+
+## Actions taken
+
+**Retired the standalone `cargo audit` job.** It ran `rustsec/audit-check` against the same RustSec advisory DB as `cargo deny check`, but did **not** honor `deny.toml`'s ignore list. As of 2026-07-02 that made it actively harmful: the transitively-forced, not-exploitable `quick-xml` advisory (RUSTSEC-2026-0194) is ignored in `deny.toml`, but the audit job would have failed on it with no equivalent ignore — forcing a *second* advisory-ignore config (`audit.toml`) to be maintained in parallel. `cargo deny check` is now the single advisory gate (advisories + licenses + bans + sources, all honoring `deny.toml`). Net: one fewer job per run, and advisory ignores live in exactly one place.
+
+## Considered and deliberately NOT changed
+
+- **PR-level cross-platform (M7).** Stands as an accepted tradeoff (AUDIT §6 / M7). PRs get fast Linux feedback; macOS/Windows portability regressions are caught on the main-push / tag runs before a release. On a public repo this coverage is now *free*, so there's no cost argument to remove it — but there's also no need to add it to PRs: the Linux-only PR gate is fast, and the primary deploy target (macOS) plus Windows are both exercised before any tag. If a portability regression ever slips to `main` and stings, revisit then.
+- **Cross-platform scope (main-push + tags).** Left as-is. A tags-only trigger would cut a few slow macOS runs, but with free minutes the wall-clock cost is only felt at merge-to-main time (infrequent, single-operator), and catching a portability break at the main merge rather than at the tag is worth the free run.
+- **Per-job recompilation.** Five heavy Linux jobs (clippy, test-linux, doc, check-secrets, validate-shaders) each compile independently — `Swatinem/rust-cache` caches across runs of a job but not across jobs within one run. Consolidating them into one serial job would compile once but serialize what is currently parallel, trading faster wall-clock feedback for fewer total core-minutes. On free Linux minutes the parallel layout (faster feedback) is the better trade. Left as-is; documented here so it's a conscious choice, not an oversight.
+- **`CARGO_INCREMENTAL: 0`, rust-cache placement, mold on Linux.** Already correct.
+
+## If the repo ever goes private again
+
+The billing multipliers snap back (macOS 10×, Windows 2×). At that point the levers, in order of impact:
+1. Restrict `test-cross-platform` to **tags only** (drop the main-push trigger) — halves macOS runs across a merge-then-tag release.
+2. Consider consolidating the heavy Linux jobs to compile-once (accepting slower feedback).
+3. Reconsider whether both macOS *and* Windows must run every release, or alternate.
+
+Until then, none of these is worth the wall-clock/feedback regression.
