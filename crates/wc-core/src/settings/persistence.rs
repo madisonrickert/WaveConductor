@@ -25,7 +25,7 @@
 //! sketch under key `wc-sketch-settings:<STORAGE_KEY>`. JSON instead of TOML
 //! because `serde_json` has a much smaller wasm footprint than `toml`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::trait_def::SketchSettings;
 
@@ -90,13 +90,24 @@ pub fn load<S: SketchSettings>() -> S {
 /// Persist a single settings struct. Reads the existing file, replaces
 /// `[<STORAGE_KEY>]`, and writes it back. Errors are logged but not
 /// returned; a settings save failure should never crash the app.
+///
+/// Two data-loss hazards are guarded against:
+///
+/// * **Corrupt-file clobbering.** The merge step ([`load_merge_table`])
+///   distinguishes an absent file (fresh table, no fuss) from a present but
+///   unparseable one. A present-but-corrupt file is *quarantined* (renamed to
+///   a sibling `.corrupt-<n>`) and logged at `error!` before we proceed with a
+///   fresh table, so a single malformed section can never silently erase every
+///   other sketch's settings.
+/// * **Torn writes.** The new contents go to a temp file in the *same*
+///   directory, which is then [`std::fs::rename`]d over the target. `rename`
+///   is atomic on a single filesystem and replaces the destination on Unix and
+///   Windows 10+, so a crash or power loss mid-write leaves either the old file
+///   or the new one intact — never a half-written one.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save<S: SketchSettings>(settings: &S) {
     let path = settings_path();
-    let mut table: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default();
+    let mut table = load_merge_table(&path);
 
     let new_value = match toml::Value::try_from(settings) {
         Ok(v) => v,
@@ -121,8 +132,116 @@ pub fn save<S: SketchSettings>(settings: &S) {
             return;
         }
     }
-    if let Err(err) = std::fs::write(&path, serialized) {
-        tracing::error!(?err, ?path, "failed to write settings file");
+
+    // Atomic replace: stage to a sibling temp file, then rename over the
+    // target. Writing in place (the old `std::fs::write(&path, ...)`) risked a
+    // truncated file on a crash between truncate and full write.
+    let tmp_path = temp_write_path(&path);
+    if let Err(err) = std::fs::write(&tmp_path, serialized) {
+        tracing::error!(?err, ?tmp_path, "failed to write temporary settings file");
+        return;
+    }
+    if let Err(err) = std::fs::rename(&tmp_path, &path) {
+        tracing::error!(
+            ?err,
+            ?tmp_path,
+            ?path,
+            "failed to atomically replace settings file"
+        );
+        // Best-effort cleanup so a failed rename does not leave the temp file
+        // littering the config dir.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+}
+
+/// Read and parse the existing settings file into a table to merge the new
+/// section into. Returns a fresh empty table when the file is absent (the
+/// normal first-save case) or unreadable.
+///
+/// On a present-but-unparseable file the bad file is quarantined (see
+/// [`quarantine_path`]) and the error logged, then a fresh table is returned.
+/// This is the crux of the corrupt-file guard: we never fold a malformed file
+/// into `default()` and write that back over the top, which would erase every
+/// sibling section.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_merge_table(path: &Path) -> toml::Table {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // No existing file: fresh table. Expected on the very first save.
+            return toml::Table::new();
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                ?path,
+                "could not read existing settings file for merge; starting fresh"
+            );
+            return toml::Table::new();
+        }
+    };
+
+    match toml::from_str::<toml::Table>(&text) {
+        Ok(table) => table,
+        Err(err) => {
+            if let Some(dest) = quarantine_path(path) {
+                match std::fs::rename(path, &dest) {
+                    Ok(()) => tracing::error!(
+                        ?err,
+                        ?path,
+                        quarantine = ?dest,
+                        "settings file is corrupt; quarantined it and starting from a fresh table",
+                    ),
+                    Err(rename_err) => tracing::error!(
+                        ?err,
+                        ?rename_err,
+                        ?path,
+                        "settings file is corrupt and could not be quarantined; starting fresh",
+                    ),
+                }
+            } else {
+                tracing::error!(
+                    ?err,
+                    ?path,
+                    "settings file is corrupt and no free quarantine name was found; starting fresh",
+                );
+            }
+            toml::Table::new()
+        }
+    }
+}
+
+/// Sibling path of `path` used to stage an atomic write. Lives in the same
+/// directory (so the subsequent [`std::fs::rename`] never crosses a filesystem
+/// boundary) and carries the current process id to avoid two instances racing
+/// on the same temp name. Falls back to a fixed stem if `path` has no file
+/// name (not reachable for the real settings path, which always ends in a
+/// file).
+#[cfg(not(target_arch = "wasm32"))]
+fn temp_write_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("sketch-settings.toml"),
+        std::ffi::OsStr::to_os_string,
+    );
+    name.push(format!(".tmp-{}", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// First unused `<file-name>.corrupt-<n>` sibling of `path`, scanning `n` from
+/// `0` upward. Returns `None` if `path` has no file name or every candidate up
+/// to `u32::MAX` is taken (neither is reachable in practice).
+#[cfg(not(target_arch = "wasm32"))]
+fn quarantine_path(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?;
+    let mut n: u32 = 0;
+    loop {
+        let mut name = file_name.to_os_string();
+        name.push(format!(".corrupt-{n}"));
+        let candidate = path.with_file_name(name);
+        if !candidate.exists() {
+            return Some(candidate);
+        }
+        n = n.checked_add(1)?;
     }
 }
 

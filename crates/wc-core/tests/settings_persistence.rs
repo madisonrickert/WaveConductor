@@ -215,3 +215,111 @@ fn load_returns_default_when_section_schema_mismatches() {
         assert_eq!(loaded, TestSketchSettings::default());
     });
 }
+
+/// Returns the sibling paths of the settings file whose name begins with
+/// `sketch-settings.toml.corrupt-`. Used to assert a corrupt file was
+/// quarantined rather than silently overwritten.
+fn quarantine_files() -> Vec<std::path::PathBuf> {
+    use std::fs;
+
+    let path = persistence::settings_path();
+    let dir = path.parent().expect("has parent").to_path_buf();
+    let target = path.file_name().expect("has file name").to_os_string();
+    let prefix = {
+        let mut p = target;
+        p.push(".corrupt-");
+        p.to_string_lossy().into_owned()
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect()
+}
+
+#[test]
+fn save_quarantines_corrupt_file_instead_of_clobbering() {
+    use std::fs;
+
+    with_temp_dir(|_dir| {
+        let path = persistence::settings_path();
+        fs::create_dir_all(path.parent().expect("has parent")).expect("mkdirs");
+        // A present-but-unparseable file. Under the old code this was silently
+        // turned into an empty table and overwritten, destroying every other
+        // section. The garbage must instead be quarantined.
+        let garbage = "this is not valid toml = = = \x00 \u{fffd}";
+        fs::write(&path, garbage).expect("seed");
+
+        let mut settings = TestSketchSettings::default();
+        settings.widget_count = 777;
+        persistence::save(&settings);
+
+        // (a) The corrupt file was preserved under a `.corrupt-*` name, with
+        // its original bytes intact.
+        let quarantined = quarantine_files();
+        assert_eq!(
+            quarantined.len(),
+            1,
+            "exactly one quarantine file expected, found: {quarantined:?}"
+        );
+        let recovered = fs::read_to_string(&quarantined[0]).expect("read quarantine");
+        assert_eq!(
+            recovered, garbage,
+            "quarantine must hold the original bytes"
+        );
+
+        // The freshly-written file is valid and our section round-trips.
+        let loaded = persistence::load::<TestSketchSettings>();
+        assert_eq!(loaded.widget_count, 777);
+    });
+}
+
+#[test]
+fn save_after_quarantine_preserves_sibling_sections() {
+    use std::fs;
+
+    with_temp_dir(|_dir| {
+        let path = persistence::settings_path();
+        fs::create_dir_all(path.parent().expect("has parent")).expect("mkdirs");
+
+        // Corrupt file → first save quarantines it and writes a fresh `[test]`.
+        fs::write(&path, "not = = valid toml").expect("seed");
+        let mut first = TestSketchSettings::default();
+        first.widget_count = 1;
+        persistence::save(&first);
+        assert_eq!(
+            quarantine_files().len(),
+            1,
+            "corrupt file must be quarantined"
+        );
+
+        // A *different* sketch's section, saved after recovery. (Only one
+        // settings type exists in the fixtures, so we inject the sibling by
+        // hand; `save_preserves_other_sections` uses the same technique.)
+        let mut text = fs::read_to_string(&path).expect("read after recovery");
+        text.push_str("\n[unrelated]\nfoo = 42\nbar = \"keep me\"\n");
+        fs::write(&path, text).expect("inject sibling section");
+
+        // A subsequent save of `[test]` must NOT lose the sibling section.
+        let mut second = TestSketchSettings::default();
+        second.widget_count = 2;
+        persistence::save(&second);
+
+        let out = fs::read_to_string(&path).expect("read after second save");
+        assert!(
+            out.contains("[unrelated]"),
+            "sibling section lost after subsequent save: {out}"
+        );
+        assert!(out.contains("foo = 42"), "sibling key lost: {out}");
+        // And the section we just saved is current.
+        let loaded = persistence::load::<TestSketchSettings>();
+        assert_eq!(loaded.widget_count, 2);
+    });
+}
