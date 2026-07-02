@@ -133,6 +133,12 @@ pub struct DspHost {
     /// Active Cymatics voice bundle, if any. `None` means the sketch is not
     /// loaded and the voices contribute nothing to the output mix.
     cymatics: Option<CymaticsVoices>,
+    /// Count of `Set*Param` commands received while the target voice was
+    /// inactive (stale-param drops). Incremented on the audio thread via
+    /// `saturating_add` instead of logging: `tracing::warn!` would take the
+    /// `LogBuffer` mutex and allocate, both forbidden on the audio callback.
+    /// Exposed via [`Self::stale_param_drops`] for tests and diagnostics.
+    stale_param_drops: u64,
 }
 
 impl DspHost {
@@ -159,6 +165,7 @@ impl DspHost {
             background,
             background_volume: Shared::new(DEFAULT_BACKGROUND_VOLUME),
             cymatics: None,
+            stale_param_drops: 0,
         }
     }
 
@@ -168,8 +175,9 @@ impl DspHost {
     /// `AddLineSynth` / `AddDotsSynth` / `AddCymaticsSynth` are idempotent
     /// (a second add while active is a no-op). Their `Remove*` counterparts
     /// are likewise idempotent. `Set*Param` commands received while the
-    /// corresponding voices are inactive are dropped via `tracing::warn!`;
-    /// the audio thread never panics on stale params.
+    /// corresponding voices are inactive are dropped and tallied in
+    /// [`Self::stale_param_drops`] (no logging on the audio thread — that
+    /// would take a mutex and allocate); the host never panics on stale params.
     pub fn apply(&mut self, command: AudioCommand) {
         match command {
             AudioCommand::SetMasterVolume(v) => {
@@ -197,11 +205,10 @@ impl DspHost {
                 } else if let Some(synth) = &self.line_synth {
                     synth.set_param(key, value);
                 } else {
-                    tracing::warn!(
-                        key,
-                        value,
-                        "SetLineParam received with no active LineSynth; dropping"
-                    );
+                    // No active LineSynth: drop and count. Logging here would
+                    // take the tracing LogBuffer mutex and allocate on the
+                    // audio thread (see `stale_param_drops`).
+                    self.stale_param_drops = self.stale_param_drops.saturating_add(1);
                 }
             }
             AudioCommand::AddDotsSynth => {
@@ -216,11 +223,8 @@ impl DspHost {
                 if let Some(synth) = &self.dots_synth {
                     synth.set_param(key, value);
                 } else {
-                    tracing::warn!(
-                        key,
-                        value,
-                        "SetDotsParam received with no active DotsSynth; dropping"
-                    );
+                    // No active DotsSynth: drop and count (no audio-thread log).
+                    self.stale_param_drops = self.stale_param_drops.saturating_add(1);
                 }
             }
             AudioCommand::AddCymaticsSynth => self.activate_cymatics(),
@@ -237,11 +241,8 @@ impl DspHost {
                         _ => c.synth.set_param(key, value),
                     }
                 } else {
-                    tracing::warn!(
-                        key,
-                        value,
-                        "SetCymaticsParam with no active voices; dropping"
-                    );
+                    // No active Cymatics voices: drop and count (no audio-thread log).
+                    self.stale_param_drops = self.stale_param_drops.saturating_add(1);
                 }
             }
             AudioCommand::TriggerCymaticsSample(id) => {
@@ -330,6 +331,17 @@ impl DspHost {
     #[must_use]
     pub fn has_background(&self) -> bool {
         self.background_idx.is_some()
+    }
+
+    /// Number of `Set*Param` commands dropped because their target voice was
+    /// inactive, accumulated on the audio thread. Saturating: it never wraps
+    /// or panics. Non-zero means the main thread sent params for a synth that
+    /// was not (yet) active — usually a benign ordering race at sketch
+    /// activation, not a defect. Read directly in tests; a future diagnostics
+    /// path can surface it over the message ring.
+    #[must_use]
+    pub fn stale_param_drops(&self) -> u64 {
+        self.stale_param_drops
     }
 
     /// Render samples into `output`.
@@ -432,6 +444,7 @@ impl core::fmt::Debug for DspHost {
             .field("background_idx", &self.background_idx)
             .field("background_playhead", &self.background.playhead)
             .field("background_volume", &self.background_volume.value())
+            .field("stale_param_drops", &self.stale_param_drops)
             // `bank` is intentionally omitted: printing all decoded PCM data
             // would make debug output extremely large. Use `background_idx` to
             // identify which bank entry is active.

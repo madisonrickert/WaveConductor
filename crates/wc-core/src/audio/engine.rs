@@ -3,13 +3,17 @@
 //! The Startup system [`start_audio_engine`] builds:
 //!   1. Two `rtrb` ring buffers (commands main → audio, messages audio → main).
 //!   2. A [`super::dsp::DspHost`] sized to the device's default output config.
-//!   3. A `cpal::Stream` whose data and error callbacks own the audio end of
-//!      each ring plus the DSP host.
+//!   3. A `cpal::Stream` whose data callback owns the audio end of each ring
+//!      plus the DSP host, and whose error callback owns a clone of a
+//!      lock-free [`AudioErrorFlag`] it raises if the stream dies mid-run.
 //!
 //! The stream is wrapped in [`AudioStream`] (a non-send resource) so Bevy's
 //! drop on app exit stops it cleanly. The producer end of the command ring and
 //! the consumer end of the message ring become `Res<AudioCommandSender>` and
 //! `Res<AudioMessageReceiver>` for any Bevy system to use.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,7 +22,7 @@ use super::background::{build_sample_bank, SampleAssets};
 use super::command::{AudioCommand, AudioMessage};
 use super::dsp::DspHost;
 use super::ring::{AudioCommandSender, AudioMessageReceiver, RING_CAPACITY};
-use super::state::AudioState;
+use super::state::{AudioErrorFlag, AudioState};
 
 /// Wraps the live `cpal::Stream` so Bevy keeps it alive for the app's
 /// lifetime. `cpal::Stream` is `!Send` on macOS, hence the non-send resource.
@@ -86,6 +90,9 @@ pub fn start_audio_engine(world: &mut World) {
             world.insert_non_send(built.sender);
             world.insert_non_send(built.receiver);
             world.insert_non_send(built.stream);
+            // Shared with the cpal error callback; `pump_audio_messages` reads
+            // it each PreUpdate to surface a mid-run stream death.
+            world.insert_resource(AudioErrorFlag(built.error_flag));
             world.resource_mut::<AudioState>().sample_rate = built.sample_rate;
             world.resource_mut::<AudioState>().channels = built.channels;
             // AudioState.status remains `NotStarted` until the audio thread
@@ -109,6 +116,9 @@ struct BuiltEngine {
     stream: AudioStream,
     sender: AudioCommandSender,
     receiver: AudioMessageReceiver,
+    /// Set by the cpal error callback when the stream dies mid-run; read by
+    /// `pump_audio_messages`. Wrapped in [`AudioErrorFlag`] at install time.
+    error_flag: Arc<AtomicBool>,
     sample_rate: u32,
     channels: u16,
 }
@@ -160,11 +170,16 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
         channels,
     });
 
-    // Send a clone of the producer into the error callback closure. Since cpal
-    // gives us non-mutable access in the error closure, we need an alternate
-    // path — but rtrb requires &mut for push. The pragmatic solution: log the
-    // error via `tracing` from the callback; the main thread will not see a
-    // structured `Errored` message in Plan 4. Plan 6+ can revisit if needed.
+    // Lock-free signal for a mid-run stream death. cpal's error closure is
+    // `FnMut` (no `&mut` access to the message ring, which `rtrb` needs to
+    // push) and runs on an OS audio thread, so it must not allocate, lock, or
+    // log. It only flips this flag with a single relaxed atomic store; the
+    // main thread's `pump_audio_messages` observes it and drives
+    // `AudioStatus::Errored`. One clone stays here (installed as
+    // `AudioErrorFlag`), the other moves into the closure.
+    let error_flag = Arc::new(AtomicBool::new(false));
+    let error_flag_cb = Arc::clone(&error_flag);
+
     let stream = device.build_output_stream(
         &config,
         move |output: &mut [f32], _info: &cpal::OutputCallbackInfo| {
@@ -202,8 +217,12 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
             // Render.
             dsp.render(output);
         },
-        move |err| {
-            tracing::error!(?err, "cpal stream error");
+        move |_err| {
+            // Real-time-sensitive thread: no alloc, no lock, no log. Formatting
+            // `_err` would allocate and logging would take the tracing mutex, so
+            // we only raise the flag. The main thread logs the failure once when
+            // it observes the flag (see `pump_audio_messages`).
+            error_flag_cb.store(true, Ordering::Relaxed);
         },
         None,
     )?;
@@ -226,6 +245,7 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
         stream: AudioStream { stream },
         sender: AudioCommandSender::new(cmd_producer),
         receiver: AudioMessageReceiver::new(msg_consumer),
+        error_flag,
         sample_rate,
         channels,
     })

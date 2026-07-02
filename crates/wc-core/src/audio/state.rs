@@ -4,12 +4,35 @@
 //! `Res<AudioMessageReceiver>` into the fields below. Sketches and UI read this
 //! resource; no other path is exposed.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
 
 use super::command::AudioMessage;
 use super::ring::AudioMessageReceiver;
+
+/// Human-facing `last_error` text set when the cpal error callback fires.
+///
+/// The callback itself cannot format the underlying `cpal::StreamError`
+/// (formatting allocates, which is forbidden on that thread), so it only flips
+/// a flag; the main thread substitutes this generic message.
+const ERROR_CALLBACK_MESSAGE: &str =
+    "cpal stream error callback fired (device disconnected or backend error)";
+
+/// Lock-free flag shared with the cpal error callback.
+///
+/// The error callback runs on an OS audio thread and must not allocate, take a
+/// lock, or log. When the stream dies mid-run it stores `true` here with a
+/// single relaxed atomic write. [`pump_audio_messages`] observes (and clears)
+/// the flag on the next `PreUpdate`, drives [`AudioStatus::Errored`], and logs
+/// the failure once on the main thread. Installed as a `Resource` by
+/// [`super::engine::start_audio_engine`]; the same `Arc` is cloned into the
+/// error-callback closure at stream-build time.
+#[derive(Resource, Clone)]
+pub struct AudioErrorFlag(pub Arc<AtomicBool>);
 
 /// Lifecycle status of the audio engine, mirrored from the audio thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Default)]
@@ -85,9 +108,17 @@ impl Default for AudioState {
 ///
 /// Uses `NonSendMut<AudioMessageReceiver>` because `rtrb::Consumer` is not
 /// `Sync`; see `ring` module docs.
+///
+/// After draining the ring it checks [`AudioErrorFlag`]: if the cpal error
+/// callback fired (the stream died mid-run), the flag is set. Observing it here
+/// drives [`AudioStatus::Errored`] and logs once. The error check runs *after*
+/// the drain so a stream death takes precedence over any stale `StreamStarted`
+/// that arrived in the same tick. The flag is optional so the pump degrades
+/// cleanly when the engine failed to build (no flag resource installed).
 pub fn pump_audio_messages(
     mut state: ResMut<'_, AudioState>,
     mut receiver: NonSendMut<'_, AudioMessageReceiver>,
+    error_flag: Option<Res<'_, AudioErrorFlag>>,
 ) {
     for msg in receiver.drain() {
         match msg {
@@ -130,6 +161,35 @@ pub fn pump_audio_messages(
             }
         }
     }
+
+    // Surface a mid-run stream death. The error callback stores `true` and
+    // never logs (real-time thread); `swap` consumes the flag so we act at most
+    // once per error event, and `set_errored_from_callback` reports whether this
+    // was the transition into `Errored` so we log exactly once.
+    let callback_fired = error_flag
+        .as_ref()
+        .is_some_and(|flag| flag.0.swap(false, Ordering::Relaxed));
+    if callback_fired && set_errored_from_callback(&mut state) {
+        tracing::error!(
+            "cpal stream error callback fired; audio is down. \
+             Status set to Errored. Restart the app to recover audio."
+        );
+    }
+}
+
+/// Drive [`AudioState`] into [`AudioStatus::Errored`] in response to the cpal
+/// error callback firing.
+///
+/// Returns `true` only when this call *transitioned* the status into `Errored`,
+/// so the caller logs exactly once per failure rather than every `PreUpdate`
+/// after the stream dies. Sets [`AudioState::last_error`] to
+/// [`ERROR_CALLBACK_MESSAGE`] (the callback cannot format the underlying error
+/// without allocating on its thread).
+fn set_errored_from_callback(state: &mut AudioState) -> bool {
+    let newly_errored = state.status != AudioStatus::Errored;
+    state.status = AudioStatus::Errored;
+    state.last_error = Some(ERROR_CALLBACK_MESSAGE.to_string());
+    newly_errored
 }
 
 #[cfg(test)]
@@ -145,5 +205,29 @@ mod tests {
         assert!((state.volume - 1.0).abs() < f32::EPSILON);
         assert!(!state.muted);
         assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn error_callback_transitions_running_to_errored_once() {
+        let mut state = AudioState {
+            status: AudioStatus::Running,
+            ..AudioState::default()
+        };
+        // First observation transitions and reports `true` (so the caller logs).
+        assert!(set_errored_from_callback(&mut state));
+        assert_eq!(state.status, AudioStatus::Errored);
+        assert_eq!(state.last_error.as_deref(), Some(ERROR_CALLBACK_MESSAGE));
+        // A second observation is idempotent and reports `false` (no re-log).
+        assert!(!set_errored_from_callback(&mut state));
+        assert_eq!(state.status, AudioStatus::Errored);
+    }
+
+    #[test]
+    fn error_flag_swap_consumes_the_flag() {
+        let flag = AudioErrorFlag(Arc::new(AtomicBool::new(true)));
+        // The pump consumes the flag with `swap`; the first read sees `true`,
+        // subsequent reads see `false` until the callback sets it again.
+        assert!(flag.0.swap(false, Ordering::Relaxed));
+        assert!(!flag.0.swap(false, Ordering::Relaxed));
     }
 }
