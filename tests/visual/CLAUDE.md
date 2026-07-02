@@ -9,11 +9,21 @@ say *which* frames to open).
 
 The whole scaffold (`wc_core::capture`, `wc_core::debug`, and their render
 wiring) is `#[cfg(debug_assertions)]`-gated and compiled out of release. Capture
-runs against the **debug** binary (`cargo run -p waveconductor`).
+runs against the **pre-built debug** binary (`target/debug/waveconductor`).
+
+**Build the app first** — capture does *not* build it. Run `cargo build -p
+waveconductor` as a separate, watchable step, then run a capture. If the binary
+is missing, `cargo xtask capture` fails fast with that exact directive rather
+than building under its launch timeout (a cold build would otherwise trip the
+90s "app did not exit" safety net mid-compile — capture would look like it hung
+when it was really still compiling). Capture also prints a non-fatal warning if
+the built binary is older than `crates/` or `assets/shaders/` sources; rebuild
+to refresh.
 
 ## Quick start
 
 ```bash
+cargo build -p waveconductor               # REQUIRED first: capture launches this pre-built binary
 cargo xtask capture --list                 # list scenarios (human)
 cargo xtask capture --list --json          # list scenarios as a JSON array of names
 cargo xtask capture line-synthetic         # capture + diff baselines (human table)
