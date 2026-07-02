@@ -95,7 +95,12 @@ mod tests {
         assert_eq!(rows[0].label, "new.png");
         assert_eq!(rows[0].subtext, "1280x853 · 471 KB");
         assert_eq!(rows[1].label, "old.png");
-        assert_eq!(rows[0].managed_path, "/store/new.png");
+        assert_eq!(
+            rows[0].managed_path,
+            std::path::Path::new("/store")
+                .join("new.png")
+                .to_string_lossy()
+        );
     }
 
     #[test]
