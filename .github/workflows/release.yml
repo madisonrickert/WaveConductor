@@ -116,9 +116,9 @@ jobs:
       - name: Write release notes
         run: |
           cat > NOTES.md <<'EOF'
-          First cross-platform alpha of the v5 Rust + Bevy rewrite. Unsigned
-          pre-release binaries for macOS (Apple Silicon), Windows (x86_64), and
-          Linux (x86_64).
+          Second alpha of the v5 Rust + Bevy rewrite. Unsigned pre-release
+          binaries for macOS (Apple Silicon), Windows (x86_64), and Linux
+          (x86_64).
 
           Downloads:
           - macOS (Apple Silicon): WaveConductor-macos-arm64.zip
@@ -127,6 +127,15 @@ jobs:
 
           Requirements: a WebGPU-capable GPU (Metal / DX12 / Vulkan 1.2+). Hand
           tracking is optional and needs the Ultraleap tracking service running.
+
+          Changed since v5.0.0-alpha.1:
+          - Settings writes are now atomic (temp file + rename) and a corrupt
+            settings file is quarantined instead of being silently discarded
+            or clobbering other sketches' saved settings.
+          - Mid-run audio stream failures are now surfaced instead of failing
+            silently.
+          - Fixed a lifecycle bug where the retired Flame and Waves sketches
+            could still be triggered by live hand-tracking input.
 
           Notes:
           - Unsigned builds. macOS: right-click the app and choose Open (or run

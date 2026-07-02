@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "5.0.0-alpha.1"
+version = "5.0.0-alpha.2"
 edition = "2021"
 license = "MIT"
 authors = ["Madison Rickert <3495636+madisonrickert@users.noreply.github.com>"]
@@ -193,9 +193,9 @@ serde_json = "1"
 # wasm-only web bindings (used by settings persistence on web targets)
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
 # Workspace-internal crates
-wc-core = { version = "5.0.0-alpha.1", path = "crates/wc-core" }
-wc-core-macros = { version = "5.0.0-alpha.1", path = "crates/wc-core-macros" }
-wc-sketches = { version = "5.0.0-alpha.1", path = "crates/wc-sketches" }
+wc-core = { version = "5.0.0-alpha.2", path = "crates/wc-core" }
+wc-core-macros = { version = "5.0.0-alpha.2", path = "crates/wc-core-macros" }
+wc-sketches = { version = "5.0.0-alpha.2", path = "crates/wc-sketches" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
