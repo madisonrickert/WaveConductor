@@ -4,3 +4,4 @@
 //! Modules are added stage by stage (see the 2026-07-02 flame port plan).
 
 pub mod branches;
+pub mod levels;
