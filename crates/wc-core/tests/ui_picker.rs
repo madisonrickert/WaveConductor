@@ -40,10 +40,13 @@ fn manifest_distinguishes_registered_vs_unregistered_sketches() {
 }
 
 /// Iterating `SKETCH_ORDER` and partitioning by manifest presence yields
-/// exactly 1 active entry and 4 placeholder entries when only `Line` is
+/// exactly 1 active entry and 2 placeholder entries when only `Line` is
 /// registered.
+///
+/// `SKETCH_ORDER` has 3 entries (`Line`, `Dots`, `Cymatics`) — `Flame` and
+/// `Waves` are de-routed seams, not part of the cycle (`AUDIT.md` T5).
 #[test]
-fn sketch_order_iteration_yields_one_active_four_placeholder_when_only_line_registered() {
+fn sketch_order_iteration_yields_one_active_two_placeholder_when_only_line_registered() {
     let mut app = App::new();
     app.register_sketch_manifest(SketchManifestEntry {
         state: AppState::Line,
@@ -55,6 +58,51 @@ fn sketch_order_iteration_yields_one_active_four_placeholder_when_only_line_regi
         .iter()
         .partition(|s| manifest.get(**s).is_some());
     assert_eq!(active.len(), 1);
-    assert_eq!(placeholder.len(), 4);
+    assert_eq!(placeholder.len(), 2);
     assert_eq!(active[0], &AppState::Line);
+}
+
+/// Every `AppState::SKETCH_ORDER` entry must resolve to a *real, implemented*
+/// sketch manifest — never a placeholder that is still reachable via
+/// Next/Prev/number-key navigation (a `SKETCH_ORDER` entry with no manifest
+/// is exactly the phantom black-screen state `Flame`/`Waves` used to be;
+/// `AUDIT.md` T5).
+///
+/// `wc-core` cannot depend on `wc-sketches` (the dependency runs the other
+/// way — `wc-sketches` depends on `wc-core`), so this test can't spin up the
+/// real `LinePlugin`/`DotsPlugin`/`CymaticsPlugin` and check their manifest
+/// registrations directly. Instead it pins the known-implemented set below,
+/// mirroring the `register_sketch_manifest` call each real sketch plugin
+/// makes today (`crates/wc-sketches/src/{line,dots,cymatics}/mod.rs`), and
+/// asserts every `SKETCH_ORDER` entry is covered by it. If `SKETCH_ORDER`
+/// ever grows a new entry, this test fails until `KNOWN_IMPLEMENTED_SKETCHES`
+/// is updated too — a deliberate human/agent acknowledgement that the sketch
+/// is really implemented, instead of the array silently re-admitting an
+/// unimplemented placeholder the way `Flame`/`Waves` did.
+#[test]
+fn sketch_order_entries_are_all_known_implemented_sketches() {
+    /// Mirrors the manifest entries each real sketch plugin registers.
+    /// Update alongside `crates/wc-sketches/src/*/mod.rs` when a new sketch
+    /// plugin starts (or stops) calling `register_sketch_manifest`.
+    const KNOWN_IMPLEMENTED_SKETCHES: [AppState; 3] =
+        [AppState::Line, AppState::Dots, AppState::Cymatics];
+
+    let mut app = App::new();
+    for state in KNOWN_IMPLEMENTED_SKETCHES {
+        app.register_sketch_manifest(SketchManifestEntry {
+            state,
+            display_name: "test",
+            screenshot: Handle::default(),
+        });
+    }
+    let manifest = app.world().resource::<SketchManifest>();
+    for state in AppState::SKETCH_ORDER {
+        assert!(
+            manifest.get(state).is_some(),
+            "{state:?} is in SKETCH_ORDER but has no known-implemented sketch \
+             manifest; either implement its plugin, register it, and add it \
+             to KNOWN_IMPLEMENTED_SKETCHES above, or remove it from \
+             SKETCH_ORDER"
+        );
+    }
 }

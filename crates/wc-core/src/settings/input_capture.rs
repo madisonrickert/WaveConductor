@@ -12,8 +12,8 @@
 //!   the sketch's click handler (for Line, tweaking a slider also spawned an
 //!   attractor at the slider's screen position);
 //! - typing a digit into a dev-panel text field both edits the field AND
-//!   fires the `SelectLine`/`SelectFlame`/… sketch-switch hotkeys, yanking
-//!   the operator out of the sketch she is tuning.
+//!   fires the `SelectLine`/`SelectDots`/`SelectCymatics` sketch-switch
+//!   hotkeys, yanking the operator out of the sketch she is tuning.
 //!
 //! This module exposes two thin boolean wrappers over `bevy_egui`'s
 //! `EguiWantsInput` state:

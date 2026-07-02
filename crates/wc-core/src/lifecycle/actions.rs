@@ -13,16 +13,20 @@ pub enum WaveConductorAction {
     NavigatePrev,
     /// Cycle to the next sketch (`x` / `→`).
     NavigateNext,
-    /// Jump directly to sketch 1 — Line (`1`).
+    /// Jump directly to Line (`1`).
     SelectLine,
-    /// Jump to sketch 2 — Flame (`2`).
-    SelectFlame,
-    /// Jump to sketch 3 — Dots (`3`).
+    /// Jump directly to Dots (`3`).
+    ///
+    /// `Digit2` is intentionally unbound: it selected `Flame` before that
+    /// `AppState` seam was de-routed from live input (`AUDIT.md` T5). No
+    /// action fills the gap so that a stray `2` press is a silent no-op
+    /// rather than resurfacing the sketch's black screen.
     SelectDots,
-    /// Jump to sketch 4 — Cymatics (`4`).
+    /// Jump directly to Cymatics (`4`).
+    ///
+    /// `Digit5` is intentionally unbound for the same reason as `Digit2`
+    /// above (it selected the now de-routed `Waves` seam).
     SelectCymatics,
-    /// Jump to sketch 5 — Waves (`5`).
-    SelectWaves,
     /// Return to the home gallery (`Escape`).
     NavigateHome,
     /// Toggle global volume (`V`). Wired in Plan 4 (audio).
@@ -42,12 +46,10 @@ pub enum WaveConductorAction {
 impl WaveConductorAction {
     /// Every action variant, in nav-precedence order. Used by the action-input
     /// producer to iterate actions without per-frame allocation.
-    pub const ALL: [WaveConductorAction; 12] = [
+    pub const ALL: [WaveConductorAction; 10] = [
         WaveConductorAction::SelectLine,
-        WaveConductorAction::SelectFlame,
         WaveConductorAction::SelectDots,
         WaveConductorAction::SelectCymatics,
-        WaveConductorAction::SelectWaves,
         WaveConductorAction::NavigateHome,
         WaveConductorAction::NavigateNext,
         WaveConductorAction::NavigatePrev,

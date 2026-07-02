@@ -35,10 +35,8 @@ pub fn handle_navigation_actions(
         }
         match input.action {
             A::SelectLine => pressed_select = pressed_select.or(Some(AppState::Line)),
-            A::SelectFlame => pressed_select = pressed_select.or(Some(AppState::Flame)),
             A::SelectDots => pressed_select = pressed_select.or(Some(AppState::Dots)),
             A::SelectCymatics => pressed_select = pressed_select.or(Some(AppState::Cymatics)),
-            A::SelectWaves => pressed_select = pressed_select.or(Some(AppState::Waves)),
             A::NavigateHome => home = true,
             A::NavigateNext => go_next = true,
             A::NavigatePrev => go_prev = true,

@@ -1,8 +1,9 @@
 //! Sketch picker page rendered during [`AppState::Home`].
 //!
-//! Walks [`AppState::SKETCH_ORDER`] (the canonical 5-sketch order), looks
-//! each variant up in the [`SketchManifest`] resource, and renders one
-//! tile per cell of a 3×2 grid:
+//! Walks [`AppState::SKETCH_ORDER`] (the canonical sketch cycle order —
+//! currently Line, Dots, Cymatics; Flame/Waves are de-routed seams, see
+//! `AUDIT.md` T5), looks each variant up in the [`SketchManifest`] resource,
+//! and renders one tile per cell of a 3×2 grid:
 //!
 //! - **Registered** sketch → `render_active_tile`: screenshot background
 //!   via `EguiUserTextures`, Orbitron name overlay with gradient fade,

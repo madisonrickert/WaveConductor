@@ -322,14 +322,16 @@ fn debug_tonemapping() -> Tonemapping {
 }
 
 /// Apply the optional `WAVECONDUCTOR_START_SKETCH` override: when set to a
-/// sketch name (`line`, `flame`, `dots`, `cymatics`, `waves`, case-insensitive)
-/// the app navigates straight into that sketch at startup instead of showing
-/// the Home picker. Unset (the default) starts at Home.
+/// sketch name (`line`, `dots`, `cymatics`, case-insensitive) the app
+/// navigates straight into that sketch at startup instead of showing the
+/// Home picker. Unset (the default) starts at Home.
 ///
 /// This is a deployment + testing convenience: kiosk installs can boot directly
 /// into a fixed sketch, and automated screenshot/verification runs can land in
 /// the sketch under test without driving the keyboard. An unrecognised value
-/// logs a warning and falls back to Home.
+/// — including `flame`/`waves`, whose `AppState` seams have no implemented
+/// sketch behind them yet (`AUDIT.md` T5) — logs a warning and falls back to
+/// Home, so no kiosk launch config can boot into a black screen.
 ///
 /// Setting `NextState` in `Startup` triggers the matching `OnEnter` on the
 /// first frame.

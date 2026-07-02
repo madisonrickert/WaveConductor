@@ -56,11 +56,11 @@ fn select_line_transitions_into_line_state() {
 fn navigate_home_returns_to_home() {
     let mut app = lifecycle_test_app();
     app.update();
-    press_key(&mut app, KeyCode::Digit2); // Select Flame
+    press_key(&mut app, KeyCode::Digit3); // Select Dots
     app.update();
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
-        AppState::Flame
+        AppState::Dots
     );
     press_key(&mut app, KeyCode::Escape); // Navigate Home
     app.update();
@@ -81,23 +81,25 @@ fn next_and_prev_cycle_through_sketches() {
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line
     );
-    // Line → next → Flame
+    // Line → next → Dots
     press_key(&mut app, KeyCode::KeyX);
     app.update();
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
-        AppState::Flame
+        AppState::Dots
     );
-    // Wrap around: 5 nexts from Flame should land back on Flame.
-    for _ in 0..5 {
+    // Wrap around: SKETCH_ORDER has 3 entries (Line, Dots, Cymatics — Flame
+    // and Waves are de-routed seams, AUDIT.md T5), so 3 nexts from Dots
+    // should land back on Dots.
+    for _ in 0..3 {
         press_key(&mut app, KeyCode::KeyX);
         app.update();
     }
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
-        AppState::Flame
+        AppState::Dots
     );
-    // Prev from Flame → Line (Z key)
+    // Prev from Dots → Line (Z key)
     press_key(&mut app, KeyCode::KeyZ);
     app.update();
     assert_eq!(
@@ -431,14 +433,14 @@ fn shift_s_targets_screensaver_within_first_60s() {
     );
 }
 
-/// When `Digit1` and `Digit2` are pressed in the same frame, the
-/// lower-numbered sketch (`Line`, bound to `Digit1`) wins.
+/// When `Digit1` and `Digit3` are pressed in the same frame, the
+/// select-action that sorts first (`Line`, bound to `Digit1`) wins.
 ///
 /// Both keys are pressed before the single `app.update()` so that
 /// `emit_action_input` sees both `just_pressed` edges in the same `PreUpdate`
-/// tick and emits both `ActionInput::SelectLine` and `ActionInput::SelectFlame`.
+/// tick and emits both `ActionInput::SelectLine` and `ActionInput::SelectDots`.
 /// `handle_navigation_actions` processes them in action-order; because
-/// `SelectLine` sorts before `SelectFlame` in `WaveConductorAction::ALL`, the
+/// `SelectLine` sorts before `SelectDots` in `WaveConductorAction::ALL`, the
 /// final `NextState` is `AppState::Line`.
 #[test]
 fn select_precedence_lower_sketch_wins_when_keys_same_frame() {
@@ -446,15 +448,15 @@ fn select_precedence_lower_sketch_wins_when_keys_same_frame() {
     app.update();
     // Both keys pressed before the update — same PreUpdate tick.
     send_press(&mut app, KeyCode::Digit1);
-    send_press(&mut app, KeyCode::Digit2);
+    send_press(&mut app, KeyCode::Digit3);
     app.update(); // PreUpdate: both ActionInputs emitted; Update: NextState set
     send_release(&mut app, KeyCode::Digit1);
-    send_release(&mut app, KeyCode::Digit2);
+    send_release(&mut app, KeyCode::Digit3);
     // Pending transition resolves on the next update tick.
     app.update();
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,
-        "when Digit1 and Digit2 are pressed in the same frame, Line (lower-numbered) must win"
+        "when Digit1 and Digit3 are pressed in the same frame, SelectLine (which sorts first) must win"
     );
 }
