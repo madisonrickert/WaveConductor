@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use clap::Args as ClapArgs;
 use ignore::WalkBuilder;
 
+use crate::util::json_escape;
+
 /// Arguments for the validate-shaders subcommand.
 #[derive(ClapArgs)]
 pub struct Args {
@@ -156,24 +158,4 @@ fn report(root: &Path, results: &[(PathBuf, Outcome)], json: bool) {
         }
     }
     println!("\n{validated} validated, {skipped} skipped (#import), {failed} failed");
-}
-
-/// Escape a string for inclusion as a JSON string value.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if u32::from(c) < 0x20 => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }

@@ -182,3 +182,4 @@ jobs:
             libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
       - run: cargo doc --no-deps --workspace --document-private-items
+      - run: cargo test --doc --workspace

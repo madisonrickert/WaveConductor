@@ -37,7 +37,7 @@ use std::process::{Command, Stdio};
 use clap::Args as ClapArgs;
 
 use diff::diff_frames;
-use metrics::{global_std, region_mean, FrameMetrics, Region};
+use metrics::{global_std, luma_from_mean, region_mean, FrameMetrics, Region};
 use scenarios::{Scenario, Scenarios};
 
 /// Per-pixel max-channel delta above which a pixel counts as changed.
@@ -46,6 +46,14 @@ const PIXEL_THRESHOLD: u8 = 12;
 /// Mean-abs-diff tolerance (0..=255) below which a frame passes the baseline.
 const DIFF_TOLERANCE: f64 = 6.0;
 
+/// Mean-luma floor (0..=255 Rec. 601) below which a frame is treated as
+/// near-zero-luminance ("all-black") by the `--update-baselines` guard. This
+/// is the signature of an unrendered/backgrounded capture (see the black-frame
+/// trap documented in `tests/visual/CLAUDE.md`), not a legitimately dark
+/// sketch frame — real sketch output always has some non-zero structure even
+/// at its darkest.
+const BLACK_LUMA_THRESHOLD: f64 = 1.0;
+
 /// Wall-clock safety timeout for the launched app (seconds). The app normally
 /// self-exits via `AppExit` after the last scheduled frame; this is the net for
 /// the case where a screenshot observer never fires.
@@ -53,12 +61,23 @@ const LAUNCH_TIMEOUT_SECS: u64 = 90;
 
 /// Arguments for the capture subcommand.
 #[derive(ClapArgs)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "clap CLI flags — each bool is an independent --flag toggle, not packed state"
+)]
 pub struct Args {
     /// Scenario name from `tests/visual/scenarios.toml`. Omit with `--list`.
     pub scenario: Option<String>,
-    /// Copy the freshly-captured frames into the baseline dir (no diff gate).
+    /// Copy the freshly-captured frames into the baseline dir (no tolerance
+    /// diff gate — but see `--allow-black`, which *is* a gate).
     #[arg(long)]
     pub update_baselines: bool,
+    /// Let `--update-baselines` bless near-zero-luminance (all-black) frames.
+    /// Only pass this when black is genuinely the correct rendered output;
+    /// otherwise an all-black frame almost always means the app window wasn't
+    /// foregrounded during capture (see `tests/visual/CLAUDE.md`).
+    #[arg(long)]
+    pub allow_black: bool,
     /// Emit machine-readable JSON instead of the human table.
     #[arg(long)]
     pub json: bool,
@@ -104,7 +123,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let report = analyze(&root, name, scenario, &out_dir)?;
 
     if args.update_baselines {
-        update_baselines(&root, name, scenario, &out_dir)?;
+        update_baselines(&root, name, scenario, &out_dir, &report, args.allow_black)?;
         if args.json {
             println!("{{\"scenario\":\"{name}\",\"updated_baselines\":true}}");
         } else {
@@ -407,13 +426,50 @@ fn analyze(
     Ok(Report { frames })
 }
 
+/// Frame indices from `report` whose mean luma falls below `threshold`
+/// (0..=255 Rec. 601) — the near-zero-luminance guard for
+/// [`update_baselines`]. Pulled out as a pure function over an already-built
+/// `Report` (reusing `full_mean`, computed once in [`analyze`]) so the
+/// detection logic is unit-testable without touching disk or the app.
+fn near_black_frames(report: &Report, threshold: f64) -> Vec<u32> {
+    report
+        .frames
+        .iter()
+        .filter(|f| luma_from_mean(f.metrics.full_mean) < threshold)
+        .map(|f| f.frame)
+        .collect()
+}
+
 /// Copy captured frames into the baseline dir (plain committed PNGs, no LFS).
+///
+/// Refuses to bless a batch containing a near-zero-luminance ("all-black")
+/// frame unless `allow_black` is set: seeding a baseline from an
+/// unrendered/backgrounded capture (see the black-frame trap documented in
+/// `tests/visual/CLAUDE.md`) would commit a PNG that can never honestly match
+/// a correctly-rendered frame, silently reintroducing the exact
+/// orphaned-baseline problem this guard exists to prevent.
 fn update_baselines(
     root: &Path,
     name: &str,
     scenario: &Scenario,
     out_dir: &Path,
+    report: &Report,
+    allow_black: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !allow_black {
+        let black = near_black_frames(report, BLACK_LUMA_THRESHOLD);
+        if !black.is_empty() {
+            return Err(format!(
+                "capture: refusing to bless {name} baselines — frame(s) {black:?} are near-zero \
+                 luminance (all-black, mean luma < {BLACK_LUMA_THRESHOLD}). This is almost always the \
+                 app window not being foregrounded during capture, not a real render (see \
+                 tests/visual/CLAUDE.md); re-run in the foreground, or pass --allow-black if black is \
+                 genuinely the correct rendered output."
+            )
+            .into());
+        }
+    }
+
     let baseline_dir = root
         .join("tests")
         .join("visual")
@@ -586,5 +642,48 @@ mod tests {
         let merged = BTreeMap::from([("FORCE_G".to_string(), "8000".to_string())]);
         let pairs = debug_env_pairs(&merged);
         assert!(pairs.contains(&("WC_DEBUG_FORCE_G".to_string(), "8000".to_string())));
+    }
+
+    /// A [`FrameReport`] with only `frame` and `metrics.full_mean` set
+    /// meaningfully — the two fields [`near_black_frames`] reads. Other
+    /// fields are filled with harmless placeholders.
+    fn frame_report(frame: u32, full_mean: [f64; 3]) -> FrameReport {
+        FrameReport {
+            frame,
+            metrics: FrameMetrics {
+                frame,
+                full_mean,
+                center_mean: full_mean,
+                global_std: 0.0,
+                delta_prev: None,
+            },
+            mean_abs_diff: None,
+            passed: true,
+            current_path: PathBuf::from(format!("frame_{frame:04}.png")),
+            baseline_path: None,
+        }
+    }
+
+    #[test]
+    fn near_black_frames_flags_only_dark_frames() {
+        let report = Report {
+            frames: vec![
+                frame_report(30, [0.0, 0.0, 0.0]),     // all-black
+                frame_report(60, [120.0, 80.0, 60.0]), // normal rendered frame
+                frame_report(90, [0.3, 0.2, 0.1]),     // still effectively black
+            ],
+        };
+        assert_eq!(
+            near_black_frames(&report, BLACK_LUMA_THRESHOLD),
+            vec![30, 90]
+        );
+    }
+
+    #[test]
+    fn near_black_frames_empty_when_all_lit() {
+        let report = Report {
+            frames: vec![frame_report(30, [10.0, 10.0, 10.0])],
+        };
+        assert!(near_black_frames(&report, BLACK_LUMA_THRESHOLD).is_empty());
     }
 }

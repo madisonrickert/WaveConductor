@@ -9,19 +9,23 @@ ignore = [
     # need to migrate. Tracked widely across the Bevy ecosystem. Re-evaluate
     # when wgpu or metal drop the dependency.
     "RUSTSEC-2024-0436",
-    # `proc-macro-error` is unmaintained. It is a BUILD-TIME-ONLY proc-macro,
-    # pulled in transitively by the dev console's command derive
-    # (bevy_console → bevy_console_derive → better-bae → proc-macro-error); it
-    # is never in the runtime binary. "Unmaintained", not a vulnerability — no
-    # safe upgrade until bevy_console's derive chain drops it. Re-evaluate on
-    # the next bevy_console bump.
-    "RUSTSEC-2024-0370",
     # `ttf-parser` was declared unmaintained by its author (will not receive
     # further fixes). Pulled in transitively by the Bevy text/font stack
     # (bevy_text → cosmic-text → rustybuzz/ttf-parser). "Unmaintained", not a
     # vulnerability; no safe upgrade until the text stack migrates off it.
     # Re-evaluate on the next bevy/cosmic-text bump.
     "RUSTSEC-2026-0192",
+    # `quick-xml` <0.41 quadratic-runtime DoS when iterating a start tag with a
+    # huge number of duplicate-checked attributes on untrusted XML. Pulled in
+    # transitively and *Linux-only* by `wayland-scanner` (^0.39, so it can't move
+    # to the patched 0.41 without the winit/wayland-client/bevy chain migrating):
+    # quick-xml ← wayland-scanner ← smithay-client-toolkit ← winit ← bevy_winit,
+    # and ← wayland-client ← rfd. Not exploitable here: wayland-scanner is a
+    # build-time proc-macro that parses the *trusted, crate-bundled* Wayland
+    # protocol XML, never untrusted runtime input, and WaveConductor's own code
+    # never calls quick-xml. macOS (the primary target) doesn't build it at all.
+    # Re-evaluate when winit/wayland-client bump wayland-scanner past quick-xml 0.41.
+    "RUSTSEC-2026-0194",
 ]
 
 [licenses]

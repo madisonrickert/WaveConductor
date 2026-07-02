@@ -11,6 +11,7 @@ mod bundle;
 mod capture;
 mod check_secrets;
 mod manifest;
+mod util;
 mod validate_shaders;
 
 use clap::{Parser, Subcommand};

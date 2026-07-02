@@ -29,7 +29,10 @@ fn clean_tree_passes() {
 
 #[test]
 fn home_dir_path_is_flagged() {
-    let (ok, out) = run_against("// path: /Users/alice/Developer/foo\n");
+    // Build the fixture at runtime so the literal home path isn't embedded in
+    // this (now-scanned) test source — see the SKIP_DIRS doc in check_secrets.rs.
+    let fixture = format!("// path: /{}/{}/Developer/foo\n", "Users", "alice");
+    let (ok, out) = run_against(&fixture);
     assert!(!ok, "home-dir path should be flagged");
     assert!(
         out.contains("/Users/"),
@@ -46,14 +49,16 @@ fn windows_home_dir_path_is_flagged() {
 
 #[test]
 fn linux_home_dir_path_is_flagged() {
-    let (ok, out) = run_against("// path: /home/alice/code\n");
+    let fixture = format!("// path: /{}/{}/code\n", "home", "alice");
+    let (ok, out) = run_against(&fixture);
     assert!(!ok, "Linux home-dir path should be flagged");
     let _ = out;
 }
 
 #[test]
 fn email_pattern_is_flagged() {
-    let (ok, _out) = run_against("// contact: alice@example.com\n");
+    let fixture = format!("// contact: {}@{}\n", "alice", "example.com");
+    let (ok, _out) = run_against(&fixture);
     assert!(!ok, "real email pattern should be flagged");
 }
 

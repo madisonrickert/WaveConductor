@@ -4,6 +4,8 @@ use std::fmt::Write as _;
 
 use clap::Args as ClapArgs;
 
+use crate::util::json_escape;
+
 /// Arguments for the manifest subcommand.
 #[derive(ClapArgs)]
 pub struct Args {
@@ -23,6 +25,11 @@ struct Entry {
 // list for the human-readable manifest output. If you add a subcommand to
 // `main.rs`, you MUST add an entry here too, or the manifest will silently
 // diverge from the real command surface.
+//
+// This can't drift silently: `xtask/tests/manifest.rs` cross-checks this table's
+// names against both clap's own `--help` subcommand list (derived straight from
+// the `Command` enum) and its own canonical `EXPECTED_SUBCOMMANDS`, so all three
+// lists are required to agree.
 const SUBCOMMANDS: &[Entry] = &[
     Entry {
         name: "manifest",
@@ -64,7 +71,9 @@ pub fn run(args: &Args) {
             let _ = writeln!(
                 out,
                 "  {{\"name\": \"{}\", \"description\": \"{}\"}}{}",
-                entry.name, entry.description, comma,
+                json_escape(entry.name),
+                json_escape(entry.description),
+                comma,
             );
         }
         out.push(']');

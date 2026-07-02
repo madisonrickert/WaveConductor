@@ -1,12 +1,20 @@
 //! `cargo xtask check-secrets` — regex-scan the working tree for forbidden
 //! secrets and local absolute paths.
 //!
+//! Pattern coverage: unix/windows home-dir paths, email addresses, and four
+//! secret-prefix shapes — AWS access key IDs (`AKIA…`), GitHub tokens
+//! (`gh[pousr]_…`), `sk-` API keys, and bearer tokens. See [`FORBIDDEN`].
+//!
 //! The scan honors `.gitignore` / `.git/info/exclude` / the global gitignore
 //! (via the `ignore` crate): gitignored files can't be committed, so a match
 //! there would be a false positive. Hidden directories are NOT skipped wholesale
 //! — committed `.github/` CI configs and `.cargo/config.toml` must still be
-//! scanned — so the explicit [`SKIP_DIRS`] prune handles `.git`, `target`,
-//! `vendor`, `docs`, and `tests`.
+//! scanned — so the explicit [`SKIP_DIRS`] prune handles only `.git`, `target`,
+//! `vendor`, other VCS/build/tool-cache directories, and the `docs/superpowers/`
+//! dated planning archive (internal working scratchpad, never published). Living
+//! `docs/` (`docs/adr`, `docs/runbooks`, README) and `tests/` are deliberately
+//! scanned like any other tree — a real secret or home path committed under
+//! either must be caught, not laundered through a skip list.
 //!
 //! Exits 0 when no findings; exits 1 when one or more findings are reported.
 
@@ -15,6 +23,8 @@ use std::path::{Path, PathBuf};
 use clap::Args as ClapArgs;
 use ignore::WalkBuilder;
 use regex::Regex;
+
+use crate::util::json_escape;
 
 /// Arguments for the check-secrets subcommand.
 #[derive(ClapArgs)]
@@ -60,6 +70,32 @@ const FORBIDDEN: &[Forbidden] = &[
         // not email addresses — the `@<scale>.<ext>` shape trips the heuristic.
         allowlist: &["noreply.github.com", "@2x.png", "@3x.png"],
     },
+    Forbidden {
+        label: "aws-access-key-id",
+        // AWS access key IDs: literal `AKIA` prefix + 16 uppercase-alphanumeric chars.
+        pattern: r"AKIA[A-Z0-9]{16}",
+        allowlist: &[],
+    },
+    Forbidden {
+        label: "github-token",
+        // Modern GitHub token prefixes: personal/oauth/user-to-server/refresh
+        // (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`), each followed by 36+ base62 chars.
+        pattern: r"gh[pousr]_[A-Za-z0-9]{36,}",
+        allowlist: &[],
+    },
+    Forbidden {
+        label: "sk-api-key",
+        // Generic `sk-`-prefixed secret-key shape (OpenAI/Stripe/etc convention).
+        pattern: r"sk-[A-Za-z0-9]{20,}",
+        allowlist: &[],
+    },
+    Forbidden {
+        label: "bearer-token",
+        // Case-insensitive "bearer" + whitespace + 20+ token chars (covers
+        // base64url and dot-separated JWT shapes).
+        pattern: r"(?i)bearer\s+[A-Za-z0-9\-_.]{20,}",
+        allowlist: &[],
+    },
 ];
 
 /// A finding produced by the scanner.
@@ -72,14 +108,6 @@ struct Finding {
 
 // Directories skipped during scanning.
 //
-// `docs/` is excluded because planning and design documents legitimately contain
-// example forbidden patterns — commit-message templates cite bot email addresses,
-// and test-fixture prose shows absolute home paths — used to describe this
-// scanner's own behavior. Scanning docs would cause the scanner to flag itself.
-//
-// `tests/` is excluded because integration-test fixtures intentionally plant
-// bad patterns to verify the scanner catches them.
-//
 // `vendor/` holds git-tracked third-party code (e.g. the Ultraleap LICENSE with
 // its public `legal@` contact) that is not ours to scrub — gitignore can't skip
 // it because it is tracked, so it is pruned by name here.
@@ -88,6 +116,18 @@ struct Finding {
 // VCS/build/cache noise that should never be scanned. Most are also gitignored
 // (and skipped on that basis), but pruning them by name avoids descending into
 // them even when running with `--root` outside the repo.
+//
+// Living `docs/` (docs/adr, docs/runbooks, README) and `tests/` are deliberately
+// NOT skipped: a real secret or home path committed under either must be caught,
+// the same as anywhere else. Only the `docs/superpowers/` dated planning archive
+// is pruned (the `superpowers` entry below) — it is internal working material
+// full of illustrative example paths/emails/commit-trailer placeholders and is
+// never published.
+//
+// Integration-test fixtures that plant a *positive* (matching) sample for this
+// scanner to catch must therefore construct it at runtime (concatenation /
+// `format!`) rather than embed the literal secret-shaped string in source — see
+// the unit tests at the foot of this file for the pattern.
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".cargo",
@@ -98,8 +138,7 @@ const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
     "vendor",
-    "docs",
-    "tests",
+    "superpowers", // docs/superpowers/ dated planning archive (see comment above)
 ];
 
 /// File extensions that are binary or generated and should be skipped.
@@ -122,26 +161,6 @@ fn should_skip(path: &Path) -> bool {
     // Skip binary / lock / generated files by extension.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     SKIP_EXTS.contains(&ext)
-}
-
-/// Escape a string for inclusion as a JSON string value.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if u32::from(c) < 0x20 => {
-                use std::fmt::Write;
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Execute the check-secrets subcommand.
@@ -260,5 +279,101 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         Err(format!("{} finding(s) — see output above", findings.len()).into())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
+mod tests {
+    use super::{Forbidden, Regex, FORBIDDEN};
+
+    /// Look up a [`FORBIDDEN`] entry by label (test-only convenience).
+    fn forbidden_by_label(label: &str) -> &'static Forbidden {
+        FORBIDDEN
+            .iter()
+            .find(|f| f.label == label)
+            .expect("test: label must exist in FORBIDDEN")
+    }
+
+    /// Compile `forbidden`'s pattern and report whether it fires on `haystack`,
+    /// honoring the same allowlist logic `run()` applies.
+    fn fires_on(forbidden: &Forbidden, haystack: &str) -> bool {
+        let re = Regex::new(forbidden.pattern).expect("test: pattern must compile");
+        // Bind the `any(...)` result to a local so the `Matches` iterator (which
+        // borrows `re`) is dropped at the end of this statement, before `re`
+        // itself; returning the borrow-dependent expression directly trips E0597.
+        let fired = re.find_iter(haystack).any(|mat| {
+            !forbidden
+                .allowlist
+                .iter()
+                .any(|allow| mat.as_str().contains(allow))
+        });
+        fired
+    }
+
+    // NOTE: positive fixtures below are built at runtime (`format!`/`+`/`.repeat`)
+    // rather than written as a single literal in source. `src/` and, as of this
+    // change, `docs/`+`tests/` are all scanned by this same tool — a literal
+    // secret-shaped string sitting in this file would make check-secrets flag
+    // its own test fixtures. See the `SKIP_DIRS` doc comment above.
+
+    #[test]
+    fn unix_home_path_pattern() {
+        let forbidden = forbidden_by_label("unix-home-path");
+        let fixture = format!("/{}/{}/", "Users", "alice");
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, "assets/shaders/line/render.wgsl"));
+    }
+
+    #[test]
+    fn windows_home_path_pattern() {
+        let forbidden = forbidden_by_label("windows-home-path");
+        let fixture = format!("C:{}{}{}a", r"\", "Users", r"\");
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, r"C:\Program Files\thing"));
+    }
+
+    #[test]
+    fn email_address_pattern() {
+        let forbidden = forbidden_by_label("email-address");
+        let fixture = format!("{}@{}.{}", "someone", "example", "com");
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, "not an email at all"));
+        // Allowlisted bot/Retina-asset forms must not fire.
+        let noreply = format!("{}@{}", "bot", "noreply.github.com");
+        assert!(!fires_on(forbidden, &noreply));
+        assert!(!fires_on(forbidden, "icon_16x16@2x.png"));
+    }
+
+    #[test]
+    fn aws_access_key_id_pattern() {
+        let forbidden = forbidden_by_label("aws-access-key-id");
+        let fixture = format!("{}{}", "AKIA", "A".repeat(16));
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, "AKIA-not-a-real-key"));
+    }
+
+    #[test]
+    fn github_token_pattern() {
+        let forbidden = forbidden_by_label("github-token");
+        let fixture = format!("gh{}_{}", "p", "a".repeat(36));
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, "ghz_not_a_real_prefix"));
+    }
+
+    #[test]
+    fn sk_api_key_pattern() {
+        let forbidden = forbidden_by_label("sk-api-key");
+        let fixture = format!("sk-{}", "a".repeat(20));
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, "sk-too-short"));
+    }
+
+    #[test]
+    fn bearer_token_pattern() {
+        let forbidden = forbidden_by_label("bearer-token");
+        let fixture = format!("Authorization: {} {}", "Bearer", "a".repeat(20));
+        assert!(fires_on(forbidden, &fixture));
+        assert!(!fires_on(forbidden, "bearer short"));
     }
 }

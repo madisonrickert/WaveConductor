@@ -49,6 +49,17 @@ DISABLE_BLOOM = "1"
 # SAME captured frames — a per-tier scenario would assert three identical
 # baselines. Hot's cooldown (≈3 fps) and the Leap idle-pause are verified by soak
 # telemetry + a frame-timing assertion, not by a baseline PNG.
+#
+# BASELINES ARE PENDING RE-SEED: the PNGs previously committed here were for
+# frames {0000, 0270, 0540, 0810} — a set that predates the frame spread above
+# ({180, 276, 495, 570, 666, 780, 1320, 1770}) and shared zero indices with it,
+# so every capture reported NEW (review) against baselines that could never
+# match. They were deleted as dead weight (T10). No baseline PNGs are
+# committed for this scenario right now; the first capture will honestly
+# report NEW (review) until re-seeded on deployment-class hardware with:
+#   cargo xtask capture line-screensaver --update-baselines
+# then commit the resulting baselines/line-screensaver/ PNGs. See
+# tests/visual/CLAUDE.md for the full baseline workflow.
 
 [scenarios.line-screensaver]
 sketch = "line"
@@ -65,8 +76,11 @@ FORCE_SCREENSAVER = "1"
 # synthetic provider). provider = "synthetic" emits a stationary open hand so
 # bone-wireframe visuals are deterministic without hardware.
 #
-# BASELINES ARE OPERATOR-SEEDED: no baseline PNGs are committed by D7 Task 1.
-# After visual/hardware verification on the deployment machine, seed them with:
+# BASELINES ARE COMMITTED: `tests/visual/baselines/dots-synthetic/` holds the
+# operator-seeded `frame_{0030,0060,0120,0240}.png` (seeded post-D7, then
+# frame_0030 was repaired after it was caught as an unrendered black frame —
+# see the black-frame trap in tests/visual/CLAUDE.md). Re-seed only on the
+# deployment-class machine after visual confirmation:
 #   cargo xtask capture dots-synthetic --update-baselines
 # then commit the resulting baselines/<name>/ PNGs. See tests/visual/CLAUDE.md
 # for the full baseline workflow and the "deployment-class machine" requirement.
@@ -102,7 +116,13 @@ dt = 0.016666667
 # ONE scenario covers all thermal tiers (tier only changes present rate; the
 # virtual-clock capture harness pins its own dt and ignores winit UpdateMode).
 #
-# BASELINES ARE OPERATOR-SEEDED: see the dots-synthetic header comment above.
+# BASELINES ARE NOT YET COMMITTED for this scenario (unlike dots-synthetic
+# above): there is no `tests/visual/baselines/dots-screensaver/` directory.
+# First capture will honestly report NEW (review) until seeded on the
+# deployment-class machine after visual confirmation:
+#   cargo xtask capture dots-screensaver --update-baselines
+# then commit the resulting baselines/dots-screensaver/ PNGs. See
+# tests/visual/CLAUDE.md for the full baseline workflow.
 
 [scenarios.dots-screensaver]
 sketch = "dots"

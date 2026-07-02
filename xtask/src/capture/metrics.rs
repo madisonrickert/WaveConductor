@@ -77,6 +77,17 @@ pub fn global_std(img: &RgbaImage) -> f64 {
     var.sqrt()
 }
 
+/// Rec. 601 luma from an already-computed RGB channel-mean triple (0..=255),
+/// e.g. [`FrameMetrics::full_mean`]. Same weights as the per-pixel luma used
+/// by [`global_std`], applied to a mean instead of every pixel — cheap reuse
+/// of a metric the caller has typically already computed. Used by the
+/// `--update-baselines` near-zero-luminance guard in `capture.rs` to catch
+/// all-black frames (e.g. a headless/backgrounded capture) before they are
+/// blessed as a baseline.
+pub fn luma_from_mean(mean_rgb: [f64; 3]) -> f64 {
+    0.299 * mean_rgb[0] + 0.587 * mean_rgb[1] + 0.114 * mean_rgb[2]
+}
+
 /// Mean absolute per-channel difference between two same-size frames, averaged
 /// over all four RGBA channels (0..=255). This is a coarse frozen-vs-animated
 /// signal (does the frame move at all?), distinct from the RGB-only baseline
@@ -123,6 +134,18 @@ mod tests {
     fn uniform_image_has_zero_std() {
         let img = solid(8, 8, [40, 40, 40]);
         assert!(global_std(&img) < 0.01);
+    }
+
+    #[test]
+    fn luma_from_mean_matches_rec601_weights() {
+        let luma = luma_from_mean([100.0, 150.0, 200.0]);
+        // 0.299*100 + 0.587*150 + 0.114*200 = 29.9 + 88.05 + 22.8 = 140.75
+        assert!((luma - 140.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn luma_from_mean_black_is_near_zero() {
+        assert!(luma_from_mean([0.0, 0.0, 0.0]).abs() < 0.01);
     }
 
     #[test]
