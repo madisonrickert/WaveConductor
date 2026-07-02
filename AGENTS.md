@@ -15,9 +15,9 @@ Run the gates CI enforces (`.github/workflows/ci.yml`) before claiming work done
 - `cargo fmt --all -- --check` — formatting. The `rustfmt.toml` "unstable features … only available in nightly" warnings are expected on stable and harmless.
 - `cargo clippy --all-targets --all-features --workspace -- -D warnings` — lints are hard errors.
 - `cargo nextest run --workspace --all-features` — tests (CI's runner). nextest does **not** run doctests; cover those with `cargo test --doc --workspace`. If nextest is absent, `cargo test --workspace --all-features` is a superset fallback.
-- `cargo doc --no-deps --workspace --document-private-items` — rustdoc build; catches broken intra-doc links (note: ~29 pre-existing doc-link warnings are non-fatal on stable).
+- `cargo doc --no-deps --workspace --document-private-items` — rustdoc build; CI's `doc` job runs it with `RUSTDOCFLAGS="-D warnings"`, so broken intra-doc links are hard errors and the doc build is clean.
 - `cargo deny check` — advisories, licenses, bans, sources (CI also runs `cargo audit`, which `deny`'s advisory check largely subsumes).
-- `cargo xtask check-secrets` — blocks home-dir paths, emails, and secret prefixes.
+- `cargo xtask check-secrets` — blocks developer home-directory paths (`/Users/...`, `/home/...`, `C:\Users\...`), email addresses, and secret prefixes (AWS `AKIA...` keys, GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` tokens, `sk-` API keys, bearer tokens). It scans the whole tree except `vendor/`, `target/`, `.git/`, and the `docs/superpowers/` dated planning archive — living `docs/` (`docs/adr`, `docs/runbooks`, README) and `tests/` are scanned like any other tree.
 - Rendered-sketch output: `cargo xtask capture <scenario>` — see the **Visual testing** section below and `tests/visual/CLAUDE.md`.
 
 `--all-features` is deliberate — it exercises `hand-tracking-gestures` (leaprs) and, on macOS, `thermal-sensor-macos` (macmon). It does **not** enable `bevy/dynamic_linking`, which is alias-only (see above).
@@ -32,7 +32,7 @@ Run the gates CI enforces (`.github/workflows/ci.yml`) before claiming work done
 
 ## Code readability
 
-- One concept per file. Files over ~300 lines or carrying two unrelated responsibilities are split.
+- One concept per file, split when a file carries two unrelated responsibilities. ~300 lines is a guideline, not a hard cap — some UI/panel files legitimately run longer where the cohesion (one panel, one concern) outweighs the line count; `panel_user.rs` is being split as part of this same work as an example of when a large file has actually crossed into "two responsibilities" territory.
 - Public API at the top, private helpers at the bottom, tests in a `#[cfg(test)] mod tests` block at the file footer.
 - Prefer named structs over tuple structs once a type has more than one semantically meaningful field.
 - No `unwrap()` or `expect()` in non-test code unless the panic is documented as an invariant violation.
@@ -43,19 +43,19 @@ Run the gates CI enforces (`.github/workflows/ci.yml`) before claiming work done
 
 - One sketch per directory; entry is `mod.rs`, never an inline single file.
 - Shaders live in `assets/shaders/<sketch>/<name>.wgsl`. Never inline WGSL strings in Rust.
-- Platform-specific code lives in `platform/native.rs` and `platform/web.rs`; portable modules do not contain `cfg` blocks.
+- Platform-specific code gets its own `platform/` submodule (e.g. `platform/native.rs`, `platform/macos.rs`, `platform/windows.rs`) when the platform surface is large enough to warrant one — see `lifecycle/thermal/platform/`. For a handful of lines, an inline `#[cfg(...)]` in the portable module is fine (e.g. `frame_limiter/`, `settings/persistence.rs`, `input/providers/mediapipe/inference_ort.rs`); don't force a submodule split for a one-line `cfg`.
 - Test files colocated with source as `#[cfg(test)] mod tests`.
 - No `src/utils/` or `src/helpers/` dumping grounds. Helpers live with the module that uses them; truly shared helpers go in a named module under `wc-core/`.
 
 ## Application performance
 
 - Default target is multi-hour unattended thermal stability, not peak FPS.
-- Sketches must run zero systems when in `SketchActivity::Idle`. Verified by inspecting the schedule with `bevy_mod_debugdump`.
+- Sketches must run zero systems when in `SketchActivity::Idle`. This is enforced by convention and review, not a CI check — the sanctioned always-on exception is the three `restart_on_*_settings_change` systems (settings-reload listeners), which are expected to keep running in `Idle`.
 - **Never allocate in a hot path.** A hot path is *any* code that runs repeatedly for the life of a session, not just the render frame: per-frame Bevy systems, the audio callback, **and continuously-running worker/background threads** (e.g. the input/inference worker loop in `wc-core/src/input/providers/mediapipe/`). The multi-hour soak target makes per-iteration allocation a thermal/jitter regression even off the render thread. Pre-allocate at init and reuse: own scratch buffers on the struct (or `bevy::ecs::system::Local`), refill with `vec.clear()` (keeps capacity) instead of reallocating, and take a reused buffer out via `std::mem::take` when it must be borrowed alongside `&mut self`. Allocating convenience wrappers are fine in tests/benchmarks but must not sit on the steady-state path. Where a dependency's API forces a residual copy (e.g. an inference backend that owns its input tensor), document the exact cost inline and flag it as a profiling-gated follow-up rather than leaving it silent.
 - Audio thread is real-time-friendly: lock-free ring buffers only, no `Mutex`, no allocations after init.
 - GPU resources: every per-sketch resource is owned by an entity tagged with the sketch's marker component, despawned on `OnExit` to release VRAM.
 - Compute shader dispatch sizes scale with settings; do not dispatch unused workgroups.
-- An 8-hour soak test is required before any release tag.
+- An 8-hour soak test is required before any release tag. Today this is a manual procedure: run the app under representative load (hand tracking + audio active, sketch cycling) on the target deployment hardware for ~8 hours and watch RSS, GPU memory, and FPS for drift or a thermal-induced stall. An agent-operable `cargo xtask soak-test` command that automates this is planned but not yet implemented — don't cite it as if it exists.
 
 ## Visual testing
 
@@ -67,6 +67,6 @@ Run the gates CI enforces (`.github/workflows/ci.yml`) before claiming work done
 
 - No private personal information in the repo. No real email addresses (use `noreply.github.com` or placeholder), no phone numbers, no API keys, no tokens, no session IDs, no analytics IDs tied to a real account. Secrets go in environment variables loaded at runtime, never committed.
 - No hardcoded local paths. No developer-machine-specific home directories (`/Users/<name>/...`, `C:\Users\<name>\...`, `/home/<name>/...`) in source, configs, scripts, CI, or comments. Paths come from workspace-relative literals (`assets/shaders/...`), runtime resolution (`dirs::config_dir()`, `std::env::current_exe()`), or environment variables.
-- Pre-commit lint check: `cargo xtask check-secrets` blocks merges that introduce home-directory path patterns, email patterns, or common secret prefixes.
-- `.env.example` checked in; `.env` is `.gitignore`d.
+- Pre-commit lint check: `cargo xtask check-secrets` blocks merges that introduce home-directory path patterns, email patterns, or the AWS/GitHub/`sk-`/bearer-token secret prefixes listed above; it scans the whole tree except `vendor/`, `target/`, and `.git/`.
+- `.env` is `.gitignore`d. (Nothing at runtime currently needs a secret env var, so there's no `.env.example` to check in.)
 - Screenshots in `README.md` or `docs/` are scrubbed of system chrome that exposes usernames or local paths.

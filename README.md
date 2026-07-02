@@ -74,7 +74,7 @@ WaveConductor's primary install target is an unattended gallery kiosk running fo
 | Ubuntu 22.04 LTS | ✓ Works | Gemini ships a `.deb`; only Ubuntu LTS is officially supported. |
 | macOS | ✓ Partial | Ultraleap 6.x retains driver support for the original Leap Motion Controller (V1) on macOS. The Leap Motion Controller 2 (Gemini-only) has no macOS driver — use V1 hardware. WaveConductor's macOS dev path uses this combination. |
 
-The 8-hour soak harness (`cargo xtask soak-test --duration 8h`) is the authoritative gate before any release tag — confirm any candidate box passes it on the deployment hardware before committing to an install.
+The 8-hour soak test is the authoritative gate before any release tag: run the app under representative load (hand tracking and audio active, sketch cycling) on the candidate box for 8+ hours and confirm RSS, GPU memory, and FPS stay stable with no thermal-induced stall before committing to that hardware for an install. This is currently a manual procedure; an agent-operable `cargo xtask soak-test` command is planned but not yet implemented.
 
 ## Documentation
 

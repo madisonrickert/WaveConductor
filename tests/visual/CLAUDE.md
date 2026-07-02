@@ -21,6 +21,7 @@ cargo xtask capture line-synthetic --json  # machine output (names frames to ope
 cargo xtask capture line-synthetic --update-baselines     # adopt current frames as baseline
 cargo xtask capture line-synthetic --watch=10             # live, no capture, quit after 10s
 cargo xtask capture line-synthetic --debug FORCE_G=4000 --debug DISABLE_BLOOM=1
+cargo xtask capture line-synthetic --update-baselines --allow-black  # only if black IS correct
 ```
 
 `cargo xtask capture` is a subcommand of the xtask dispatcher; `cargo xtask
@@ -33,7 +34,8 @@ manifest` lists it alongside the other subcommands.
 | `<scenario>` (positional) | Scenario name from `scenarios.toml`. Required unless `--list`. |
 | `--list` | List available scenario names and exit (no launch). Honours `--json`. |
 | `--json` | Emit machine-readable JSON instead of the human table. Also reshapes `--list` and `--update-baselines` output. |
-| `--update-baselines` | Launch + capture, then copy the fresh frames into `baselines/<scenario>/`. No diff gate; always exits 0. Use only after visual confirmation. |
+| `--update-baselines` | Launch + capture, then copy the fresh frames into `baselines/<scenario>/`. No tolerance diff gate, but *is* gated by the near-zero-luminance ("all-black") guard below — refuses and exits nonzero if any captured frame is effectively black. Use only after visual confirmation. |
+| `--allow-black` | Only meaningful with `--update-baselines`: lets it bless a batch containing near-zero-luminance frames. Only pass this when black is genuinely the correct rendered output — see the black-frame environment trap below before reaching for it. |
 | `--watch[=SECS]` | Launch the scenario for hands-on inspection (no capture, normal variable-dt clock), then kill after `SECS` (default `10`). |
 | `--debug KEY=VAL` | Ad-hoc `WC_DEBUG_*` override (KEY *without* the `WC_DEBUG_` prefix). Repeatable. Merges over the scenario's `debug` table; CLI wins. |
 
@@ -46,11 +48,13 @@ launcher didn't supply them), `metrics.json` (per-frame metrics array),
 `app.log` (teed stdout+stderr), `clean-config/` (fresh settings dir when
 `config = "clean"`).
 
-Exit code: `0` on pass (and for `--list` / `--watch` / `--update-baselines`);
-nonzero when a frame regresses beyond tolerance. Tolerance is mean-abs-diff
-`<= 6.0` (0..=255 units); a pixel counts as "changed" when its max-channel delta
-exceeds `12`. A frame with no baseline yet never regresses — it is reported as
-`NEW (review)` and added to `open_for_review`.
+Exit code: `0` on pass (and for `--list` / `--watch` / a successful
+`--update-baselines`); nonzero when a frame regresses beyond tolerance, or when
+`--update-baselines` is refused by the near-zero-luminance guard (see below).
+Tolerance is mean-abs-diff `<= 6.0` (0..=255 units); a pixel counts as
+"changed" when its max-channel delta exceeds `12`. A frame with no baseline
+yet never regresses — it is reported as `NEW (review)` and added to
+`open_for_review`.
 
 ## Scenarios (`scenarios.toml`)
 
@@ -203,7 +207,10 @@ Notes:
 - `--list --json` prints a bare JSON array of scenario names, e.g.
   `["line-synthetic","line-synthetic-no-bloom"]`.
 - `--update-baselines --json` prints
-  `{"scenario":"<name>","updated_baselines":true}`.
+  `{"scenario":"<name>","updated_baselines":true}` on success. If the
+  near-zero-luminance guard refuses the update, that's a plain-text error on
+  stderr (like any other xtask failure, e.g. an unknown scenario name) and a
+  nonzero exit — not a JSON payload.
 
 The per-frame `metrics.json` sidecar (always written) is a JSON array of
 `{frame, full_mean, center_mean, global_std, delta_prev}`, where `delta_prev` is
@@ -224,6 +231,38 @@ pixel-exact matching brittle, which is why the diff is tolerance-based and you
   first, e.g. `--debug DISABLE_BLOOM=1`, `--debug SOLID_PARTICLES=ff00ff`,
   `--debug DISABLE_SMEAR=1`, then fix the code and re-capture.
 - Commit baseline PNGs as plain files (no Git LFS).
+- `--update-baselines` refuses to bless a batch containing a near-zero-luminance
+  ("all-black") frame — mean luma under ~1 on the 0..=255 Rec. 601 scale —
+  unless `--allow-black` is also passed. This is a guard against the
+  backgrounded-window trap below silently poisoning a baseline with an
+  unrendered frame; it is not a substitute for actually Reading the frames.
+  If the refusal fires, diagnose per the trap below before reaching for
+  `--allow-black`.
+
+## Known environment trap: all-black frames when backgrounded
+
+`cargo xtask capture` returns all-black (`[0, 0, 0]`) frames when the app
+window is not the foreground/focused window at capture time — this is common
+for agent-driven or otherwise headless-ish runs where nothing brings the
+launched window forward. `app.log` is clean in this state: no panic, no error,
+just a frame that never actually got painted before the screenshot fired.
+
+**This is an environment problem, not a code regression** — don't start
+debugging the render pipeline from an all-black frame alone. Diagnostic: run a
+known-good sketch/scenario (e.g. `line-synthetic` or `dots-synthetic`, both of
+which have committed, previously-confirmed-correct baselines) alongside the
+scenario under investigation. If the known-good sketch is *also* black against
+its baseline, the capture ran unfocused — refocus the window (or otherwise
+ensure the app is foregrounded) and re-run, rather than chasing a phantom
+regression in sketch code. If the known-good sketch renders correctly and only
+the scenario under investigation is black, then it *is* worth treating as a
+real bug.
+
+The `--update-baselines` near-zero-luminance guard above exists specifically
+so this trap can't silently commit an all-black PNG as a "baseline" the next
+honest capture could then never match — this is exactly how
+`dots-synthetic/frame_0030.png` was seeded wrong once (commit `b50a9d63`) and
+had to be repaired after the fact (commit `ffd7f3e6`).
 
 ## Determinism + headless note
 
