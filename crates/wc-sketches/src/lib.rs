@@ -6,6 +6,7 @@
 
 pub mod cymatics;
 pub mod dots;
+pub mod flame;
 pub mod hand_mesh;
 pub mod line;
 pub mod particles;
