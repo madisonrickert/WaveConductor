@@ -13,7 +13,6 @@
 //!
 //! Foundation module: consumed by the pipeline (plan Phase 8); exercised by
 //! tests until then.
-#![allow(dead_code)]
 
 /// One SSD anchor. Width/height are 1.0 for the fixed-size palm anchors; the
 /// centre is normalized to `[0, 1]` over the model input.
@@ -39,8 +38,16 @@ pub struct PalmAnchorOptions {
     pub input_height: u32,
     /// Smallest anchor scale (unused for fixed-size anchors but part of the
     /// canonical calculation that sets the per-location anchor count).
+    #[allow(
+        dead_code,
+        reason = "canonical MediaPipe anchor-spec field; unread for the vendored fixed-size config, retained for spec fidelity"
+    )]
     pub min_scale: f32,
     /// Largest anchor scale.
+    #[allow(
+        dead_code,
+        reason = "canonical MediaPipe anchor-spec field; unread for the vendored fixed-size config, retained for spec fidelity"
+    )]
     pub max_scale: f32,
     /// Per-layer output strides. Consecutive equal strides accumulate anchors
     /// at the same feature-map resolution.

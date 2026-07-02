@@ -40,7 +40,6 @@
 //!    xy positions — though the metric wrist→middle-MCP segment, paired with
 //!    its square-norm image projection, feeds the size-estimated depth that
 //!    becomes palm z ([`super::coords::estimate_depth`]).
-#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -1050,6 +1049,10 @@ fn square_pad_into(frame: &Frame, out: &mut RgbImage) {
 }
 
 /// Allocating convenience wrapper over [`square_pad_into`] (tests/benchmarks).
+#[allow(
+    dead_code,
+    reason = "allocating convenience wrapper exercised only by #[cfg(test)]; square_pad_into is the hot path"
+)]
 fn square_pad(frame: &Frame) -> RgbImage {
     let mut img = RgbImage::default();
     square_pad_into(frame, &mut img);
@@ -1099,6 +1102,10 @@ fn resize_into(src: &RgbImage, w: u32, h: u32, dst: &mut RgbImage) {
 /// `image`-crate Triangle resize (allocates its output). Tests/benchmarks
 /// only — the equivalence-test oracle for [`resize_into`], which is what the
 /// pipeline's detect path uses.
+#[allow(
+    dead_code,
+    reason = "test-only equivalence oracle for resize_into (the pipeline's hot path)"
+)]
 fn resize(img: &RgbImage, w: u32, h: u32) -> RgbImage {
     image::imageops::resize(img, w, h, FilterType::Triangle)
 }
@@ -1116,18 +1123,6 @@ fn fill_nhwc_unit(img: &RgbImage, out: &mut Tensor) {
     out.shape.clear();
     out.shape
         .extend_from_slice(&[1, idx(img.height()), idx(img.width()), 3]);
-}
-
-/// Allocating convenience wrapper over [`fill_nhwc_unit`] (tests/benchmarks).
-/// `size` is unused except to document the expected square dimension.
-fn to_nhwc_unit(img: &RgbImage, size: u32) -> Tensor {
-    let n = idx(size);
-    let mut out = Tensor {
-        data: Vec::with_capacity(n * n * 3),
-        shape: Vec::with_capacity(4),
-    };
-    fill_nhwc_unit(img, &mut out);
-    out
 }
 
 /// Warp the rotated normalized ROI out of `square` into a reused `out_size`²
@@ -1154,6 +1149,10 @@ fn warp_roi_into(square: &RgbImage, roi: &RoiRect, out_size: u32, dst: &mut RgbI
 }
 
 /// Allocating convenience wrapper over [`warp_roi_into`] (tests/benchmarks).
+#[allow(
+    dead_code,
+    reason = "allocating convenience wrapper exercised only by #[cfg(test)]; warp_roi_into is the hot path"
+)]
 fn warp_roi(square: &RgbImage, roi: &RoiRect, out: u32) -> RgbImage {
     let mut dst = RgbImage::default();
     warp_roi_into(square, roi, out, &mut dst);

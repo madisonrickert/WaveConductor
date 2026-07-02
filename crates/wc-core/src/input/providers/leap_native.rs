@@ -51,15 +51,20 @@ const _: () = assert!(WEDGE_THRESHOLD.as_nanos() > STALE_FRAME_THRESHOLD.as_nano
 // The workspace lint `unsafe_code = "deny"` must be locally lifted for the
 // two `unsafe impl` blocks below. `leaprs::Connection` wraps a raw LeapC FFI
 // pointer that Rust cannot verify is thread-safe, but the LeapC SDK guarantees
-// handle-safety from any single thread at a time. We own the connection
-// exclusively (no aliasing) and access it only from the Bevy main thread via
-// the `ProviderRegistry` exclusive resource. This is the only `unsafe impl`
-// in `wc-core` — a deliberate, narrow FFI exception.
+// handle-safety from any single thread at a time. `ProviderRegistry` stores
+// providers as a plain Bevy `Resource`, accessed via `ResMut`, which Bevy's
+// scheduler may run on any task-pool thread (not pinned to the main thread) —
+// but never concurrently with itself, since `ResMut` gives exclusive access.
+// This is the only `unsafe impl` in `wc-core` — a deliberate, narrow FFI
+// exception.
 #[allow(unsafe_code)]
-// SAFETY: `LeaprsProvider` is polled exclusively on the Bevy main thread via
-// `ProviderRegistry` (an exclusive resource). The LeapC SDK guarantees
-// handle-safety: a connection handle is valid from any single thread, provided
-// it is not polled concurrently. No aliasing, no concurrent access.
+// SAFETY: `LeaprsProvider` may be polled on any single Bevy task-pool thread
+// (Bevy does not pin `Resource` scheduling to the main thread), but `ResMut`
+// guarantees Bevy never gives out two live borrows of the same resource at
+// once, so `LeaprsProvider` is never accessed from two threads concurrently.
+// The LeapC SDK guarantees handle-safety under that exact condition: a
+// connection handle is valid from any single thread, provided it is not
+// polled concurrently. No aliasing, no concurrent access.
 unsafe impl Send for LeaprsProvider {}
 #[allow(unsafe_code)]
 // SAFETY: same reasoning as `Send` above.
@@ -169,15 +174,12 @@ impl HandTrackingProvider for LeaprsProvider {
             match conn.poll(0) {
                 Ok(msg) => {
                     let event = msg.event();
-                    // SAFETY: we forward the event to handle_event; the borrow
-                    // on `conn` ends here since we only pass the event variant.
-                    // We need to work around the borrow-checker by delegating
-                    // to a free function that receives `&mut self` minus the
-                    // connection. We use an unsafe pointer trick below.
-                    //
-                    // Actually: `conn` borrows from `self.connection`; we need
-                    // to pass `&mut self.status` etc. separately. Use a helper
-                    // that takes the sub-fields by reference.
+                    // `event` is an owned copy taken out of `msg`, so it does not
+                    // borrow from `conn`. That lets us call `dispatch_event` with
+                    // disjoint `&mut` borrows of `self.status`, `self.diagnostics`,
+                    // and `self.last_tracking_instant` here, instead of `&mut self`,
+                    // even though `conn` (borrowed from `self.connection`) is still
+                    // live in this loop.
                     dispatch_event(
                         event,
                         &mut self.status,
@@ -477,9 +479,13 @@ fn dispatch_event(
         }
 
         // Policy events, dropped-frame completions, image/log/config events,
-        // and any future unknown variants are silently ignored. The policy we
-        // requested is already applied at start(); a future phase can inspect
-        // granted flags from the Policy event if needed.
+        // and any future unknown variants are silently ignored. The
+        // `BackgroundFrames` / `AllowPauseResume` policies we requested are
+        // NOT applied at start() — that only opens the connection; the
+        // retry loop in poll() applies both policies once the handshake
+        // settles into `ServiceConnection::Connected` (see the comment on
+        // `start()`). A future phase can inspect granted flags from the
+        // Policy event if needed.
         _ => {}
     }
 }

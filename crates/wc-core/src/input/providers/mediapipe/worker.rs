@@ -15,10 +15,9 @@
 //!
 //! Foundation module: wired into the provider in [`super::MediaPipeProvider`];
 //! exercised by a mock-source plumbing test.
-#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -73,8 +72,22 @@ pub enum WorkerMsg {
 pub struct MediaPipeWorkerDiagnostics {
     /// Pipeline-stage metrics.
     pub pipeline: PipelineDiagnostics,
-    /// Cumulative worker-side dropped messages/frames.
+    /// Cumulative *camera*-frame drops since worker start: over-budget frames
+    /// discarded undecoded by the rate cap or idle throttle (see
+    /// [`drop_over_budget_frame`]). Mirrors `TrackingFlow::Streaming::dropped_since_start`
+    /// in the worker's status messages. Deliberately excludes ring-buffer
+    /// backpressure (a `WorkerMsg` push failing because the provider's `poll`
+    /// has not drained fast enough) — see [`Self::ring_full_drops`], which
+    /// that distinct failure mode is reported under.
     pub dropped_frames: u64,
+    /// Cumulative ring-buffer backpressure drops since worker start: a
+    /// [`WorkerMsg`] failed to `push` because the 256-entry `rtrb` ring was
+    /// full (see [`push_msg`]). This is a slow-consumer symptom (the main
+    /// thread's `poll` is not draining fast enough), not a camera problem, so
+    /// it is counted separately from [`Self::dropped_frames`] rather than
+    /// inflating it — folding the two together would misattribute backpressure
+    /// as camera drops in diagnostics.
+    pub ring_full_drops: u64,
     /// Wall time spent acquiring + decoding the frame that was just processed.
     /// Separates a slow camera/decode from slow inference on hardware.
     pub capture_decode: Duration,
@@ -140,13 +153,20 @@ pub const IDLE_INFERENCE_HZ: u32 = 4;
 /// to `producer`. `tuning` is the provider's shared lock-free cell; the loop
 /// re-reads its idle-throttle flag every iteration and drops to
 /// [`IDLE_INFERENCE_HZ`] while it is set.
+///
+/// If the OS itself fails to create the thread (e.g. the process is out of
+/// thread resources), that failure is not silently swallowed: it is logged at
+/// `error!` and reported to the provider the same way a camera failure is —
+/// pushing a [`no_camera_status`] [`WorkerMsg::Status`] onto `producer` — so
+/// `MediaPipeProvider::poll` surfaces it instead of leaving the provider's
+/// status frozen at whatever it was before `start()` forever.
 #[must_use]
 pub fn spawn_worker(
     make_source: SourceFactory,
     pipeline: Pipeline,
     max_hz: u32,
     tuning: Arc<MediaPipeLiveTuning>,
-    mut producer: Producer<WorkerMsg>,
+    producer: Producer<WorkerMsg>,
 ) -> WorkerHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
@@ -156,9 +176,30 @@ pub fn spawn_worker(
     // single-thread invariant MediaPipe's FlowLimiter gives us: newest frame wins.
     let min_inference_interval = inference_interval(max_hz);
 
-    let join = std::thread::Builder::new()
+    // `producer` must move into the spawned closure for the success path, but
+    // `std::thread::Builder::spawn` drops the closure — and everything it
+    // captured — without handing it back when thread creation fails, so a bare
+    // move would silently lose the ring producer right alongside the error.
+    // Routing it through a shared slot lets the failure branch below reclaim
+    // it: the closure never got to run, so the slot still holds it.
+    let producer_slot = Arc::new(Mutex::new(Some(producer)));
+    let producer_for_thread = Arc::clone(&producer_slot);
+
+    let spawn_result = std::thread::Builder::new()
         .name("wc-mediapipe-worker".into())
         .spawn(move || {
+            let Some(mut producer) = producer_for_thread
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+            else {
+                // Unreachable in practice: this closure is the only code that
+                // ever runs while the slot can still be non-empty (the failure
+                // branch below only fires when this closure never started).
+                // Guarded rather than unwrapped so a future refactor can't
+                // turn a logic error into a worker-thread panic.
+                return;
+            };
             // Build the source on this thread (so !Send backends are fine).
             let Ok(source) = make_source() else {
                 let _ = producer.push(WorkerMsg::Status(no_camera_status()));
@@ -172,10 +213,46 @@ pub fn spawn_worker(
                 &tuning,
                 producer,
             );
-        })
-        .ok();
+        });
+
+    let join = match spawn_result {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!("failed to spawn MediaPipe worker thread: {e}");
+            // The closure above never ran, so the slot still holds the
+            // producer: reclaim it and report the failure the same way the
+            // running loop reports a camera failure, so the provider's status
+            // does not stay frozen at "Connecting" forever.
+            if let Ok(mut slot) = producer_slot.lock() {
+                if let Some(mut producer) = slot.take() {
+                    let _ = producer.push(WorkerMsg::Status(no_camera_status()));
+                }
+            }
+            None
+        }
+    };
 
     WorkerHandle { stop, join }
+}
+
+/// Cumulative worker-loop drop counters, split by WHY a frame or message never
+/// reached the provider.
+///
+/// [`Self::camera`] and [`Self::ring_full`] are distinct failure modes that
+/// must not be folded into one number: a camera drop means the worker chose
+/// not to process a frame (rate cap or idle throttle, working as intended); a
+/// ring-full drop means a [`WorkerMsg`] the worker DID produce never reached
+/// the provider because the main thread's `poll` has not drained the 256-entry
+/// `rtrb` ring fast enough (backpressure — a symptom of a slow consumer, not
+/// the camera). Reported on [`MediaPipeWorkerDiagnostics`] as
+/// [`MediaPipeWorkerDiagnostics::dropped_frames`] and
+/// [`MediaPipeWorkerDiagnostics::ring_full_drops`] respectively.
+#[derive(Debug, Default)]
+struct DropCounters {
+    /// Real camera-frame drops (see [`drop_over_budget_frame`]).
+    camera: u64,
+    /// Ring-buffer backpressure drops (see [`push_msg`]).
+    ring_full: u64,
 }
 
 /// The worker's capture→process→publish loop, run on the worker thread until
@@ -196,7 +273,7 @@ fn run_worker_loop(
     let start = Instant::now();
     let mut frame = Frame::default();
     let mut last_inference = None;
-    let mut dropped_frames = 0_u64;
+    let mut drops = DropCounters::default();
     let mut pipeline_errors = 0_u64;
     // Computed once: the idle cap can only ever *lower* the rate (a configured
     // active cap slower than IDLE_INFERENCE_HZ stays authoritative).
@@ -205,7 +282,7 @@ fn run_worker_loop(
     // flag flips so a capable backend (macOS AVFoundation) drops its hardware
     // capture rate. `None` forces a sync call on the first iteration.
     let mut last_throttle: Option<bool> = None;
-    announce_source(source.as_ref(), &mut producer, &mut dropped_frames);
+    announce_source(source.as_ref(), &mut producer, &mut drops);
 
     while !stop.load(Ordering::Relaxed) {
         let loop_start = Instant::now();
@@ -230,7 +307,7 @@ fn run_worker_loop(
         // keeps the camera stream fresh (newest frame wins; sleeping instead
         // would let the buffer fill with stale frames, see spawn_worker).
         if !should_process_frame(last_inference, loop_start, min_interval) {
-            drop_over_budget_frame(source.as_mut(), &mut producer, &mut dropped_frames);
+            drop_over_budget_frame(source.as_mut(), &mut producer, &mut drops);
             // Fast mocks and some non-blocking camera sources can return
             // frames immediately; after dropping one, back off briefly so
             // the cap doesn't busy-spin a core.
@@ -254,55 +331,43 @@ fn run_worker_loop(
                     Ok(hands) => {
                         let diag = worker_diag(
                             &pipeline,
-                            dropped_frames,
+                            &drops,
                             capture_decode,
                             dt,
                             pipeline_errors,
                             idle_throttled,
                         );
-                        push_msg(
-                            &mut producer,
-                            WorkerMsg::Diagnostics(diag),
-                            &mut dropped_frames,
-                        );
+                        push_msg(&mut producer, WorkerMsg::Diagnostics(diag), &mut drops);
                         push_msg(
                             &mut producer,
                             WorkerMsg::Hands {
                                 hands,
                                 timestamp: now,
                             },
-                            &mut dropped_frames,
+                            &mut drops,
                         );
                         // last_frame_ago = the inter-frame interval, so the dev
                         // panel shows the achieved cadence rather than 0.
                         push_msg(
                             &mut producer,
-                            WorkerMsg::Status(streaming_status(dt, dropped_frames)),
-                            &mut dropped_frames,
+                            WorkerMsg::Status(streaming_status(dt, drops.camera)),
+                            &mut drops,
                         );
                     }
                     Err(e) => {
                         // Surface the error rather than silently dropping the
                         // frame; count it and forward the (rare) string.
                         pipeline_errors = pipeline_errors.saturating_add(1);
-                        push_msg(
-                            &mut producer,
-                            WorkerMsg::Error(e.to_string()),
-                            &mut dropped_frames,
-                        );
+                        push_msg(&mut producer, WorkerMsg::Error(e.to_string()), &mut drops);
                         let diag = worker_diag(
                             &pipeline,
-                            dropped_frames,
+                            &drops,
                             capture_decode,
                             dt,
                             pipeline_errors,
                             idle_throttled,
                         );
-                        push_msg(
-                            &mut producer,
-                            WorkerMsg::Diagnostics(diag),
-                            &mut dropped_frames,
-                        );
+                        push_msg(&mut producer, WorkerMsg::Diagnostics(diag), &mut drops);
                     }
                 }
             }
@@ -324,15 +389,15 @@ fn run_worker_loop(
 fn announce_source(
     source: &dyn FrameSource,
     producer: &mut Producer<WorkerMsg>,
-    dropped_frames: &mut u64,
+    drops: &mut DropCounters,
 ) {
     if let Some(label) = source.format_label().map(str::to_owned) {
-        push_msg(producer, WorkerMsg::CameraFormat(label), dropped_frames);
+        push_msg(producer, WorkerMsg::CameraFormat(label), drops);
     }
     push_msg(
         producer,
         WorkerMsg::Status(streaming_status(Duration::ZERO, 0)),
-        dropped_frames,
+        drops,
     );
 }
 
@@ -344,15 +409,15 @@ fn announce_source(
 fn drop_over_budget_frame(
     source: &mut dyn FrameSource,
     producer: &mut Producer<WorkerMsg>,
-    dropped_frames: &mut u64,
+    drops: &mut DropCounters,
 ) {
     match source.discard_frame() {
         Ok(true) => {
-            *dropped_frames = dropped_frames.saturating_add(1);
+            drops.camera = drops.camera.saturating_add(1);
             push_msg(
                 producer,
-                WorkerMsg::Status(streaming_status(Duration::ZERO, *dropped_frames)),
-                dropped_frames,
+                WorkerMsg::Status(streaming_status(Duration::ZERO, drops.camera)),
+                drops,
             );
         }
         // No frame was waiting: nothing to drop (the caller backs off).
@@ -396,7 +461,7 @@ fn should_process_frame(
 /// success and error paths so the field set stays in lockstep).
 fn worker_diag(
     pipeline: &Pipeline,
-    dropped_frames: u64,
+    drops: &DropCounters,
     capture_decode: Duration,
     inference_interval: Duration,
     pipeline_errors: u64,
@@ -404,7 +469,8 @@ fn worker_diag(
 ) -> MediaPipeWorkerDiagnostics {
     MediaPipeWorkerDiagnostics {
         pipeline: pipeline.diagnostics(),
-        dropped_frames,
+        dropped_frames: drops.camera,
+        ring_full_drops: drops.ring_full,
         capture_decode,
         inference_interval,
         pipeline_errors,
@@ -412,10 +478,13 @@ fn worker_diag(
     }
 }
 
-/// Push a message and count ring-overwrite drops without blocking the worker.
-fn push_msg(producer: &mut Producer<WorkerMsg>, msg: WorkerMsg, dropped_frames: &mut u64) {
+/// Push a message, counting a ring-full push failure as backpressure
+/// ([`DropCounters::ring_full`]) — never as a camera drop
+/// ([`DropCounters::camera`]), which only [`drop_over_budget_frame`] touches.
+/// Never blocks the worker.
+fn push_msg(producer: &mut Producer<WorkerMsg>, msg: WorkerMsg, drops: &mut DropCounters) {
     if producer.push(msg).is_err() {
-        *dropped_frames = dropped_frames.saturating_add(1);
+        drops.ring_full = drops.ring_full.saturating_add(1);
     }
 }
 
@@ -655,6 +724,44 @@ mod tests {
         );
         // Uncapped active rate (max_hz = 0) → idle period applies alone.
         assert_eq!(idle_capped_interval(None), Some(idle_period));
+    }
+
+    #[test]
+    fn push_msg_counts_ring_full_separately_from_camera_drops() {
+        // T16(b) regression: a ring-full push (backpressure — the provider's
+        // `poll` not draining fast enough) must NOT inflate the same counter
+        // `streaming_status` reports as camera drops (`DropCounters::camera`,
+        // only ever touched by `drop_over_budget_frame`). Capacity 1 so the
+        // second push is guaranteed to find the ring full.
+        let (mut producer, _consumer) = rtrb::RingBuffer::<WorkerMsg>::new(1);
+        let mut drops = DropCounters::default();
+
+        // First push succeeds (fills the one slot).
+        push_msg(
+            &mut producer,
+            WorkerMsg::Status(no_camera_status()),
+            &mut drops,
+        );
+        assert_eq!(drops.ring_full, 0, "the first push had room");
+        assert_eq!(
+            drops.camera, 0,
+            "push_msg must never touch the camera counter"
+        );
+
+        // Second push finds the ring full (nothing drained it).
+        push_msg(
+            &mut producer,
+            WorkerMsg::Status(no_camera_status()),
+            &mut drops,
+        );
+        assert_eq!(
+            drops.ring_full, 1,
+            "a ring-full push must count as backpressure"
+        );
+        assert_eq!(
+            drops.camera, 0,
+            "ring-full backpressure must not be misattributed as a camera drop"
+        );
     }
 
     #[test]

@@ -7,7 +7,6 @@
 //! are gated on the `hand-tracking-mediapipe-camera` feature. Frames are written into a
 //! caller-owned, reused [`Frame`] buffer so the worker performs no per-frame
 //! heap allocation after warm-up.
-#![allow(dead_code)]
 
 use thiserror::Error;
 
@@ -50,6 +49,10 @@ impl Frame {
 
     /// Resize the backing buffer to match `width`×`height` (reused across
     /// frames; only reallocates when the dimensions grow).
+    #[allow(
+        dead_code,
+        reason = "exercised only by #[cfg(test)] capture/worker paths and MockFrameSource"
+    )]
     pub fn fit_to(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -111,12 +114,20 @@ pub trait FrameSource {
 
 /// A test/replay frame source: serves a fixed list of frames, optionally
 /// looping the last one so a worker keeps receiving input.
+#[allow(
+    dead_code,
+    reason = "test/replay capture helper; constructed only from #[cfg(test)] and integration tests"
+)]
 pub struct MockFrameSource {
     frames: Vec<Frame>,
     next: usize,
     loop_last: bool,
 }
 
+#[allow(
+    dead_code,
+    reason = "test/replay capture constructors; called only from #[cfg(test)] and integration tests"
+)]
 impl MockFrameSource {
     /// Serve `frames` once, then return `Ok(false)` forever.
     #[must_use]

@@ -25,7 +25,6 @@
 //!
 //! Foundation module: consumed by the pipeline (plan Phase 8); exercised by
 //! tests until then.
-#![allow(dead_code)]
 
 use std::time::Duration;
 
@@ -244,15 +243,6 @@ impl Default for HandTracker {
 }
 
 impl HandTracker {
-    /// Construct a tracker with a custom association gate.
-    #[must_use]
-    pub fn with_gate(gate: f32) -> Self {
-        Self {
-            gate,
-            ..Self::default()
-        }
-    }
-
     /// Assign (or reuse) a track for a hand observed with `chirality` at palm
     /// position `pos`, returning its stable id, held chirality, and smoothed
     /// depth.

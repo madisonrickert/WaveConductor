@@ -14,7 +14,6 @@
 //!
 //! Foundation module: consumed by the pipeline (plan Phase 8); exercised by
 //! tests until then.
-#![allow(dead_code)]
 
 use std::f32::consts::FRAC_PI_2;
 

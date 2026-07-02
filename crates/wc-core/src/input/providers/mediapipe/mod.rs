@@ -419,6 +419,13 @@ fn refill_metrics(d: &mut ProviderDiagnostics, worker_diag: &MediaPipeWorkerDiag
         "Pipeline errors",
         worker_diag.pipeline_errors,
     ));
+    // Ring-buffer backpressure drops, reported distinctly from camera-frame
+    // drops (`dropped_frames`) so the dev panel never misattributes a slow
+    // consumer as a camera problem.
+    d.metrics.push(ProviderMetric::count(
+        "Ring-full drops",
+        worker_diag.ring_full_drops,
+    ));
     // Invariant: the per-poll metrics refill must stay within the SmallVec's
     // inline capacity (20) — a spill here would heap-allocate on every
     // diagnostics frame. Adding a metric that trips this assert means raising
