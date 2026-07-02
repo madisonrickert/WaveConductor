@@ -93,7 +93,7 @@ pub fn load<S: SketchSettings>() -> S {
 ///
 /// Two data-loss hazards are guarded against:
 ///
-/// * **Corrupt-file clobbering.** The merge step ([`load_merge_table`])
+/// * **Corrupt-file clobbering.** The merge step (`load_merge_table`)
 ///   distinguishes an absent file (fresh table, no fuss) from a present but
 ///   unparseable one. A present-but-corrupt file is *quarantined* (renamed to
 ///   a sibling `.corrupt-<n>`) and logged at `error!` before we proceed with a

@@ -30,7 +30,7 @@ use crate::ui::OverlayStyle;
 /// placed in column 1. Each helper renders only the input widget — no label,
 /// no `ui.horizontal` wrapper. The Grid handles label/widget alignment.
 ///
-/// `field` is `&mut dyn PartialReflect` as returned by [`bevy::reflect::Struct::field_mut`].
+/// `field` is `&mut dyn PartialReflect` as returned by [`bevy::reflect::structs::Struct::field_mut`].
 ///
 /// `storage_key` is the owning settings struct's storage key, threaded through
 /// to widgets that need a unique egui id (currently [`render_enum`]).

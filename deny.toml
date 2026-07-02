@@ -26,6 +26,14 @@ ignore = [
     # never calls quick-xml. macOS (the primary target) doesn't build it at all.
     # Re-evaluate when winit/wayland-client bump wayland-scanner past quick-xml 0.41.
     "RUSTSEC-2026-0194",
+    # Sibling advisory on the same pinned `quick-xml` 0.39.4: unbounded
+    # namespace-declaration allocation in `NsReader` (memory-exhaustion DoS on
+    # untrusted XML with many `xmlns` attributes on one start tag). Same
+    # dependency chain and same non-applicability as RUSTSEC-2026-0194 above —
+    # wayland-scanner's build-time codegen never touches untrusted input.
+    # `cargo update -p quick-xml` confirms no compatible fix is available while
+    # wayland-scanner stays on `^0.39`. Re-evaluate alongside RUSTSEC-2026-0194.
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
