@@ -170,3 +170,85 @@ const _: () = {
     assert!(std::mem::size_of::<Attractor>().is_multiple_of(16));
     assert!(std::mem::size_of::<Particle>().is_multiple_of(16));
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Particle` field offsets must match the WGSL `struct Particle` in
+    /// `simulate.wgsl` / `render.wgsl` exactly — the module doc's "four copies
+    /// must move together" hazard, enforced here rather than left as prose. A
+    /// reorder or inserted field would otherwise silently bind the wrong f32 to
+    /// each shader field.
+    #[test]
+    fn particle_field_offsets_match_wgsl() {
+        assert_eq!(std::mem::offset_of!(Particle, position), 0);
+        assert_eq!(std::mem::offset_of!(Particle, velocity), 8);
+        assert_eq!(std::mem::offset_of!(Particle, original_xy), 16);
+        assert_eq!(std::mem::offset_of!(Particle, alpha), 24);
+        assert_eq!(std::mem::offset_of!(Particle, age), 28);
+        assert_eq!(std::mem::offset_of!(Particle, lifespan), 32);
+        assert_eq!(std::mem::offset_of!(Particle, spawn_hash), 36);
+        assert_eq!(std::mem::offset_of!(Particle, spawn_color), 40);
+        assert_eq!(std::mem::offset_of!(Particle, _pad), 44);
+    }
+
+    /// Locks the doc comment's "48 bytes" claim to the actual layout.
+    #[test]
+    fn particle_is_48_bytes() {
+        assert_eq!(std::mem::size_of::<Particle>(), 48);
+    }
+
+    /// `Attractor` field offsets must match the WGSL `struct Attractor`.
+    #[test]
+    fn attractor_field_offsets_match_wgsl() {
+        assert_eq!(std::mem::offset_of!(Attractor, position), 0);
+        assert_eq!(std::mem::offset_of!(Attractor, power), 8);
+        assert_eq!(std::mem::offset_of!(Attractor, radius), 12);
+    }
+
+    /// Locks the doc comment's "16-byte aligned (4 × f32)" claim (also the
+    /// per-entry stride the audit expects for the `attractors` array below).
+    #[test]
+    fn attractor_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<Attractor>(), 16);
+    }
+
+    /// `SimParams` field offsets must match the WGSL `struct SimParams` in
+    /// `simulate.wgsl` exactly; a reorder or size change silently corrupts
+    /// every dispatch's uniforms.
+    #[test]
+    fn sim_params_field_offsets_match_wgsl() {
+        assert_eq!(std::mem::offset_of!(SimParams, dt), 0);
+        assert_eq!(std::mem::offset_of!(SimParams, attractor_count), 4);
+        assert_eq!(std::mem::offset_of!(SimParams, pulling_drag_baked), 8);
+        assert_eq!(std::mem::offset_of!(SimParams, inertial_drag_baked), 12);
+        assert_eq!(std::mem::offset_of!(SimParams, size_scale), 16);
+        assert_eq!(std::mem::offset_of!(SimParams, fade_duration), 20);
+        assert_eq!(std::mem::offset_of!(SimParams, constrain_min), 24);
+        assert_eq!(std::mem::offset_of!(SimParams, constrain_max), 32);
+        assert_eq!(std::mem::offset_of!(SimParams, attract_gate), 40);
+        assert_eq!(std::mem::offset_of!(SimParams, attract_fraction), 44);
+        assert_eq!(std::mem::offset_of!(SimParams, turbulence_amp), 48);
+        assert_eq!(std::mem::offset_of!(SimParams, turbulence_scale), 52);
+        assert_eq!(std::mem::offset_of!(SimParams, turbulence_time), 56);
+        assert_eq!(std::mem::offset_of!(SimParams, stationary_constant), 60);
+        assert_eq!(std::mem::offset_of!(SimParams, restoring_linear), 64);
+        assert_eq!(std::mem::offset_of!(SimParams, _spring_pad), 68);
+        assert_eq!(std::mem::offset_of!(SimParams, attractors), 80);
+    }
+
+    /// Locks the doc comments' "header ... totals 80 bytes" claim, and ties the
+    /// full struct size to [`MAX_ATTRACTORS`] via the real const (rather than a
+    /// hardcoded total) so a future change to `MAX_ATTRACTORS` cannot silently
+    /// shift the expected size without also failing this assertion.
+    #[test]
+    fn sim_params_size_tracks_max_attractors() {
+        const HEADER_BYTES: usize = 80;
+        const ATTRACTOR_STRIDE: usize = 16;
+        assert_eq!(
+            std::mem::size_of::<SimParams>(),
+            HEADER_BYTES + MAX_ATTRACTORS * ATTRACTOR_STRIDE
+        );
+    }
+}

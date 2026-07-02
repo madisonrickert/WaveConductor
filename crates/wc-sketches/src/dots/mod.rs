@@ -52,17 +52,13 @@ pub mod systems;
 pub use systems::DotsRoot;
 
 use crate::particles::material::ParticleMaterial;
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use wc_core::audio::state::AudioState;
 #[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
-use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
-use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
-use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
+use wc_core::settings::RegisterSketchSettingsExt;
+use wc_core::sketch::{despawn_with, sketch_active};
 
 /// Plugin that registers the Dots (Fabric) sketch.
 pub struct DotsPlugin;
@@ -115,7 +111,7 @@ impl Plugin for DotsPlugin {
                 despawn_with::<DotsRoot>,
                 remove_dots_sim_params,
                 exit_dots_audio,
-                reset_dots_render_profile,
+                wc_core::sketch::reset_render_profile,
             ),
         );
         app.add_systems(
@@ -170,10 +166,13 @@ impl Plugin for DotsPlugin {
         );
 
         // Apply Dots' tonemapping + bloom profile onto the main camera each
-        // frame while Dots is active (live dev-panel tuning).
+        // frame while Dots is active (live dev-panel tuning). The applier is the
+        // shared generic in `wc_core::sketch::lifecycle`, monomorphised on
+        // `DotsSettings` (its `SketchLifecycle` impl supplies the profile).
         app.add_systems(
             Update,
-            apply_dots_render_profile.run_if(in_state(AppState::Dots)),
+            wc_core::sketch::apply_render_profile::<settings::DotsSettings>
+                .run_if(in_state(AppState::Dots)),
         );
         // Apply Dots' master_brightness exposure onto the particle material each
         // frame (live dev-panel tuning).
@@ -213,8 +212,13 @@ impl Plugin for DotsPlugin {
         // a requires_restart setting changes (e.g. `dot_spacing`, which sizes
         // the compute storage buffer at spawn). The overlay's `drive_reload_state`
         // system (in wc-core) drives the full FadeOut → Switch → FadeIn cycle.
-        // Mirrors `LinePlugin`'s `restart_on_settings_change` registration.
-        app.add_systems(Update, restart_on_dots_settings_change);
+        // The listener is the shared generic in `wc_core::sketch::lifecycle`,
+        // monomorphised on `DotsSettings` (which supplies the storage key +
+        // `AppState::Dots` via its `SketchLifecycle` impl).
+        app.add_systems(
+            Update,
+            wc_core::sketch::restart_on_settings_change::<settings::DotsSettings>,
+        );
     }
 }
 
@@ -230,17 +234,14 @@ impl Plugin for DotsPlugin {
 /// placeholder fill defined in `OverlayStyle`. This mirrors the behavior of
 /// [`crate::line::register_line_manifest`].
 pub(crate) fn register_dots_manifest(app: &mut App) {
-    let asset_server = app.world().resource::<AssetServer>();
-    // Load the picker-tile screenshot as PNG. Bevy's default features include
-    // the `png` image loader; JPEG requires the separate `bevy/jpeg` feature
-    // which is not enabled in this workspace.
-    // v4 calls this sketch "Fabric" in HomePage.tsx.
-    let screenshot = asset_server.load("sketches/dots/screenshot.png");
-    app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
-        state: AppState::Dots,
-        display_name: "Fabric",
-        screenshot,
-    });
+    // Delegates to the shared `register_sketch_tile` helper (async PNG load +
+    // manifest append). v4 calls this sketch "Fabric" in HomePage.tsx.
+    wc_core::sketch::register_sketch_tile(
+        app,
+        AppState::Dots,
+        "Fabric",
+        "sketches/dots/screenshot.png",
+    );
 }
 
 /// Idle veto for the Dots sketch. Returns `true` while the mouse attractor's
@@ -365,35 +366,6 @@ fn remove_dots_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<systems::DotsExplodeFocal>();
 }
 
-/// Write Dots' tonemapping + bloom settings onto the main camera each frame
-/// while Dots is active (live dev-panel tuning). Change-gated inside
-/// `set_camera_render_profile`, so an unchanged profile is a no-op.
-fn apply_dots_render_profile(
-    settings: Res<'_, settings::DotsSettings>,
-    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
-) {
-    for (mut tonemapping, mut bloom) in &mut camera {
-        wc_core::render::set_camera_render_profile(
-            &mut tonemapping,
-            &mut bloom,
-            settings.tonemapping,
-            settings.bloom_intensity,
-            settings.bloom_threshold,
-            settings.bloom_composite,
-        );
-    }
-}
-
-/// `OnExit(AppState::Dots)` — restore the SDR camera base so Home/picker is
-/// un-tonemapped.
-fn reset_dots_render_profile(
-    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
-) {
-    for (mut tonemapping, mut bloom) in &mut camera {
-        wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
-    }
-}
-
 /// Write Dots' `master_brightness` setting onto the particle render material
 /// each frame while Dots is active (covers Active/Idle/Screensaver via
 /// `in_state(AppState::Dots)`), so the dev-panel exposure knob is live. The
@@ -430,66 +402,6 @@ fn drive_dots_master_brightness(
 #[cfg(debug_assertions)]
 fn should_register_explode(toggles: Option<&DebugToggles>) -> bool {
     !toggles.is_some_and(|t| t.disable_explode)
-}
-
-/// How long the user must stop adjusting a `requires_restart` setting before
-/// the sketch restarts. 500 ms quiescence prevents mid-drag sketch kills when
-/// the user is still adjusting a slider. Mirrors [`crate::line`]'s debounce.
-const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Listens for [`wc_core::settings::SketchRestart`] events targeted at
-/// [`settings::DotsSettings::STORAGE_KEY`] ("dots") and begins the reload
-/// fade-overlay transition so the `Dots → Home → Dots` cycle is blacked out
-/// rather than flashing the picker page.
-///
-/// A 500 ms debounce prevents the restart from firing while the user is still
-/// dragging a slider. The debounce timestamp is tracked in a
-/// `Local<Option<Duration>>` that is updated on every matching message and
-/// checked each frame against `Time::elapsed`.
-///
-/// After the debounce window closes, calls [`SketchReloadState::begin_fade_out`]
-/// which sets `phase = FadeOut`. The `drive_reload_state` system (registered in
-/// `wc-core`'s `LifecyclePlugin`) owns all subsequent phase transitions:
-/// `FadeOut` → Switch (sets `NextState::Home`) → `FadeIn` (sets
-/// `NextState::Dots`). Mirrors `crate::line::restart_on_settings_change`.
-fn restart_on_dots_settings_change(
-    mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
-    time: Res<'_, Time>,
-    current: Res<'_, State<AppState>>,
-    mut reload_state: ResMut<'_, SketchReloadState>,
-    // Optional: not present in headless (MinimalPlugins) test harnesses.
-    audio_state: Option<Res<'_, AudioState>>,
-    // Tracks the `Time::elapsed` of the last received restart message.
-    // `None` means no message has been received since the last restart.
-    mut last_change_at: Local<'_, Option<std::time::Duration>>,
-) {
-    // Absorb any new restart messages, updating the debounce timestamp.
-    // Only arm when in Dots (not during the Home/FadeIn return leg) and when
-    // no reload is already in progress.
-    let got_message = events
-        .read()
-        .any(|e| e.storage_key == settings::DotsSettings::STORAGE_KEY);
-    if got_message && **current == AppState::Dots && reload_state.is_idle() {
-        *last_change_at = Some(time.elapsed());
-        tracing::debug!("DotsSettings changed — debounce timer reset (500 ms)");
-    }
-
-    // Fire the FadeOut only after 500 ms of no further changes.
-    if let Some(last) = *last_change_at {
-        let elapsed_since = time.elapsed().saturating_sub(last);
-        if elapsed_since >= RESTART_DEBOUNCE
-            && **current == AppState::Dots
-            && reload_state.is_idle()
-        {
-            // Fall back to full volume (1.0) when the audio engine hasn't
-            // started — headless tests and early startup before the cpal
-            // stream is active.
-            let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
-            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, AppState::Dots);
-            *last_change_at = None;
-            tracing::debug!("DotsSettings debounce elapsed — beginning reload FadeOut");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -677,9 +589,10 @@ mod tests {
         );
     }
 
-    /// `restart_on_dots_settings_change` must transition `SketchReloadState`
-    /// to `FadeOut` after a `SketchRestart { storage_key: "dots" }` event
-    /// arrives and the 500 ms debounce elapses while in `AppState::Dots`.
+    /// The shared `restart_on_settings_change::<DotsSettings>` listener must
+    /// transition `SketchReloadState` to `FadeOut` after a
+    /// `SketchRestart { storage_key: "dots" }` event arrives and the 500 ms
+    /// debounce elapses while in `AppState::Dots`.
     ///
     /// This is the primary behavioral assertion for the Dots restart listener.
     /// It exercises the system end-to-end: event receipt, debounce arming,
@@ -699,7 +612,10 @@ mod tests {
         app.insert_resource(SketchReloadState::default());
         // Register the SketchRestart message type so `MessageReader` resolves.
         app.add_message::<SketchRestart>();
-        app.add_systems(Update, restart_on_dots_settings_change);
+        app.add_systems(
+            Update,
+            wc_core::sketch::restart_on_settings_change::<settings::DotsSettings>,
+        );
 
         // Transition to AppState::Dots so the listener gates correctly.
         app.world_mut()
@@ -749,7 +665,7 @@ mod tests {
         );
     }
 
-    /// `restart_on_dots_settings_change` must ignore `SketchRestart` events
+    /// The shared `restart_on_settings_change::<DotsSettings>` listener must ignore `SketchRestart` events
     /// whose `storage_key` does not match `DotsSettings::STORAGE_KEY` ("dots").
     ///
     /// Verifies the filter predicate: a "line" event (wrong key) must leave
@@ -768,7 +684,10 @@ mod tests {
         app.init_state::<AppState>();
         app.insert_resource(SketchReloadState::default());
         app.add_message::<SketchRestart>();
-        app.add_systems(Update, restart_on_dots_settings_change);
+        app.add_systems(
+            Update,
+            wc_core::sketch::restart_on_settings_change::<settings::DotsSettings>,
+        );
 
         app.world_mut()
             .resource_mut::<NextState<AppState>>()

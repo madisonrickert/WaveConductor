@@ -45,25 +45,17 @@ pub mod screensaver;
 pub mod settings;
 pub mod systems;
 
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::sprite_render::MeshMaterial2d;
-use wc_core::audio::state::AudioState;
-use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::screensaver::ScreensaverActive;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
-use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
-use wc_core::sketch::{despawn_with, in_idle, sketch_active, RegisterSketchManifestExt};
+use wc_core::settings::RegisterSketchSettingsExt;
+use wc_core::sketch::{despawn_with, in_idle, sketch_active};
 
 use compute::{create_cymatics_textures, CymaticsSimParams, SimParamsGpu, MAX_ITERATIONS};
 use settings::CymaticsSettings;
-
-/// Debounce window before a `requires_restart` settings change triggers the
-/// reload fade. Matches the Dots sketch (`RESTART_DEBOUNCE` in `dots/mod.rs`).
-const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Resting alive-mask radius (v4 `MINIMUM_ACTIVE_RADIUS`). At rest the wave
 /// sources oscillate inside a small mask of this radius; interaction (C9) grows
@@ -163,8 +155,14 @@ impl Plugin for CymaticsPlugin {
 
         // Restart listener: debounces `requires_restart` settings changes
         // (vertical_resolution, iterations) and begins the fade-out/reload
-        // cycle. Mirrors `restart_on_dots_settings_change` in `dots/mod.rs`.
-        app.add_systems(Update, restart_on_cymatics_settings_change);
+        // cycle. The listener is the shared generic in
+        // `wc_core::sketch::lifecycle`, monomorphised on `CymaticsSettings`
+        // (which supplies the storage key + `AppState::Cymatics` via its
+        // `SketchLifecycle` impl).
+        app.add_systems(
+            Update,
+            wc_core::sketch::restart_on_settings_change::<CymaticsSettings>,
+        );
 
         // Shared wireframe bone overlay (mirrors Line/Dots). Cymatics renders in
         // the main 2D pass with no post-process node, so no
@@ -210,7 +208,7 @@ impl Plugin for CymaticsPlugin {
                 despawn_with::<CymaticsRoot>,
                 remove_cymatics_sim_params,
                 systems::audio_coupling::exit_cymatics_audio,
-                reset_cymatics_render_profile,
+                wc_core::sketch::reset_render_profile,
             ),
         );
         app.add_systems(
@@ -304,7 +302,7 @@ impl Plugin for CymaticsPlugin {
         // lifecycle. Change-gated inside `set_camera_render_profile`.
         app.add_systems(
             Update,
-            apply_cymatics_render_profile.run_if(
+            wc_core::sketch::apply_render_profile::<CymaticsSettings>.run_if(
                 sketch_active(AppState::Cymatics)
                     .or_else(in_idle(AppState::Cymatics))
                     .or_else(in_screensaver(AppState::Cymatics)),
@@ -339,17 +337,14 @@ impl Plugin for CymaticsPlugin {
 /// fill defined in `OverlayStyle`. This mirrors the behavior of
 /// [`crate::dots::register_dots_manifest`].
 pub(crate) fn register_cymatics_manifest(app: &mut App) {
-    let asset_server = app.world().resource::<AssetServer>();
-    // Load the picker-tile screenshot as PNG. Bevy's default features include
-    // the `png` image loader; JPEG requires the separate `bevy/jpeg` feature
-    // which is not enabled in this workspace.
-    // v4 calls this sketch "Cymatics" in HomePage.tsx.
-    let screenshot = asset_server.load("sketches/cymatics/screenshot.png");
-    app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
-        state: AppState::Cymatics,
-        display_name: "Cymatics",
-        screenshot,
-    });
+    // Delegates to the shared `register_sketch_tile` helper (async PNG load +
+    // manifest append). v4 calls this sketch "Cymatics" in HomePage.tsx.
+    wc_core::sketch::register_sketch_tile(
+        app,
+        AppState::Cymatics,
+        "Cymatics",
+        "sketches/cymatics/screenshot.png",
+    );
 }
 
 /// Idle veto for the Cymatics sketch. Returns `true` while the alive-mask
@@ -670,78 +665,6 @@ fn update_cymatics_material(
         }
         if let Some(mut mat) = materials.get_mut(&handle.0) {
             mat.skew = new_skew;
-        }
-    }
-}
-
-/// Write Cymatics' tonemapping + bloom settings onto the main camera each frame
-/// while Cymatics is active (live dev-panel tuning). Change-gated inside
-/// `set_camera_render_profile`, so an unchanged profile is a no-op.
-fn apply_cymatics_render_profile(
-    settings: Res<'_, CymaticsSettings>,
-    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
-) {
-    for (mut tonemapping, mut bloom) in &mut camera {
-        wc_core::render::set_camera_render_profile(
-            &mut tonemapping,
-            &mut bloom,
-            settings.tonemapping,
-            settings.bloom_intensity,
-            settings.bloom_threshold,
-            settings.bloom_composite,
-        );
-    }
-}
-
-/// `OnExit(AppState::Cymatics)` — restore the SDR camera base so Home/picker is
-/// un-tonemapped.
-fn reset_cymatics_render_profile(
-    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
-) {
-    for (mut tonemapping, mut bloom) in &mut camera {
-        wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
-    }
-}
-
-/// Listen for [`wc_core::settings::SketchRestart`] events targeted at
-/// `CymaticsSettings` and begin the fade-out/reload cycle after a 500 ms
-/// debounce window.
-///
-/// Only arms when in `AppState::Cymatics` and no reload is already in
-/// progress, preventing double-fires during the return leg. Mirrors
-/// `restart_on_dots_settings_change` in `dots/mod.rs`.
-fn restart_on_cymatics_settings_change(
-    mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
-    time: Res<'_, Time>,
-    current: Res<'_, State<AppState>>,
-    mut reload_state: ResMut<'_, SketchReloadState>,
-    // Optional: absent in headless test harnesses (no cpal audio stream).
-    audio_state: Option<Res<'_, AudioState>>,
-    // Tracks the `Time::elapsed` of the last received restart message;
-    // `None` means no pending restart since the last reload.
-    mut last_change_at: Local<'_, Option<std::time::Duration>>,
-) {
-    // Absorb any new restart messages for our settings key and reset the
-    // debounce timestamp. Only arm when in Cymatics and no reload in progress.
-    let got_message = events
-        .read()
-        .any(|e| e.storage_key == CymaticsSettings::STORAGE_KEY);
-    if got_message && **current == AppState::Cymatics && reload_state.is_idle() {
-        *last_change_at = Some(time.elapsed());
-        tracing::debug!("CymaticsSettings changed — debounce timer reset (500 ms)");
-    }
-
-    // Fire the FadeOut only after 500 ms of no further changes.
-    if let Some(last) = *last_change_at {
-        let elapsed_since = time.elapsed().saturating_sub(last);
-        if elapsed_since >= RESTART_DEBOUNCE
-            && **current == AppState::Cymatics
-            && reload_state.is_idle()
-        {
-            let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
-            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, AppState::Cymatics);
-            *last_change_at = None;
-            tracing::debug!("CymaticsSettings debounce elapsed — beginning reload FadeOut");
         }
     }
 }

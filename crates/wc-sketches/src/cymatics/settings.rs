@@ -558,6 +558,25 @@ pub struct CymaticsSettings {
     pub c2_omega_y: f32,
 }
 
+/// Ties `CymaticsSettings` to the shared sketch lifecycle glue: Cymatics
+/// occupies [`wc_core::lifecycle::state::AppState::Cymatics`] and exposes its
+/// camera render-profile knobs to the generic
+/// [`wc_core::sketch::apply_render_profile`] and
+/// [`wc_core::sketch::restart_on_settings_change`] systems.
+impl wc_core::sketch::SketchLifecycle for CymaticsSettings {
+    const STATE: wc_core::lifecycle::state::AppState =
+        wc_core::lifecycle::state::AppState::Cymatics;
+
+    fn render_profile(&self) -> wc_core::sketch::RenderProfile {
+        wc_core::sketch::RenderProfile {
+            tonemapping: self.tonemapping,
+            bloom_intensity: self.bloom_intensity,
+            bloom_threshold: self.bloom_threshold,
+            bloom_composite: self.bloom_composite,
+        }
+    }
+}
+
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
 // attributes above so a missing-field deserialize lands on the same value the
 // derived `Default` impl produces. Update both sites together.

@@ -47,6 +47,33 @@ impl SketchManifest {
     }
 }
 
+/// Load a sketch's picker-tile screenshot and register its manifest entry.
+///
+/// Collapses the boilerplate every sketch's `register_*_manifest` function
+/// repeated verbatim: resolve the [`AssetServer`], kick off the async
+/// screenshot load, and append the [`SketchManifestEntry`]. The load is async;
+/// the picker renders the tile as soon as the image asset finishes loading,
+/// showing the dark placeholder fill from `OverlayStyle` until then.
+///
+/// `screenshot_path` is the asset-relative PNG path (e.g.
+/// `"sketches/line/screenshot.png"`). Bevy's default features include the `png`
+/// loader; JPEG would require the separate `bevy/jpeg` feature, which this
+/// workspace does not enable.
+pub fn register_sketch_tile(
+    app: &mut App,
+    state: AppState,
+    display_name: &'static str,
+    screenshot_path: &'static str,
+) {
+    let asset_server = app.world().resource::<AssetServer>();
+    let screenshot = asset_server.load(screenshot_path);
+    app.register_sketch_manifest(SketchManifestEntry {
+        state,
+        display_name,
+        screenshot,
+    });
+}
+
 /// Extension trait — each sketch plugin's `build` calls this once.
 pub trait RegisterSketchManifestExt {
     /// Append `entry` to the [`SketchManifest`]. Idempotent on duplicate

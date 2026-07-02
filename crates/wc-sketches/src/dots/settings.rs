@@ -454,6 +454,24 @@ pub struct DotsSettings {
     pub breath_rate_hz: f32,
 }
 
+/// Ties `DotsSettings` to the shared sketch lifecycle glue: Dots occupies
+/// [`wc_core::lifecycle::state::AppState::Dots`] and exposes its camera
+/// render-profile knobs to the generic
+/// [`wc_core::sketch::apply_render_profile`] and
+/// [`wc_core::sketch::restart_on_settings_change`] systems.
+impl wc_core::sketch::SketchLifecycle for DotsSettings {
+    const STATE: wc_core::lifecycle::state::AppState = wc_core::lifecycle::state::AppState::Dots;
+
+    fn render_profile(&self) -> wc_core::sketch::RenderProfile {
+        wc_core::sketch::RenderProfile {
+            tonemapping: self.tonemapping,
+            bloom_intensity: self.bloom_intensity,
+            bloom_threshold: self.bloom_threshold,
+            bloom_composite: self.bloom_composite,
+        }
+    }
+}
+
 // Per-field serde defaults. Values MUST match the `#[setting(default = ...)]`
 // attributes above so a missing-field deserialize lands on the same value the
 // derive-macro `Default` impl would produce. Update both sites together.

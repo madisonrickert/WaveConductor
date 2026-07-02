@@ -54,19 +54,15 @@ pub mod template_adjustments_store;
 pub use systems::LineRoot;
 
 use crate::particles::material::ParticleMaterial;
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use wc_core::audio::state::AudioState;
 #[cfg(debug_assertions)]
 use wc_core::debug::DebugToggles;
-use wc_core::lifecycle::reload::SketchReloadState;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 use wc_core::lifecycle::RegisterIdleVetoExt;
 #[cfg(feature = "templates")]
 use wc_core::settings::RegisterDockSectionExt;
-use wc_core::settings::{RegisterSketchSettingsExt, SketchSettings};
-use wc_core::sketch::{despawn_with, sketch_active, RegisterSketchManifestExt};
+use wc_core::settings::RegisterSketchSettingsExt;
+use wc_core::sketch::{despawn_with, sketch_active};
 
 /// Plugin that registers the Line sketch.
 pub struct LinePlugin;
@@ -233,7 +229,13 @@ impl Plugin for LinePlugin {
         // Restart listener: begins the FadeOut phase of the reload overlay when
         // a requires_restart setting changes. The overlay's `drive_reload_state`
         // system (in wc-core) drives the full FadeOut → Switch → FadeIn cycle.
-        app.add_systems(Update, restart_on_settings_change);
+        // The listener is the shared generic in `wc_core::sketch::lifecycle`,
+        // monomorphised on `LineSettings` (which supplies the storage key +
+        // `AppState::Line` via its `SketchLifecycle` impl).
+        app.add_systems(
+            Update,
+            wc_core::sketch::restart_on_settings_change::<settings::LineSettings>,
+        );
     }
 }
 
@@ -245,15 +247,25 @@ impl Plugin for LinePlugin {
 /// Factored out of [`LinePlugin::build`] so that method stays within the line
 /// limit.
 fn register_line_render_profile(app: &mut App) {
+    // Tonemapping + bloom applier and the SDR reset are the shared generic
+    // systems in `wc_core::sketch::lifecycle` (Line's `SketchLifecycle` impl
+    // supplies the profile). `in_state(AppState::Line)` covers Line's
+    // Active/Idle/Screensaver sub-states. The master-brightness driver stays
+    // per-sketch: it touches `ParticleMaterial`, a `wc-sketches` type that
+    // `wc-core` cannot reference.
     app.add_systems(
         Update,
-        apply_line_render_profile.run_if(in_state(AppState::Line)),
+        wc_core::sketch::apply_render_profile::<settings::LineSettings>
+            .run_if(in_state(AppState::Line)),
     );
     app.add_systems(
         Update,
         drive_line_master_brightness.run_if(in_state(AppState::Line)),
     );
-    app.add_systems(OnExit(AppState::Line), reset_line_render_profile);
+    app.add_systems(
+        OnExit(AppState::Line),
+        wc_core::sketch::reset_render_profile,
+    );
 }
 
 /// Register Line's shared wireframe bone overlay ([`crate::hand_mesh::HandMeshPlugin`])
@@ -296,19 +308,16 @@ fn register_line_hand_mesh_overlay(app: &mut App) {
 /// image asset finishes loading. Before then the tile shows the dark placeholder
 /// fill defined in `OverlayStyle`.
 pub(crate) fn register_line_manifest(app: &mut App) {
-    let asset_server = app.world().resource::<AssetServer>();
-    // Load the picker-tile screenshot as PNG. Bevy's default features include
-    // the `png` image loader; JPEG requires the separate `bevy/jpeg` feature
-    // which is not enabled in this workspace. The PNG at this path is the
-    // 1280×720 screenshot that was always present; the JPG copy (loaded in the
-    // previous commit) has been removed.
-    // v4 calls this sketch "Gravity" in HomePage.tsx:44.
-    let screenshot = asset_server.load("sketches/line/screenshot.png");
-    app.register_sketch_manifest(wc_core::sketch::SketchManifestEntry {
-        state: AppState::Line,
-        display_name: "Gravity",
-        screenshot,
-    });
+    // Delegates to the shared `register_sketch_tile` helper (async PNG load +
+    // manifest append). The PNG at this path is the 1280×720 screenshot that
+    // was always present; the JPG copy (loaded in an earlier commit) has been
+    // removed. v4 calls this sketch "Gravity" in HomePage.tsx:44.
+    wc_core::sketch::register_sketch_tile(
+        app,
+        AppState::Line,
+        "Gravity",
+        "sketches/line/screenshot.png",
+    );
 }
 
 /// `OnExit(AppState::Line)` companion to [`systems::spawn_line`].
@@ -333,64 +342,6 @@ fn remove_sim_params(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<crate::particles::sim_cpu::CpuMirror>();
     commands.remove_resource::<systems::sim_params::LineSmearFocal>();
     commands.remove_resource::<post_process::LinePostParams>();
-}
-
-/// How long the user must stop adjusting a `requires_restart` setting before
-/// the sketch restarts. 500 ms quiescence prevents mid-drag sketch kills when
-/// the user is still adjusting a slider.
-const RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Listens for `SketchRestart { storage_key == LineSettings::STORAGE_KEY }`
-/// and begins the reload fade-overlay transition so the `Line → Home → Line`
-/// cycle is blacked out rather than flashing the picker page.
-///
-/// A 500 ms debounce (`RESTART_DEBOUNCE`) prevents the restart from firing
-/// while the user is still dragging a slider. The debounce timestamp is tracked
-/// in a `Local<Option<Duration>>` that is updated on every message and checked
-/// each frame against `Time::elapsed`.
-///
-/// After the debounce window closes, calls `SketchReloadState::begin_fade_out`
-/// which sets `phase = FadeOut`. The `drive_reload_state` system (registered in
-/// `wc-core`'s `LifecyclePlugin`) owns all subsequent phase transitions:
-/// `FadeOut` → Switch (sets `NextState::Home`) → `FadeIn` (sets `NextState::Line`).
-fn restart_on_settings_change(
-    mut events: MessageReader<'_, '_, wc_core::settings::SketchRestart>,
-    time: Res<'_, bevy::prelude::Time>,
-    current: Res<'_, State<AppState>>,
-    mut reload_state: ResMut<'_, SketchReloadState>,
-    // Optional: not present in headless (MinimalPlugins) test harnesses.
-    audio_state: Option<Res<'_, AudioState>>,
-    // Tracks the `Time::elapsed` of the last received restart message.
-    // `None` means no message has been received since the last restart.
-    mut last_change_at: Local<'_, Option<std::time::Duration>>,
-) {
-    // Absorb any new restart messages, updating the debounce timestamp.
-    // Only arm when in Line (not during the Home/FadeIn return leg) and when
-    // no reload is already in progress.
-    let got_message = events
-        .read()
-        .any(|e| e.storage_key == settings::LineSettings::STORAGE_KEY);
-    if got_message && **current == AppState::Line && reload_state.is_idle() {
-        *last_change_at = Some(time.elapsed());
-        tracing::debug!("LineSettings changed — debounce timer reset (500 ms)");
-    }
-
-    // Fire the FadeOut only after 500 ms of no further changes.
-    if let Some(last) = *last_change_at {
-        let elapsed_since = time.elapsed().saturating_sub(last);
-        if elapsed_since >= RESTART_DEBOUNCE
-            && **current == AppState::Line
-            && reload_state.is_idle()
-        {
-            // Fall back to full volume (1.0) when the audio engine hasn't
-            // started — headless tests and early startup before the cpal
-            // stream is active.
-            let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
-            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, AppState::Line);
-            *last_change_at = None;
-            tracing::debug!("LineSettings debounce elapsed — beginning reload FadeOut");
-        }
-    }
 }
 
 /// Idle veto for the Line sketch. Returns `true` while the mouse attractor's
@@ -523,35 +474,6 @@ fn exit_line_screensaver_audio(
 /// `insert_dots_post_params` pattern in [`crate::dots`].
 fn insert_line_post_params(mut commands: Commands<'_, '_>) {
     commands.insert_resource(post_process::LinePostParams::default());
-}
-
-/// Write Line's tonemapping + bloom settings onto the main camera each frame
-/// while Line is active (live dev-panel tuning). Change-gated inside
-/// `set_camera_render_profile`, so an unchanged profile is a no-op.
-fn apply_line_render_profile(
-    settings: Res<'_, settings::LineSettings>,
-    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
-) {
-    for (mut tonemapping, mut bloom) in &mut camera {
-        wc_core::render::set_camera_render_profile(
-            &mut tonemapping,
-            &mut bloom,
-            settings.tonemapping,
-            settings.bloom_intensity,
-            settings.bloom_threshold,
-            settings.bloom_composite,
-        );
-    }
-}
-
-/// `OnExit(AppState::Line)` — restore the SDR camera base so Home/picker is
-/// un-tonemapped.
-fn reset_line_render_profile(
-    mut camera: Query<'_, '_, (&mut Tonemapping, &mut Bloom), With<Camera2d>>,
-) {
-    for (mut tonemapping, mut bloom) in &mut camera {
-        wc_core::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
-    }
 }
 
 /// Write Line's `master_brightness` setting onto the particle render material

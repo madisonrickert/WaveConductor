@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "WaveConductor sketch plugins: line, flame, dots, cymatics, waves."
+description = "WaveConductor sketch plugins: line, dots, cymatics."
 publish = false
 
 [lints]
