@@ -60,6 +60,46 @@ pub struct FlameSettings {
     #[serde(default = "default_autorotate_speed")]
     pub autorotate_speed: f32,
 
+    /// Exponent on the two-hand spread ratio driving hand zoom: 1 is proportional; higher values zoom more aggressively per hand movement.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.25_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Two-hand zoom gamma",
+        section = "Camera",
+        category = Dev
+    )]
+    #[serde(default = "default_two_hand_zoom_gamma")]
+    pub two_hand_zoom_gamma: f32,
+
+    /// Scale on the two-hand midpoint drag that pans the view; 0 disables pan.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Hand pan sensitivity",
+        section = "Camera",
+        category = Dev
+    )]
+    #[serde(default = "default_hand_pan_sensitivity")]
+    pub hand_pan_sensitivity: f32,
+
+    /// Exponential time constant of the settle-to-home camera ease: seconds to recover ~63% of the deviation after the user lets go. The ease keeps polar/distance/pan from being stranded in an ugly pose (azimuth is exempt; autorotate owns it).
+    #[setting(
+        default = 8.0_f32,
+        min = 0.5_f32,
+        max = 60.0_f32,
+        step = 0.5_f32,
+        label = "Camera return time",
+        unit = "s",
+        section = "Camera",
+        category = Dev
+    )]
+    #[serde(default = "default_camera_return_seconds")]
+    pub camera_return_seconds: f32,
+
     /// Fake depth-of-field strength: the `* 3.0` factor in v4's
     /// `outOfFocusAmount`. 0 disables the `DoF` entirely.
     #[setting(
@@ -371,6 +411,15 @@ fn default_target_points() -> f32 {
 fn default_autorotate_speed() -> f32 {
     1.0
 }
+fn default_two_hand_zoom_gamma() -> f32 {
+    1.0
+}
+fn default_hand_pan_sensitivity() -> f32 {
+    1.0
+}
+fn default_camera_return_seconds() -> f32 {
+    8.0
+}
 fn default_dof_strength() -> f32 {
     3.0
 }
@@ -472,6 +521,9 @@ mod tests {
         assert_eq!(d.name, default_name());
         assert!((d.target_points - default_target_points()).abs() < f32::EPSILON);
         assert!((d.autorotate_speed - default_autorotate_speed()).abs() < f32::EPSILON);
+        assert!((d.two_hand_zoom_gamma - default_two_hand_zoom_gamma()).abs() < f32::EPSILON);
+        assert!((d.hand_pan_sensitivity - default_hand_pan_sensitivity()).abs() < f32::EPSILON);
+        assert!((d.camera_return_seconds - default_camera_return_seconds()).abs() < f32::EPSILON);
         assert!((d.dof_strength - default_dof_strength()).abs() < f32::EPSILON);
         assert!((d.base_point_size - default_base_point_size()).abs() < f32::EPSILON);
         assert!((d.point_opacity - default_point_opacity()).abs() < f32::EPSILON);

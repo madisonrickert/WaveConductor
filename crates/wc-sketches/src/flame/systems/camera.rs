@@ -1,5 +1,8 @@
 //! CPU orbit camera for the Flame sketch: autorotate + drag + wheel zoom +
-//! grab-fling momentum (F10 sets [`FlameCamera::angular_velocity`] on release).
+//! grab-fling momentum (F10 sets [`FlameCamera::angular_velocity`] on release) +
+//! two-hand pan (moves the [`FlameCamera::target`] look-at point) + a
+//! settle-to-home ease that recenters polar/distance/target whenever nothing
+//! is actively holding the camera (no hand grab, no mouse drag).
 //!
 //! No `Camera3d` entity exists (see the plan's "Approved deviations" note):
 //! [`FlameCamera`] is pure CPU state, and [`crate::flame::render::drive_flame_material`]
@@ -14,6 +17,7 @@ use bevy::prelude::*;
 use wc_core::input::pointer::PointerState;
 
 use crate::flame::settings::FlameSettings;
+use crate::flame::systems::hands::FlameGrabState;
 
 /// v4's `OrbitControls` minimum/maximum distance bounds.
 const MIN_DISTANCE: f32 = 0.1;
@@ -27,6 +31,12 @@ const ZOOM_SENSITIVITY: f32 = 0.1;
 /// Per-frame-at-60fps momentum decay (v4 kept per-frame units; applied
 /// dt-scaled below so the decay rate is frame-rate independent).
 const MOMENTUM_DECAY: f32 = 0.95;
+/// Vertical field of view shared by [`FlameCamera::clip_from_view`] and the
+/// pan math in [`FlameCamera::pan_by_pixels`] (v4 camera: 60 degrees).
+const FOVY: f32 = std::f32::consts::PI / 3.0;
+/// Maximum distance the pan target may wander from the origin: keeps the
+/// fractal recoverable in-frame no matter how far a two-hand drag runs.
+const PAN_MAX_RADIUS: f32 = 2.0;
 
 /// CPU orbit camera around the origin. Produces the two mat4 uniforms; no
 /// `Camera3d` entity exists (see the plan's deviation note).
@@ -43,6 +53,10 @@ pub struct FlameCamera {
     pub angular_velocity: Vec2,
     /// Cursor position at the previous frame while dragging.
     pub last_drag: Option<Vec2>,
+    /// Orbit/look-at center, in model-world space. `Vec3::ZERO` is v4's fixed
+    /// origin. Written only by [`FlameCamera::pan_by_pixels`] and the
+    /// screensaver recenter (settle-to-home, see [`update_flame_camera`]).
+    pub target: Vec3,
 }
 
 impl Default for FlameCamera {
@@ -57,12 +71,13 @@ impl Default for FlameCamera {
             distance,
             angular_velocity: Vec2::ZERO,
             last_drag: None,
+            target: Vec3::ZERO,
         }
     }
 }
 
 impl FlameCamera {
-    /// Spherical-to-Cartesian eye position, orbiting the origin.
+    /// Spherical-to-Cartesian eye position, orbiting [`FlameCamera::target`].
     ///
     /// `polar` is measured from +Y (not from the equator), so `y = cos(polar)`
     /// and the `x`/`z` split carries `sin(polar)` scaled by the azimuth's
@@ -70,12 +85,13 @@ impl FlameCamera {
     /// `OrbitControls` spherical parametrization.
     #[must_use]
     pub fn eye(&self) -> Vec3 {
-        self.distance
-            * Vec3::new(
-                self.polar.sin() * self.azimuth.sin(),
-                self.polar.cos(),
-                self.polar.sin() * self.azimuth.cos(),
-            )
+        self.target
+            + self.distance
+                * Vec3::new(
+                    self.polar.sin() * self.azimuth.sin(),
+                    self.polar.cos(),
+                    self.polar.sin() * self.azimuth.cos(),
+                )
     }
 
     /// `view_from_model = view * rotateX(-PI/2)`, baking v4's
@@ -84,7 +100,7 @@ impl FlameCamera {
     /// equivalent this replaces).
     #[must_use]
     pub fn view_from_model(&self) -> Mat4 {
-        let view = Mat4::look_at_rh(self.eye(), Vec3::ZERO, Vec3::Y);
+        let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
         view * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
     }
 
@@ -92,7 +108,55 @@ impl FlameCamera {
     /// matching [`crate::flame::render::default_view_matrices`]'s projection.
     #[must_use]
     pub fn clip_from_view(aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.01, 25.0)
+        Mat4::perspective_rh(FOVY, aspect, 0.01, 25.0)
+    }
+
+    /// Set the orbit radius, clamped to v4's `OrbitControls` bounds
+    /// `[MIN_DISTANCE, MAX_DISTANCE]` — the single write path shared by wheel
+    /// zoom and the two-hand spread zoom.
+    pub fn set_distance_clamped(&mut self, distance: f32) {
+        self.distance = distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
+    }
+
+    /// Translate the pan `target` by a window-pixel delta (top-left origin,
+    /// +y down), so on-screen content follows the hands (grab metaphor):
+    /// hands moving right pan the camera left, hands moving down aim it up.
+    ///
+    /// `world_per_pixel = 2 * distance * tan(fovy/2) / window_height` is the
+    /// world-space width of one pixel at the target plane, so pan speed
+    /// matches apparent on-screen hand speed at any zoom. The target is
+    /// clamped to `PAN_MAX_RADIUS` so the fractal can always be recovered.
+    pub fn pan_by_pixels(&mut self, delta_px: Vec2, window_height: f32, sensitivity: f32) {
+        // Unit vector from target toward the eye (the spherical terms are
+        // already normalized); forward is its negation.
+        let toward_eye = Vec3::new(
+            self.polar.sin() * self.azimuth.sin(),
+            self.polar.cos(),
+            self.polar.sin() * self.azimuth.cos(),
+        );
+        let forward = -toward_eye;
+        // look_at_rh basis: right = forward x up_world, up = right x forward.
+        // The polar clamp keeps forward off the poles, so the cross products
+        // stay well-conditioned.
+        let right = forward.cross(Vec3::Y).normalize();
+        let up = right.cross(forward);
+        let world_per_pixel = 2.0 * self.distance * (FOVY * 0.5).tan() / window_height.max(1.0);
+        let motion = (-right * delta_px.x + up * delta_px.y) * world_per_pixel * sensitivity;
+        self.target = (self.target + motion).clamp_length_max(PAN_MAX_RADIUS);
+    }
+
+    /// Ease `polar`, `distance`, and the pan `target` toward the default
+    /// (v4 start) pose by `alpha` — the settle-to-home restoration that
+    /// guarantees no gesture leaves the kiosk in a permanently ugly state
+    /// (Dots' `fabric_tension` home-spring is the same idea for particles).
+    /// `azimuth` is deliberately exempt: autorotate owns it, and every
+    /// azimuth is an equally valid view of the fractal.
+    pub fn ease_toward_home(&mut self, alpha: f32) {
+        let home = Self::default();
+        self.polar += (home.polar - self.polar) * alpha;
+        self.distance += (home.distance - self.distance) * alpha;
+        // Home target is the origin, so the lerp reduces to a scale.
+        self.target *= 1.0 - alpha;
     }
 }
 
@@ -104,7 +168,10 @@ impl FlameCamera {
 /// button drag overrides azimuth/polar directly from the cursor delta, wheel
 /// scroll rescales distance, and — when nothing is dragging — decaying fling
 /// momentum (set by F10's hand-grab release) keeps nudging azimuth/polar.
-/// Polar is clamped last so no path can push the eye through a pole.
+/// Then, whenever no hand is grabbing and no mouse drag is in progress, a
+/// settle-to-home ease pulls polar/distance/[`FlameCamera::target`] back
+/// toward the default pose. Polar is clamped last so no path can push the eye
+/// through a pole.
 pub fn update_flame_camera(
     time: Res<'_, Time>,
     settings: Res<'_, FlameSettings>,
@@ -112,6 +179,7 @@ pub fn update_flame_camera(
     mouse_buttons: Res<'_, ButtonInput<MouseButton>>,
     scroll: Res<'_, AccumulatedMouseScroll>,
     window: Single<'_, '_, &Window>,
+    grab: Res<'_, FlameGrabState>,
     mut camera: ResMut<'_, FlameCamera>,
 ) {
     let dt = time.delta_secs();
@@ -141,8 +209,8 @@ pub fn update_flame_camera(
     // Wheel zoom: each scroll line scales distance by (1 - 0.1 * lines),
     // clamped to v4's OrbitControls bounds.
     if scroll.delta.y != 0.0 {
-        camera.distance = (camera.distance * (1.0 - ZOOM_SENSITIVITY * scroll.delta.y))
-            .clamp(MIN_DISTANCE, MAX_DISTANCE);
+        let zoomed = camera.distance * (1.0 - ZOOM_SENSITIVITY * scroll.delta.y);
+        camera.set_distance_clamped(zoomed);
     }
 
     // Fling momentum: only applied while nothing is actively dragging (a held
@@ -153,6 +221,18 @@ pub fn update_flame_camera(
         camera.azimuth -= velocity.x * dt * 60.0;
         camera.polar -= velocity.y * dt * 60.0;
         camera.angular_velocity *= MOMENTUM_DECAY.powf(dt * 60.0);
+    }
+
+    // Settle-to-home: whenever nothing actively holds the camera (no hand
+    // grabbing, no mouse drag), polar/distance/target ease back to the v4
+    // start pose so the kiosk always recovers from any gesture. The ease is
+    // dt-correct (`1 - exp(-dt/tau)`), gentle enough to coexist with a
+    // decaying fling, and also runs during the screensaver — that is what
+    // recenters an abandoned pan for attract mode.
+    if grab.grabbing_count == 0 && camera.last_drag.is_none() {
+        // `.max(0.1)` guards a hand-edited settings file against div-by-zero.
+        let alpha = 1.0 - (-dt / settings.camera_return_seconds.max(0.1)).exp();
+        camera.ease_toward_home(alpha);
     }
 
     // Clamp last: no path above (autorotate, drag, fling) can push the eye
@@ -228,10 +308,109 @@ mod tests {
                 polar,
                 azimuth: 2.3,
                 distance: 3.0,
+                target: Vec3::new(1.5, -0.8, 0.4),
                 ..FlameCamera::default()
             };
             let m = cam.view_from_model();
             assert!(m.is_finite());
         }
+    }
+
+    /// Pan moves the target opposite the hand delta's screen-right direction
+    /// (content follows the hands), scaled by distance and fovy.
+    #[test]
+    fn pan_by_pixels_moves_target_left_when_hands_move_right() {
+        let mut cam = FlameCamera::default(); // azimuth 0: eye on +Z, right = +X
+        cam.pan_by_pixels(Vec2::new(10.0, 0.0), 720.0, 1.0);
+        assert!(
+            cam.target.x < 0.0,
+            "target must move -X, got {}",
+            cam.target.x
+        );
+        assert!(cam.target.y.abs() < 1e-6);
+        assert!(cam.target.z.abs() < 1e-6);
+    }
+
+    /// Hands moving down (window +y) aim the camera up: target moves toward
+    /// world +Y (camera-up at the default pose has positive Y).
+    #[test]
+    fn pan_by_pixels_moves_target_up_when_hands_move_down() {
+        let mut cam = FlameCamera::default();
+        cam.pan_by_pixels(Vec2::new(0.0, 10.0), 720.0, 1.0);
+        assert!(
+            cam.target.y > 0.0,
+            "target must gain +Y, got {}",
+            cam.target.y
+        );
+    }
+
+    /// The pan target never leaves the `PAN_MAX_RADIUS` ball.
+    #[test]
+    fn pan_by_pixels_clamps_target_radius() {
+        let mut cam = FlameCamera::default();
+        for _ in 0..100 {
+            cam.pan_by_pixels(Vec2::new(500.0, 300.0), 720.0, 1.0);
+        }
+        assert!(cam.target.length() <= PAN_MAX_RADIUS + 1e-4);
+    }
+
+    /// Sensitivity 0 disables pan entirely.
+    #[test]
+    fn pan_by_pixels_sensitivity_zero_is_inert() {
+        let mut cam = FlameCamera::default();
+        cam.pan_by_pixels(Vec2::new(50.0, 50.0), 720.0, 0.0);
+        assert_eq!(cam.target, Vec3::ZERO);
+    }
+
+    /// `set_distance_clamped` enforces the v4 `OrbitControls` bounds.
+    #[test]
+    fn set_distance_clamped_enforces_bounds() {
+        let mut cam = FlameCamera::default();
+        cam.set_distance_clamped(0.001);
+        assert!((cam.distance - 0.1).abs() < 1e-6);
+        cam.set_distance_clamped(100.0);
+        assert!((cam.distance - 8.0).abs() < 1e-6);
+        cam.set_distance_clamped(1.5);
+        assert!((cam.distance - 1.5).abs() < 1e-6);
+    }
+
+    /// The settle-to-home ease converges polar/distance/target back to the
+    /// default pose while leaving azimuth alone (autorotate owns it).
+    #[test]
+    fn ease_toward_home_converges_pose_and_exempts_azimuth() {
+        let home = FlameCamera::default();
+        let mut cam = FlameCamera {
+            azimuth: 2.7,
+            polar: 3.0,
+            distance: 7.5,
+            target: Vec3::new(1.5, -0.5, 1.0),
+            ..FlameCamera::default()
+        };
+        let dt = 1.0_f32 / 60.0;
+        // 8s time constant, simulated for 60s: deviation shrinks by e^-7.5.
+        let alpha = 1.0 - (-dt / 8.0_f32).exp();
+        for _ in 0..3600 {
+            cam.ease_toward_home(alpha);
+        }
+        assert!((cam.polar - home.polar).abs() < 1e-2);
+        assert!((cam.distance - home.distance).abs() < 1e-2);
+        assert!(cam.target.length() < 1e-2);
+        assert!((cam.azimuth - 2.7).abs() < 1e-6, "azimuth must be exempt");
+    }
+
+    /// A single ease step moves each regressing channel strictly toward home.
+    #[test]
+    fn ease_toward_home_single_step_moves_toward_home() {
+        let home = FlameCamera::default();
+        let mut cam = FlameCamera {
+            polar: home.polar + 1.0,
+            distance: home.distance + 3.0,
+            target: Vec3::new(1.0, 0.0, 0.0),
+            ..FlameCamera::default()
+        };
+        cam.ease_toward_home(0.1);
+        assert!((cam.polar - home.polar - 0.9).abs() < 1e-5);
+        assert!((cam.distance - home.distance - 2.7).abs() < 1e-5);
+        assert!((cam.target.x - 0.9).abs() < 1e-5);
     }
 }
