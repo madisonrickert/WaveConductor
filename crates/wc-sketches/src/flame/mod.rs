@@ -17,6 +17,7 @@ pub mod branches;
 pub mod compute;
 pub mod levels;
 pub mod settings;
+pub mod systems;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
@@ -35,13 +36,43 @@ impl Plugin for FlamePlugin {
 
         // v4 scene background: #10101f. The whole sketch reads against it
         // (fog fades points toward it), so it is swapped at the state seam.
-        app.add_systems(OnEnter(AppState::Flame), enter_flame_clear_color);
+        // `spawn_flame` allocates the node buffer + inserts the sim resources
+        // on entry; `remove_flame_resources` drops them (releasing VRAM) and
+        // `despawn_with::<FlameRoot>` tears down the sketch's entities on exit.
+        app.add_systems(
+            OnEnter(AppState::Flame),
+            (systems::spawn::spawn_flame, enter_flame_clear_color),
+        );
         app.add_systems(
             OnExit(AppState::Flame),
             (
+                wc_core::sketch::despawn_with::<systems::spawn::FlameRoot>,
+                systems::spawn::remove_flame_resources,
                 exit_flame_clear_color,
                 wc_core::sketch::reset_render_profile,
             ),
+        );
+
+        // Name/point-budget watcher: rebuilds the fractal on change. Gated on
+        // the state (not `sketch_active`) so the screensaver carousel's name
+        // changes are picked up while the sketch is idle.
+        app.add_systems(
+            Update,
+            systems::name_change::watch_flame_name.run_if(in_state(AppState::Flame)),
+        );
+        // Per-frame writer: virtual-time cX oscillation + pointer warp, then the
+        // single baker. Ordered after the watcher so it bakes the fresh spec.
+        app.add_systems(
+            Update,
+            systems::sim_params::update_flame_sim
+                .after(systems::name_change::watch_flame_name)
+                .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
+        );
+        // Idle freeze: zero the dispatch count so the compute pass idles while
+        // the sketch is frozen (v4 froze on idle too).
+        app.add_systems(
+            OnEnter(wc_core::lifecycle::state::SketchActivity::Idle),
+            systems::sim_params::freeze_flame_sim.run_if(in_state(AppState::Flame)),
         );
 
         // Tonemapping + bloom profile onto the main camera while Flame is
