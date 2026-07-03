@@ -17,8 +17,14 @@
 //!   drag, wheel zoom, and decaying fling momentum (F10 sets the momentum on
 //!   hand-grab release). [`crate::flame::render::drive_flame_material`] reads
 //!   it each frame to build the material's view/projection uniforms.
+//! - [`hands`] — grab-and-fling: gathers grabbing [`wc_core::input::entity::TrackedHand`]s,
+//!   drives `camera`'s orbit/momentum the way a mouse drag does, and writes
+//!   [`hands::FlameGrabState::warp_px`], the pixel-space source
+//!   `sim_params::update_flame_sim` maps into the fractal warp. Also owns the
+//!   idle veto that keeps the sketch `Active` through a fling's coast-down.
 
 pub mod camera;
+pub mod hands;
 pub mod name_change;
 pub mod sim_params;
 pub mod spawn;

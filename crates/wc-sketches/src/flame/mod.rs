@@ -22,6 +22,7 @@ pub mod systems;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
+use wc_core::lifecycle::RegisterIdleVetoExt;
 use wc_core::settings::RegisterSketchSettingsExt;
 
 /// Plugin that registers the Flame sketch.
@@ -91,6 +92,37 @@ impl Plugin for FlamePlugin {
                 wc_core::lifecycle::screensaver::in_screensaver(AppState::Flame),
             ),
         );
+
+        // Hand grab-and-fling: gathers grabbing hands and drives the orbit
+        // camera the way a mouse drag does, writing `FlameGrabState.warp_px`
+        // (F7's `update_flame_sim` maps it into the fractal warp every frame).
+        // Ordered before the camera update so this frame's grab delta lands
+        // before autorotate/momentum apply it.
+        app.init_resource::<systems::hands::FlameGrabState>();
+        app.add_systems(
+            Update,
+            systems::hands::update_flame_hands
+                .before(systems::camera::update_flame_camera)
+                .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
+        );
+        // Idle veto: stay Active through a released fling's coast-down and
+        // while a hand is actively grabbing (mirrors `dots::dots_idle_veto`).
+        app.register_idle_veto(systems::hands::flame_idle_veto);
+
+        // Hand-mesh overlay: warm amber #ffb84d, the flame-palette
+        // counterpart to Dots' ice blue.
+        app.add_plugins(crate::hand_mesh::HandMeshPlugin {
+            config: crate::hand_mesh::HandMeshConfig {
+                app_state: AppState::Flame,
+                bone_color: Color::srgb(
+                    f32::from(0xff_u8) / 255.0,
+                    f32::from(0xb8_u8) / 255.0,
+                    f32::from(0x4d_u8) / 255.0,
+                ),
+                glow_intensity: 5.0,
+                bone_radius: 10.0,
+            },
+        });
 
         // Per-frame material driver: packs settings + FlameState into the eight
         // render uniforms. Gated on the state (not `sketch_active`) so the

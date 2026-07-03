@@ -83,7 +83,14 @@ pub fn bake_flame_sim(state: &FlameState, sim: &mut FlameSimParams) {
 }
 
 /// `Update` (gated `sketch_active(AppState::Flame)`): advance the virtual-time
-/// `cX`, map the pointer to the warp offset, hold full complexity, then bake.
+/// `cX`, map the pixel-space warp source to the `[-1, 1]` warp offset, hold
+/// full complexity, then bake.
+///
+/// [`FlameGrabState::warp_px`] (F10) is the single pixel-space source of the
+/// warp: the pointer only writes it while `grabbing_count == 0` (a hand grab
+/// is driving the warp otherwise, via [`super::hands::step_grab`]), but the
+/// `[-1, 1]` mapping below always reads it, so the pointer and hand paths
+/// converge on one downstream write.
 ///
 /// Reads `Time` in virtual seconds so the capture harness (which pins the sim
 /// timestep) produces deterministic frames. All stack math — no allocation.
@@ -93,20 +100,31 @@ pub fn update_flame_sim(
     window: Single<'_, '_, &Window>,
     mut state: ResMut<'_, FlameState>,
     mut sim: ResMut<'_, FlameSimParams>,
+    mut grab_state: ResMut<'_, super::hands::FlameGrabState>,
 ) {
     // v4 time oscillation on the virtual clock.
     state.c_x = flame_cx(time.elapsed_secs_f64());
 
-    // Map the primary pointer (window logical coords, top-left origin) to
-    // normalized device coords in [-1, 1], matching v4's `mapLinear`. Keep the
-    // last value when there is no pointer this frame (v4's mouse persists).
-    if let Some(p) = pointer.primary {
-        let w = window.width();
-        let h = window.height();
-        // Guard against a zero-sized window (no divide-by-zero warp spike).
-        if w > 0.0 && h > 0.0 {
-            state.warp_input = Vec2::new(p.x / w * 2.0 - 1.0, p.y / h * 2.0 - 1.0);
+    let w = window.width();
+    let h = window.height();
+
+    // Pointer drives `warp_px` only while no hand is grabbing; while grabbing,
+    // `update_flame_hands` (ordered before this system) has already written
+    // it for this frame via `step_grab`'s steady-grab branch.
+    if grab_state.grabbing_count == 0 {
+        if let Some(p) = pointer.primary {
+            grab_state.warp_px = p;
         }
+    }
+
+    // Map the pixel-space warp source (window logical coords, top-left
+    // origin) to normalized device coords in [-1, 1], matching v4's
+    // `mapLinear`. Guard against a zero-sized window (no divide-by-zero spike).
+    if w > 0.0 && h > 0.0 {
+        state.warp_input = Vec2::new(
+            grab_state.warp_px.x / w * 2.0 - 1.0,
+            grab_state.warp_px.y / h * 2.0 - 1.0,
+        );
     }
 
     // Live sketch always shows the full tree; the screensaver lowers this.
