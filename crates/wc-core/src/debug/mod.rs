@@ -67,6 +67,10 @@ pub struct DebugToggles {
     /// so the interaction state machine grows `active_radius` deterministically
     /// without hardware or a real mouse press. Presence = on.
     pub force_cymatics_interaction: bool,
+    /// `WC_DEBUG_FORCE_FLAME_WARP`: pin the Flame warp offset to a fixed
+    /// `(0.35, -0.2)` for the `flame-warp` capture scenario, deterministically
+    /// deforming the attractor without a pointer or hand. Presence = on.
+    pub force_flame_warp: bool,
 }
 
 impl DebugToggles {
@@ -97,6 +101,7 @@ impl DebugToggles {
             force_screensaver: present("WC_DEBUG_FORCE_SCREENSAVER"),
             force_tier,
             force_cymatics_interaction: present("WC_DEBUG_FORCE_CYMATICS_INTERACTION"),
+            force_flame_warp: present("WC_DEBUG_FORCE_FLAME_WARP"),
         }
     }
 
@@ -237,6 +242,14 @@ mod tests {
         assert!(!t.disable_bone_camera);
         assert_eq!(t.solid_particles, None);
         assert!(!t.force_cymatics_interaction);
+        assert!(!t.force_flame_warp);
+    }
+
+    #[test]
+    fn force_flame_warp_flag_present() {
+        let vars = vec![("WC_DEBUG_FORCE_FLAME_WARP".to_string(), String::new())];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.force_flame_warp);
     }
 
     #[test]

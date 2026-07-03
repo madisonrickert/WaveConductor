@@ -378,6 +378,7 @@ mod tests {
             force_screensaver: false,
             force_tier: None,
             force_cymatics_interaction: false,
+            force_flame_warp: false,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");

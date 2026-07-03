@@ -493,6 +493,7 @@ mod tests {
             force_screensaver: false,
             force_tier: Some(ThermalTier::Hot),
             force_cymatics_interaction: false,
+            force_flame_warp: false,
         };
         assert_eq!(effective_tier(&thermal, Some(&forced)), ThermalTier::Hot);
         assert_eq!(effective_tier(&thermal, None), ThermalTier::Cool);

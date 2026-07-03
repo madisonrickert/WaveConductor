@@ -207,3 +207,38 @@ dt = 0.016666667
 
 [scenarios.cymatics-screensaver.debug]
 FORCE_SCREENSAVER = "1"
+
+# Flame, idle morph: default name ("who are you?"), pinned virtual clock, the
+# cX oscillation + autorotate are the only motion. Early frames catch the
+# bloom-in from the zero seed; 240 is the settled fractal.
+[scenarios.flame-synthetic]
+sketch = "flame"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+
+# Flame, warped attractor: WC_DEBUG_FORCE_FLAME_WARP pins the pointer warp to
+# (0.35, -0.2), deterministically deforming the shape without hardware.
+[scenarios.flame-warp]
+sketch = "flame"
+provider = "synthetic"
+config = "clean"
+frames = [60, 120, 240, 480]
+dt = 0.016666667
+
+[scenarios.flame-warp.debug]
+FORCE_FLAME_WARP = "1"
+
+# Flame attract mode: ember decay + brightness lift + ghost label. The
+# carousel period (120 s) exceeds the capture span, so the seed stays the
+# default name — deterministic. Wide frame spread across the fade ramp.
+[scenarios.flame-screensaver]
+sketch = "flame"
+provider = "mock"
+config = "clean"
+frames = [180, 360, 600, 1200]
+dt = 0.016666667
+
+[scenarios.flame-screensaver.debug]
+FORCE_SCREENSAVER = "1"

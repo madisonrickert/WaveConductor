@@ -107,6 +107,12 @@ pub fn ember_complexity(fade_alpha: f32, ember_fraction: f32) -> f32 {
 ///
 /// Reads `Time` in virtual seconds so the capture harness (which pins the sim
 /// timestep) produces deterministic frames. All stack math — no allocation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a Bevy system's parameters are its data dependencies; the debug \
+              warp-pin adds a ninth, and splitting would obscure the single \
+              per-frame warp/fade/bake pipeline"
+)]
 pub fn update_flame_sim(
     time: Res<'_, Time>,
     pointer: Res<'_, PointerState>,
@@ -116,6 +122,7 @@ pub fn update_flame_sim(
     mut state: ResMut<'_, FlameState>,
     mut sim: ResMut<'_, FlameSimParams>,
     mut grab_state: ResMut<'_, super::hands::FlameGrabState>,
+    #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
 ) {
     // v4 time oscillation on the virtual clock.
     state.c_x = flame_cx(time.elapsed_secs_f64());
@@ -140,6 +147,14 @@ pub fn update_flame_sim(
             grab_state.warp_px.x / w * 2.0 - 1.0,
             grab_state.warp_px.y / h * 2.0 - 1.0,
         );
+    }
+
+    // Debug: WC_DEBUG_FORCE_FLAME_WARP pins the warp to a fixed offset for the
+    // `flame-warp` capture scenario, deforming the attractor reproducibly
+    // without a pointer or hand. Overrides the mapped value above so it wins.
+    #[cfg(debug_assertions)]
+    if debug_toggles.as_ref().is_some_and(|t| t.force_flame_warp) {
+        state.warp_input = Vec2::new(0.35, -0.2);
     }
 
     // Live sketch shows the full tree once the wake roar-back completes;
