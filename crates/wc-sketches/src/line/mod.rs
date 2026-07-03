@@ -544,6 +544,7 @@ mod tests {
             force_tier: None,
             force_cymatics_interaction: false,
             force_flame_warp: false,
+            force_flame_camera_pose: false,
         };
         assert!(should_register_smear(Some(&all_off)));
         assert!(should_register_smear(None)); // no toggles → everything on

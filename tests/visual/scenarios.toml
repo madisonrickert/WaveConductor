@@ -230,6 +230,21 @@ dt = 0.016666667
 [scenarios.flame-warp.debug]
 FORCE_FLAME_WARP = "1"
 
+# Flame, pinned camera pose: WC_DEBUG_FORCE_FLAME_CAMERA_POSE pins the CPU
+# orbit camera to a fixed zoomed-in, panned-off-center pose (azimuth 0.9,
+# polar 1.1, distance 0.35, target (0.2, 0.0, 0.1)), overriding autorotate/
+# drag/fling/settle-to-home each frame — a deterministic regression guard for
+# the target-aware view matrix added alongside the two-hand zoom/pan gestures.
+[scenarios.flame-camera-pose]
+sketch = "flame"
+provider = "synthetic"
+config = "clean"
+frames = [60, 120, 240, 480]
+dt = 0.016666667
+
+[scenarios.flame-camera-pose.debug]
+FORCE_FLAME_CAMERA_POSE = "1"
+
 # Flame attract mode: ember decay + brightness lift + ghost label. The
 # carousel period (120 s) exceeds the capture span, so the seed stays the
 # default name — deterministic. Wide frame spread across the fade ramp.

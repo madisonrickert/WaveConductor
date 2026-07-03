@@ -171,7 +171,16 @@ impl FlameCamera {
 /// Then, whenever no hand is grabbing and no mouse drag is in progress, a
 /// settle-to-home ease pulls polar/distance/[`FlameCamera::target`] back
 /// toward the default pose. Polar is clamped last so no path can push the eye
-/// through a pole.
+/// through a pole. Last of all (debug builds only),
+/// `WC_DEBUG_FORCE_FLAME_CAMERA_POSE` pins a fixed zoomed-in/panned-off-center
+/// pose for the `flame-camera-pose` capture scenario, overriding every path
+/// above.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a Bevy system's parameters are its data dependencies; the debug \
+              camera-pose pin adds a ninth, and splitting would obscure the \
+              single per-frame orbit/pan/settle pipeline"
+)]
 pub fn update_flame_camera(
     time: Res<'_, Time>,
     settings: Res<'_, FlameSettings>,
@@ -181,6 +190,7 @@ pub fn update_flame_camera(
     window: Single<'_, '_, &Window>,
     grab: Res<'_, FlameGrabState>,
     mut camera: ResMut<'_, FlameCamera>,
+    #[cfg(debug_assertions)] debug_toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
 ) {
     let dt = time.delta_secs();
 
@@ -241,6 +251,23 @@ pub fn update_flame_camera(
     camera.polar = camera
         .polar
         .clamp(POLAR_EPSILON, std::f32::consts::PI - POLAR_EPSILON);
+
+    // Debug: WC_DEBUG_FORCE_FLAME_CAMERA_POSE pins a deterministic
+    // zoomed-in/panned-off-center pose for the `flame-camera-pose` capture
+    // scenario, overriding every interaction path above (autorotate, drag,
+    // fling, settle-to-home) each frame so the target-aware view matrix has a
+    // fixed, reproducible regression fixture without a pointer or hand.
+    #[cfg(debug_assertions)]
+    if debug_toggles
+        .as_ref()
+        .is_some_and(|t| t.force_flame_camera_pose)
+    {
+        camera.azimuth = 0.9;
+        camera.polar = 1.1;
+        camera.distance = 0.35;
+        camera.target = Vec3::new(0.2, 0.0, 0.1);
+        camera.angular_velocity = Vec2::ZERO;
+    }
 }
 
 #[cfg(test)]

@@ -554,7 +554,12 @@ mod tests {
             anchor_distance: 1.0,
             ..FlameGrabState::default()
         };
-        let mut camera = FlameCamera::default();
+        // Seed stale momentum so the assertion below proves the steady
+        // two-hand frame actively zeroes it (not just that the default is 0).
+        let mut camera = FlameCamera {
+            angular_velocity: Vec2::new(0.2, 0.1),
+            ..FlameCamera::default()
+        };
         let gather = GrabGather {
             centroid: Vec2::new(700.0, 400.0),
             count: 2,

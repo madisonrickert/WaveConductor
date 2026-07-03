@@ -175,8 +175,9 @@ pub fn drive_flame_material(
     let view_from_model = camera.view_from_model();
     let clip_from_view = FlameCamera::clip_from_view(aspect);
 
-    // focal = camera distance; identical to `camera.eye().length()` for an
-    // origin orbit, but `distance` avoids re-deriving the eye vector here.
+    // focal = camera distance: the eye-to-look-at length. `distance` stays
+    // correct even when the pan `target` is off-origin (unlike
+    // `camera.eye().length()`, which measures from the world origin).
     let focal = camera.distance;
     let render_a = Vec4::new(
         focal,

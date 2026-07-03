@@ -436,6 +436,7 @@ mod tests {
             force_tier: None,
             force_cymatics_interaction: false,
             force_flame_warp: false,
+            force_flame_camera_pose: false,
         };
         // No toggles set → node registered.
         assert!(should_register_explode(None));

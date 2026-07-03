@@ -71,6 +71,10 @@ pub struct DebugToggles {
     /// `(0.35, -0.2)` for the `flame-warp` capture scenario, deterministically
     /// deforming the attractor without a pointer or hand. Presence = on.
     pub force_flame_warp: bool,
+    /// `WC_DEBUG_FORCE_FLAME_CAMERA_POSE`: pins a deterministic non-default
+    /// Flame camera pose — zoomed in, panned off-center — so captures
+    /// regression-guard the target-aware view matrix. Presence = on.
+    pub force_flame_camera_pose: bool,
 }
 
 impl DebugToggles {
@@ -102,6 +106,7 @@ impl DebugToggles {
             force_tier,
             force_cymatics_interaction: present("WC_DEBUG_FORCE_CYMATICS_INTERACTION"),
             force_flame_warp: present("WC_DEBUG_FORCE_FLAME_WARP"),
+            force_flame_camera_pose: present("WC_DEBUG_FORCE_FLAME_CAMERA_POSE"),
         }
     }
 
@@ -243,6 +248,7 @@ mod tests {
         assert_eq!(t.solid_particles, None);
         assert!(!t.force_cymatics_interaction);
         assert!(!t.force_flame_warp);
+        assert!(!t.force_flame_camera_pose);
     }
 
     #[test]
@@ -250,6 +256,16 @@ mod tests {
         let vars = vec![("WC_DEBUG_FORCE_FLAME_WARP".to_string(), String::new())];
         let t = DebugToggles::from_env_vars(&vars);
         assert!(t.force_flame_warp);
+    }
+
+    #[test]
+    fn force_flame_camera_pose_flag_present() {
+        let vars = vec![(
+            "WC_DEBUG_FORCE_FLAME_CAMERA_POSE".to_string(),
+            String::new(),
+        )];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.force_flame_camera_pose);
     }
 
     #[test]

@@ -269,6 +269,15 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
             format!("{tier:?}").to_lowercase()
         ));
     }
+    if t.force_cymatics_interaction {
+        parts.push("\"force_cymatics_interaction\":true".to_string());
+    }
+    if t.force_flame_warp {
+        parts.push("\"force_flame_warp\":true".to_string());
+    }
+    if t.force_flame_camera_pose {
+        parts.push("\"force_flame_camera_pose\":true".to_string());
+    }
     format!("{{{}}}", parts.join(","))
 }
 
@@ -379,6 +388,7 @@ mod tests {
             force_tier: None,
             force_cymatics_interaction: false,
             force_flame_warp: false,
+            force_flame_camera_pose: true,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");
@@ -386,8 +396,10 @@ mod tests {
         assert!(json.contains("\"frames\":[0,2]"), "{json}");
         assert!(json.contains("\"force_g\":8000"), "{json}");
         assert!(json.contains("\"disable_smear\":true"), "{json}");
+        assert!(json.contains("\"force_flame_camera_pose\":true"), "{json}");
         // Off toggles must not appear.
         assert!(!json.contains("disable_bloom"), "{json}");
+        assert!(!json.contains("force_flame_warp"), "{json}");
     }
 
     #[test]
