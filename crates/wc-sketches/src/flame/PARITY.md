@@ -121,6 +121,24 @@ golden-tested against values generated from the v4 source.
    attract-mode brightness lift, and debounced name admission. v4 Flame had no
    attract mode.
 
+## Post-parity additions
+
+Features added after the parity port, by design (not v4 behavior):
+
+1. **Two-hand camera gestures (2026-07-03)** — spec
+   `docs/superpowers/specs/2026-07-03-flame-two-hand-camera-gestures-design.md`.
+   One grabbed hand keeps the v4 orbit-and-fling; two grabbed hands switch to
+   spread-ratio zoom (hands apart = zoom in) plus midpoint-drag pan (new
+   `FlameCamera::target`, clamped to radius 2.0). Orbit momentum is suppressed
+   in two-hand mode, so releasing out of a zoom never flings. Dev knobs:
+   `two_hand_zoom_gamma`, `hand_pan_sensitivity`.
+2. **Settle-to-home camera ease (2026-07-03, same spec)** — whenever no hand
+   grabs and no mouse drags, `polar`/`distance`/`target` ease exponentially back
+   to the v4 start pose (`camera_return_seconds` Dev knob, default 8 s time
+   constant) so no gesture can strand the kiosk in an ugly pose — Dots'
+   `fabric_tension` philosophy applied to the camera. `azimuth` is exempt
+   (autorotate owns it).
+
 ## Verdict
 
 **Status:** PENDING — operator sign-off required before tagging.
@@ -171,6 +189,16 @@ Complete each item on the deployment machine (`cargo rund`) before tagging Flame
   hand's projected position with the amber (`#ffb84d`) bone overlay visible;
   release with motion → the camera flings/coasts and decays smoothly. Tune the
   grab threshold and fling decay if the feel is off.
+- [ ] **Two-hand zoom/pan feel** (post-parity addition): grab with both hands →
+  spreading them apart zooms in, squeezing together zooms out, moving both
+  together pans the view (content follows the hands); dropping to one hand
+  resumes orbit without a jump; releasing both never flings. Tune
+  `two_hand_zoom_gamma` and `hand_pan_sensitivity` in **Flame** settings (flip
+  ADVANCED to see Dev knobs) if the feel is off.
+- [ ] **Settle-to-home**: zoom/pan/tilt the camera into an extreme pose, let go,
+  and confirm it drifts back to the start framing over ~10–20 s (azimuth keeps
+  autorotating). Tune `camera_return_seconds` if the drift reads too eager or
+  too lazy.
 
 ### Attract mode (`cargo rund`)
 
@@ -185,14 +213,18 @@ Complete each item on the deployment machine (`cargo rund`) before tagging Flame
 
 ### Capture baselines (deployment machine + display required)
 
-- [ ] Seed the three baselines after Reading the frames:
+- [ ] Seed the four baselines after Reading the frames:
   `cargo xtask capture flame-synthetic --update-baselines`,
   `cargo xtask capture flame-warp --update-baselines`,
-  `cargo xtask capture flame-screensaver --update-baselines`. Confirm the
+  `cargo xtask capture flame-screensaver --update-baselines`,
+  `cargo xtask capture flame-camera-pose --update-baselines`. Confirm the
   synthetic frames show the recognizable fractal, the warp frames show it
-  visibly displaced, and the screensaver frames show the thinner lifted ember
-  with the ghost label. (Headless/backgrounded capture renders all-black frames —
-  a known environment trap, not a bug; run on a real display.) Commit the PNGs.
+  visibly displaced, the screensaver frames show the thinner lifted ember
+  with the ghost label, and the camera-pose frames show a static (no
+  autorotate drift) zoomed-in, off-center view — the pinned pose that
+  regression-guards the two-hand gesture camera's target-aware view matrix.
+  (Headless/backgrounded capture renders all-black frames — a known
+  environment trap, not a bug; run on a real display.) Commit the PNGs.
 
 ### AgX / tonemap eye-tune
 
