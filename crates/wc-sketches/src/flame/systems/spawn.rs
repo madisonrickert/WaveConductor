@@ -21,6 +21,7 @@ use crate::flame::levels::{LevelLayout, MAX_LEVELS, MAX_POINTS};
 use crate::flame::render::{default_view_matrices, flame_fog_color, FlameMaterial};
 use crate::flame::settings::FlameSettings;
 use crate::flame::systems::camera::FlameCamera;
+use crate::flame::systems::hands::FlameGrabState;
 use crate::flame::systems::name_change::reseed_nodes;
 use crate::flame::systems::sim_params::FlameState;
 
@@ -142,6 +143,9 @@ pub fn spawn_flame(
     // Fresh orbit pose per entry, matching v4's re-created `OrbitControls`
     // each time the sketch mounts.
     commands.insert_resource(FlameCamera::default());
+    // Fresh grab state too: a grab held across exit/re-entry must not replay
+    // a stale centroid (or two-hand zoom anchor) as a first-frame jump.
+    commands.insert_resource(FlameGrabState::default());
 }
 
 /// `OnExit(AppState::Flame)`: drop the sim resources.

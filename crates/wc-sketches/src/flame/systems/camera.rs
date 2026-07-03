@@ -238,12 +238,20 @@ pub fn update_flame_camera(
     // start pose so the kiosk always recovers from any gesture. The ease is
     // dt-correct (`1 - exp(-dt/tau)`), gentle enough to coexist with a
     // decaying fling, and also runs during the screensaver — that is what
-    // recenters an abandoned pan for attract mode.
+    // recenters an abandoned pan for attract mode. During the Idle activity
+    // window this system does not run at all (zero-systems-when-Idle), so the
+    // ease pauses there by design; the screensaver resumes it as the backstop.
     if grab.grabbing_count == 0 && camera.last_drag.is_none() {
         // `.max(0.1)` guards a hand-edited settings file against div-by-zero.
         let alpha = 1.0 - (-dt / settings.camera_return_seconds.max(0.1)).exp();
         camera.ease_toward_home(alpha);
     }
+
+    // Wrap azimuth to [0, TAU): autorotate accumulates it unbounded, and after
+    // a multi-hour soak `sin`/`cos` of a many-thousand-radian f32 lose enough
+    // precision to micro-jitter the orbit. Wrapping is invisible (every
+    // consumer takes sin/cos) and keeps the argument small forever.
+    camera.azimuth = camera.azimuth.rem_euclid(TAU);
 
     // Clamp last: no path above (autorotate, drag, fling) can push the eye
     // through a pole, which would make `view_from_model`'s look-at basis
@@ -439,5 +447,60 @@ mod tests {
         assert!((cam.polar - home.polar - 0.9).abs() < 1e-5);
         assert!((cam.distance - home.distance - 2.7).abs() < 1e-5);
         assert!((cam.target.x - 0.9).abs() < 1e-5);
+    }
+
+    /// World-level: the settle-to-home ease must be suppressed while a hand
+    /// grabs the camera, and resume once the grab releases — the gate lives
+    /// in `update_flame_camera`'s wiring, which the pure-method tests above
+    /// cannot see.
+    #[test]
+    fn settle_to_home_suppressed_while_grabbing_resumes_on_release() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(100));
+        world.insert_resource(time);
+        // Autorotate off: azimuth is not under test here.
+        world.insert_resource(FlameSettings {
+            autorotate_speed: 0.0,
+            ..FlameSettings::default()
+        });
+        world.insert_resource(PointerState::default());
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        world.insert_resource(AccumulatedMouseScroll::default());
+        world.spawn(Window::default());
+        world.insert_resource(FlameCamera {
+            distance: 5.0,
+            target: Vec3::new(1.0, 0.0, 0.0),
+            ..FlameCamera::default()
+        });
+        world.insert_resource(FlameGrabState {
+            grabbing_count: 1,
+            ..FlameGrabState::default()
+        });
+
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        let held = *world.resource::<FlameCamera>();
+        assert!(
+            (held.distance - 5.0).abs() < 1e-6,
+            "no ease while grabbing, got distance {}",
+            held.distance
+        );
+        assert!(
+            (held.target.x - 1.0).abs() < 1e-6,
+            "no ease while grabbing, got target.x {}",
+            held.target.x
+        );
+
+        world.insert_resource(FlameGrabState::default());
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        let released = *world.resource::<FlameCamera>();
+        assert!(released.distance < 5.0, "ease resumes on release");
+        assert!(released.target.x < 1.0, "ease resumes on release");
     }
 }
