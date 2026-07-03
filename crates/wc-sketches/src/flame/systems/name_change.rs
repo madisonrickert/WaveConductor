@@ -41,9 +41,13 @@ pub fn reseed_nodes(buffers: &mut Assets<ShaderBuffer>, handle: &Handle<ShaderBu
         root.color = [0.0, 0.0, 0.0];
     }
     if let Some(mut buffer) = buffers.get_mut(handle) {
+        // MAIN_WORLD | RENDER_WORLD to match the spawn allocation: this reseed
+        // runs on every name change and must stay CPU-writable (RENDER_WORLD-only
+        // would be freed after the first extraction and this `get_mut` would
+        // return `None`, silently skipping the reseed).
         *buffer = ShaderBuffer::new(
             cast_slice::<FlameNodeGpu, u8>(&nodes),
-            RenderAssetUsages::RENDER_WORLD,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
     }
 }

@@ -63,9 +63,15 @@ pub fn spawn_flame(
     // STORAGE | COPY_SRC | COPY_DST).
     let capacity = usize::try_from(MAX_POINTS).unwrap_or(0);
     let zeroed = vec![FlameNodeGpu::zeroed(); capacity];
+    // MAIN_WORLD | RENDER_WORLD (not RENDER_WORLD-only like Line/Dots): the
+    // name-change path reseeds this buffer from the CPU (`reseed_nodes`), which
+    // needs a main-world copy to mutate. Extraction is change-gated, so between
+    // reseeds the compute pass's render-world writes persist; a reseed swaps the
+    // GPU buffer and `prepare_flame_bind_groups` rebuilds its bind group (keyed
+    // on `BufferId`).
     let handle = buffers.add(ShaderBuffer::new(
         cast_slice::<FlameNodeGpu, u8>(&zeroed),
-        RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     ));
     // Seed the root + size the buffer to the live tree.
     reseed_nodes(&mut buffers, &handle, layout.total);
@@ -80,9 +86,13 @@ pub fn spawn_flame(
     // mesh only needs to exist to trigger the draw call. Rebuilt on name change.
     let vertex_count = usize::try_from(layout.total).unwrap_or(0) * 6;
     let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vertex_count];
+    // MAIN_WORLD | RENDER_WORLD: `resize_flame_mesh` rewrites this mesh's vertex
+    // count from the CPU when the name changes the tree size, so it must stay
+    // resident in the main world (a RENDER_WORLD-only mesh is freed after
+    // extraction and panics on `get_mut`).
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     let mesh_handle = meshes.add(mesh);
