@@ -13,6 +13,7 @@
 //! Simulation, rendering, interaction, audio, and the attract performer are
 //! wired in later stages of the port plan.
 
+pub mod audio_coupling;
 pub mod branches;
 pub mod compute;
 pub mod levels;
@@ -30,6 +31,10 @@ use wc_core::settings::RegisterSketchSettingsExt;
 pub struct FlamePlugin;
 
 impl Plugin for FlamePlugin {
+    // The registration list grows one stage at a time as the port plan adds
+    // sim/render/interaction/audio/attract sub-systems (see the module docs);
+    // splitting it would scatter the single source of truth for wiring order.
+    #[allow(clippy::too_many_lines)]
     fn build(&self, app: &mut App) {
         // Settings: panel + persistence (storage key "flame").
         app.register_sketch_settings::<settings::FlameSettings>();
@@ -42,9 +47,17 @@ impl Plugin for FlamePlugin {
         // `spawn_flame` allocates the node buffer + inserts the sim resources
         // on entry; `remove_flame_resources` drops them (releasing VRAM) and
         // `despawn_with::<FlameRoot>` tears down the sketch's entities on exit.
+        // `enter_flame_audio` reads the freshly-inserted `FlameState` to push
+        // the initial name-derived audio config, so it must run after
+        // `spawn_flame`'s command flush — hence `.chain()`.
         app.add_systems(
             OnEnter(AppState::Flame),
-            (systems::spawn::spawn_flame, enter_flame_clear_color),
+            (
+                systems::spawn::spawn_flame,
+                enter_flame_clear_color,
+                audio_coupling::enter_flame_audio,
+            )
+                .chain(),
         );
         app.add_systems(
             OnExit(AppState::Flame),
@@ -53,6 +66,7 @@ impl Plugin for FlamePlugin {
                 systems::spawn::remove_flame_resources,
                 exit_flame_clear_color,
                 wc_core::sketch::reset_render_profile,
+                audio_coupling::exit_flame_audio,
             ),
         );
 
@@ -92,6 +106,28 @@ impl Plugin for FlamePlugin {
             systems::camera::update_flame_camera.run_if(
                 wc_core::lifecycle::screensaver::in_screensaver(AppState::Flame),
             ),
+        );
+
+        // Audio coupling: two per-frame scalars (morph-energy, camera
+        // distance) drive the FlameSynth voice. Registered under both gates
+        // — the screensaver's autorotate + carousel keep the fractal
+        // morphing and the audio should track it there too — ordered after
+        // the camera update so `FlameCamera::distance` reflects this frame's
+        // zoom/autorotate before it is pushed.
+        app.init_resource::<audio_coupling::FlameMorphEnergy>();
+        app.add_systems(
+            Update,
+            audio_coupling::drive_flame_audio
+                .after(systems::camera::update_flame_camera)
+                .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
+        );
+        app.add_systems(
+            Update,
+            audio_coupling::drive_flame_audio
+                .after(systems::camera::update_flame_camera)
+                .run_if(wc_core::lifecycle::screensaver::in_screensaver(
+                    AppState::Flame,
+                )),
         );
 
         // Hand grab-and-fling: gathers grabbing hands and drives the orbit

@@ -8,10 +8,15 @@
 //! construction, never the per-frame path.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bytemuck::{cast_slice, Zeroable};
 
+use wc_core::audio::command::AudioCommand;
+use wc_core::audio::ring::AudioCommandSender;
+
+use crate::flame::audio_coupling::push_flame_config;
 use crate::flame::branches::{build_flame_spec, normalize_name};
 use crate::flame::compute::sim_params::{
     encode_branches, encode_levels, FlameNodeGpu, FlameSimParams,
@@ -50,7 +55,10 @@ pub fn reseed_nodes(buffers: &mut Assets<ShaderBuffer>, handle: &Handle<ShaderBu
 /// changes the name while the sketch is idle. On a change: rebuild the
 /// [`crate::flame::branches::FlameSpec`] + [`LevelLayout`], re-encode the GPU
 /// branch/level tables, reseed the node buffer, and update [`FlameState`].
-/// (F14 extends this to push the audio config.)
+/// On a rebuild also pushes the audio config: an instant `"duck_pulse"` mute
+/// (v4's anti-click dip before the swap; the synth's `follow(0.016)` smoother
+/// turns it into a fast dip rather than an audible pop) followed by the whole
+/// name-derived param surface via [`push_flame_config`] (F14).
 pub fn watch_flame_name(
     settings: Res<'_, FlameSettings>,
     mut state: ResMut<'_, FlameState>,
@@ -58,6 +66,7 @@ pub fn watch_flame_name(
     mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
     roots: Query<'_, '_, &Mesh2d, With<FlameRoot>>,
+    audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
 ) {
     let name = normalize_name(&settings.name);
     let name_unchanged = name == state.last_name.as_str();
@@ -84,6 +93,23 @@ pub fn watch_flame_name(
     state.layout = layout;
     name.clone_into(&mut state.last_name);
     state.last_target_points = settings.target_points;
+
+    // Audio: instant duck before the new config lands (v4's anti-click mute
+    // ahead of the swap), then the whole name-derived param surface. Skipped
+    // cleanly when no audio engine is running (headless tests, no cpal device).
+    if let Some(mut audio_cmd) = audio_cmd {
+        if let Err(_dropped) = audio_cmd.push(AudioCommand::SetFlameParam {
+            key: "duck_pulse",
+            value: 1.0,
+        }) {
+            tracing::warn!("audio command ring full; dropping Flame duck_pulse");
+        }
+        push_flame_config(
+            &mut audio_cmd,
+            &state.spec.audio,
+            settings.chord_energy_scale,
+        );
+    }
 }
 
 /// Replace the [`FlameRoot`] mesh's position attribute with `total * 6` origin
