@@ -19,6 +19,7 @@ use crate::flame::compute::sim_params::{
 use crate::flame::levels::LevelLayout;
 use crate::flame::settings::FlameSettings;
 use crate::flame::systems::sim_params::FlameState;
+use crate::flame::systems::spawn::FlameRoot;
 
 /// Rewrite the node storage buffer to `total` slots, seeding node 0 as the
 /// root at v4's `jumpiness` position `[3, 3, 3]` (color black) and leaving
@@ -49,12 +50,14 @@ pub fn reseed_nodes(buffers: &mut Assets<ShaderBuffer>, handle: &Handle<ShaderBu
 /// changes the name while the sketch is idle. On a change: rebuild the
 /// [`crate::flame::branches::FlameSpec`] + [`LevelLayout`], re-encode the GPU
 /// branch/level tables, reseed the node buffer, and update [`FlameState`].
-/// (F8 extends this to rebuild the mesh; F14 to push the audio config.)
+/// (F14 extends this to push the audio config.)
 pub fn watch_flame_name(
     settings: Res<'_, FlameSettings>,
     mut state: ResMut<'_, FlameState>,
     mut sim: ResMut<'_, FlameSimParams>,
     mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
+    mut meshes: ResMut<'_, Assets<Mesh>>,
+    roots: Query<'_, '_, &Mesh2d, With<FlameRoot>>,
 ) {
     let name = normalize_name(&settings.name);
     let name_unchanged = name == state.last_name.as_str();
@@ -73,10 +76,32 @@ pub fn watch_flame_name(
     sim.level_count = encode_levels(&layout, &mut sim.levels);
     reseed_nodes(&mut buffers, &sim.nodes, layout.total);
 
+    // Resize the billboard mesh to the new tree: `total * 6` origin vertices.
+    // Same event-driven allocation as the branch/buffer rebuild above.
+    resize_flame_mesh(&mut meshes, &roots, layout.total);
+
     state.spec = spec;
     state.layout = layout;
     name.clone_into(&mut state.last_name);
     state.last_target_points = settings.target_points;
+}
+
+/// Replace the [`FlameRoot`] mesh's position attribute with `total * 6` origin
+/// vertices, matching the new tree size. The vertex data is unused (the shader
+/// derives everything from `vertex_index`); only the vertex count drives how
+/// many billboards are drawn.
+fn resize_flame_mesh(
+    meshes: &mut Assets<Mesh>,
+    roots: &Query<'_, '_, &Mesh2d, With<FlameRoot>>,
+    total: u32,
+) {
+    let vertex_count = usize::try_from(total).unwrap_or(0) * 6;
+    for mesh2d in roots {
+        if let Some(mut mesh) = meshes.get_mut(&mesh2d.0) {
+            let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vertex_count];
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +110,7 @@ mod tests {
     use super::*;
     use bevy::asset::AssetPlugin;
     use bevy::ecs::system::RunSystemOnce;
+    use bevy::mesh::PrimitiveTopology;
 
     use crate::flame::branches::build_flame_spec;
     use crate::flame::compute::sim_params::{FlameLevelParamsGpu, FlameSimParams};
@@ -98,6 +124,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));
         app.init_asset::<ShaderBuffer>();
+
+        app.init_asset::<Mesh>();
 
         // Start built for "madison", but settings now say "xy".
         let start_spec = build_flame_spec("madison");
@@ -132,6 +160,18 @@ mod tests {
             ..default()
         });
 
+        // A FlameRoot mesh entity sized to the old tree; the watcher resizes it.
+        let mesh_handle = {
+            let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32, 0.0, 0.0]; 6]);
+            meshes.add(mesh)
+        };
+        app.world_mut().spawn((FlameRoot, Mesh2d(mesh_handle.clone())));
+
         app.world_mut()
             .run_system_once(watch_flame_name)
             .expect("watcher runs");
@@ -141,6 +181,15 @@ mod tests {
         let expected_total = usize::try_from(state.layout.total).expect("fits");
         let sim = app.world().resource::<FlameSimParams>();
         assert_eq!(sim.params.branch_count, 3, "xy golden -> 3 branches");
+
+        // The mesh was resized to the new tree: total (88_573) * 6 vertices.
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&mesh_handle).expect("mesh present");
+        assert_eq!(
+            mesh.count_vertices(),
+            expected_total * 6,
+            "mesh resized to xy tree"
+        );
 
         let buffers = app.world().resource::<Assets<ShaderBuffer>>();
         let data = buffers
@@ -160,6 +209,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));
         app.init_asset::<ShaderBuffer>();
+        app.init_asset::<Mesh>();
 
         let spec = build_flame_spec("madison");
         let layout = LevelLayout::build(4, 100_000.0);

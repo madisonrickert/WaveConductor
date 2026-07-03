@@ -16,6 +16,7 @@
 pub mod branches;
 pub mod compute;
 pub mod levels;
+pub mod render;
 pub mod settings;
 pub mod systems;
 
@@ -73,6 +74,15 @@ impl Plugin for FlamePlugin {
         app.add_systems(
             OnEnter(wc_core::lifecycle::state::SketchActivity::Idle),
             systems::sim_params::freeze_flame_sim.run_if(in_state(AppState::Flame)),
+        );
+
+        // Per-frame material driver: packs settings + FlameState into the eight
+        // render uniforms. Gated on the state (not `sketch_active`) so the
+        // camera/material keep updating during Idle and the screensaver, like
+        // `drive_dots_master_brightness`.
+        app.add_systems(
+            Update,
+            render::drive_flame_material.run_if(in_state(AppState::Flame)),
         );
 
         // Tonemapping + bloom profile onto the main camera while Flame is

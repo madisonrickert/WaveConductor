@@ -8,6 +8,7 @@
 //! `ExtractSchedule` removal companion.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bytemuck::{cast_slice, Zeroable};
@@ -17,6 +18,7 @@ use crate::flame::compute::sim_params::{
     encode_branches, encode_levels, FlameLevelParamsGpu, FlameNodeGpu, FlameSimParams,
 };
 use crate::flame::levels::{LevelLayout, MAX_LEVELS, MAX_POINTS};
+use crate::flame::render::{default_view_matrices, flame_fog_color, FlameMaterial};
 use crate::flame::settings::FlameSettings;
 use crate::flame::systems::name_change::reseed_nodes;
 use crate::flame::systems::sim_params::FlameState;
@@ -36,9 +38,18 @@ pub struct FlameRoot;
 /// The buffer is created at full [`MAX_POINTS`] capacity, then [`reseed_nodes`]
 /// resizes it to the live tree and seeds the root — the same fresh-tree start
 /// v4 uses (children bloom in from the origin under the 0.8 position lerp).
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "layout.total is bounded by MAX_POINTS (200k), exact as f32"
+)]
 pub fn spawn_flame(
     settings: Res<'_, FlameSettings>,
     mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
+    mut meshes: ResMut<'_, Assets<Mesh>>,
+    mut materials: ResMut<'_, Assets<FlameMaterial>>,
+    asset_server: Res<'_, AssetServer>,
+    window: Single<'_, '_, &Window>,
     mut commands: Commands<'_, '_>,
 ) {
     let name = normalize_name(&settings.name);
@@ -62,6 +73,45 @@ pub fn spawn_flame(
     let params = encode_branches(&spec);
     let mut levels = [FlameLevelParamsGpu::zeroed(); MAX_LEVELS];
     let level_count = encode_levels(&layout, &mut levels);
+
+    // Flat TriangleList mesh of `total * 6` origin vertices (data unused): the
+    // vertex shader derives each node + quad corner from `vertex_index`, so the
+    // mesh only needs to exist to trigger the draw call. Rebuilt on name change.
+    let vertex_count = usize::try_from(layout.total).unwrap_or(0) * 6;
+    let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vertex_count];
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    let mesh_handle = meshes.add(mesh);
+
+    // Seed the material with the v4 start pose; `drive_flame_material` overwrites
+    // every uniform from settings + FlameState next Update (and F9 swaps in the
+    // live orbit matrices), so these are one-frame placeholders.
+    let w = window.width().max(1.0);
+    let h = window.height().max(1.0);
+    let aspect = w / h;
+    let (view_from_model, clip_from_view) = default_view_matrices(aspect);
+    let material_handle = materials.add(FlameMaterial {
+        nodes: handle.clone(),
+        disc_texture: asset_server.load("sketches/flame/disc.png"),
+        view_from_model,
+        clip_from_view,
+        render_a: Vec4::new(0.782_6, 2.0, 3.0, 0.2),
+        render_b: Vec4::new(layout.total as f32, 0.545, 1.0, 50.0),
+        fog_color: flame_fog_color(),
+        fog_range: Vec4::new(2.0, 60.0, w, h),
+    });
+
+    commands.spawn((
+        FlameRoot,
+        bevy::mesh::Mesh2d(mesh_handle),
+        bevy::sprite_render::MeshMaterial2d(material_handle),
+        Transform::default(),
+        GlobalTransform::default(),
+        Visibility::default(),
+    ));
 
     commands.insert_resource(FlameSimParams {
         params,
@@ -104,6 +154,12 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));
         app.init_asset::<ShaderBuffer>();
+        // F8: `spawn_flame` now also spawns a mesh + material entity, so the
+        // system needs the Mesh/FlameMaterial asset stores and a Window.
+        app.init_asset::<Mesh>();
+        app.init_asset::<Image>();
+        app.init_asset::<FlameMaterial>();
+        app.world_mut().spawn(Window::default());
         app.insert_resource(FlameSettings {
             name: "madison".into(),
             ..default()
@@ -113,14 +169,33 @@ mod tests {
             .run_system_once(spawn_flame)
             .expect("spawn runs");
 
-        let sim = app.world().resource::<FlameSimParams>();
-        assert_eq!(sim.params.branch_count, 4, "madison -> 4 branches");
-        let state = app.world().resource::<FlameState>();
-        assert_eq!(state.last_name, "madison");
-        assert!((state.complexity - 1.0).abs() < f32::EPSILON);
+        // Read the scalars we need as owned values, then drop the immutable
+        // world borrows before the `world_mut` mesh query below.
+        let (branch_count, total, handle) = {
+            let sim = app.world().resource::<FlameSimParams>();
+            let state = app.world().resource::<FlameState>();
+            assert_eq!(state.last_name, "madison");
+            assert!((state.complexity - 1.0).abs() < f32::EPSILON);
+            (
+                sim.params.branch_count,
+                usize::try_from(state.layout.total).expect("fits"),
+                sim.nodes.clone(),
+            )
+        };
+        assert_eq!(branch_count, 4, "madison -> 4 branches");
 
-        let handle = sim.nodes.clone();
-        let total = usize::try_from(state.layout.total).expect("fits");
+        // The FlameRoot mesh entity carries `madison`'s total * 6 vertices.
+        let mesh_handle = app
+            .world_mut()
+            .query_filtered::<&Mesh2d, With<FlameRoot>>()
+            .single(app.world())
+            .expect("FlameRoot mesh entity present")
+            .0
+            .clone();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&mesh_handle).expect("mesh present");
+        assert_eq!(mesh.count_vertices(), total * 6, "total * 6 vertices");
+
         let buffers = app.world().resource::<Assets<ShaderBuffer>>();
         let buffer = buffers.get(&handle).expect("node buffer present");
         let data = buffer.data.as_ref().expect("cpu data present");
