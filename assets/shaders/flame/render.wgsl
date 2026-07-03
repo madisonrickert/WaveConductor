@@ -74,8 +74,16 @@ fn vertex(
     // v4 fake DoF: out-of-focus points grow and fade.
     let focal = max(render_a.x, 1e-4);
     let oof = pow(abs(dist - focal) / focal, 2.0) * render_a.z;
-    // v4: gl_PointSize = size * (1 + oof) * ((viewport_h / 2) / dist), clamped.
-    let size_px = min(render_b.w, render_a.y * (1.0 + oof) * (fog_range.w * 0.5) / dist);
+    // v4: gl_PointSize = originalSize * (1 + oof) * (scale / dist), clamped to
+    // 50px. v4's `scale` is THREE's `UniformsLib.points` default of 1.0 — THREE
+    // only auto-sets `scale` to viewport_h/2 for the built-in `PointsMaterial`,
+    // NOT for a custom `ShaderMaterial`, so v4's points are a resolution-
+    // independent ~2.5px at the focal distance, not viewport-scaled. Using
+    // viewport_h/2 here blew every point up to the 50px clamp (the unfocused-
+    // blur look); `scale = 1.0` restores v4's tiny, sharp cloud. `base_point_size`
+    // is the operator knob if the absolute pixel size reads small on a HiDPI
+    // deployment display.
+    let size_px = min(render_b.w, render_a.y * (1.0 + oof) / dist);
 
     var clip = clip_from_view * view_pos;
     // Screen-space billboard: pixel offset scaled into NDC, pre-divide.
