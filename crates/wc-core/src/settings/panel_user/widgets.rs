@@ -48,6 +48,7 @@ pub(super) fn render_widget_value(
         SettingKind::Boolean => render_bool(field, ui),
         SettingKind::Color => render_color(field, ui),
         SettingKind::Text => render_text(field, ui),
+        SettingKind::TextList => render_text_list(field, ui),
         SettingKind::FilePath {
             filter_label,
             extensions,
@@ -175,6 +176,43 @@ fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
     } else {
         ui.label("(expected String)");
     }
+}
+
+/// Render an editable string-list widget: per-row edit + up/down/remove,
+/// plus an add button. Mutates the reflected `Vec<String>` in place.
+fn render_text_list(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
+    let Some(list) = field.try_downcast_mut::<Vec<String>>() else {
+        ui.label("(expected Vec<String>)");
+        return;
+    };
+    ui.vertical(|ui| {
+        let len = list.len();
+        let mut remove: Option<usize> = None;
+        let mut swap: Option<(usize, usize)> = None;
+        for (i, item) in list.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(item).desired_width(140.0));
+                if ui.small_button("up").clicked() && i > 0 {
+                    swap = Some((i, i - 1));
+                }
+                if ui.small_button("dn").clicked() && i + 1 < len {
+                    swap = Some((i, i + 1));
+                }
+                if ui.small_button("x").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some((a, b)) = swap {
+            list.swap(a, b);
+        }
+        if let Some(i) = remove {
+            list.remove(i);
+        }
+        if ui.button("Add entry").clicked() {
+            list.push(String::new());
+        }
+    });
 }
 
 /// Render the enum widget (`ComboBox`) for a field. No label — Grid column 1

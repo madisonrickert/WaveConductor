@@ -72,6 +72,9 @@ pub fn set_setting(
         SettingKind::Color => {
             return Err("color settings can't be set from the console; use the panel".to_owned());
         }
+        SettingKind::TextList => {
+            return Err("list settings can't be set from the console; use the panel".to_owned());
+        }
     }
     Ok(format!("{storage_key}.{field} = {value}"))
 }

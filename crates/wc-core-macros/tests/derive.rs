@@ -203,3 +203,37 @@ fn template_library_kind_carries_filter_and_extensions() {
     assert_eq!(*filter_label, "Image");
     assert_eq!(*extensions, ["png", "jpg"]);
 }
+
+/// Fixture exercising `ty = TextList`: a Vec<String> list setting.
+#[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Resource, Default)]
+#[settings(storage_key = "derive_test_textlist")]
+struct TextListFixture {
+    #[setting(
+        default = Vec::new(),
+        ty = TextList,
+        label = "Names",
+        category = User
+    )]
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+#[test]
+fn text_list_kind_is_emitted() {
+    let defs = TextListFixture::settings_def();
+    assert!(matches!(defs[0].kind, SettingKind::TextList));
+    assert_eq!(defs[0].label, "Names");
+}
+
+#[test]
+fn text_list_default_is_empty_and_roundtrips_toml() {
+    let d = TextListFixture::default();
+    assert!(d.names.is_empty());
+    let with_names = TextListFixture {
+        names: vec!["madison".into(), "Xiaohan".into()],
+    };
+    let toml_str = toml::to_string(&with_names).expect("serialize");
+    let back: TextListFixture = toml::from_str(&toml_str).expect("deserialize");
+    assert_eq!(back, with_names);
+}

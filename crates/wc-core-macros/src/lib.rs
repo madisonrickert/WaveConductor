@@ -37,7 +37,7 @@
 //! | `unit`             | string    | `""` (suffix on `Number` values, e.g. `"ms"`) |
 //! | `section`          | string    | `""` (no section header)         |
 //! | `category`         | `User` \| `Dev` | `Dev`                       |
-//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `FilePath` \| `Enum` | `Number` |
+//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `TextList` \| `FilePath` \| `TemplateLibrary` \| `Enum` | `Number` |
 //! | `min`, `max`, `step` | numeric expr | none (only meaningful on `Number`) |
 //! | `extensions`       | `["ext", ...]` | none (only meaningful on `FilePath`) |
 //! | `filter_label`     | string    | `"File"` (only meaningful on `FilePath`) |
@@ -107,6 +107,8 @@ enum Kind {
     Boolean,
     Color,
     Text,
+    /// Editable list of short strings, backed by a `Vec<String>` field.
+    TextList,
     FilePath,
     /// Managed image template library; same `filter_label`/`extensions`
     /// attributes as `FilePath`, distinct `SettingKind`.
@@ -256,12 +258,13 @@ fn parse_setting_attr(
             "Boolean" => Kind::Boolean,
             "Color" => Kind::Color,
             "Text" => Kind::Text,
+            "TextList" => Kind::TextList,
             "FilePath" => Kind::FilePath,
             "TemplateLibrary" => Kind::TemplateLibrary,
             "Enum" => Kind::Enum,
             other => {
                 return Err(meta.error(format!(
-                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `FilePath`, `TemplateLibrary`, or `Enum`)"
+                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `TextList`, `FilePath`, `TemplateLibrary`, or `Enum`)"
                 )))
             }
         };
@@ -394,6 +397,7 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
             Kind::Boolean => quote! { ::wc_core::settings::SettingKind::Boolean },
             Kind::Color => quote! { ::wc_core::settings::SettingKind::Color },
             Kind::Text => quote! { ::wc_core::settings::SettingKind::Text },
+            Kind::TextList => quote! { ::wc_core::settings::SettingKind::TextList },
             Kind::FilePath => {
                 let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
                 let exts: Vec<&str> = f

@@ -17,6 +17,10 @@ pub enum SettingKind {
     Color,
     /// Free-form UTF-8 string. Rendered as a single-line text edit.
     Text,
+    /// Editable list of short strings, stored as `Vec<String>`. Rendered as
+    /// one single-line text edit per entry with reorder/remove buttons and an
+    /// add button. Persists as a TOML array (no persistence changes needed).
+    TextList,
     /// Filesystem path stored as a UTF-8 `String`. Rendered as a text-edit
     /// plus a Browse… button that opens [`rfd::FileDialog`]. The `extensions`
     /// list filters the dialog; an empty slice allows any file.
