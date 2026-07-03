@@ -130,14 +130,14 @@ The remaining four v4 sketches. Each ships its own `PARITY.md`, absorbs accumula
 
 | Slug | Parity target | Notes |
 | ---- | ------------- | ----- |
-| `sketch-flame` | Perceptual | IFS fractal; recognizability matters, chaotic detail can drift. CPU-bound (no GPU parallelism); audio coupling stays CPU-side (visitor stats during the per-frame traversal). No GPU↔CPU sync concern. |
+| `sketch-flame` | Perceptual | **Shipped 2026-07-02** (`crates/wc-sketches/src/flame/PARITY.md`). IFS fractal; recognizability matters, chaotic detail can drift. Shipped as **GPU level-parallel IFS** — this supersedes the earlier "CPU-bound (no GPU parallelism)" characterization: the recursion is parallel *within* each tree level, so it runs one compute dispatch per level (5–16/frame) over a persistent node buffer, no per-frame CPU walk and no GPU↔CPU readback. Audio is envelope/DSP approximation from CPU input scalars (analytic `\|dcX/dt\|` + warp speed + camera distance), not visitor stats. |
 | `sketch-dots` | Perceptual | Shares most infrastructure with Line. **Keep particles on CPU** (matches v4); only fall back to the approximated-envelope pattern if counts ever force a GPU port. |
 | `sketch-cymatics` | Physics-matched | 2025-era human-authored; the visual *is* the simulation, numerical drift = wrong sketch. GPU compute (ping-pong wave PDE); audio reads CPU-side input scalars (`activeRadius`, `numCycles`, `centerSpeed`, `slowDownAmount`), never GPU state. The architectural reference for the universal pattern. |
 | `sketch-waves` | Perceptual | Audio→visual coupling (FFT of microphone). Depends on `mic-fft`. Visuals are a closed-form CPU heightmap; no GPU compute. |
 
 Order is provisional — the actual sequence depends on which sketch's data demands surface architectural gaps soonest.
 
-> **Re-entry checklist (2026-07 audit, T5).** `AppState::Flame` and `AppState::Waves` and their `SketchActivity` source seams still exist, but were **de-routed from all live input** — removed from `SKETCH_ORDER`, the picker, and the `Select*` bindings, and the `WAVECONDUCTOR_START_SKETCH` env falls back to Home for those names — so a stray keypress can no longer land on a black screen. Bringing either online is the reverse: register its plugin + manifest, re-add it to `SKETCH_ORDER`, restore its picker tile and binding, and author its screensaver attract performer. The "every `SKETCH_ORDER` entry has a registered manifest" test (added by T5, in `crates/wc-core/tests/lifecycle.rs`) is the guard — it fails if a variant re-enters the cycle unimplemented.
+> **Re-entry checklist (2026-07 audit, T5; Flame re-entered 2026-07-02).** `AppState::Flame` came back online on 2026-07-02 (registered plugin + manifest tile, re-added to `SKETCH_ORDER`, `SelectFlame`/`Digit2` binding restored, screensaver performer authored). **`AppState::Waves` remains the only de-routed seam:** its `SketchActivity` source still exists but is removed from `SKETCH_ORDER`, the picker, and the `Select*` bindings, and `WAVECONDUCTOR_START_SKETCH` falls back to Home for its name — so a stray keypress can no longer land on a black screen. Bringing Waves online is the reverse: register its plugin + manifest, re-add it to `SKETCH_ORDER`, restore its picker tile and binding, and author its screensaver attract performer. The "every `SKETCH_ORDER` entry has a registered manifest" test (added by T5, in `crates/wc-core/tests/lifecycle.rs`) is the guard — it fails if a variant re-enters the cycle unimplemented.
 
 ### `mic-fft`
 
@@ -275,7 +275,7 @@ Apply to future sketches:
 - Use smoothed envelopes (attack/release on input edges) for the right perceptual shape; tune constants against v4 perceptually; document as named consts.
 - Approved deviation: audio won't be frame-by-frame mathematically equal to v4, but IS perceptually equivalent — document per `PARITY.md`.
 
-Per sketch: Flame — no change (visitor stats already CPU-side). Dots — keep particles CPU-side. Cymatics — copy v4 directly (CPU drives the GPU-compute inputs; audio reads them). Waves — audio is *input* (mic FFT), no coupling concern. The `AudioCommand::Add<Sketch>Synth` + per-param-over-a-lock-free-ring shape established for Line is the template.
+Per sketch: Flame — shipped with envelope/DSP audio (no visitor stats; analytic `|dcX/dt|` + warp speed + camera distance drive the synth). Dots — keep particles CPU-side. Cymatics — copy v4 directly (CPU drives the GPU-compute inputs; audio reads them). Waves — audio is *input* (mic FFT), no coupling concern. The `AudioCommand::Add<Sketch>Synth` + per-param-over-a-lock-free-ring shape established for Line is the template.
 
 ---
 

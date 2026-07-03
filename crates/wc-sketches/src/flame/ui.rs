@@ -14,13 +14,13 @@
 //!    side: rather than admitting every keystroke into the persisted
 //!    carousel list (which would fill it with half-typed garbage), it waits
 //!    for [`NAME_SETTLE_SECS`] of no further edits before calling
-//!    [`admit_name`]. The carousel (driven by [`super::screensaver`]) only
+//!    `admit_name`. The carousel (driven by [`super::screensaver`]) only
 //!    ever cycles through names someone actually finished typing.
 //! 3. [`flame_seed_ghost_label`] draws the same centered-bottom anchor while
 //!    the sketch is `Screensaver`, naming the seed currently on screen in a
 //!    muted color — the fractal is always attributed, even in attract mode.
 //!
-//! [`admit_name`] itself is the pure debounced-admission core: reject too
+//! `admit_name` itself is the pure debounced-admission core: reject too
 //! short / the default placeholder, case-insensitive dedupe (moving the
 //! existing entry to the front rather than duplicating), otherwise insert at
 //! the front and cap the list length.

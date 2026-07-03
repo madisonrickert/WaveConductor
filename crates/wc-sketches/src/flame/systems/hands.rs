@@ -22,7 +22,7 @@
 //! gathers every [`TrackedHand`] whose [`GrabStrength`] clears
 //! [`GRAB_THRESHOLD`], projects palms to window-logical pixels via
 //! [`palm_to_world`] plus the world→window flip documented on that function,
-//! averages them, and hands the result to the pure [`step_grab`] state
+//! averages them, and hands the result to the pure `step_grab` state
 //! machine (extracted so the grab/orbit/warp math is unit-testable without
 //! spinning up a `Window` or hand entities). `update_flame_sim` then reads
 //! `FlameGrabState.warp_px`, only letting the pointer overwrite it while
@@ -55,7 +55,7 @@ const MAX_GRAB_SAMPLES: usize = 8;
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct FlameGrabState {
     /// Number of hands currently grabbing (`GrabStrength > GRAB_THRESHOLD`).
-    /// `0` when no hand is grabbing; read by [`flame_idle_veto`] and by
+    /// `0` when no hand is grabbing; read by `flame_idle_veto` and by
     /// `update_flame_sim` to decide whether the pointer may overwrite
     /// `warp_px` this frame.
     pub grabbing_count: usize,
@@ -69,7 +69,7 @@ pub struct FlameGrabState {
     pub mouse_offset: Vec2,
     /// The v4 `mousePosition` analogue, in window-logical pixels. Written by
     /// the pointer while `grabbing_count == 0` and by the steady-grab branch
-    /// of [`step_grab`] otherwise; always the source `update_flame_sim` maps
+    /// of `step_grab` otherwise; always the source `update_flame_sim` maps
     /// into `[-1, 1]` fractal warp coordinates.
     pub warp_px: Vec2,
 }
@@ -152,7 +152,7 @@ pub(crate) fn step_grab(
 
 /// `Update`, gated `sketch_active(AppState::Flame)`, ordered
 /// `.before(update_flame_camera)`: gathers this frame's grabbing hands and
-/// steps [`step_grab`].
+/// steps `step_grab`.
 ///
 /// Palms project to world-space via [`palm_to_world`] (centered origin, +y
 /// up), then flip to window-logical pixels (top-left origin, +y down, the

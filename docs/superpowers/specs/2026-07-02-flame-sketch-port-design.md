@@ -29,7 +29,9 @@ Flame is an IFS (Iterated Function System) fractal: a name typed by the visitor
 variation + additive color), and ~100k points are evaluated through the branch tree
 every frame, drawn as an additive point cloud with a fake depth-of-field. In v4 the
 entire evaluation ran on the CPU in TypeScript and was a known responsiveness pain.
-Flame is also **v5's first 3D sketch** (perspective camera, orbit/autorotate, fog).
+Flame is also **v5's first sketch with a 3D perspective look** (orbit/autorotate,
+fog) — achieved by in-material projection into the existing 2D camera, with no
+`Camera3d` (see Rendering).
 
 ## Scope
 
@@ -109,13 +111,16 @@ each level. Update `docs/superpowers/roadmap.md` (Flame character line + the
   color), recompute level offsets, re-seed node states so the new shape blooms in
   through the lerp — matching v4's rebuild-then-settle behavior. Scratch buffers
   reused across rebuilds (no steady-state allocation).
-- **Single-branch carve-out**: a 1-branch name is a 1,000-node sequential *chain*
-  (v4's fallback) — structurally unparallelizable. That rare case is evaluated on
-  the CPU with the same transform functions and uploaded (~32 KB) per frame while
-  active. Documented inline as the sanctioned exception.
+- **Single-branch case is unreachable** (approved deviation, found during
+  planning; see the plan's "Approved deviations" note). v4's name input
+  substitutes the default name for empty input, so `numBranches = ceil(1 +
+  len%5 + wraps)` is always 2–8; the 1,000-node sequential *chain* in v4's
+  `computeDepth` is dead code. v5 mirrors the trim-or-default normalization
+  (`normalize_name`) and asserts `branch_count >= 2`, so every fractal is
+  GPU-parallel with no CPU-chain fallback.
 - **Simulation shaders** in `assets/shaders/flame/simulate.wgsl` (never inline);
   the 8 variations port as a WGSL `switch` on variation id; the Rust transform
-  mirror (used by the chain case and tests) and the WGSL kernel **change together
+  mirror (used by the golden/parity tests) and the WGSL kernel **change together
   term-for-term** (Dots kernel-parity discipline).
 - **Lifecycle discipline**: dispatches gated on sketch activity (zero dispatches in
   `Idle` and after exit); all GPU resources owned by entities under a `FlameRoot`
@@ -123,13 +128,19 @@ each level. Update `docs/superpowers/roadmap.md` (Flame character line + the
   manual `ExtractSchedule` companion system (the known `ExtractResourcePlugin`
   no-removal-propagation landmine).
 
-## Rendering — first 3D sketch
+## Rendering — 3D projection without a 3D camera
 
-- Perspective HDR `Camera3d` under `FlameRoot` (FOV 60, background/clear `#10101f`),
-  routed through the house tonemapping/bloom stack with a per-sketch
-  `RenderProfile` (v4's baked `pow(0.545)` gamma is the starting value for the
-  profile's gamma knob; final look is eye-tuned by the operator under AgX, as with
-  every prior port).
+- **No `Camera3d`** (approved deviation; see the plan's deviation note). The app
+  runs exactly one window camera — the global HDR `Camera2d` — and
+  `apply_render_profile`, the hand-mesh composite, and the shared-MSAA contract
+  all assume it; a second window camera would re-open the shared-MSAA-texture
+  landmine. So the orbit camera is a CPU `FlameCamera` resource passed to a
+  custom `Material2d` as two `mat4` uniforms (view-from-model, clip-from-view),
+  and the vertex shader does the perspective projection + billboarding
+  in-material, drawing into the existing `Camera2d`. Clear color `#10101f`; the
+  house tonemapping/bloom stack and per-sketch `RenderProfile` are untouched
+  (v4's baked `pow(0.545)` gamma is the profile's starting gamma; final look is
+  eye-tuned by the operator under AgX, as with every prior port).
 - Points draw as **instanced camera-facing quads** whose vertex shader reads the
   sim storage buffer directly at the instance index — no CPU round-trip. Vertex:
   fake-DoF sizing + opacity falloff (v4 formulas). Fragment: disc sprite sample
@@ -139,10 +150,11 @@ each level. Update `docs/superpowers/roadmap.md` (Flame character line + the
 - **Instance count = live node count.** Because the buffer is level-ordered, a
   level-prefix count is a smooth complexity knob — this is the attract-mode ember
   mechanism and the point-budget control.
-- **Early-verification risk**: the shared hand-mesh composite has only ever run
-  against 2D cameras. `BoneWireframeMaterial` is already a 3D `MaterialPlugin`,
-  but compositing into a `Camera3d` HDR target must be proven in the first render
-  stage, not discovered at the end.
+- **Hand-mesh composite is unaffected**: because there is no second camera (see
+  above), the shared hand-mesh composite keeps running against the single
+  `Camera2d` exactly as it does for every other sketch. The original spec's
+  "compositing into a `Camera3d` HDR target" early-verification risk does not
+  arise under the in-material approach.
 
 ## Interaction
 
@@ -286,32 +298,34 @@ Exactly the audit T5 reversal, plus the roadmap correction:
   parent-index math; prefix-count (ember) math; history debounce/dedupe rules;
   carousel advance; morph-energy envelope; pseudo-density mapping; settings serde
   defaults.
-- **Kernel parity**: the Rust transform mirror (needed anyway for the chain case)
-  is the reference for the WGSL kernel under the change-together discipline;
-  golden numbers come from v4.
+- **Kernel parity**: the Rust transform mirror (needed anyway for the
+  golden/parity tests) is the reference for the WGSL kernel under the
+  change-together discipline; golden numbers come from v4.
 - **Shaders**: `cargo xtask validate-shaders` covers the two new WGSL files.
 - **Capture scenarios** (`tests/visual/scenarios.toml`): `flame-synthetic` (clean
   config → default name → deterministic under the pinned virtual clock),
-  `flame-interacting` (a new `WC_DEBUG_FORCE_FLAME_WARP`-style toggle drives the
-  attractor deterministically), `flame-screensaver` (`FORCE_SCREENSAVER` + a
-  toggle pinning the carousel seed/period). New toggles join `DebugToggles`
+  `flame-warp` (the `WC_DEBUG_FORCE_FLAME_WARP` toggle pins the warp offset to a
+  fixed `(0.35, -0.2)`, deforming the attractor deterministically),
+  `flame-screensaver` (`FORCE_SCREENSAVER`, carousel period exceeds the capture
+  span so the seed stays the default name). New toggles join `DebugToggles`
   (debug-assertions-gated, absent from release).
 - **Deferred to the operator pre-tag checklist** (house pattern; template at the
   bottom of `dots/PARITY.md` / `cymatics/PARITY.md`): baseline seeding on
   deployment-class hardware, AgX/gamma + palette eye-tune, audio ear-tune, the
   8-hour soak.
 - **PARITY.md** at closure records the approved deviations: GPU formulation,
-  envelope audio + pseudo-density (+ fallback seam), tanh limiter, instanced
-  billboards for point sprites, single-branch CPU chain, dropped `quality="low"`
+  in-material projection (no `Camera3d`), envelope audio + pseudo-density (+
+  fallback seam), tanh limiter, instanced billboards for point sprites, the
+  not-ported single-branch chain (unreachable in v4), dropped `quality="low"`
   fallback, and the v5-only additions (carousel, ember, editable list).
 
 ## Performance & stability constraints
 
 Beyond the repo-wide rules (AGENTS.md), the Flame-specific commitments:
 
-- Zero per-frame CPU simulation (sole documented exception: the single-branch
-  chain carve-out); per-frame CPU work is uniform assembly, envelope math, camera
-  integration, and egui overlay only.
+- Zero per-frame CPU simulation (every fractal is GPU-parallel; the single-branch
+  chain is unreachable, not a fallback); per-frame CPU work is uniform assembly,
+  envelope math, camera integration, and egui overlay only.
 - No steady-state allocation anywhere: name-change rebuild uses pre-allocated
   scratch; persistent GPU buffers with `queue.write_buffer`; bind groups cached
   and invalidated on resize.
@@ -326,7 +340,7 @@ Beyond the repo-wide rules (AGENTS.md), the Flame-specific commitments:
 
 | Risk | Mitigation |
 |---|---|
-| Hand-mesh composite unproven on a 3D camera | Verify in the first render-stage slice |
+| Hand-mesh composite on a second camera | Resolved: no `Camera3d`; in-material projection draws into the existing `Camera2d`, composite unchanged |
 | Hash-derived chord register misses v4's density feel | Documented one-shot box-count fallback, name-change-only |
 | Additive overdraw when zoomed close | Ported size clamp + frame-limiter headroom; soak watch |
 | GPU float behavior across ≤ 17 lerp'd levels | Lerp is contractive/stable; capture tolerance-diff covers |
@@ -338,13 +352,13 @@ Beyond the repo-wide rules (AGENTS.md), the Flame-specific commitments:
 
 1. **Core math** — Rust transforms/PRNG/branch builder + golden tests vs v4;
    level/offset arithmetic. Pure CPU, no Bevy.
-2. **Lifecycle scaffold + re-entry** — stub `FlamePlugin` (clear-color 3D camera
-   under `FlameRoot`), manifest, `SKETCH_ORDER`/bindings/`from_name`, tripwire
-   tests updated; `WAVECONDUCTOR_START_SKETCH=flame` works for all later stages.
+2. **Lifecycle scaffold + re-entry** — stub `FlamePlugin` (clear-color swap, no
+   3D camera), manifest, `SKETCH_ORDER`/bindings/`from_name`, tripwire tests
+   updated; `WAVECONDUCTOR_START_SKETCH=flame` works for all later stages.
 3. **Compute pipeline** — storage buffer, per-level dispatch node, seeding,
-   uniforms, `simulate.wgsl`; chain carve-out.
-4. **Render** — billboard material + `render.wgsl` (DoF, disc, fog, additive),
-   `RenderProfile`; hand-mesh-on-3D verification.
+   uniforms, `simulate.wgsl`.
+4. **Render** — billboard material + `render.wgsl` (in-material projection, DoF,
+   disc, fog, additive), `RenderProfile`; hand-mesh composite unchanged.
 5. **Interaction** — orbit camera, warp, grab-fling, idle veto.
 6. **Name input + settings depth** — overlay, write-through, keybinding gate,
    `TextList` setting kind, history admission.

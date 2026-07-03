@@ -189,7 +189,7 @@ mod tests {
         assert!((az - std::f32::consts::TAU).abs() < 1e-3);
     }
 
-    /// Zoom clamps to v4's `OrbitControls` bounds [0.1, 8.0].
+    /// Zoom clamps to v4's `OrbitControls` bounds `[0.1, 8.0]`.
     #[test]
     fn zoom_clamps_to_v4_bounds() {
         let mut cam = FlameCamera::default();

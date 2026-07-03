@@ -30,7 +30,7 @@ pub struct FlameNodeGpu {
     pub pos: [f32; 3],
     /// Padding (vec3 alignment).
     _pad0: f32,
-    /// Accumulated additive color (can exceed [0,1]).
+    /// Accumulated additive color (can exceed `[0,1]`).
     pub color: [f32; 3],
     /// Padding.
     _pad1: f32,

@@ -58,7 +58,7 @@ pub fn reseed_nodes(buffers: &mut Assets<ShaderBuffer>, handle: &Handle<ShaderBu
 /// On a rebuild also pushes the audio config: an instant `"duck_pulse"` mute
 /// (v4's anti-click dip before the swap; the synth's `follow(0.016)` smoother
 /// turns it into a fast dip rather than an audible pop) followed by the whole
-/// name-derived param surface via [`push_flame_config`] (F14).
+/// name-derived param surface via `push_flame_config` (F14).
 pub fn watch_flame_name(
     settings: Res<'_, FlameSettings>,
     mut state: ResMut<'_, FlameState>,

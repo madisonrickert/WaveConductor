@@ -13,7 +13,7 @@
 //! - **Chord voice** (`createChord`): five oscillators — root/third/fifth
 //!   sines, sub (root/2) and sub2 (root/4) triangles — at fixed voice gains
 //!   1.0 / 1.0 / 0.7 / 0.9 / 0.8, all scaled by a single chord gain. Each
-//!   frequency is a [`Shared`] recomputed by [`FlameSynth::recompute_chord`]
+//!   frequency is a [`Shared`] recomputed by `FlameSynth::recompute_chord`
 //!   from `chord_degree` + `is_major` via the ported scale math.
 //! - **Noise voice**: white noise scaled by the (smoothed) noise gain. v4's
 //!   noise is unfiltered into the compressor; the name-tuned lowpass belongs to
@@ -379,7 +379,7 @@ impl FlameSynth {
     ///
     /// `&mut self` because `morph_energy` reads and rewrites the one-pole
     /// accumulator fields (v4 `updateFromFractalStats`), and `is_major` /
-    /// `chord_degree` retune the chord via [`Self::recompute_chord`].
+    /// `chord_degree` retune the chord via `Self::recompute_chord`.
     pub fn set_param(&mut self, key: &'static str, value: f32) {
         match key {
             "morph_energy" => self.apply_morph_energy(value),

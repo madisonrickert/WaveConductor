@@ -261,7 +261,7 @@ pub struct FlameSettings {
     #[serde(default = "default_attract_brightness")]
     pub attract_brightness: f32,
 
-    /// Names admitted by [`super::ui::admit_name`] once a typed name settles
+    /// Names admitted by `super::ui::admit_name` once a typed name settles
     /// (`super::ui::NAME_SETTLE_SECS` of no further edits) — the screensaver
     /// carousel cycles this list. Front is most recent; editable/reorderable
     /// in the dock via the `TextList` widget.

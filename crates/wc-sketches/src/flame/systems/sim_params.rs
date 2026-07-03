@@ -1,7 +1,7 @@
 //! Per-frame Flame simulation writer plus the idle freeze.
 //!
 //! Owns [`FlameState`] (the main-world mirror of everything the fractal needs
-//! between name changes), the pure [`flame_cx`] oscillation, and the single
+//! between name changes), the pure `flame_cx` oscillation, and the single
 //! [`bake_flame_sim`] baker that both the live writer ([`update_flame_sim`])
 //! and, later, the screensaver performer call — one baker, multiple writers,
 //! so the warp/dispatch derivation cannot drift (Condition A1).
@@ -44,7 +44,7 @@ pub struct FlameState {
     pub c_x: f32,
     /// Pointer/hand warp offset in normalized device coords ([-1, 1]).
     pub warp_input: Vec2,
-    /// Live fraction of the tree ([0, 1]); 1.0 while active, lowered by the
+    /// Live fraction of the tree (`[0, 1]`); 1.0 while active, lowered by the
     /// screensaver ember ramp. Drives the dispatch prefix in [`bake_flame_sim`].
     pub complexity: f32,
 }
@@ -99,9 +99,9 @@ pub fn ember_complexity(fade_alpha: f32, ember_fraction: f32) -> f32 {
 /// the ember complexity curve (so the F15 wake roar-back completes during
 /// Active's fade-out — the Dots dual-gate lesson), then bake.
 ///
-/// [`FlameGrabState::warp_px`] (F10) is the single pixel-space source of the
+/// `FlameGrabState::warp_px` (F10) is the single pixel-space source of the
 /// warp: the pointer only writes it while `grabbing_count == 0` (a hand grab
-/// is driving the warp otherwise, via [`super::hands::step_grab`]), but the
+/// is driving the warp otherwise, via `super::hands::step_grab`), but the
 /// `[-1, 1]` mapping below always reads it, so the pointer and hand paths
 /// converge on one downstream write.
 ///

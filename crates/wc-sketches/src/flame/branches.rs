@@ -133,7 +133,7 @@ pub struct BranchSpec {
     pub var_b: VariationId,
     /// Combinator mode.
     pub mode: VariationMode,
-    /// Additive per-application color (can exceed [0,1]; additive blending
+    /// Additive per-application color (can exceed `[0,1]`; additive blending
     /// and the HDR camera absorb it, as in v4).
     pub color: [f32; 3],
 }
@@ -153,8 +153,8 @@ pub struct NameAudioConfig {
     pub is_major: bool,
     /// Whether the white-noise voice is active. v4: hash3 % 100 >= 50.
     pub has_noise: bool,
-    /// Hash-derived stand-in for v4's box-count density, in ~[1, 3.2]. See
-    /// [`pseudo_density`] for the formula and the PARITY fallback seam.
+    /// Hash-derived stand-in for v4's box-count density, in ~`[1, 3.2]`. See
+    /// `pseudo_density` for the formula and the PARITY fallback seam.
     pub pseudo_density: f32,
     /// Chord register: v4's `clamp(floor(map(density, 1, 3, 0, 24)), 0, 48)`.
     pub chord_degree: f32,
@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(got, expect);
     }
 
-    /// Pseudo-density is deterministic per name, within [1, 3.2], and ranks a
+    /// Pseudo-density is deterministic per name, within `[1, 3.2]`, and ranks a
     /// dense many-branch name above a sparse two-branch one.
     #[test]
     fn pseudo_density_is_bounded_and_monotonic_in_branches() {

@@ -99,7 +99,7 @@ impl LevelLayout {
         }
     }
 
-    /// Node count visible at `complexity` in [0, 1]: 0 shows only the root,
+    /// Node count visible at `complexity` in `[0, 1]`: 0 shows only the root,
     /// 1 shows everything, and intermediate values cut smoothly (mid-level)
     /// so the screensaver ember ramp has no visible level "pops".
     #[must_use]
@@ -224,7 +224,7 @@ mod tests {
 
     /// dispatch_levels_for_live returns the number of levels (including the
     /// root level 0, which is never dispatched) whose nodes intersect
-    /// [0, live): dispatching that prefix updates every visible node.
+    /// `[0, live)`: dispatching that prefix updates every visible node.
     #[test]
     fn dispatch_levels_covers_live_prefix() {
         let layout = LevelLayout::build(5, 100_000.0);

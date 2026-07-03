@@ -17,8 +17,8 @@
 //!   (`|Δwarp_input| / dt`), the CPU-visible stand-in for user-driven motion.
 //!
 //! Both are scaled into v4's `velocityFactor` range (clamped at 0.06 inside
-//! [`FlameSynth::set_param`]'s `"morph_energy"` arm) via [`CX_ENERGY_WEIGHT`]
-//! and [`WARP_ENERGY_WEIGHT`], then summed and run through [`step_flame_energy`]
+//! [`FlameSynth::set_param`]'s `"morph_energy"` arm) via `CX_ENERGY_WEIGHT`
+//! and `WARP_ENERGY_WEIGHT`, then summed and run through `step_flame_energy`
 //! — an attack/release follow filter (the `step_dots_envelope` shape) so the
 //! synth sees a smoothed, click-free scalar rather than a raw per-frame spike.
 //!
@@ -37,7 +37,7 @@
 //!
 //! The rest of the per-frame surface (`filter_freq`, `filter_q`, `noise_scale`,
 //! `has_noise`, `is_major`, `chord_degree`, `density`, `chord_energy`) is
-//! name-derived, not per-frame: [`push_flame_config`] pushes it once on entry
+//! name-derived, not per-frame: `push_flame_config` pushes it once on entry
 //! ([`enter_flame_audio`]) and once per rebuild (`watch_flame_name`, preceded
 //! there by an instant `"duck_pulse"` — v4's anti-click mute before the swap,
 //! which the synth's `follow(0.016)` smoother turns into a fast dip rather
@@ -69,10 +69,10 @@ use super::systems::sim_params::FlameState;
 /// Weight on [`flame_cx_rate`] before it enters the synth's v4 velocity
 /// curves (which clamp `morph_energy × noise_gain_scale` at 0.06 — see
 /// `FlameSynth::set_param`'s `"morph_energy"` arm). Primary ear-tune surface,
-/// alongside [`WARP_ENERGY_WEIGHT`] and [`FlameSettings::morph_energy_scale`].
+/// alongside `WARP_ENERGY_WEIGHT` and [`FlameSettings::morph_energy_scale`].
 const CX_ENERGY_WEIGHT: f32 = 0.03;
 
-/// Weight on the pointer/hand `warp_speed` term. See [`CX_ENERGY_WEIGHT`].
+/// Weight on the pointer/hand `warp_speed` term. See `CX_ENERGY_WEIGHT`.
 const WARP_ENERGY_WEIGHT: f32 = 0.01;
 
 // ── Analytic morph-rate ─────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ const WARP_ENERGY_WEIGHT: f32 = 0.01;
 /// `|d(cX)/dt|` in closed form, replacing v4's `VelocityTrackerVisitor` as the
 /// time-driven morph source.
 ///
-/// [`flame_cx`] is `cX = 2·σ(u) - 1` with `u = 6·sin(t/3)`. By the chain rule:
+/// `flame_cx` is `cX = 2·σ(u) - 1` with `u = 6·sin(t/3)`. By the chain rule:
 ///
 /// ```text
 /// du/dt   = 6·cos(t/3)/3

@@ -51,7 +51,7 @@ pub const BUILTIN_SEEDS: &[&str] = &[
 pub struct FlameCarousel {
     /// Seconds since the last carousel advance.
     pub elapsed: f32,
-    /// Index into whichever list [`next_carousel_name`] is currently reading
+    /// Index into whichever list `next_carousel_name` is currently reading
     /// (custom or builtin) of the name that will show next.
     pub index: usize,
 }
