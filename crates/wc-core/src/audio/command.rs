@@ -87,6 +87,26 @@ pub enum AudioCommand {
     /// still playing restarts it from the beginning. Fire-and-forget; no echo
     /// message is sent back.
     TriggerCymaticsSample(CymaticsSampleId),
+    /// Build and activate the Flame sketch's synth voice graph. Idempotent: a
+    /// second `AddFlameSynth` while one is active is a no-op.
+    ///
+    /// Construction allocates (the boxed `FlameSynth` graph plus its parameter
+    /// `Shared` handles) on the audio thread exactly once per sketch activation,
+    /// not per buffer.
+    AddFlameSynth,
+    /// Stop the Flame synth. Idempotent: a second `RemoveFlameSynth` while no
+    /// synth is active is a no-op. Drops the graph and its allocations.
+    RemoveFlameSynth,
+    /// Set a named parameter on the Flame synth. `key` is `&'static str` to keep
+    /// this variant `Copy`; see [`super::flame_synth::FlameSynth`] for the legal
+    /// set. Unknown keys are logged and dropped silently — the host never panics
+    /// on a stale key.
+    SetFlameParam {
+        /// Parameter identifier. Must be a `'static` string literal.
+        key: &'static str,
+        /// New target value. Range and meaning depend on `key`.
+        value: f32,
+    },
 }
 
 /// One-shot Cymatics sample identifiers (v4 `kick`/`risingbass`).
@@ -140,4 +160,9 @@ pub enum AudioMessage {
     CymaticsSynthActivated,
     /// Sent after the audio thread applies a `RemoveCymaticsSynth` command.
     CymaticsSynthDeactivated,
+    /// Sent after the audio thread applies an `AddFlameSynth` command and
+    /// successfully constructed the Flame synth graph.
+    FlameSynthActivated,
+    /// Sent after the audio thread applies a `RemoveFlameSynth` command.
+    FlameSynthDeactivated,
 }

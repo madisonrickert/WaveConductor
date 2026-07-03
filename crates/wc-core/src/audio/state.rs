@@ -80,6 +80,9 @@ pub struct AudioState {
     /// Whether the Cymatics voice bundle is currently active on the audio thread.
     /// Mirrors `CymaticsSynthActivated` / `CymaticsSynthDeactivated` messages.
     pub cymatics_synth_active: bool,
+    /// Whether the Flame synth is currently active on the audio thread.
+    /// Mirrors `FlameSynthActivated` / `FlameSynthDeactivated` messages.
+    pub flame_synth_active: bool,
     /// Most recent error from the audio thread, if any.
     pub last_error: Option<String>,
 }
@@ -95,6 +98,7 @@ impl Default for AudioState {
             line_synth_active: false,
             dots_synth_active: false,
             cymatics_synth_active: false,
+            flame_synth_active: false,
             last_error: None,
         }
     }
@@ -158,6 +162,12 @@ pub fn pump_audio_messages(
             }
             AudioMessage::CymaticsSynthDeactivated => {
                 state.cymatics_synth_active = false;
+            }
+            AudioMessage::FlameSynthActivated => {
+                state.flame_synth_active = true;
+            }
+            AudioMessage::FlameSynthDeactivated => {
+                state.flame_synth_active = false;
             }
         }
     }

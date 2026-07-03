@@ -605,3 +605,85 @@ fn dots_synth_produces_audio_after_volume_set() {
         "expected audible output after AddDotsSynth + volume ramp, max_abs = {max_abs}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Flame synth dispatch tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_flame_synth_activates() {
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
+    assert!(!host.flame_synth_active());
+    host.apply(AudioCommand::AddFlameSynth);
+    assert!(host.flame_synth_active());
+}
+
+#[test]
+fn add_flame_synth_is_idempotent() {
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
+    host.apply(AudioCommand::AddFlameSynth);
+    host.apply(AudioCommand::SetFlameParam {
+        key: "filter_freq",
+        value: 300.0,
+    });
+    // Second AddFlameSynth must be a no-op: the slot stays active.
+    host.apply(AudioCommand::AddFlameSynth);
+    assert!(host.flame_synth_active());
+}
+
+#[test]
+fn remove_flame_synth_is_idempotent() {
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
+    // Remove with nothing active should be a no-op.
+    host.apply(AudioCommand::RemoveFlameSynth);
+    assert!(!host.flame_synth_active());
+    host.apply(AudioCommand::AddFlameSynth);
+    host.apply(AudioCommand::RemoveFlameSynth);
+    host.apply(AudioCommand::RemoveFlameSynth);
+    assert!(!host.flame_synth_active());
+}
+
+#[test]
+fn add_flame_then_set_param_then_remove_sequence() {
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
+    host.apply(AudioCommand::AddFlameSynth);
+    assert!(host.flame_synth_active());
+    // SetFlameParam must not panic with an active synth.
+    host.apply(AudioCommand::SetFlameParam {
+        key: "has_noise",
+        value: 1.0,
+    });
+    host.apply(AudioCommand::SetFlameParam {
+        key: "volume_scale",
+        value: 1.0,
+    });
+    host.apply(AudioCommand::SetFlameParam {
+        key: "morph_energy",
+        value: 0.05,
+    });
+    // Render a buffer to exercise the render path.
+    let mut buf = vec![0.0_f32; 256];
+    host.render(&mut buf);
+    host.apply(AudioCommand::RemoveFlameSynth);
+    assert!(!host.flame_synth_active());
+    // After removal the render path must produce silence.
+    let mut silent = vec![1.0_f32; 64];
+    host.render(&mut silent);
+    assert!(
+        silent.iter().all(|s| s.abs() < f32::EPSILON),
+        "expected silence after RemoveFlameSynth"
+    );
+}
+
+#[test]
+fn set_flame_param_with_no_synth_bumps_stale_drops() {
+    let mut host = DspHost::new(48_000, 2, SampleBank::default());
+    let before = host.stale_param_drops();
+    // No synth active; SetFlameParam should drop and count, never panic.
+    host.apply(AudioCommand::SetFlameParam {
+        key: "morph_energy",
+        value: 1.0,
+    });
+    assert!(!host.flame_synth_active());
+    assert_eq!(host.stale_param_drops(), before + 1);
+}

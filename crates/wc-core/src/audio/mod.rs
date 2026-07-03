@@ -55,6 +55,7 @@ pub mod cymatics_synth;
 pub mod dots_synth;
 pub mod dsp;
 pub mod engine;
+pub mod flame_synth;
 pub mod line_synth;
 pub mod nav;
 pub mod ring;

@@ -9,9 +9,9 @@
 //!
 //! - `render` is allocation-free.
 //! - `apply` is allocation-free **except** for `AddLineSynth`, `AddDotsSynth`,
-//!   and `AddCymaticsSynth`, each of which allocates a new voice graph or
-//!   bundle exactly once per sketch activation. This is a one-shot cost at
-//!   sketch boundaries, not a per-buffer allocation.
+//!   `AddCymaticsSynth`, and `AddFlameSynth`, each of which allocates a new
+//!   voice graph or bundle exactly once per sketch activation. This is a
+//!   one-shot cost at sketch boundaries, not a per-buffer allocation.
 //! - `RemoveLineSynth` / `RemoveDotsSynth` / `RemoveCymaticsSynth` drop their
 //!   graphs/bundles on the audio thread; deallocation is bounded (a handful of
 //!   `Arc` and `Box` frees, no recursive structure).
@@ -44,6 +44,7 @@ use fundsp::shared::Shared;
 use super::command::{AudioCommand, CymaticsSampleId};
 use super::cymatics_synth::CymaticsSynth;
 use super::dots_synth::DotsSynth;
+use super::flame_synth::FlameSynth;
 use super::line_synth::LineSynth;
 use super::sample_bank::{LoopVoice, OneShotVoice, SampleBank};
 
@@ -133,6 +134,9 @@ pub struct DspHost {
     /// Active Cymatics voice bundle, if any. `None` means the sketch is not
     /// loaded and the voices contribute nothing to the output mix.
     cymatics: Option<CymaticsVoices>,
+    /// Active Flame voice graph, if any. `None` means the sketch is not loaded
+    /// and the synth contributes nothing to the output mix.
+    flame_synth: Option<FlameSynth>,
     /// Count of `Set*Param` commands received while the target voice was
     /// inactive (stale-param drops). Incremented on the audio thread via
     /// `saturating_add` instead of logging: `tracing::warn!` would take the
@@ -165,6 +169,7 @@ impl DspHost {
             background,
             background_volume: Shared::new(DEFAULT_BACKGROUND_VOLUME),
             cymatics: None,
+            flame_synth: None,
             stale_param_drops: 0,
         }
     }
@@ -245,6 +250,24 @@ impl DspHost {
                     self.stale_param_drops = self.stale_param_drops.saturating_add(1);
                 }
             }
+            AudioCommand::AddFlameSynth => {
+                if self.flame_synth.is_none() {
+                    self.flame_synth = Some(FlameSynth::new(f64::from(self.sample_rate)));
+                }
+            }
+            AudioCommand::RemoveFlameSynth => {
+                self.flame_synth = None;
+            }
+            AudioCommand::SetFlameParam { key, value } => {
+                // `FlameSynth::set_param` is `&mut` (it carries the v4 one-pole
+                // mapping accumulators), so match with `&mut self.flame_synth`.
+                if let Some(synth) = &mut self.flame_synth {
+                    synth.set_param(key, value);
+                } else {
+                    // No active FlameSynth: drop and count (no audio-thread log).
+                    self.stale_param_drops = self.stale_param_drops.saturating_add(1);
+                }
+            }
             AudioCommand::TriggerCymaticsSample(id) => {
                 if let Some(c) = &mut self.cymatics {
                     match id {
@@ -318,6 +341,12 @@ impl DspHost {
         self.dots_synth.is_some()
     }
 
+    /// True if a Flame voice graph is currently active.
+    #[must_use]
+    pub fn flame_synth_active(&self) -> bool {
+        self.flame_synth.is_some()
+    }
+
     /// Current Line background-sample amplitude scalar. Reflects the most
     /// recent `SetLineParam { key: "background_volume" }` write the audio
     /// thread has observed.
@@ -359,8 +388,8 @@ impl DspHost {
     ///    still get deterministic results.
     /// 4. If Cymatics is active, tick its synth, add the blub loop, and add any
     ///    in-flight kick/risingbass one-shots — all accumulating into the frame.
-    /// 5. Broadcast the summed Line+Dots synth sample across channels, add to the
-    ///    accumulated frame, **clamp once** to `[-1.0, 1.0]`.
+    /// 5. Broadcast the summed Line+Dots+Flame synth sample across channels, add
+    ///    to the accumulated frame, **clamp once** to `[-1.0, 1.0]`.
     /// 6. Multiply by master `gain` (`muted ? 0 : volume`).
     ///
     /// The single clamp in step 5 covers all sources (background, Cymatics
@@ -392,7 +421,8 @@ impl DspHost {
             // Tick synths before touching the frame (no interdependence).
             let line_sample = self.line_synth.as_mut().map_or(0.0, LineSynth::tick_mono);
             let dots_sample = self.dots_synth.as_mut().map_or(0.0, DotsSynth::tick_mono);
-            let synth_sample = line_sample + dots_sample;
+            let flame_sample = self.flame_synth.as_mut().map_or(0.0, FlameSynth::tick_mono);
+            let synth_sample = line_sample + dots_sample + flame_sample;
             // Zero the frame before all additive sources accumulate into it.
             for slot in frame.iter_mut() {
                 *slot = 0.0;
@@ -441,6 +471,7 @@ impl core::fmt::Debug for DspHost {
             .field("line_synth_active", &self.line_synth.is_some())
             .field("dots_synth_active", &self.dots_synth.is_some())
             .field("cymatics_active", &self.cymatics.is_some())
+            .field("flame_synth_active", &self.flame_synth.is_some())
             .field("background_idx", &self.background_idx)
             .field("background_playhead", &self.background.playhead)
             .field("background_volume", &self.background_volume.value())

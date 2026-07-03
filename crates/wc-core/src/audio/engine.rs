@@ -203,11 +203,14 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
                     AudioCommand::RemoveCymaticsSynth => {
                         Some(AudioMessage::CymaticsSynthDeactivated)
                     }
+                    AudioCommand::AddFlameSynth => Some(AudioMessage::FlameSynthActivated),
+                    AudioCommand::RemoveFlameSynth => Some(AudioMessage::FlameSynthDeactivated),
                     // Per-param sweeps and one-shot triggers are fire-and-forget;
                     // omit echoes to keep the bounded message ring from filling.
                     AudioCommand::SetLineParam { .. }
                     | AudioCommand::SetDotsParam { .. }
                     | AudioCommand::SetCymaticsParam { .. }
+                    | AudioCommand::SetFlameParam { .. }
                     | AudioCommand::TriggerCymaticsSample(_) => None,
                 };
                 if let Some(msg) = echo {
