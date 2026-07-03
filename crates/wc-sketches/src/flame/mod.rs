@@ -76,6 +76,22 @@ impl Plugin for FlamePlugin {
             systems::sim_params::freeze_flame_sim.run_if(in_state(AppState::Flame)),
         );
 
+        // Orbit camera: autorotate + drag + wheel zoom + fling momentum decay.
+        // Registered under both gates — autorotate is the screensaver's
+        // motion, drag/zoom input is simply inert there.
+        app.init_resource::<systems::camera::FlameCamera>();
+        app.add_systems(
+            Update,
+            systems::camera::update_flame_camera
+                .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
+        );
+        app.add_systems(
+            Update,
+            systems::camera::update_flame_camera.run_if(
+                wc_core::lifecycle::screensaver::in_screensaver(AppState::Flame),
+            ),
+        );
+
         // Per-frame material driver: packs settings + FlameState into the eight
         // render uniforms. Gated on the state (not `sketch_active`) so the
         // camera/material keep updating during Idle and the screensaver, like

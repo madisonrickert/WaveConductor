@@ -2,10 +2,10 @@
 //!
 //! Allocates the GPU node storage buffer (capacity [`MAX_POINTS`]), encodes the
 //! persisted name's branch/level tables, and installs
-//! [`FlameSimParams`] (render-world source) and [`FlameState`] (main-world
-//! mirror). On exit the resources are dropped, releasing the buffer handle and
-//! its VRAM; the render-world copy of [`FlameSimParams`] dies via the F6
-//! `ExtractSchedule` removal companion.
+//! [`FlameSimParams`] (render-world source), [`FlameState`] (main-world
+//! mirror), and a fresh [`FlameCamera`] orbit pose. On exit the resources are
+//! dropped, releasing the buffer handle and its VRAM; the render-world copy of
+//! [`FlameSimParams`] dies via the F6 `ExtractSchedule` removal companion.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
@@ -20,6 +20,7 @@ use crate::flame::compute::sim_params::{
 use crate::flame::levels::{LevelLayout, MAX_LEVELS, MAX_POINTS};
 use crate::flame::render::{default_view_matrices, flame_fog_color, FlameMaterial};
 use crate::flame::settings::FlameSettings;
+use crate::flame::systems::camera::FlameCamera;
 use crate::flame::systems::name_change::reseed_nodes;
 use crate::flame::systems::sim_params::FlameState;
 
@@ -128,6 +129,9 @@ pub fn spawn_flame(
         warp_input: Vec2::ZERO,
         complexity: 1.0,
     });
+    // Fresh orbit pose per entry, matching v4's re-created `OrbitControls`
+    // each time the sketch mounts.
+    commands.insert_resource(FlameCamera::default());
 }
 
 /// `OnExit(AppState::Flame)`: drop the sim resources.

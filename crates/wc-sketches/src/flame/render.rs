@@ -37,6 +37,7 @@ use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, MeshMaterial2d};
 
 use crate::flame::settings::FlameSettings;
+use crate::flame::systems::camera::FlameCamera;
 use crate::flame::systems::sim_params::FlameState;
 use crate::flame::systems::spawn::FlameRoot;
 
@@ -145,13 +146,14 @@ pub fn flame_fog_color() -> Vec4 {
 
 /// `Update` (gated `in_state(AppState::Flame)`, so it also runs during Idle /
 /// Screensaver like `drive_dots_master_brightness`): pack [`FlameSettings`] +
-/// [`FlameState`] into every material uniform each frame.
+/// [`FlameState`] + [`FlameCamera`] into every material uniform each frame.
 ///
 /// The camera never stops autorotating, so change-gating buys nothing here;
 /// the per-frame cost is an 8-uniform bind-group re-prepare, the same class as
-/// Cymatics' per-frame render params. Until F9 lands, the view/projection
-/// matrices come from [`default_view_matrices`] and `render_a.x` (focal) is the
-/// v4 start-pose camera distance; F9 swaps in the live `FlameCamera` matrices.
+/// Cymatics' per-frame render params. The view/projection matrices and the
+/// focal distance now come from the live [`FlameCamera`] orbit resource (F9);
+/// [`default_view_matrices`] remains the fixed v4 start-pose fallback used by
+/// `spawn_flame`'s one-frame placeholder and its own doc tests.
 #[allow(
     clippy::as_conversions,
     clippy::cast_precision_loss,
@@ -160,6 +162,7 @@ pub fn flame_fog_color() -> Vec4 {
 pub fn drive_flame_material(
     settings: Res<'_, FlameSettings>,
     state: Res<'_, FlameState>,
+    camera: Res<'_, FlameCamera>,
     window: Single<'_, '_, &Window>,
     roots: Query<'_, '_, &MeshMaterial2d<FlameMaterial>, With<FlameRoot>>,
     mut materials: ResMut<'_, Assets<FlameMaterial>>,
@@ -167,11 +170,12 @@ pub fn drive_flame_material(
     let w = window.width().max(1.0);
     let h = window.height().max(1.0);
     let aspect = w / h;
-    let (view_from_model, clip_from_view) = default_view_matrices(aspect);
+    let view_from_model = camera.view_from_model();
+    let clip_from_view = FlameCamera::clip_from_view(aspect);
 
-    // focal = camera distance; the v4 start pose sits ~0.7826 units from the
-    // origin (F9 replaces this with the live orbit distance).
-    let focal = Vec3::new(0.0, 0.35, 0.7).length();
+    // focal = camera distance; identical to `camera.eye().length()` for an
+    // origin orbit, but `distance` avoids re-deriving the eye vector here.
+    let focal = camera.distance;
     let render_a = Vec4::new(
         focal,
         settings.base_point_size,

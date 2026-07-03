@@ -170,7 +170,8 @@ mod tests {
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32, 0.0, 0.0]; 6]);
             meshes.add(mesh)
         };
-        app.world_mut().spawn((FlameRoot, Mesh2d(mesh_handle.clone())));
+        app.world_mut()
+            .spawn((FlameRoot, Mesh2d(mesh_handle.clone())));
 
         app.world_mut()
             .run_system_once(watch_flame_name)

@@ -13,7 +13,12 @@
 //! - [`sim_params`] — the per-frame writer: virtual-time `cX` oscillation,
 //!   pointer/hand warp, and the single [`sim_params::bake_flame_sim`] baker.
 //!   Also the `OnEnter(SketchActivity::Idle)` freeze that zeroes dispatches.
+//! - [`camera`] — the [`camera::FlameCamera`] CPU orbit resource: autorotate,
+//!   drag, wheel zoom, and decaying fling momentum (F10 sets the momentum on
+//!   hand-grab release). [`crate::flame::render::drive_flame_material`] reads
+//!   it each frame to build the material's view/projection uniforms.
 
+pub mod camera;
 pub mod name_change;
 pub mod sim_params;
 pub mod spawn;
