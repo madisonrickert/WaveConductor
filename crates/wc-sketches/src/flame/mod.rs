@@ -19,6 +19,7 @@ pub mod levels;
 pub mod render;
 pub mod settings;
 pub mod systems;
+pub mod ui;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
@@ -147,6 +148,20 @@ impl Plugin for FlamePlugin {
         app.add_systems(
             Update,
             wc_core::sketch::restart_on_settings_change::<settings::FlameSettings>,
+        );
+
+        // Name-input overlay + debounced carousel admission. The overlay
+        // draws every egui pass (self-gated inside the function on
+        // Active-only); the debounce watcher only runs while the sketch is
+        // actually active (no point admitting names while it's idle/hidden).
+        app.init_resource::<ui::FlameNameDebounce>();
+        app.add_systems(
+            Update,
+            ui::debounce_name_admission.run_if(wc_core::sketch::sketch_active(AppState::Flame)),
+        );
+        app.add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            ui::flame_name_input_overlay,
         );
     }
 }

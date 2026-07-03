@@ -3,8 +3,9 @@
 //! The `name` is the sketch's identity: it seeds branch count, transforms,
 //! colors, and audio character (see `super::branches`). It is a LIVE setting:
 //! the name-change watcher rebuilds the fractal in place (no restart fade).
-//! The carousel list (`carousel_names`) is added in the name-input task once
-//! the `TextList` setting kind exists.
+//! `carousel_names` (a `TextList`) holds the names the screensaver cycles
+//! through; `super::ui::debounce_name_admission` populates it once a typed
+//! name settles.
 //!
 //! Per-field serde defaults follow the house pattern: every field carries
 //! `#[serde(default = "default_<name>")]` so legacy TOML deserializes cleanly.
@@ -260,6 +261,20 @@ pub struct FlameSettings {
     #[serde(default = "default_attract_brightness")]
     pub attract_brightness: f32,
 
+    /// Names admitted by [`super::ui::admit_name`] once a typed name settles
+    /// (`super::ui::NAME_SETTLE_SECS` of no further edits) — the screensaver
+    /// carousel cycles this list. Front is most recent; editable/reorderable
+    /// in the dock via the `TextList` widget.
+    #[setting(
+        default = Vec::new(),
+        ty = TextList,
+        label = "Carousel names",
+        section = "Screensaver",
+        category = User
+    )]
+    #[serde(default = "default_carousel_names")]
+    pub carousel_names: Vec<String>,
+
     /// Scale on the CPU morph-energy proxy (analytic |dcX/dt| + warp speed)
     /// before it enters the synth's v4 velocity curves. The primary ear-tune
     /// knob standing in for v4's measured point velocity.
@@ -401,6 +416,9 @@ fn default_ember_fraction() -> f32 {
 fn default_attract_brightness() -> f32 {
     2.2
 }
+fn default_carousel_names() -> Vec<String> {
+    Vec::new()
+}
 fn default_morph_energy_scale() -> f32 {
     1.0
 }
@@ -441,6 +459,10 @@ mod tests {
             (parsed.carousel_period_secs - 120.0).abs() < 1e-6,
             "sibling default"
         );
+        assert!(
+            parsed.carousel_names.is_empty(),
+            "missing carousel_names falls back to empty list"
+        );
     }
 
     /// Every `#[setting(default = ...)]` matches its `default_*` serde fn.
@@ -465,6 +487,7 @@ mod tests {
         assert!((d.carousel_period_secs - default_carousel_period_secs()).abs() < f32::EPSILON);
         assert!((d.ember_fraction - default_ember_fraction()).abs() < f32::EPSILON);
         assert!((d.attract_brightness - default_attract_brightness()).abs() < f32::EPSILON);
+        assert_eq!(d.carousel_names, default_carousel_names());
         assert!((d.morph_energy_scale - default_morph_energy_scale()).abs() < f32::EPSILON);
         assert!((d.chord_energy_scale - default_chord_energy_scale()).abs() < f32::EPSILON);
         assert!((d.synth_volume_scale - default_synth_volume_scale()).abs() < f32::EPSILON);

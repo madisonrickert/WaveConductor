@@ -17,10 +17,11 @@ default = []
 hand-tracking-gestures = ["wc-core/hand-tracking-gestures"]
 # Per-image template adjustments (Line): the registered adjustments map, the
 # custom dock-section UI, the re-seed/colour-influence drivers, and orphan
-# pruning. Native-only (pulls wc-core/templates, which uses rfd/image/blake3);
-# the binary enables it, CI exercises it under --all-features. `dep:bevy_egui`
-# is for the custom dock-section renderer's `egui::Ui` parameter.
-templates = ["wc-core/templates", "dep:bevy_egui", "dep:egui-phosphor"]
+# pruning. Native-only (pulls wc-core/templates, which uses rfd/image/blake3).
+# `egui-phosphor` is for the custom dock-section renderer's reset-to-default
+# glyph. `bevy_egui` moved to an unconditional dependency below (Task F12,
+# Flame's name-input overlay), so it is no longer feature-gated here.
+templates = ["wc-core/templates", "dep:egui-phosphor"]
 
 [dependencies]
 bevy.workspace = true
@@ -32,9 +33,11 @@ tracing.workspace = true
 # Line heatmap-image spawn (Plan 10 Phase A): PNG decode + CDF inversion.
 image.workspace = true
 rand.workspace = true
-# Only for the `templates` feature's custom dock-section renderer (egui::Ui +
-# the phosphor reset-to-default glyph, matching the main settings panel).
-bevy_egui = { workspace = true, optional = true }
+# Flame's name-input overlay (Task F12) draws unconditionally, so bevy_egui
+# is a required dependency (already in the workspace graph via wc-core).
+bevy_egui.workspace = true
+# Only for the `templates` feature's custom dock-section renderer (the
+# phosphor reset-to-default glyph, matching the main settings panel).
 egui-phosphor = { workspace = true, optional = true }
 
 [dev-dependencies]
