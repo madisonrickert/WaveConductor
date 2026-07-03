@@ -59,6 +59,14 @@ uniforms (approved deviation #2 in `PARITY.md`). All camera work happens in
   grab, and the re-anchor-on-count-change rule already makes threshold flicker
   harmless (a lost frame, never a jump). Chirality/identity machinery is unnecessary —
   midpoint and spread are symmetric under hand swap.
+- **Home return (Madison, mid-design):** after the camera settles — no hand grabbing,
+  no mouse drag — `polar`, `distance`, and `target` ease continuously back to the v4
+  start pose so no gesture (or wheel abuse) can leave the kiosk in a permanently ugly
+  state. Same philosophy as Dots' `fabric_tension` home-spring, applied to the camera:
+  always-on gentle restoration rather than a delayed snap. `azimuth` is deliberately
+  exempt — autorotate owns it, and every azimuth is an equally valid view of the
+  fractal. The ease also runs through fling coast (too gentle to fight it) and through
+  the screensaver, which is what recenters an abandoned pan for attract mode.
 
 ## Architecture
 
@@ -81,8 +89,7 @@ pub struct FlameCamera {
 - `eye()` returns `self.target + distance * spherical` ; `view_from_model()` looks at
   `self.target` (model `rotateX(-PI/2)` baking unchanged).
 - New `const FOVY: f32 = 60 deg` shared by `clip_from_view` and the pan math; new
-  `const PAN_MAX_RADIUS: f32 = 2.0`; new `const RECENTER_DECAY: f32 = 0.98`
-  (per-frame-at-60fps, dt-scaled like `MOMENTUM_DECAY`).
+  `const PAN_MAX_RADIUS: f32 = 2.0`.
 - New methods (pan/zoom math lives here so `hands.rs` stays a gather-and-step file):
   - `pub fn pan_by_pixels(&mut self, delta_px: Vec2, window_height: f32, sensitivity: f32)`
     — `delta_px` in window-logical px (y down); translates `target` by
@@ -92,11 +99,15 @@ pub struct FlameCamera {
     keeps the basis non-degenerate).
   - `pub fn set_distance_clamped(&mut self, distance: f32)` — clamps to
     `[MIN_DISTANCE, MAX_DISTANCE]`; wheel zoom refactors onto it.
-- `update_flame_camera` gains `Res<State<SketchActivity>>`: during
-  `SketchActivity::Screensaver`, `target` eases geometrically toward `Vec3::ZERO`
-  (`target *= RECENTER_DECAY.powf(dt * 60)`), so a walked-away-from pan never strands
-  the attract loop off-center. Distance persists, matching the existing wheel-zoom
-  precedent.
+  - `pub fn ease_toward_home(&mut self, alpha: f32)` — lerps `polar` and `distance`
+    toward `Self::default()`'s values and `target` toward the origin by `alpha`;
+    `azimuth` exempt (autorotate owns it).
+- `update_flame_camera` gains `Res<FlameGrabState>`: whenever
+  `grabbing_count == 0 && last_drag.is_none()`, it calls
+  `ease_toward_home(1 - exp(-dt / camera_return_seconds))` — a dt-correct exponential
+  ease whose time constant is the `camera_return_seconds` Dev setting (default 8 s to
+  recover ~63%, ~19 s to 90%). Runs through fling coast and the screensaver alike, so
+  an abandoned pan/zoom always drifts home for attract mode.
 
 ### `systems/hands.rs`
 
@@ -121,12 +132,15 @@ pub struct FlameCamera {
 
 ### `settings.rs`
 
-Two live Dev-category knobs (precedent: `autorotate_speed`; same section):
+Three live Dev-category knobs (precedent: `autorotate_speed`; same section):
 
 - `two_hand_zoom_gamma: f32` — default 1.0, min 0.25, max 3.0, step 0.05. Exponent on
   the spread ratio; >1 = more aggressive zoom per hand movement.
 - `hand_pan_sensitivity: f32` — default 1.0, min 0.0, max 3.0, step 0.05. 0 disables
-  pan. Each with the matching `default_*` serde fn and the defaults-sync test entry.
+  pan.
+- `camera_return_seconds: f32` — default 8.0, min 0.5, max 60.0, step 0.5. Exponential
+  time constant of the settle-to-home ease (seconds to recover ~63% of the deviation).
+  Each with the matching `default_*` serde fn and the defaults-sync test entry.
 
 ### Debug/capture hook
 
@@ -155,8 +169,8 @@ engage.
 
 - Unit (colocated): zoom ratio math (apart→closer distance shrinks, together→grows,
   gamma exponent, clamp), pan direction/sign and radius clamp, no-jump on 1↔2
-  transitions, no fling after 2-hand release, screensaver recenter convergence,
-  matrices finite with nonzero target, gather spread correctness.
+  transitions, no fling after 2-hand release, home-return convergence (and azimuth
+  exemption), matrices finite with nonzero target, gather spread correctness.
 - World-level ECS test: two spawned `TrackedHand` entities spreading apart across two
   `update_flame_hands` runs → `distance` decreases (mirrors the existing one-hand
   world test).
