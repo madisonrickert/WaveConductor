@@ -1,6 +1,7 @@
-//! Name-input overlay and debounced carousel admission.
+//! Name-input overlay, debounced carousel admission, and the screensaver
+//! ghost seed label.
 //!
-//! Two independent pieces of glue:
+//! Three independent pieces of glue:
 //!
 //! 1. [`flame_name_input_overlay`] draws a centered-bottom `egui::TextEdit`
 //!    bound to `FlameSettings::name` while the sketch is `Active` (hidden in
@@ -13,9 +14,11 @@
 //!    side: rather than admitting every keystroke into the persisted
 //!    carousel list (which would fill it with half-typed garbage), it waits
 //!    for [`NAME_SETTLE_SECS`] of no further edits before calling
-//!    [`admit_name`]. The carousel (driven by the screensaver, a later
-//!    stage) only ever cycles through names someone actually finished
-//!    typing.
+//!    [`admit_name`]. The carousel (driven by [`super::screensaver`]) only
+//!    ever cycles through names someone actually finished typing.
+//! 3. [`flame_seed_ghost_label`] draws the same centered-bottom anchor while
+//!    the sketch is `Screensaver`, naming the seed currently on screen in a
+//!    muted color — the fractal is always attributed, even in attract mode.
 //!
 //! [`admit_name`] itself is the pure debounced-admission core: reject too
 //! short / the default placeholder, case-insensitive dedupe (moving the
@@ -25,7 +28,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use super::branches::DEFAULT_NAME;
+use super::branches::{normalize_name, DEFAULT_NAME};
 use super::settings::FlameSettings;
 use wc_core::lifecycle::state::{AppState, SketchActivity};
 
@@ -162,6 +165,41 @@ pub fn flame_name_input_overlay(
                         settings.set_changed();
                     }
                 });
+        });
+}
+
+/// `bevy_egui::EguiPrimaryContextPass`: draws a dim centered-bottom ghost
+/// label naming the current seed while the Flame screensaver is showing.
+///
+/// Self-gated (not a `run_if`) on `AppState::Flame` AND
+/// `SketchActivity::Screensaver`, the same pattern as
+/// [`flame_name_input_overlay`] — the input box itself stays hidden there (it
+/// gates on `Active`), so the fractal is never left unattributed: the ghost
+/// label fills the same anchor with the seed name the carousel is currently
+/// showing, in a muted color that reads as "attract mode, not editable".
+pub fn flame_seed_ghost_label(
+    app_state: Res<'_, State<AppState>>,
+    activity: Option<Res<'_, State<SketchActivity>>>,
+    settings: Res<'_, FlameSettings>,
+    mut contexts: EguiContexts<'_, '_>,
+) {
+    if **app_state != AppState::Flame {
+        return;
+    }
+    if !activity.is_some_and(|a| *a.get() == SketchActivity::Screensaver) {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let seed = normalize_name(&settings.name);
+
+    egui::Area::new(egui::Id::new("wc-flame-seed-ghost"))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -64.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new(seed).color(egui::Color32::from_gray(140)));
         });
 }
 

@@ -18,6 +18,7 @@ pub mod branches;
 pub mod compute;
 pub mod levels;
 pub mod render;
+pub mod screensaver;
 pub mod settings;
 pub mod systems;
 pub mod ui;
@@ -197,8 +198,15 @@ impl Plugin for FlamePlugin {
         );
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            ui::flame_name_input_overlay,
+            (ui::flame_name_input_overlay, ui::flame_seed_ghost_label),
         );
+
+        // Attract performer: carousel driver + ember complexity decay, both
+        // gated `in_screensaver(AppState::Flame)` (zero systems otherwise).
+        // The brightness lift lives in `drive_flame_material` above (already
+        // gated `in_state(AppState::Flame)`, so it runs through the
+        // screensaver too); the ghost label is registered just above.
+        app.add_plugins(screensaver::FlameScreensaverPlugin);
     }
 }
 

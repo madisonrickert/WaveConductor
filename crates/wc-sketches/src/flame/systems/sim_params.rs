@@ -19,10 +19,12 @@
 
 use bevy::prelude::*;
 use wc_core::input::pointer::PointerState;
+use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
 use crate::flame::branches::FlameSpec;
 use crate::flame::compute::sim_params::FlameSimParams;
 use crate::flame::levels::LevelLayout;
+use crate::flame::settings::FlameSettings;
 
 /// Main-world mirror of the live fractal, rebuilt on name change and read every
 /// frame by the writer. Held out of [`FlameSimParams`] so the extract resource
@@ -82,9 +84,20 @@ pub fn bake_flame_sim(state: &FlameState, sim: &mut FlameSimParams) {
         .saturating_sub(1);
 }
 
+/// Ember complexity decay driven by [`ScreensaverFade::alpha`]: full tree at
+/// fade 0 (Active steady state), [`FlameSettings::ember_fraction`] at fade 1
+/// (Screensaver steady state), linear between. The same curve rides
+/// `ScreensaverFade`'s 1.5 s ramp in both directions, so the graceful decay
+/// into the ember and the roar-back on wake are symmetric.
+#[must_use]
+pub fn ember_complexity(fade_alpha: f32, ember_fraction: f32) -> f32 {
+    1.0 - fade_alpha * (1.0 - ember_fraction)
+}
+
 /// `Update` (gated `sketch_active(AppState::Flame)`): advance the virtual-time
-/// `cX`, map the pixel-space warp source to the `[-1, 1]` warp offset, hold
-/// full complexity, then bake.
+/// `cX`, map the pixel-space warp source to the `[-1, 1]` warp offset, apply
+/// the ember complexity curve (so the F15 wake roar-back completes during
+/// Active's fade-out — the Dots dual-gate lesson), then bake.
 ///
 /// [`FlameGrabState::warp_px`] (F10) is the single pixel-space source of the
 /// warp: the pointer only writes it while `grabbing_count == 0` (a hand grab
@@ -98,6 +111,8 @@ pub fn update_flame_sim(
     time: Res<'_, Time>,
     pointer: Res<'_, PointerState>,
     window: Single<'_, '_, &Window>,
+    settings: Res<'_, FlameSettings>,
+    fade: Res<'_, ScreensaverFade>,
     mut state: ResMut<'_, FlameState>,
     mut sim: ResMut<'_, FlameSimParams>,
     mut grab_state: ResMut<'_, super::hands::FlameGrabState>,
@@ -127,8 +142,11 @@ pub fn update_flame_sim(
         );
     }
 
-    // Live sketch always shows the full tree; the screensaver lowers this.
-    state.complexity = 1.0;
+    // Live sketch shows the full tree once the wake roar-back completes;
+    // `ember_complexity` reads the SAME fade envelope the screensaver's
+    // `drive_flame_attract_sim` does, so `complexity` rides `fade.alpha()`
+    // back to 1.0 over the fade-out instead of snapping there on wake.
+    state.complexity = ember_complexity(fade.alpha(), settings.ember_fraction);
 
     bake_flame_sim(&state, &mut sim);
 }
@@ -181,6 +199,16 @@ mod tests {
             let v = flame_cx(f64::from(i) * 0.37);
             assert!((-1.0..=1.0).contains(&v));
         }
+    }
+
+    /// Ember endpoints and midpoint: fade 0 -> full, fade 1 -> ember fraction.
+    #[test]
+    fn ember_complexity_endpoints() {
+        assert!((ember_complexity(0.0, 0.5) - 1.0).abs() < 1e-6);
+        assert!((ember_complexity(1.0, 0.5) - 0.5).abs() < 1e-6);
+        assert!((ember_complexity(0.5, 0.5) - 0.75).abs() < 1e-6);
+        // ember_fraction 1.0 disables the decay entirely.
+        assert!((ember_complexity(1.0, 1.0) - 1.0).abs() < 1e-6);
     }
 
     /// The baker writes warp = (cX/5 + cdx, cY/5 + cdy) and a full dispatch

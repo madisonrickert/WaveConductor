@@ -35,6 +35,7 @@ use bevy::render::render_resource::{
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, MeshMaterial2d};
+use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
 use crate::flame::settings::FlameSettings;
 use crate::flame::systems::camera::FlameCamera;
@@ -163,6 +164,7 @@ pub fn drive_flame_material(
     settings: Res<'_, FlameSettings>,
     state: Res<'_, FlameState>,
     camera: Res<'_, FlameCamera>,
+    fade: Res<'_, ScreensaverFade>,
     window: Single<'_, '_, &Window>,
     roots: Query<'_, '_, &MeshMaterial2d<FlameMaterial>, With<FlameRoot>>,
     mut materials: ResMut<'_, Assets<FlameMaterial>>,
@@ -183,12 +185,13 @@ pub fn drive_flame_material(
         settings.point_opacity,
     );
     let live = state.layout.live_count_for_complexity(state.complexity) as f32;
-    let render_b = Vec4::new(
-        live,
-        settings.gamma,
-        settings.master_brightness,
-        settings.point_size_clamp,
-    );
+    // AgX white-knee lift during attract mode (the Dots-established pattern):
+    // fade.alpha() 0 -> unchanged; fade.alpha() 1 -> full `attract_brightness`
+    // lift. The live prefix (`live`, above) already thins with the ember, so
+    // together the fractal reads visibly thinner AND brighter-lifted.
+    let brightness =
+        settings.master_brightness * (1.0 + fade.alpha() * (settings.attract_brightness - 1.0));
+    let render_b = Vec4::new(live, settings.gamma, brightness, settings.point_size_clamp);
     let fog_color = flame_fog_color();
     let fog_range = Vec4::new(settings.fog_near, settings.fog_far, w, h);
 
