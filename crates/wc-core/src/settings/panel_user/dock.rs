@@ -3,12 +3,18 @@
 //!
 //! Pure logic and small `Resource` state, kept apart from [`super`]'s egui
 //! drawing so the routing/geometry rules ([`tab_for_storage_key`],
-//! [`active_sketch_tab`], [`dock_rect`]) and the Advanced-toggle gate
-//! ([`field_visible`]) are unit-testable without an egui context.
+//! [`dock_rect`]) and the Advanced-toggle gate ([`field_visible`]) are
+//! unit-testable without an egui context.
+//!
+//! Which sketch owns the Sketch tab (and its label) is *not* decided here: it
+//! is derived from the [`crate::sketch::SketchManifest`] via
+//! [`crate::sketch::SketchManifest::settings_binding`] and
+//! [`crate::sketch::SketchManifest::sketch_settings_keys`], so a sketch wires
+//! its settings tab simply by registering its picker tile. [`tab_for_storage_key`]
+//! takes the manifest's sketch-key set as input rather than hardcoding it.
 
 use bevy::prelude::Resource;
 
-use crate::lifecycle::state::AppState;
 use crate::settings::def::{SettingDef, SettingsCategory};
 
 /// Inline stack snapshot of registered settings storage keys. Sized for the
@@ -25,7 +31,8 @@ pub(super) enum SettingsTab {
     /// Active sketch: sketch-specific knobs (particles, visual, audio, etc.).
     ///
     /// The header label and the settings struct rendered here both depend on
-    /// which sketch is running; see [`active_sketch_tab`] and
+    /// which sketch is running; see
+    /// [`crate::sketch::SketchManifest::settings_binding`] and
     /// [`super::draw_dock_header`].
     #[default]
     Sketch,
@@ -37,9 +44,10 @@ pub(super) enum SettingsTab {
 
 impl SettingsTab {
     /// All tabs in left-to-right display order. The label for
-    /// [`SettingsTab::Sketch`] is a static placeholder; the live label
-    /// comes from [`active_sketch_tab`] and is substituted at render time
-    /// in [`super::draw_dock_header`].
+    /// [`SettingsTab::Sketch`] is a static placeholder; the live label comes
+    /// from the active sketch's manifest entry (see
+    /// [`crate::sketch::SketchManifest::settings_binding`]) and is substituted
+    /// at render time in [`super::draw_dock_header`].
     pub(super) const ORDER: [(SettingsTab, &'static str); 3] = [
         (SettingsTab::Sketch, "LINE"),
         (SettingsTab::HandTracking, "HAND TRACKING"),
@@ -68,36 +76,27 @@ pub(super) fn field_visible(def: &SettingDef, advanced: bool) -> bool {
     }
 }
 
-/// Route a settings struct (identified by its storage key) to its dock tab.
+/// Route a settings struct (identified by its storage key) to its dock tab,
+/// given the set of storage keys that belong to registered sketches
+/// (`sketch_keys`, from [`crate::sketch::SketchManifest::sketch_settings_keys`]).
 ///
-/// The map is intentionally total: any key not explicitly placed — including
-/// the overlay (`auto_fade`) and any future settings struct — falls to
-/// [`SettingsTab::Display`], so a newly registered struct is always reachable
-/// rather than silently hidden.
-pub(super) fn tab_for_storage_key(key: &str) -> SettingsTab {
-    match key {
-        // All sketch settings types route to the generic Sketch tab; only
-        // the currently-running sketch's struct renders (see the active-sketch
-        // gate in `super::draw_user_panel`).
-        "line" | "dots" | "cymatics" => SettingsTab::Sketch,
-        "hand_tracking" => SettingsTab::HandTracking,
-        // "screensaver", overlay/auto_fade, and anything new.
-        _ => SettingsTab::Display,
+/// Any key in `sketch_keys` routes to the generic [`SettingsTab::Sketch`] tab;
+/// only the *running* sketch's struct actually renders there (see the
+/// active-sketch gate in `super::draw_user_panel`). Passing the sketch-key set
+/// in — rather than hardcoding `"line" | "dots" | …` here — is what stops every
+/// newly ported sketch from having to edit this function.
+///
+/// The map is otherwise total: any key not a sketch key and not
+/// `"hand_tracking"` — the overlay (`auto_fade`), `"screensaver"`, and any
+/// future settings struct — falls to [`SettingsTab::Display`], so a newly
+/// registered struct is always reachable rather than silently hidden.
+pub(super) fn tab_for_storage_key(key: &str, sketch_keys: &[&str]) -> SettingsTab {
+    if sketch_keys.contains(&key) {
+        return SettingsTab::Sketch;
     }
-}
-
-/// Storage key + header label of the settings struct shown in the active-sketch
-/// tab, by current `AppState`. Sketches whose settings route to `SettingsTab::Sketch`
-/// are gated on this so only the running sketch's knobs render (both `LineSettings`
-/// and `DotsSettings` are always registered).
-pub(super) fn active_sketch_tab(state: AppState) -> (&'static str, &'static str) {
-    match state {
-        AppState::Dots => ("dots", "FABRIC"),
-        AppState::Cymatics => ("cymatics", "CYMATICS"),
-        // Line is the default/home-adjacent sketch label. NOTE: other sketch
-        // states (e.g. Flame, Waves) share this fallback and will mis-show the
-        // Line tab once they register their own settings — add an arm each here.
-        _ => ("line", "LINE"),
+    match key {
+        "hand_tracking" => SettingsTab::HandTracking,
+        _ => SettingsTab::Display,
     }
 }
 
@@ -123,48 +122,63 @@ mod tests {
     use super::*;
     use crate::settings::def::SettingKind;
 
-    /// Both sketch storage keys ("line" and "dots") route to `SettingsTab::Sketch`;
-    /// hand-tracking routes to `HandTracking`; everything else falls to `Display`.
+    /// The sketch-key set (as the manifest would supply) routes to
+    /// `SettingsTab::Sketch`; hand-tracking routes to `HandTracking`; everything
+    /// else falls to `Display`. A newly ported sketch's key needs no edit here —
+    /// it is a Sketch key the moment it appears in `sketch_keys`.
     #[test]
-    fn dots_and_line_route_to_sketch_tab() {
-        assert_eq!(tab_for_storage_key("line"), SettingsTab::Sketch);
-        assert_eq!(tab_for_storage_key("dots"), SettingsTab::Sketch);
-        assert_eq!(tab_for_storage_key("cymatics"), SettingsTab::Sketch);
+    fn sketch_keys_route_to_sketch_tab() {
+        let sketch_keys = ["line", "dots", "cymatics", "flame"];
         assert_eq!(
-            tab_for_storage_key("hand_tracking"),
+            tab_for_storage_key("line", &sketch_keys),
+            SettingsTab::Sketch
+        );
+        assert_eq!(
+            tab_for_storage_key("flame", &sketch_keys),
+            SettingsTab::Sketch
+        );
+        assert_eq!(
+            tab_for_storage_key("hand_tracking", &sketch_keys),
             SettingsTab::HandTracking
         );
-        assert_eq!(tab_for_storage_key("overlay_ui"), SettingsTab::Display);
-    }
-
-    /// The active-sketch tab label and storage key follow `AppState`: Dots shows
-    /// "FABRIC", Cymatics shows "CYMATICS", and the remaining states (including
-    /// Line and Home) fall back to "LINE".
-    #[test]
-    fn active_sketch_tab_label_follows_state() {
-        assert_eq!(active_sketch_tab(AppState::Dots), ("dots", "FABRIC"));
-        assert_eq!(active_sketch_tab(AppState::Line), ("line", "LINE"));
         assert_eq!(
-            active_sketch_tab(AppState::Cymatics),
-            ("cymatics", "CYMATICS")
+            tab_for_storage_key("overlay_ui", &sketch_keys),
+            SettingsTab::Display
         );
     }
 
     /// Every settings struct lands in a tab, and the map is total: unknown
     /// keys (a future struct, the overlay) fall to Display rather than vanish.
+    /// A key absent from `sketch_keys` is treated as non-sketch even if it
+    /// looks like one, so routing can never mis-show the Sketch tab.
     #[test]
     fn tab_routing_is_total() {
-        assert_eq!(tab_for_storage_key("line"), SettingsTab::Sketch);
+        let sketch_keys = ["line", "dots", "cymatics", "flame"];
         assert_eq!(
-            tab_for_storage_key("hand_tracking"),
+            tab_for_storage_key("line", &sketch_keys),
+            SettingsTab::Sketch
+        );
+        assert_eq!(
+            tab_for_storage_key("hand_tracking", &sketch_keys),
             SettingsTab::HandTracking
         );
-        assert_eq!(tab_for_storage_key("screensaver"), SettingsTab::Display);
-        assert_eq!(tab_for_storage_key("overlay"), SettingsTab::Display);
         assert_eq!(
-            tab_for_storage_key("some_future_sketch"),
+            tab_for_storage_key("screensaver", &sketch_keys),
+            SettingsTab::Display
+        );
+        assert_eq!(
+            tab_for_storage_key("overlay", &sketch_keys),
+            SettingsTab::Display
+        );
+        assert_eq!(
+            tab_for_storage_key("some_future_sketch", &sketch_keys),
             SettingsTab::Display,
             "unrecognized keys must route to Display, never disappear"
+        );
+        assert_eq!(
+            tab_for_storage_key("flame", &[]),
+            SettingsTab::Display,
+            "a sketch key not yet in the manifest is non-sketch, never mis-shown"
         );
     }
 

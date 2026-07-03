@@ -312,10 +312,14 @@ pub(crate) fn register_line_manifest(app: &mut App) {
     // manifest append). The PNG at this path is the 1280×720 screenshot that
     // was always present; the JPG copy (loaded in an earlier commit) has been
     // removed. v4 calls this sketch "Gravity" in HomePage.tsx:44.
+    // `STORAGE_KEY` binds this tile to `LineSettings` so the settings dock's
+    // Sketch tab resolves to Line automatically (no per-sketch match arm).
+    use wc_core::settings::SketchSettings as _;
     wc_core::sketch::register_sketch_tile(
         app,
         AppState::Line,
         "Gravity",
+        settings::LineSettings::STORAGE_KEY,
         "sketches/line/screenshot.png",
     );
 }

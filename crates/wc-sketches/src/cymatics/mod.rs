@@ -339,10 +339,14 @@ impl Plugin for CymaticsPlugin {
 pub(crate) fn register_cymatics_manifest(app: &mut App) {
     // Delegates to the shared `register_sketch_tile` helper (async PNG load +
     // manifest append). v4 calls this sketch "Cymatics" in HomePage.tsx.
+    // `STORAGE_KEY` binds this tile to `CymaticsSettings` so the settings dock's
+    // Sketch tab resolves to Cymatics automatically (no per-sketch match arm).
+    use wc_core::settings::SketchSettings as _;
     wc_core::sketch::register_sketch_tile(
         app,
         AppState::Cymatics,
         "Cymatics",
+        settings::CymaticsSettings::STORAGE_KEY,
         "sketches/cymatics/screenshot.png",
     );
 }

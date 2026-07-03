@@ -19,6 +19,7 @@ fn manifest_distinguishes_registered_vs_unregistered_sketches() {
     app.register_sketch_manifest(SketchManifestEntry {
         state: AppState::Line,
         display_name: "Line",
+        settings_key: "line",
         screenshot: Handle::default(),
     });
     let manifest = app.world().resource::<SketchManifest>();
@@ -46,6 +47,7 @@ fn sketch_order_iteration_yields_one_active_three_placeholder_when_only_line_reg
     app.register_sketch_manifest(SketchManifestEntry {
         state: AppState::Line,
         display_name: "Line",
+        settings_key: "line",
         screenshot: Handle::default(),
     });
     let manifest = app.world().resource::<SketchManifest>();
@@ -92,6 +94,7 @@ fn sketch_order_entries_are_all_known_implemented_sketches() {
         app.register_sketch_manifest(SketchManifestEntry {
             state,
             display_name: "test",
+            settings_key: "test",
             screenshot: Handle::default(),
         });
     }

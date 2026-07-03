@@ -236,10 +236,14 @@ impl Plugin for DotsPlugin {
 pub(crate) fn register_dots_manifest(app: &mut App) {
     // Delegates to the shared `register_sketch_tile` helper (async PNG load +
     // manifest append). v4 calls this sketch "Fabric" in HomePage.tsx.
+    // `STORAGE_KEY` binds this tile to `DotsSettings` so the settings dock's
+    // Sketch tab resolves to Dots automatically (no per-sketch match arm).
+    use wc_core::settings::SketchSettings as _;
     wc_core::sketch::register_sketch_tile(
         app,
         AppState::Dots,
         "Fabric",
+        settings::DotsSettings::STORAGE_KEY,
         "sketches/dots/screenshot.png",
     );
 }

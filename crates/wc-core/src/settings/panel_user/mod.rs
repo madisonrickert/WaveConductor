@@ -52,6 +52,7 @@ use dock::{KeySnapshot, SettingsDockAdvanced, SettingsDockTab, SettingsTab};
 use super::custom_section::{CustomDockSections, DockSectionFn};
 use super::registry::SettingsRegistry;
 use crate::lifecycle::state::AppState;
+use crate::sketch::SketchManifest;
 use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::SettingsPanelVisible;
 use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
@@ -133,12 +134,25 @@ fn draw_user_panel(world: &mut World) {
     // registry resource is absent (tests, `Off` with an empty registry).
     let provider_status = provider_status::provider_status_snapshot(world);
 
-    // Read the active AppState to determine which sketch's settings to show
-    // in the Sketch tab and what label to display. Done before the egui
-    // context borrow so the resource stays accessible to the reflection
-    // pass inside the closure.
+    // Read the active AppState + the sketch manifest to determine which
+    // sketch's settings show in the Sketch tab and what label it carries.
+    // Both the active-sketch binding and the full sketch-key set (for tab
+    // routing) come from the manifest — the single registry every sketch must
+    // populate — so no per-sketch `match` arm lives here. Snapshotted before
+    // the egui context borrow so the resources stay free for the reflection
+    // pass inside the closure. `sketch_keys` is a handful of `&'static str`;
+    // `active_label` is uppercased once per frame only while the panel is open.
     let app_state = *world.resource::<State<AppState>>().get();
-    let (active_key, active_label) = dock::active_sketch_tab(app_state);
+    let (sketch_keys, active_binding): (SmallVec<[&'static str; 8]>, Option<(&str, &str)>) =
+        match world.get_resource::<SketchManifest>() {
+            Some(m) => (
+                m.sketch_settings_keys().collect(),
+                m.settings_binding(app_state),
+            ),
+            None => (SmallVec::new(), None),
+        };
+    let active_key = active_binding.map(|(key, _)| key);
+    let active_label = active_binding.map_or_else(String::new, |(_, name)| name.to_uppercase());
 
     // Set true inside the closure when an import/delete changed the store, so the
     // in-memory library resource is reloaded after the closure releases `world`.
@@ -211,9 +225,9 @@ fn draw_user_panel(world: &mut World) {
 
                     // Header: tab bar (the title) on the left, Advanced toggle on
                     // the right. Fixed, outside the scroll body. The active-sketch
-                    // label ("LINE" or "FABRIC") is passed so the Sketch tab reads
-                    // the live name rather than a static placeholder.
-                    draw_dock_header(ui, &mut selected_tab, &mut advanced, active_label, &style);
+                    // label (e.g. "GRAVITY", "FABRIC") comes from the manifest so
+                    // the Sketch tab reads the live name, not a static placeholder.
+                    draw_dock_header(ui, &mut selected_tab, &mut advanced, &active_label, &style);
                     ui.add_space(4.0);
                     hairline(ui, &style);
                     ui.add_space(8.0);
@@ -225,15 +239,17 @@ fn draw_user_panel(world: &mut World) {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for key in &keys {
-                                let tab = dock::tab_for_storage_key(key);
+                                let tab = dock::tab_for_storage_key(key, &sketch_keys);
                                 if tab != selected_tab {
                                     continue;
                                 }
-                                // On the Sketch tab only the running sketch's
-                                // settings render; both `LineSettings` and
-                                // `DotsSettings` are always registered, so
-                                // without this gate both would appear.
-                                if tab == SettingsTab::Sketch && *key != active_key {
+                                // On the Sketch tab only the *running* sketch's
+                                // settings render; every sketch's settings
+                                // struct is always registered, so without this
+                                // gate all of them would appear. `active_key` is
+                                // `None` only when no sketch is active (Home) —
+                                // then nothing renders here, never a stale tab.
+                                if tab == SettingsTab::Sketch && active_key != Some(*key) {
                                     continue;
                                 }
                                 fields::render_section_by_key(
@@ -285,9 +301,10 @@ fn draw_user_panel(world: &mut World) {
 /// switching pages.
 ///
 /// `active_sketch_label` is the live label for [`SettingsTab::Sketch`]
-/// (e.g. `"LINE"` or `"FABRIC"`), derived from the current [`AppState`] by
-/// the caller. It overrides the static placeholder stored in
-/// [`SettingsTab::ORDER`] for that entry.
+/// (e.g. `"GRAVITY"` or `"FABRIC"`), the active sketch's manifest display name
+/// uppercased by the caller (see [`SketchManifest::settings_binding`]). It
+/// overrides the static placeholder stored in [`SettingsTab::ORDER`] for that
+/// entry.
 fn draw_dock_header(
     ui: &mut egui::Ui,
     selected: &mut SettingsTab,

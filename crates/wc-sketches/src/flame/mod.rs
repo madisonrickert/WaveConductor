@@ -214,10 +214,14 @@ impl Plugin for FlamePlugin {
 pub(crate) fn register_flame_manifest(app: &mut App) {
     // Delegates to the shared `register_sketch_tile` helper (async PNG load +
     // manifest append). v4 calls this sketch "You-niverse" in HomePage.tsx.
+    // `STORAGE_KEY` binds this tile to `FlameSettings` so the settings dock's
+    // Sketch tab resolves to Flame automatically (no per-sketch match arm).
+    use wc_core::settings::SketchSettings as _;
     wc_core::sketch::register_sketch_tile(
         app,
         AppState::Flame,
         "You-niverse",
+        settings::FlameSettings::STORAGE_KEY,
         "sketches/flame/screenshot.png",
     );
 }
