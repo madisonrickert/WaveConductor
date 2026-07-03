@@ -94,40 +94,38 @@ impl Plugin for FlamePlugin {
         );
 
         // Orbit camera: autorotate + drag + wheel zoom + fling momentum decay.
-        // Registered under both gates — autorotate is the screensaver's
-        // motion, drag/zoom input is simply inert there.
+        // Runs while Active OR during the screensaver — autorotate is the
+        // screensaver's motion, drag/zoom input is simply inert there. Registered
+        // ONCE with a combined run condition (not twice): a system added more
+        // than once has an ambiguous `SystemTypeSet`, which cannot be used as a
+        // `.before`/`.after` ordering target — and `drive_flame_audio` and
+        // `update_flame_hands` below order against this system. `.or_else` is the
+        // non-deprecated run-condition `or` combinator in this Bevy version.
         app.init_resource::<systems::camera::FlameCamera>();
         app.add_systems(
             Update,
-            systems::camera::update_flame_camera
-                .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
-        );
-        app.add_systems(
-            Update,
             systems::camera::update_flame_camera.run_if(
-                wc_core::lifecycle::screensaver::in_screensaver(AppState::Flame),
+                wc_core::sketch::sketch_active(AppState::Flame).or_else(
+                    wc_core::lifecycle::screensaver::in_screensaver(AppState::Flame),
+                ),
             ),
         );
 
         // Audio coupling: two per-frame scalars (morph-energy, camera
-        // distance) drive the FlameSynth voice. Registered under both gates
-        // — the screensaver's autorotate + carousel keep the fractal
-        // morphing and the audio should track it there too — ordered after
-        // the camera update so `FlameCamera::distance` reflects this frame's
-        // zoom/autorotate before it is pushed.
+        // distance) drive the FlameSynth voice. Runs while Active OR during the
+        // screensaver — the screensaver's autorotate + carousel keep the fractal
+        // morphing and the audio should track it there too — ordered after the
+        // camera update so `FlameCamera::distance` reflects this frame's
+        // zoom/autorotate before it is pushed. Registered ONCE with a combined
+        // run condition, for the same ambiguous-`SystemTypeSet` reason as the
+        // camera above.
         app.init_resource::<audio_coupling::FlameMorphEnergy>();
         app.add_systems(
             Update,
             audio_coupling::drive_flame_audio
                 .after(systems::camera::update_flame_camera)
-                .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
-        );
-        app.add_systems(
-            Update,
-            audio_coupling::drive_flame_audio
-                .after(systems::camera::update_flame_camera)
-                .run_if(wc_core::lifecycle::screensaver::in_screensaver(
-                    AppState::Flame,
+                .run_if(wc_core::sketch::sketch_active(AppState::Flame).or_else(
+                    wc_core::lifecycle::screensaver::in_screensaver(AppState::Flame),
                 )),
         );
 
