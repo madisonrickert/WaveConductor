@@ -427,8 +427,10 @@ process).
   code unnecessary for the festival** — the OBSBOT soak-test result gates whether the
   IOKit work is on the critical path at all. Biggest correction from the original
   design.
-- OBSBOT SDK access requested — not needed for the kiosk; relevant only to runtime
-  control or the body-performance gimbal-follow (weigh vendor-dependency risk).
+- OBSBOT **deferred 2026-07-06 pending SDK access** (owned; revisit when access
+  arrives). Not needed for the kiosk (firmware-persist path); SDK relevant only to
+  runtime control or the body-performance gimbal-follow (weigh vendor-dependency risk).
+  Near-term kiosk work proceeds camera-agnostic (A3 + A1b) meanwhile.
 - Deployment machine + thermal headroom undecided.
 - Body use context: confirmed to include multi-person kiosk walk-ups → MoveNet
   MultiPose default; the general `Pose` model keeps BlazePose swappable for solo work.
