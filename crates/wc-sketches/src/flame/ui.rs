@@ -191,17 +191,31 @@ pub fn flame_name_input_overlay(
             };
             backdrop_blur_frame(ui, &style, options, |ui| {
                 ui.centered_and_justified(|ui| {
+                    let text_font = egui::FontId::proportional((height * 0.44).max(15.0));
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut settings.bypass_change_detection().name)
                             .char_limit(20)
-                            .hint_text("who are you?")
-                            .font(egui::FontId::proportional((height * 0.44).max(15.0)))
+                            .font(text_font.clone())
                             .horizontal_align(egui::Align::Center)
                             // No egui frame: only the frosted-glass backdrop shows.
                             .frame(egui::Frame::NONE),
                     );
                     if response.changed() {
                         settings.set_changed();
+                    }
+                    // Centered placeholder. egui's own `hint_text` is painted at
+                    // the field's top-left regardless of `horizontal_align` (which
+                    // only offsets the typed galley), so it read off-center until
+                    // the first keystroke. Paint it ourselves, centered, while the
+                    // name is empty — matching the centered typed text.
+                    if settings.name.trim().is_empty() {
+                        ui.painter().text(
+                            response.rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "who are you?",
+                            text_font,
+                            ui.visuals().weak_text_color(),
+                        );
                     }
                 });
             });
