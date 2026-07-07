@@ -20,11 +20,14 @@ use wc_core::CorePlugin;
 use wc_sketches::SketchesPlugin;
 
 mod hand_providers;
+mod logging;
 
 fn main() {
     // `init_tracing` returns the in-app log buffer the capture layer feeds; the
     // dev panel's Log view reads it as a resource.
-    let log_buffer = init_tracing();
+    // `_log_guard` keeps the non-blocking file-log writer alive for the whole
+    // process; dropping it would flush and stop on-disk logging.
+    let (log_buffer, _log_guard) = init_tracing();
     let mut app = App::new();
     app.insert_resource(log_buffer)
         // v4 Line renders against a black background; Bevy defaults to gray.
@@ -481,10 +484,17 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCaptureLayer {
     }
 }
 
-/// Initialize the tracing subscriber: env-filtered fmt to stderr plus a capture
-/// layer feeding the in-app [`wc_core::diagnostics::LogBuffer`], which is
-/// returned so `main` can insert it as a resource for the dev panel to read.
-fn init_tracing() -> wc_core::diagnostics::LogBuffer {
+/// Initialize the tracing subscriber: env-filtered fmt to stderr, a capture
+/// layer feeding the in-app [`wc_core::diagnostics::LogBuffer`], and (best
+/// effort) a non-blocking rolling on-disk log. Also installs the panic hook.
+///
+/// Returns the log buffer (inserted as a resource for the dev panel) and the
+/// file writer's [`WorkerGuard`], which `main` must hold for the process
+/// lifetime so buffered log lines are flushed.
+fn init_tracing() -> (
+    wc_core::diagnostics::LogBuffer,
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+) {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -498,12 +508,28 @@ fn init_tracing() -> wc_core::diagnostics::LogBuffer {
     // node-placement dump for debugging (see `inference_ort::backend`).
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,waveconductor=info,wc_core=info,ort=warn"));
+
+    // Best-effort on-disk layer. `.with(Option<Layer>)` is a no-op when `None`.
+    let (file_layer, guard) = match logging::file_writer() {
+        Some((writer, guard)) => {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_target(false)
+                .with_writer(writer);
+            (Some(layer), Some(guard))
+        }
+        None => (None, None),
+    };
+
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .with(LogCaptureLayer {
             buffer: buffer.clone(),
         })
+        .with(file_layer)
         .init();
-    buffer
+
+    logging::install_panic_hook();
+    (buffer, guard)
 }

@@ -50,6 +50,9 @@ wc-core = { workspace = true, features = ["thermal-sensor", "templates"] }
 wc-sketches = { workspace = true, features = ["templates"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+# Per-user local-data dir resolution for the on-disk log path (see `src/logging.rs`).
+dirs = { workspace = true }
 # Display-sleep inhibitor for the kiosk: see the workspace Cargo.toml comment.
 keepawake = { workspace = true }
 # Optional: pulled in when the `hand-tracking-gestures` feature is active.
