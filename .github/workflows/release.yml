@@ -285,12 +285,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install WiX Toolset + cargo-wix (Windows)
+      - name: Install WiX Toolset (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install wixtoolset --no-progress -y
-          cargo install cargo-wix --version ^0.3 --locked
 
       - name: Install Linux build deps for Bevy
         if: runner.os == 'Linux'

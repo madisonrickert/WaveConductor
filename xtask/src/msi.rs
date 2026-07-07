@@ -2,11 +2,11 @@
 //! Windows app directory produced by `bundle-windows`.
 //!
 //! The staged folder (`target/dist/windows-x86_64/WaveConductor`) is the single
-//! source of truth for what ships; this subcommand harvests it into an MSI via
-//! the `WiX` Toolset (`cargo wix`), never re-deriving file contents. It expects to
-//! run on a Windows runner with `WiX` v3 + `cargo-wix` installed (that is where a
-//! Windows release binary and MSI are produced); the version-mapping logic is
-//! host-independent and unit-tested on any host.
+//! source of truth for what ships; this subcommand harvests it into an MSI by
+//! invoking the `WiX` v3 toolset directly (`heat` → `candle` → `light`), never
+//! re-deriving file contents. It expects to run on a Windows runner with `WiX`
+//! v3 installed (that is where a Windows release binary and MSI are produced);
+//! the version-mapping logic is host-independent and unit-tested on any host.
 
 use std::path::Path;
 
@@ -111,8 +111,26 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Invoke `cargo wix` against the committed `WiX` source, harvesting the staged
-/// dir. `cargo-wix` + `WiX` v3 must be on PATH (CI installs them).
+/// Resolve a `WiX` v3 tool path. `WiX` sets `%WIX%` to its install root and
+/// ships tools under `%WIX%\bin`; fall back to the bare name (PATH) when unset.
+fn wix_tool(name: &str) -> std::ffi::OsString {
+    match std::env::var_os("WIX") {
+        Some(root) => {
+            let mut p = std::path::PathBuf::from(root);
+            p.push("bin");
+            p.push(format!("{name}.exe"));
+            p.into_os_string()
+        }
+        None => std::ffi::OsString::from(name),
+    }
+}
+
+/// Build the MSI by running the `WiX` v3 toolset directly: `heat` harvests the
+/// staged app dir into a `HarvestedComponents` component group (`cargo wix`
+/// does not run the directory harvester on its own), `candle` compiles the
+/// committed product source plus the harvested fragment, and `light` links
+/// them into the final MSI. `WiX` v3 must be installed (CI installs it via
+/// `choco install wixtoolset`, which sets `%WIX%`).
 fn build_msi(
     root: &Path,
     staged: &Path,
@@ -120,16 +138,52 @@ fn build_msi(
     out_msi: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wxs = root.join("wix").join("waveconductor.wxs");
-    let status = std::process::Command::new("cargo")
+    let build_dir = root.join("target").join("wix");
+    std::fs::create_dir_all(&build_dir)?;
+
+    let harvest_wxs = build_dir.join("harvest.wxs");
+    let status = std::process::Command::new(wix_tool("heat"))
         .current_dir(root)
-        .args(["wix", "--no-build", "--nocapture"])
-        .args(["--install-version", version])
-        .args(["--output".as_ref(), out_msi.as_os_str()])
-        .args(["--include".as_ref(), wxs.as_os_str()])
+        .arg("dir")
+        .arg(staged)
+        .args(["-cg", "HarvestedComponents"])
+        .args(["-dr", "INSTALLDIR"])
+        .args(["-srd", "-scom", "-sreg", "-sfrag", "-gg"])
+        .args(["-var", "env.WC_MSI_STAGED_DIR"])
+        .arg("-out")
+        .arg(&harvest_wxs)
         .env("WC_MSI_STAGED_DIR", staged)
         .status()?;
     if !status.success() {
-        return Err(format!("package-windows-msi: `cargo wix` failed with {status}").into());
+        return Err(format!("package-windows-msi: `heat` failed with {status}").into());
+    }
+
+    let mut candle_out = build_dir.clone().into_os_string();
+    candle_out.push(std::path::MAIN_SEPARATOR.to_string());
+    let status = std::process::Command::new(wix_tool("candle"))
+        .current_dir(root)
+        .arg(format!("-dVersion={version}"))
+        .arg(&wxs)
+        .arg(&harvest_wxs)
+        .arg("-out")
+        .arg(&candle_out)
+        .env("WC_MSI_STAGED_DIR", staged)
+        .status()?;
+    if !status.success() {
+        return Err(format!("package-windows-msi: `candle` failed with {status}").into());
+    }
+
+    let product_wixobj = build_dir.join("waveconductor.wixobj");
+    let harvest_wixobj = build_dir.join("harvest.wixobj");
+    let status = std::process::Command::new(wix_tool("light"))
+        .current_dir(root)
+        .arg(&product_wixobj)
+        .arg(&harvest_wixobj)
+        .arg("-out")
+        .arg(out_msi)
+        .status()?;
+    if !status.success() {
+        return Err(format!("package-windows-msi: `light` failed with {status}").into());
     }
     Ok(())
 }

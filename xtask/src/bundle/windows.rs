@@ -137,8 +137,14 @@ fn assemble(
     // above and deliberately excluded here.
     let bin_dir = binary.parent().unwrap_or_else(|| Path::new("."));
     let mut runtime_dlls = Vec::new();
-    for entry in std::fs::read_dir(bin_dir)? {
-        let entry = entry?;
+    let entries = std::fs::read_dir(bin_dir).map_err(|e| {
+        format!(
+            "bundle-windows: cannot read binary dir {}: {e}",
+            bin_dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("bundle-windows: cannot read dir entry: {e}"))?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         let lower = name.to_ascii_lowercase();
@@ -265,6 +271,8 @@ mod tests {
         std::fs::write(tmp.join("onnxruntime.dll"), b"ort").expect("ort dll");
         std::fs::write(tmp.join("onnxruntime_providers_shared.dll"), b"ort2").expect("ort shared");
         std::fs::write(tmp.join("DirectML.dll"), b"dml").expect("dml dll");
+        // Mixed-case ORT DLL to assert the `is_ort` case-folding, not just inspect it.
+        std::fs::write(tmp.join("OnnxRuntime_Providers_Cuda.DLL"), b"ort3").expect("ort cuda dll");
         // An unrelated DLL that must NOT be staged.
         std::fs::write(tmp.join("random.dll"), b"nope").expect("random dll");
         let leap = tmp.join("LeapC.dll");
@@ -283,11 +291,16 @@ mod tests {
             "ort shared staged"
         );
         assert!(app.join("DirectML.dll").is_file(), "directml staged");
+        assert!(
+            app.join("OnnxRuntime_Providers_Cuda.DLL").is_file(),
+            "mixed-case ort dll staged"
+        );
         assert!(!app.join("random.dll").exists(), "unrelated dll not staged");
         assert_eq!(
             report.runtime_dlls,
             vec![
                 "DirectML.dll".to_string(),
+                "OnnxRuntime_Providers_Cuda.DLL".to_string(),
                 "onnxruntime.dll".to_string(),
                 "onnxruntime_providers_shared.dll".to_string(),
             ],
