@@ -285,6 +285,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install WiX Toolset + cargo-wix (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+          cargo install cargo-wix --version ^0.3 --locked
+
       - name: Install Linux build deps for Bevy
         if: runner.os == 'Linux'
         run: |
@@ -302,6 +309,19 @@ jobs:
       - name: Build + bundle
         run: cargo xtask ${{ matrix.bundle }}
 
+      - name: Verify staged runtime DLLs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $report = cargo xtask bundle-windows --skip-build --json | ConvertFrom-Json
+          Write-Host "Staged runtime DLLs: $($report.runtime_dlls -join ', ')"
+          if (-not ($report.runtime_dlls -contains 'onnxruntime.dll')) {
+            throw "onnxruntime.dll was not staged; ORT DLL glob needs widening (see xtask/src/bundle/windows.rs)"
+          }
+          if (-not ($report.runtime_dlls -contains 'DirectML.dll')) {
+            throw "DirectML.dll was not staged"
+          }
+
       - name: Archive (macOS)
         if: runner.os == 'macOS'
         run: ditto -c -k --keepParent "${{ matrix.app_path }}" "${{ matrix.asset }}"
@@ -314,6 +334,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path "${{ matrix.app_path }}" -DestinationPath "${{ matrix.asset }}" -Force
+
+      - name: Package MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo xtask package-windows-msi --version "${{ needs.prepare.outputs.version }}"
+
+      - name: Upload MSI artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: WaveConductor-${{ needs.prepare.outputs.version }}-x86_64.msi
+          path: WaveConductor-${{ needs.prepare.outputs.version }}-x86_64.msi
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         with:
