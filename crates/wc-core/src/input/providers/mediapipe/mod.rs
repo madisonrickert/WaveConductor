@@ -59,6 +59,18 @@ mod signals;
 mod smoothing;
 mod worker;
 
+/// Backend label before the provider has loaded its ONNX Runtime sessions.
+const BACKEND_NOT_STARTED: &str = "not started";
+/// Backend label when one model stage registers `CoreML` and another falls back
+/// to CPU.
+const BACKEND_COREML_CPU: &str = "ort/CoreML+CPU";
+/// Backend label when one model stage registers `DirectML` and another falls
+/// back to CPU.
+const BACKEND_DIRECTML_CPU: &str = "ort/DirectML+CPU";
+/// Backend label for any mixed accelerator state outside the named platform
+/// pairs above.
+const BACKEND_MIXED: &str = "ort/mixed";
+
 /// Construction-time configuration for the webcam provider.
 #[derive(Debug, Clone)]
 pub struct MediaPipeConfig {
@@ -157,6 +169,10 @@ pub struct MediaPipeProvider {
     /// [`Self::set_grab_deadzone`] / [`Self::set_depth_calibration_k`]; read by
     /// the pipeline each frame.
     live_tuning: Arc<MediaPipeLiveTuning>,
+    /// Backend label selected when the provider last started. Reused by the
+    /// dev-panel metrics refill so the visible "Backend" row matches the
+    /// sessions actually registered by [`Self::build_pipeline`].
+    backend_label: &'static str,
 }
 
 /// The provider's running state (everything that exists only between `start`
@@ -189,6 +205,7 @@ impl MediaPipeProvider {
             target_ts: Duration::ZERO,
             had_hands: false,
             live_tuning,
+            backend_label: BACKEND_NOT_STARTED,
         }
     }
 
@@ -359,11 +376,14 @@ pub fn apply_mediapipe_idle_throttle(
 /// Refill the dev-panel metrics list from one worker diagnostics snapshot.
 /// Extracted from `poll` so the per-frame drain stays one screen long; called
 /// at most once per poll, under the (main-thread-only) diagnostics lock.
-fn refill_metrics(d: &mut ProviderDiagnostics, worker_diag: &MediaPipeWorkerDiagnostics) {
+fn refill_metrics(
+    d: &mut ProviderDiagnostics,
+    worker_diag: &MediaPipeWorkerDiagnostics,
+    backend: &'static str,
+) {
     d.metrics.clear();
     let p = worker_diag.pipeline;
-    d.metrics
-        .push(ProviderMetric::text("Backend", "ort/CoreML"));
+    d.metrics.push(ProviderMetric::text("Backend", backend));
     d.metrics
         .push(ProviderMetric::duration("Pipeline total", p.total));
     d.metrics.push(ProviderMetric::duration(
@@ -462,8 +482,8 @@ fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Capture
 }
 
 /// Load one ONNX model and wrap it as a boxed [`HandInference`], returning the
-/// inference backend label the session registered (`"ort/CoreML"` or
-/// `"ort/CPU"`) alongside it for diagnostics.
+/// inference backend label the session registered (`"ort/CoreML"`,
+/// `"ort/DirectML"`, or `"ort/CPU"`) alongside it for diagnostics.
 ///
 /// Reads the model file from `dir/name` and builds an [`inference_ort::OrtInference`]
 /// session. ONNX Runtime reads input/output shapes directly from the graph, so no
@@ -487,19 +507,25 @@ fn load_model(
 
 /// Combine the palm and landmark backend labels into one diagnostics string.
 ///
-/// They normally agree; if one stage falls back to CPU while the other reaches
-/// `CoreML`, report the mixed state rather than hiding the slow path.
+/// They normally agree; if one stage falls back to CPU while the other reaches a
+/// platform accelerator, report the mixed state rather than hiding the slow path.
 fn combined_backend(palm: &'static str, landmark: &'static str) -> &'static str {
     if palm == landmark {
         palm
+    } else if palm == inference_ort::BACKEND_COREML || landmark == inference_ort::BACKEND_COREML {
+        BACKEND_COREML_CPU
+    } else if palm == inference_ort::BACKEND_DIRECTML || landmark == inference_ort::BACKEND_DIRECTML
+    {
+        BACKEND_DIRECTML_CPU
     } else {
-        "ort/CoreML+CPU"
+        BACKEND_MIXED
     }
 }
 
 impl HandTrackingProvider for MediaPipeProvider {
     fn start(&mut self) -> Result<(), HandTrackingError> {
         let (pipeline, backend) = self.build_pipeline()?;
+        self.backend_label = backend;
         // Surface where inference actually registered so a silent CPU fallback
         // (the 240% CPU symptom) is visible in the dev panel, not assumed away.
         tracing::info!("MediaPipe hand inference backend: {backend} (palm+landmark)");
@@ -564,6 +590,7 @@ impl HandTrackingProvider for MediaPipeProvider {
         self.smoother.clear();
         self.target_hands.clear();
         self.had_hands = false;
+        self.backend_label = BACKEND_NOT_STARTED;
     }
 
     fn poll(&mut self, now: Duration, out: &mut Messages<HandTrackingFrame>) {
@@ -610,7 +637,7 @@ impl HandTrackingProvider for MediaPipeProvider {
                 }
                 if let Some(worker_diag) = new_diagnostics {
                     d.dropped_frames = worker_diag.dropped_frames;
-                    refill_metrics(&mut d, &worker_diag);
+                    refill_metrics(&mut d, &worker_diag, self.backend_label);
                 }
             }
         }
@@ -758,6 +785,38 @@ mod tests {
             worker::IDLE_INFERENCE_HZ,
             4,
             "IDLE_INFERENCE_HZ changed: update the wake-latency contract doc in worker.rs"
+        );
+    }
+
+    #[test]
+    fn combined_backend_reports_coreml_cpu_mixed_state() {
+        assert_eq!(
+            combined_backend(inference_ort::BACKEND_COREML, inference_ort::BACKEND_CPU),
+            BACKEND_COREML_CPU
+        );
+    }
+
+    #[test]
+    fn combined_backend_reports_directml_cpu_mixed_state() {
+        assert_eq!(
+            combined_backend(inference_ort::BACKEND_DIRECTML, inference_ort::BACKEND_CPU),
+            BACKEND_DIRECTML_CPU
+        );
+    }
+
+    #[test]
+    fn metrics_backend_uses_selected_backend_label() {
+        let mut diagnostics = ProviderDiagnostics::default();
+        refill_metrics(
+            &mut diagnostics,
+            &MediaPipeWorkerDiagnostics::default(),
+            inference_ort::BACKEND_DIRECTML,
+        );
+        assert_eq!(
+            diagnostics.metrics.first().map(|metric| metric.value),
+            Some(crate::input::state::ProviderMetricValue::Text(
+                inference_ort::BACKEND_DIRECTML
+            ))
         );
     }
 

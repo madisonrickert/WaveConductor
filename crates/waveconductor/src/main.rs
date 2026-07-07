@@ -9,7 +9,11 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
+#[cfg(target_os = "windows")]
+use bevy::render::settings::Backends;
+use bevy::render::settings::WgpuSettings;
 use bevy::render::view::Msaa;
+use bevy::render::RenderPlugin;
 use tracing_subscriber::EnvFilter;
 use wc_core::audio::background::{EncodedSample, SampleAssets};
 use wc_core::CorePlugin;
@@ -31,6 +35,10 @@ fn main() {
         .insert_resource(load_sample_assets())
         .add_plugins((
             DefaultPlugins
+                .set(RenderPlugin {
+                    render_creation: wgpu_settings().into(),
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "WaveConductor".into(),
@@ -54,21 +62,12 @@ fn main() {
                 // and emit `ERROR Could not set global logger…` at startup.
                 .disable::<bevy::log::LogPlugin>(),
             bevy_egui::EguiPlugin {
-                // egui's bindless texture path needs wgpu's `TEXTURE_BINDING_ARRAY`,
-                // which Metal (macOS) and browser WebGPU (wasm) don't expose. On those
-                // backends bevy_egui auto-disables bindless and logs a startup warning.
-                // Gate the *request* by target so we neither ask for it nor warn there,
-                // while keeping bevy_egui's default on backends that support it
-                // (Vulkan/DX12 on Linux/Windows). Revisit the macOS arm if bevy gains
-                // Metal bindless support: https://github.com/bevyengine/bevy/issues/18149
-                bindless_mode_array_size: if cfg!(any(
-                    target_os = "macos",
-                    target_arch = "wasm32"
-                )) {
-                    None
-                } else {
-                    bevy_egui::EguiPlugin::default().bindless_mode_array_size
-                },
+                // egui's bindless texture path needs wgpu binding-array support.
+                // Windows AMD integrated GPUs can expose a Vulkan/DX12-class adapter
+                // without that optional feature, and our UI does not need the bindless
+                // path. Gate the request on targets where it has already shown up as
+                // startup noise or a portability risk.
+                bindless_mode_array_size: egui_bindless_mode_array_size(),
                 ..Default::default()
             },
             CorePlugin,
@@ -117,6 +116,32 @@ fn main() {
     app.add_systems(Update, apply_debug_bloom_toggle);
 
     app.run();
+}
+
+#[cfg(target_os = "windows")]
+fn wgpu_settings() -> WgpuSettings {
+    let mut settings = WgpuSettings::default();
+    if Backends::from_env().is_none() {
+        settings.backends = Some(Backends::DX12);
+    }
+    settings
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wgpu_settings() -> WgpuSettings {
+    WgpuSettings::default()
+}
+
+fn egui_bindless_mode_array_size() -> Option<std::num::NonZero<u32>> {
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    )) {
+        None
+    } else {
+        bevy_egui::EguiPlugin::default().bindless_mode_array_size
+    }
 }
 
 /// Read sketch sample assets into a `SampleAssets` resource.

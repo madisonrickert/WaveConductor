@@ -116,7 +116,7 @@ jobs:
       - name: Write release notes
         run: |
           cat > NOTES.md <<'EOF'
-          Second alpha of the v5 Rust + Bevy rewrite. Unsigned pre-release
+          Third alpha of the v5 Rust + Bevy rewrite. Unsigned pre-release
           binaries for macOS (Apple Silicon), Windows (x86_64), and Linux
           (x86_64).
 
@@ -128,14 +128,17 @@ jobs:
           Requirements: a WebGPU-capable GPU (Metal / DX12 / Vulkan 1.2+). Hand
           tracking is optional and needs the Ultraleap tracking service running.
 
-          Changed since v5.0.0-alpha.1:
-          - Settings writes are now atomic (temp file + rename) and a corrupt
-            settings file is quarantined instead of being silently discarded
-            or clobbering other sketches' saved settings.
-          - Mid-run audio stream failures are now surfaced instead of failing
-            silently.
-          - Fixed a lifecycle bug where the retired Flame and Waves sketches
-            could still be triggered by live hand-tracking input.
+          Changed since v5.0.0-alpha.2:
+          - Windows now defaults the renderer to DX12 unless WGPU_BACKEND is
+            explicitly set, avoiding older AMD Vulkan-driver startup paths.
+          - Disabled egui's optional bindless-texture request on Windows so
+            GPUs without TEXTURE_BINDING_ARRAY no longer hit that startup
+            warning/fallback path.
+          - DirectML-backed MediaPipe sessions now apply the ONNX Runtime
+            session options DirectML requires and report DirectML/CPU mixed
+            states accurately in the dev panel.
+          - Refreshed the Cargo.lock advisory surface by updating
+            crossbeam-epoch to 0.9.20.
 
           Notes:
           - Unsigned builds. macOS: right-click the app and choose Open (or run

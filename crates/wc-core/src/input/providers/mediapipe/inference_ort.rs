@@ -34,13 +34,11 @@ use super::inference::{HandInference, InferenceError, Tensor};
 
 /// Backend label when the session runs on ONNX Runtime's CPU execution provider
 /// (no GPU EP for this target, or the EP failed to register and fell back).
-const BACKEND_CPU: &str = "ort/CPU";
+pub(super) const BACKEND_CPU: &str = "ort/CPU";
 /// Backend label when the macOS `CoreML` execution provider registered.
-#[cfg(target_os = "macos")]
-const BACKEND_COREML: &str = "ort/CoreML";
+pub(super) const BACKEND_COREML: &str = "ort/CoreML";
 /// Backend label when the Windows `DirectML` execution provider registered.
-#[cfg(target_os = "windows")]
-const BACKEND_DIRECTML: &str = "ort/DirectML";
+pub(super) const BACKEND_DIRECTML: &str = "ort/DirectML";
 
 /// `ort`-backed inference for one ONNX model stage.
 ///
@@ -85,6 +83,10 @@ impl OrtInference {
             .map_err(load_err)?
             .with_intra_op_spinning(false)
             .map_err(load_err)?;
+        #[cfg(target_os = "windows")]
+        {
+            builder = configure_accelerator_session(builder)?;
+        }
 
         // Register the platform GPU execution provider on the builder. `Ok`
         // registration means the EP attached to the session options, NOT that
@@ -142,6 +144,25 @@ fn load_err<R>(e: ort::Error<R>) -> InferenceError {
 /// context for the same reason as [`load_err`].
 fn run_err<R>(e: ort::Error<R>) -> InferenceError {
     InferenceError::Run(e.to_string())
+}
+
+/// Apply session options required by the platform accelerator before registering
+/// the execution provider.
+///
+/// Windows `DirectML` rejects memory-pattern optimization and parallel graph
+/// execution, so both are disabled explicitly here. Parallel execution is
+/// already ONNX Runtime's default-off state, but spelling it out keeps the
+/// DirectML contract close to the registration site and catches future builder
+/// default changes. `CoreML` and CPU targets need no special session options.
+#[cfg(target_os = "windows")]
+fn configure_accelerator_session(
+    builder: SessionBuilder,
+) -> Result<SessionBuilder, InferenceError> {
+    builder
+        .with_parallel_execution(false)
+        .map_err(load_err)?
+        .with_memory_pattern(false)
+        .map_err(load_err)
 }
 
 /// Register the macOS `CoreML` execution provider on `builder`, returning the
