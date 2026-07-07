@@ -76,3 +76,15 @@ rustflags = [
     "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../vendor/leapc/linux-x86_64",
     "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../vendor/leapc/linux-x86_64",
 ]
+
+# Statically link the MSVC C runtime so the shipped exe needs no external
+# "VC++ 2015-2022 Redistributable" install. Makes BOTH the portable zip and the
+# MSI self-contained (a zip cannot carry an installer's redist merge module).
+#
+# Our static-CRT exe loads onnxruntime.dll / DirectML.dll / LeapC.dll, which use
+# the dynamic CRT. Safe because these are C-ABI libraries with opaque handles and
+# caller-owned buffers, so no CRT-owned resource (heap allocation, FILE*) crosses
+# the boundary. If ORT ever regresses this, drop crt-static and add Microsoft's
+# VC++ redist merge module to the WiX source (MSI-only) instead.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
