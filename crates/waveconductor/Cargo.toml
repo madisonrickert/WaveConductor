@@ -64,3 +64,9 @@ wc-core = { workspace = true, features = ["thermal-sensor", "thermal-sensor-maco
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wc-core = { workspace = true, features = ["thermal-sensor", "thermal-sensor-windows"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the app icon + version metadata into the Windows exe at build time.
+# Build-dependency only + Windows-gated, so it never touches the macOS/Linux
+# `--all-features` compile surface.
+winresource = "0.1"

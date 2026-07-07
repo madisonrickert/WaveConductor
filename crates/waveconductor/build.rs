@@ -1,7 +1,12 @@
-//! Build-time copy of the vendored LeapC.dll next to the produced .exe on
-//! Windows. macOS and Linux use rpath baked into the binary via
+//! Windows-only build-time steps: copying the vendored LeapC.dll next to the
+//! produced .exe, and embedding the app icon + version resource.
+//!
+//! LeapC.dll: macOS and Linux use rpath baked into the binary via
 //! `.cargo/config.toml`'s `rustflags`; Windows uses adjacent-file discovery
 //! at runtime, so the DLL has to sit in the same directory as the .exe.
+//!
+//! Icon + version resource: embedded via `winresource` so the installed exe
+//! shows a real icon in Explorer, the Start Menu, and Add/Remove Programs.
 //!
 //! No-op on non-Windows targets.
 
@@ -32,5 +37,18 @@ fn main() {
                 err
             );
         });
+    }
+
+    // Embed the app icon + version metadata into the Windows exe.
+    #[cfg(target_os = "windows")]
+    {
+        println!("cargo:rerun-if-changed=assets/icon.ico");
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.set("ProductName", "WaveConductor");
+        res.set("FileDescription", "WaveConductor");
+        res.set("CompanyName", "Madison Rickert");
+        res.compile()
+            .expect("embed Windows resources (icon + version) via winresource");
     }
 }
