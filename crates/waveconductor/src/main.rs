@@ -1,3 +1,10 @@
+// Release builds are a GUI app: detach from the console so double-clicking the
+// installed exe doesn't spawn a stray console window. Gated on
+// `not(debug_assertions)` (not bare `windows`) so `cargo rund`, the visual
+// capture harness, and any debug run keep their stderr/console. Inert on
+// non-Windows targets. Logs still land on disk via `logging` (Task 1).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! `WaveConductor` v5 binary entry point.
 //!
 //! Constructs the Bevy [`App`], registers core plugins, and runs the event loop.
