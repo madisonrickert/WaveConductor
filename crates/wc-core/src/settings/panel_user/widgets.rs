@@ -4,9 +4,14 @@
 //! per-kind renderers below; each renders only the input widget (no label —
 //! [`super::fields`]'s Grid already placed that in column 1). The
 //! `TemplateLibrary` kind delegates to
-//! [`super::template_picker::render_template_library`] when the `templates`
+//! `super::template_picker::render_template_library` when the `templates`
 //! feature is on, and permanently falls back to [`render_file_path`]
 //! otherwise.
+//
+// NB: the `template_picker` reference above is a plain code span, not an
+// intra-doc link — `mod template_picker` is `#[cfg(feature = "templates")]`, so
+// a `[...]` link fails to resolve in the default-feature `cargo doc` CI gate
+// (which does not pass `--all-features`). See `super::fields` for the same.
 
 #![allow(
     clippy::as_conversions,
@@ -170,9 +175,12 @@ fn render_color(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui
 }
 
 /// Render the text widget for a field. No label — Grid column 1 already holds it.
+///
+/// Fills the grid's value column (`desired_width = INFINITY`) rather than egui's
+/// narrow default so long values like the flame name are comfortably editable.
 fn render_text(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui) {
     if let Some(v) = field.try_downcast_mut::<String>() {
-        ui.text_edit_singleline(v);
+        ui.add(egui::TextEdit::singleline(v).desired_width(f32::INFINITY));
     } else {
         ui.label("(expected String)");
     }

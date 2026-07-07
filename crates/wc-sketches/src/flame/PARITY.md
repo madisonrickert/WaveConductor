@@ -85,12 +85,20 @@ golden-tested against values generated from the v4 source.
 3. **Envelope/DSP audio replaces v4's per-frame stat-driven audio.** v4 sampled
    node state every 307th point per frame to drive the voice; v5 drives it from
    two CPU-side scalars instead: analytic `|dcX/dt|` + warp speed approximate the
-   morph velocity, and camera distance sets a proximity gain. Chord register is
-   set by a hash-derived pseudo-density (replacing v4's box-counting), and a
-   `tanh` shaper replaces the `DynamicsCompressor`. **Fallback seam:** if
+   morph velocity, and camera distance sets a proximity gain. The chord register
+   is a hash-derived pseudo-density *base* per name (replacing v4's box-counting),
+   and a `tanh` shaper replaces the `DynamicsCompressor`. **Fallback seam:** if
    ear-tuning rejects the pseudo-density register feel, a one-shot ~2k-point CPU
    evaluation + box-count at name-change time (only) can replace it without
    touching the steady-state path.
+
+   **2026-07-03 amendment — screen-Y pitch restored.** The pseudo-density register
+   is now only the *base*; `chord_degree` is driven per frame from the
+   pointer/hand vertical position (`flame_pitch_degree` in `audio_coupling.rs`,
+   ±`PITCH_Y_RANGE` diatonic degrees around the base), restoring the mouse/hand-Y
+   pitch responsiveness Madison flagged as missing vs v4. This maps screen-Y
+   straight to the degree rather than reintroducing v4's per-frame box-count, so
+   the soak path stays allocation-free. Ear-tune surface: `PITCH_Y_RANGE`.
 
 4. **Instanced additive billboards + `specialize` blend override replace
    `THREE.Points`.** `gl_PointSize` sprites become instanced camera-facing quads;

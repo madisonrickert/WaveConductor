@@ -13,7 +13,7 @@
 //! - Per-tier **present-rate throttling** via `bevy::winit::WinitSettings`
 //!   (`UpdateMode::Reactive { wait }`) — the thermal lever that actually lowers
 //!   the unattended idle frame rate. Capped at the operator's "Screensaver FPS
-//!   cap" setting (default 15 fps) regardless of temperature (the Cool tier),
+//!   cap" setting (default 20 fps) regardless of temperature (the Cool tier),
 //!   with Warm ≈ 15 fps and Hot ≈ 3 fps floored at that cap so heat only ever
 //!   lowers the rate. The reactive loop drives the whole schedule, so the cap
 //!   also throttles the particle compute dispatch and smear post pass against
@@ -180,7 +180,7 @@ const SCREENSAVER_FPS_MAX: f64 = 240.0;
 /// Target present interval (frame-to-frame wait) per tier while in the
 /// screensaver, capped by the operator's "Screensaver FPS cap" setting
 /// (`cap_fps`, see [`settings::ScreensaverSettings::screensaver_fps`];
-/// default 15). Larger wait = lower fps = less heat. These are the
+/// default 20). Larger wait = lower fps = less heat. These are the
 /// present-rate half of the thermal ladder; the particle-count / dispatch
 /// half lives in each sketch's attract driver (Seam 3 for Line).
 ///
@@ -255,29 +255,63 @@ fn save_present_mode(mut commands: Commands<'_, '_>, winit: Res<'_, WinitSetting
     });
 }
 
-/// While the screensaver is showing, set `WinitSettings` to a reactive
-/// update-mode whose `wait` matches the effective tier, throttling the present
-/// rate. Mouse / keyboard / touch interaction wakes the loop instantly
-/// (`react_to_*` all true), so a visitor at the controls resumes at full rate
-/// without perceptible lag. The *unfocused* mode gets the same reactive mode —
-/// deliberately more device-event-responsive than the `game()` baseline's
-/// unfocused `reactive_low_power` (`react_to_device_events: true` vs `false`),
-/// so a passer-by can wake an unfocused window too.
+/// Build the screensaver's present mode: a **pure timer-driven** reactive loop
+/// at `wait`, with every early-wake source disabled. Extracted so the policy is
+/// a single named decision (unit-tested by `screensaver_mode_is_pure_timer`) and
+/// so a future edit that re-enables a `react_to_*` flag is a visible, tested
+/// change rather than a buried literal. See [`apply_present_rate`] for the full
+/// rationale.
+fn screensaver_update_mode(wait: Duration) -> UpdateMode {
+    UpdateMode::Reactive {
+        wait,
+        // Pure timer: no device / user / window event may early-wake the present
+        // loop. The rate is then a function of the thermal tier + operator cap
+        // alone and cannot burst to vsync when a device chatters (raw
+        // `DeviceEvent` motion from a live pointer, or an idle HID posting
+        // periodic reports). Wake is instead detected on the next timer tick by
+        // the polled interaction check — winit still *delivers* the buffered
+        // events to Bevy's input resources on that tick, so no input is dropped;
+        // only its early-wake is suppressed. See `apply_present_rate` docs.
+        react_to_device_events: false,
+        react_to_user_events: false,
+        react_to_window_events: false,
+    }
+}
+
+/// While the screensaver is showing, set `WinitSettings` to the
+/// [`screensaver_update_mode`] whose `wait` matches the effective tier,
+/// throttling the present rate. The mode is a **pure timer-driven** reactive
+/// loop: all event-reactivity is off, so the present rate is a function of the
+/// thermal tier and the operator cap alone and **cannot burst to vsync when a
+/// device chatters**. A live mouse emitting raw `DeviceEvent` motion (or an idle
+/// HID posting periodic reports) would otherwise early-wake the loop on every
+/// event and drag the "frame-limited" screensaver up to the display rate — the
+/// jump this policy exists to prevent. Both focused and unfocused modes get the
+/// same pure-timer mode.
 ///
-/// **Hand-wake chain (webcam / MediaPipe):** camera frames are *not* winit
-/// events, so a hand wakes the install through the polled path instead — and
-/// nothing wakes the loop early, so each step costs a full reactive tick. The
-/// inference worker (already capped at 4 Hz in Idle/Screensaver, commit
-/// b3d6589a) emits a hand-bearing frame → tick N's `poll_all_providers`
-/// (`PreUpdate`) drains it and `reset_on_interaction` / `advance_activity`
-/// write `NextState` in tick N's `Update` — but `StateTransition` runs *before*
-/// `Update` in the `Main` schedule, so the `Active` flip and the
-/// `OnExit(Screensaver)` restore land in tick N+1's `StateTransition`, a
-/// second full wait later. The throttle therefore adds ≤ 2 reactive ticks:
-/// ~133 ms at the default 15 fps cap (~66 ms at a 30 fps cap), ≈ 433 ms total
-/// against the ~300 ms worst-case wake documented on the inference throttle.
-/// At hotter tiers the two ticks scale with the wait — ≤ 666 ms at Hot,
-/// ≈ 0.97 s total worst case, an accepted trade in a thermal emergency.
+/// Suppressing early-wake does **not** drop input: winit buffers window/device
+/// events and `forward_bevy_events` drains them into Bevy's input resources on
+/// the next update, so the polled interaction check (`reset_on_interaction` /
+/// `advance_activity`) still sees a click / keypress / hand and flips
+/// `Screensaver → Active` — just on the next timer tick rather than instantly.
+/// Wake is therefore uniformly polled for every modality, matching how hand
+/// tracking already wakes (below).
+///
+/// **Wake chain / latency:** camera frames are *not* winit events, so hand
+/// tracking always woke through the polled path; with early-wake off, mouse /
+/// keyboard / touch now wake the same way. Nothing wakes the loop early, so each
+/// step costs a full reactive tick. The inference worker (capped at 4 Hz in
+/// Idle/Screensaver, commit b3d6589a) emits a hand-bearing frame → tick N's
+/// `poll_all_providers` (`PreUpdate`) drains it and `reset_on_interaction` /
+/// `advance_activity` write `NextState` in tick N's `Update` — but
+/// `StateTransition` runs *before* `Update` in the `Main` schedule, so the
+/// `Active` flip and the `OnExit(Screensaver)` restore land in tick N+1's
+/// `StateTransition`, a second full wait later. The throttle therefore adds
+/// ≤ 2 reactive ticks: ~100 ms at the default 20 fps cap (~66 ms at a 30 fps
+/// cap), ≈ 400 ms total against the ~300 ms worst-case wake documented on the
+/// inference throttle. At hotter tiers the two ticks scale with the wait —
+/// ≤ 666 ms at Hot, ≈ 0.97 s total worst case, an accepted trade in a thermal
+/// emergency.
 ///
 /// Only writes `WinitSettings` when the desired mode changes (avoids churning a
 /// resource every frame).
@@ -315,12 +349,7 @@ fn apply_present_rate(
     // `WinitSettings` is rewritten per frame (opt-in path only; harmless churn).
     let duty_wake = duty.as_deref().map(|d| d.requested_wake(time.elapsed()));
     let wait = effective_wait(tier_present_wait(tier, settings.screensaver_fps), duty_wake);
-    let desired = UpdateMode::Reactive {
-        wait,
-        react_to_device_events: true,
-        react_to_user_events: true,
-        react_to_window_events: true,
-    };
+    let desired = screensaver_update_mode(wait);
     if winit.focused_mode != desired {
         let fps = if wait.is_zero() {
             f64::INFINITY
@@ -403,6 +432,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn screensaver_mode_is_pure_timer() {
+        // The present rate must be governed by the tier timer alone: every
+        // `react_to_*` flag must be false, or a chatty device (raw pointer
+        // motion, idle HID reports) early-wakes the reactive loop and bursts the
+        // "frame-limited" screensaver up to vsync — the "jump to 60fps"
+        // regression. This pins that policy so re-enabling a flag is a test
+        // failure, not a silent behavior change. `wait` is passed through
+        // verbatim so the tier ladder still sets the rate.
+        assert_eq!(
+            screensaver_update_mode(Duration::from_millis(50)),
+            UpdateMode::Reactive {
+                wait: Duration::from_millis(50),
+                react_to_device_events: false,
+                react_to_user_events: false,
+                react_to_window_events: false,
+            },
+        );
+    }
+
+    #[test]
     fn effective_wait_is_floored_to_duty_cycle() {
         // Hot tier present wait (333 ms) yields to a tighter duty-cycle wake.
         let tier = Duration::from_millis(333);
@@ -437,8 +486,10 @@ mod tests {
         assert!(
             tier_present_wait(ThermalTier::Warm, 30.0) < tier_present_wait(ThermalTier::Hot, 30.0)
         );
-        // …and at the default 15 fps cap, Warm's nominal ~15 fps floors at the
-        // cap (equal wait) instead of presenting FASTER than the cool tier.
+        // …and at the operator default cap the ladder still never decreases
+        // with heat. These use `<=` (not `<`) on purpose: at a cap ≤ 15 fps,
+        // Warm's nominal 66 ms floors to the Cool wait — equal, not faster —
+        // rather than presenting FASTER than the cool tier.
         let cap = settings::ScreensaverSettings::default().screensaver_fps;
         assert!(
             tier_present_wait(ThermalTier::Cool, cap) <= tier_present_wait(ThermalTier::Warm, cap)

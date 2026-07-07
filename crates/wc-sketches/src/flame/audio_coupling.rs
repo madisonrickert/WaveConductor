@@ -24,8 +24,8 @@
 //!
 //! ## What this writes each frame
 //!
-//! [`drive_flame_audio`] pushes three [`AudioCommand::SetFlameParam`] commands
-//! onto the lock-free [`AudioCommandSender`] ring every frame:
+//! [`drive_flame_audio`] pushes up to four [`AudioCommand::SetFlameParam`]
+//! commands onto the lock-free [`AudioCommandSender`] ring every frame:
 //!
 //! - `"morph_energy"` = the smoothed [`FlameMorphEnergy`] envelope.
 //! - `"camera_distance"` = [`FlameCamera::distance`] (the orbit radius —
@@ -34,14 +34,20 @@
 //!   the [`ScreensaverFade`] envelope IS the screensaver audio ramp: it fades
 //!   the synth out during the fade-in to attract mode and back in during the
 //!   wake fade-out, with no hard mute.
+//! - `"chord_degree"` = `flame_pitch_degree` of the pointer/hand screen-Y
+//!   around the name's base register — v4's mouse/hand-Y pitch responsiveness,
+//!   pushed only when the rounded degree actually changes (tracked in
+//!   [`FlameChordDegreeCache`], which [`enter_flame_audio`] and `watch_flame_name`
+//!   invalidate whenever they re-push the bare base via `push_flame_config`).
 //!
-//! The rest of the per-frame surface (`filter_freq`, `filter_q`, `noise_scale`,
-//! `has_noise`, `is_major`, `chord_degree`, `density`, `chord_energy`) is
-//! name-derived, not per-frame: `push_flame_config` pushes it once on entry
-//! ([`enter_flame_audio`]) and once per rebuild (`watch_flame_name`, preceded
-//! there by an instant `"duck_pulse"` — v4's anti-click mute before the swap,
-//! which the synth's `follow(0.016)` smoother turns into a fast dip rather
-//! than an audible pop).
+//! The rest of the param surface (`filter_freq`, `filter_q`, `noise_scale`,
+//! `has_noise`, `is_major`, `density`, `chord_energy`, and the *base*
+//! `chord_degree`) is name-derived, not per-frame: `push_flame_config` pushes it
+//! once on entry ([`enter_flame_audio`]) and once per rebuild
+//! (`watch_flame_name`, preceded there by an instant `"duck_pulse"` — v4's
+//! anti-click mute before the swap, which the synth's `follow(0.016)` smoother
+//! turns into a fast dip rather than an audible pop). The per-frame screen-Y
+//! offset above rides on top of that name base.
 //!
 //! ## Ring-full handling
 //!
@@ -74,6 +80,31 @@ const CX_ENERGY_WEIGHT: f32 = 0.03;
 
 /// Weight on the pointer/hand `warp_speed` term. See `CX_ENERGY_WEIGHT`.
 const WARP_ENERGY_WEIGHT: f32 = 0.01;
+
+// ── Screen-Y → pitch (v4 parity) ─────────────────────────────────────────────
+
+/// Diatonic scale degrees added at the top of the screen and subtracted at the
+/// bottom, on top of the name's base register — restores v4's mouse/hand-Y
+/// pitch responsiveness. v4 drove pitch indirectly (mouse-Y warped the fractal,
+/// which shifted its live box-count *density*, which set the chord degree); v5
+/// maps screen-Y straight to the degree instead, avoiding a per-frame CPU
+/// box-count on the multi-hour soak path. Full vertical travel spans
+/// `2 × PITCH_Y_RANGE` degrees around the name's register. Ear-tune surface.
+const PITCH_Y_RANGE: f32 = 7.0;
+
+/// Map the pointer/hand vertical position to a chord scale degree around the
+/// name's base register.
+///
+/// `warp_y` is the normalized warp offset in `[-1, 1]` (top of screen = -1, per
+/// [`FlameState::warp_input`]), so higher on screen yields a higher pitch.
+/// Clamped to v4's `[0, 24]` `baseOffset` range; the synth rounds the result to
+/// an integer degree (`chord_frequencies`).
+#[must_use]
+pub(crate) fn flame_pitch_degree(base_degree: f32, warp_y: f32) -> f32 {
+    // Negate: warp_y is +down, but higher on screen should raise the pitch.
+    let offset = -warp_y.clamp(-1.0, 1.0) * PITCH_Y_RANGE;
+    (base_degree + offset).clamp(0.0, 24.0)
+}
 
 // ── Analytic morph-rate ─────────────────────────────────────────────────────
 
@@ -124,6 +155,23 @@ pub fn flame_cx_rate(elapsed_secs: f64) -> f32 {
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct FlameMorphEnergy(pub f32);
 
+/// Per-frame change-tracker for [`drive_flame_audio`]'s `"chord_degree"` push:
+/// the last rounded degree actually sent to the synth. An unchanged degree skips
+/// the push (each `chord_degree` write triggers a chord recompute on the audio
+/// thread, so re-pushing an unchanged value is wasted work).
+///
+/// A [`Resource`] rather than a system-`Local` because it must be invalidated
+/// from *outside* [`drive_flame_audio`]: both [`enter_flame_audio`] and
+/// `watch_flame_name` re-push the bare *base* register via `push_flame_config`
+/// (on entry and on every name change), overwriting the synth's `chord_degree`.
+/// Without invalidation this cache would still believe the previous frame's
+/// base+screen-Y value is live and skip the corrective re-push — silently
+/// dropping the screen-Y pitch offset until the hand crosses into a different
+/// integer degree band (and, across a state re-entry, leaving a freshly rebuilt
+/// synth stuck at its default degree).
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct FlameChordDegreeCache(pub Option<f32>);
+
 /// Advance [`FlameMorphEnergy`] by one frame: an exponential follow toward
 /// `raw`, using `attack_rate` while rising and `release_rate` while falling,
 /// clamped to `[0, 1]` (the `step_dots_envelope` shape, generalized from a
@@ -151,6 +199,11 @@ pub(crate) fn step_flame_energy(
 /// The envelope is advanced **before** the `audio_cmd` early-return so
 /// headless tests without an [`AudioCommandSender`] can still observe
 /// [`FlameMorphEnergy`] — the `drive_dots_audio` idiom.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a Bevy system's parameters are its data dependencies; the screen-Y \
+              pitch push adds the `FlameChordDegreeCache` change-tracker as a ninth"
+)]
 pub fn drive_flame_audio(
     time: Res<'_, Time>,
     state: Res<'_, FlameState>,
@@ -159,6 +212,7 @@ pub fn drive_flame_audio(
     fade: Res<'_, ScreensaverFade>,
     mut energy: ResMut<'_, FlameMorphEnergy>,
     mut last_warp: Local<'_, Vec2>,
+    mut degree_cache: ResMut<'_, FlameChordDegreeCache>,
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
 ) {
     let dt = time.delta_secs();
@@ -198,6 +252,18 @@ pub fn drive_flame_audio(
         "volume_scale",
         settings.synth_volume_scale * (1.0 - fade.alpha()),
     );
+
+    // Screen-Y → chord register (v4 parity): the name's base degree shifted by
+    // the pointer/hand vertical position. Pushed only when the rounded degree
+    // changes — the synth rounds to an integer degree and each change triggers a
+    // chord recompute on the audio thread, so a per-frame push at an unchanged
+    // degree would be wasted work. `follow(0.016)` inside the synth glides the
+    // frequency change, so stepping between integer degrees is click-free.
+    let degree = flame_pitch_degree(state.spec.audio.chord_degree, state.warp_input.y).round();
+    if degree_cache.0 != Some(degree) {
+        push_flame_param(&mut audio_cmd, "chord_degree", degree);
+        degree_cache.0 = Some(degree);
+    }
 }
 
 // ── Enter / exit lifecycle ───────────────────────────────────────────────────
@@ -213,8 +279,15 @@ pub fn drive_flame_audio(
 pub fn enter_flame_audio(
     state: Res<'_, FlameState>,
     settings: Res<'_, FlameSettings>,
+    mut degree_cache: ResMut<'_, FlameChordDegreeCache>,
     audio_cmd: Option<NonSendMut<'_, AudioCommandSender>>,
 ) {
+    // The synth is (re)built on entry and `push_flame_config` below re-pushes the
+    // bare base register, so any degree the previous session cached is stale.
+    // Invalidate it so `drive_flame_audio` re-asserts base + screen-Y on its
+    // first frame instead of skipping on a coincidental match (see
+    // [`FlameChordDegreeCache`]).
+    degree_cache.0 = None;
     let Some(mut audio_cmd) = audio_cmd else {
         return;
     };
@@ -290,6 +363,32 @@ mod tests {
     // Rates matching FlameSettings defaults: attack = 1000/120 s^-1, release = 1000/600 s^-1.
     const TEST_ATTACK_RATE: f32 = 1000.0 / 120.0;
     const TEST_RELEASE_RATE: f32 = 1000.0 / 600.0;
+
+    // ── flame_pitch_degree: screen-Y → chord register ─────────────────────
+
+    /// Higher on screen (`warp_y` toward -1) raises the degree; lower drops it;
+    /// centered leaves the name's base register; the result stays in `[0, 24]`.
+    #[test]
+    fn flame_pitch_degree_tracks_screen_y() {
+        let base = 10.0;
+        assert!(
+            flame_pitch_degree(base, -1.0) > base,
+            "top of screen must raise pitch"
+        );
+        assert!(
+            flame_pitch_degree(base, 1.0) < base,
+            "bottom of screen must lower pitch"
+        );
+        assert!(
+            (flame_pitch_degree(base, 0.0) - base).abs() < f32::EPSILON,
+            "screen center holds the name's base register"
+        );
+        // Clamped to v4's [0, 24] range at both extremes, and past [-1, 1].
+        for (b, y) in [(0.0, 5.0), (24.0, -5.0), (2.0, 1.0), (23.0, -1.0)] {
+            let d = flame_pitch_degree(b, y);
+            assert!((0.0..=24.0).contains(&d), "degree {d} out of [0, 24]");
+        }
+    }
 
     // ── flame_cx_rate: analytic vs. numeric, and turning points ───────────
 
@@ -427,6 +526,7 @@ mod tests {
         world.insert_resource(FlameSettings::default());
         world.insert_resource(ScreensaverFade::default());
         world.insert_resource(FlameMorphEnergy::default());
+        world.insert_resource(FlameChordDegreeCache::default());
         // No AudioCommandSender inserted — system must skip ring pushes cleanly.
 
         world

@@ -20,7 +20,8 @@ use wc_core_macros::SketchSettings;
 #[settings(storage_key = "flame")]
 pub struct FlameSettings {
     /// The visitor's name. Empty means "use the default placeholder name".
-    /// Live: the watcher rebuilds branches + reseeds the node buffer on change.
+    /// Live: the watcher rebuilds branches and the compute morphs the live shape
+    /// into the new name on change (the node buffer is never reseeded).
     #[setting(
         default = String::new(),
         ty = Text,
@@ -31,9 +32,22 @@ pub struct FlameSettings {
     #[serde(default = "default_name")]
     pub name: String,
 
+    /// Show the name overlay text: the editable name box while active, and the
+    /// name label during the screensaver. When off, the name is entered and read
+    /// only here in the settings panel (the fractal itself is unaffected).
+    #[setting(
+        default = true,
+        label = "Show name overlay",
+        section = "Identity",
+        category = User
+    )]
+    #[serde(default = "default_show_name_overlay")]
+    pub show_name_overlay: bool,
+
     /// Approximate total point budget. The tree depth is
     /// floor(ln(budget)/ln(branches)), so actual totals land under this.
-    /// Live: the watcher rebuilds layout + mesh when it changes.
+    /// Live: the watcher rebuilds the layout when it changes (the node buffer and
+    /// billboard mesh are fixed at full capacity; only the live prefix varies).
     #[setting(
         default = 100_000.0_f32,
         min = 10_000.0_f32,
@@ -273,6 +287,26 @@ pub struct FlameSettings {
     #[serde(default = "default_carousel_period_secs")]
     pub carousel_period_secs: f32,
 
+    /// Exponential time constant of the screensaver name-morph: seconds for the
+    /// fractal to morph ~63% of the way from the previous carousel name into the
+    /// next (the shapes lerp directly seed-to-seed — no collapse to the origin
+    /// between names). A higher value is a slower, gentler transition; the v5
+    /// default of a fixed 0.8 per-frame lerp cut over in ~50 ms, which read as
+    /// too abrupt. Applies only during the screensaver — live typing keeps its
+    /// snappy per-keystroke reform.
+    #[setting(
+        default = 5.0_f32,
+        min = 0.0_f32,
+        max = 20.0_f32,
+        step = 0.5_f32,
+        label = "Name morph time",
+        unit = "s",
+        section = "Screensaver",
+        category = User
+    )]
+    #[serde(default = "default_name_morph_seconds")]
+    pub name_morph_seconds: f32,
+
     /// Fraction of full complexity the ember decays to during the
     /// screensaver (Madison: "40-60%"). 1.0 disables the decay.
     #[setting(
@@ -405,6 +439,9 @@ impl wc_core::sketch::SketchLifecycle for FlameSettings {
 fn default_name() -> String {
     String::new()
 }
+fn default_show_name_overlay() -> bool {
+    true
+}
 fn default_target_points() -> f32 {
     100_000.0
 }
@@ -459,6 +496,9 @@ fn default_bloom_composite() -> wc_core::render::BloomComposite {
 fn default_carousel_period_secs() -> f32 {
     120.0
 }
+fn default_name_morph_seconds() -> f32 {
+    5.0
+}
 fn default_ember_fraction() -> f32 {
     0.5
 }
@@ -509,6 +549,11 @@ mod tests {
             "sibling default"
         );
         assert!(
+            (parsed.name_morph_seconds - 5.0).abs() < 1e-6,
+            "sibling default"
+        );
+        assert!(parsed.show_name_overlay, "sibling default (bool)");
+        assert!(
             parsed.carousel_names.is_empty(),
             "missing carousel_names falls back to empty list"
         );
@@ -519,6 +564,7 @@ mod tests {
     fn default_values_match_serde_defaults() {
         let d = FlameSettings::default();
         assert_eq!(d.name, default_name());
+        assert_eq!(d.show_name_overlay, default_show_name_overlay());
         assert!((d.target_points - default_target_points()).abs() < f32::EPSILON);
         assert!((d.autorotate_speed - default_autorotate_speed()).abs() < f32::EPSILON);
         assert!((d.two_hand_zoom_gamma - default_two_hand_zoom_gamma()).abs() < f32::EPSILON);
@@ -537,6 +583,7 @@ mod tests {
         assert!((d.bloom_threshold - default_bloom_threshold()).abs() < f32::EPSILON);
         assert_eq!(d.bloom_composite, default_bloom_composite());
         assert!((d.carousel_period_secs - default_carousel_period_secs()).abs() < f32::EPSILON);
+        assert!((d.name_morph_seconds - default_name_morph_seconds()).abs() < f32::EPSILON);
         assert!((d.ember_fraction - default_ember_fraction()).abs() < f32::EPSILON);
         assert!((d.attract_brightness - default_attract_brightness()).abs() < f32::EPSILON);
         assert_eq!(d.carousel_names, default_carousel_names());

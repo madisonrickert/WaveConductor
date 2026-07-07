@@ -102,6 +102,13 @@ impl Plugin for FlamePlugin {
         // `update_flame_hands` below order against this system. `.or_else` is the
         // non-deprecated run-condition `or` combinator in this Bevy version.
         app.init_resource::<systems::camera::FlameCamera>();
+        // `update_flame_camera` reads `PointerOverUi` as its egui-vs-scene input
+        // guard, but that resource is normally supplied by wc-core's overlay-
+        // buttons plugin (inside the UI plugin), not by FlamePlugin. Defensively
+        // init it here (idempotent — the UI plugin's own init and maintaining
+        // system win in production) so a harness that adds FlamePlugin without
+        // the UI plugin can't panic on the first tick.
+        app.init_resource::<wc_core::input::pointer::PointerOverUi>();
         app.add_systems(
             Update,
             systems::camera::update_flame_camera.run_if(
@@ -120,6 +127,7 @@ impl Plugin for FlamePlugin {
         // run condition, for the same ambiguous-`SystemTypeSet` reason as the
         // camera above.
         app.init_resource::<audio_coupling::FlameMorphEnergy>();
+        app.init_resource::<audio_coupling::FlameChordDegreeCache>();
         app.add_systems(
             Update,
             audio_coupling::drive_flame_audio

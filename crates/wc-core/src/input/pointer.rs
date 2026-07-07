@@ -37,6 +37,19 @@ pub struct PointerState {
     pub cursor: Option<Vec2>,
 }
 
+/// Whether the pointer is currently over the egui UI chrome (settings panel,
+/// name box, overlay buttons) or egui otherwise wants pointer input.
+///
+/// The canonical egui-vs-sketch input guard: sketch input systems that read the
+/// raw Bevy pointer streams (`AccumulatedMouseScroll`, mouse-button drags) check
+/// this before reacting, so scrolling the settings panel does not also zoom the
+/// sketch camera, and dragging on a panel does not orbit it. Populated once per
+/// frame by `crate::ui::buttons::update_pointer_over_ui` (which owns the
+/// `EguiContexts` read); `false` whenever no egui context exists (headless
+/// tests), so guarded systems behave exactly as before the guard was added.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Reflect)]
+pub struct PointerOverUi(pub bool);
+
 /// Which input source produced the [`PointerState::primary`] value this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Reflect)]
 pub enum PointerSource {

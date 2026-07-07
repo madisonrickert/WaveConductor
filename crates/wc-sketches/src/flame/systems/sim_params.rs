@@ -22,7 +22,7 @@ use wc_core::input::pointer::PointerState;
 use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
 use crate::flame::branches::FlameSpec;
-use crate::flame::compute::sim_params::FlameSimParams;
+use crate::flame::compute::sim_params::{settle_lerp, FlameSimParams};
 use crate::flame::levels::LevelLayout;
 use crate::flame::settings::FlameSettings;
 
@@ -164,6 +164,16 @@ pub fn update_flame_sim(
     state.complexity = ember_complexity(fade.alpha(), settings.ember_fraction);
 
     bake_flame_sim(&state, &mut sim);
+
+    // Settle lerp blended on the screensaver fade envelope: crisp (v4 default)
+    // while awake, easing toward the slow morph rate as attract mode fades in and
+    // back to crisp on wake — so entering and leaving the screensaver eases the
+    // lerp smoothly instead of snapping it the frame the activity flips.
+    // `bake_flame_sim` intentionally does not touch the lerp fields.
+    let (lerp_pos, lerp_col) =
+        settle_lerp(settings.name_morph_seconds, time.delta_secs(), fade.alpha());
+    sim.params.lerp_pos = lerp_pos;
+    sim.params.lerp_col = lerp_col;
 }
 
 /// `OnEnter(SketchActivity::Idle)` (gated `in_state(AppState::Flame)`): zero the

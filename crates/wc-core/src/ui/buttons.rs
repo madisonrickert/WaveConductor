@@ -31,6 +31,7 @@ use super::frame::should_paint_backdrop_blur;
 use super::style::OverlayStyle;
 use crate::audio::command::AudioCommand;
 use crate::audio::state::AudioState;
+use crate::input::pointer::PointerOverUi;
 use crate::lifecycle::state::AppState;
 
 // Re-export so Tasks 14/15 can reach the icon glyph constants via this module.
@@ -68,6 +69,7 @@ impl Plugin for OverlayButtonsPlugin {
         app.init_resource::<LastTouchAt>();
         app.init_resource::<SettingsPanelVisible>();
         app.init_resource::<VolumeMuted>();
+        app.init_resource::<PointerOverUi>();
         // Register the message type if it isn't already present (idempotent).
         // `bevy::input::InputPlugin` handles this in production; tests that
         // use `MinimalPlugins` need explicit registration.
@@ -96,7 +98,30 @@ impl Plugin for OverlayButtonsPlugin {
             )
                 .chain(),
         );
+        // Cache "pointer is over the UI" for sketch input systems to read. Runs
+        // in the same egui pass as the draws; egui's area memory persists across
+        // frames, so this reflects every overlay (incl. the settings dock drawn
+        // by another plugin) regardless of intra-pass ordering.
+        app.add_systems(bevy_egui::EguiPrimaryContextPass, update_pointer_over_ui);
     }
+}
+
+/// `EguiPrimaryContextPass`: cache whether the pointer is over any egui area (or
+/// egui otherwise wants pointer input) into [`PointerOverUi`].
+///
+/// This is the app's single egui-vs-sketch input guard. Sketch input systems in
+/// `Update` (e.g. the Flame camera's wheel-zoom and drag-orbit) read the cached
+/// bool so interacting with the settings panel, name box, or overlay buttons
+/// does not leak into the sketch. Reading a one-frame-old value is harmless for
+/// input gating; when no egui context exists (headless tests) the guard stays
+/// `false` and guarded systems behave as they did before it was added.
+pub fn update_pointer_over_ui(
+    mut contexts: EguiContexts<'_, '_>,
+    mut over: ResMut<'_, PointerOverUi>,
+) {
+    over.0 = contexts
+        .ctx_mut()
+        .is_ok_and(|ctx| ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input());
 }
 
 /// Flip [`PointerCoarse`] `true` on any incoming touch message; auto-revert

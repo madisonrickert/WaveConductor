@@ -8,8 +8,9 @@
 //!   and [`sim_params::FlameState`] for the render/audio/interaction stages.
 //! - [`name_change`] — the settings watcher: normalize the name, rebuild the
 //!   [`crate::flame::branches::FlameSpec`] + [`crate::flame::levels::LevelLayout`],
-//!   re-encode the GPU branch/level tables, and reseed the node buffer. Runs on
-//!   every name/point-budget change (including the screensaver carousel).
+//!   and re-encode the GPU branch/level tables. The node buffer is never
+//!   reseeded here — the compute morphs the live shape into the new attractor.
+//!   Runs on every name/point-budget change (including the screensaver carousel).
 //! - [`sim_params`] — the per-frame writer: virtual-time `cX` oscillation,
 //!   pointer/hand warp, and the single [`sim_params::bake_flame_sim`] baker.
 //!   Also the `OnEnter(SketchActivity::Idle)` freeze that zeroes dispatches.

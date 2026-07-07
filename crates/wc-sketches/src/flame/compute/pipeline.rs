@@ -256,7 +256,9 @@ fn init_flame_pipeline(
 ///
 /// Both uniform buffers are uploaded via `queue.write_buffer` (a staged copy, no
 /// allocation). The bind group is cached and reused every frame — rebuilt only
-/// when the node storage buffer changes (a name-change reseed reallocates it).
+/// when the node storage buffer's [`BufferId`] changes, which now happens only on
+/// sketch re-entry (`spawn_flame` allocates a fresh buffer). Name changes no
+/// longer touch it: the buffer is seeded once and the compute morphs it in place.
 /// The compute runs every active frame, including the multi-hour soak, so
 /// rebuilding the bind group per frame would be a steady-state allocation. The
 /// cache keys on the node buffer's [`BufferId`]: when it changes the entry is
@@ -313,7 +315,8 @@ fn prepare_flame_bind_groups(
     }
 
     // Reuse the bind group while the node storage buffer is unchanged; rebuild +
-    // replace (releasing the old buffer reference) on a name-change reseed.
+    // replace (releasing the old buffer reference) when the buffer is swapped,
+    // which now only happens on sketch re-entry (a fresh `spawn_flame` alloc).
     let buffer_id = gpu_nodes.buffer.id();
     let bind_group = match &*cached {
         Some((id, bg)) if *id == buffer_id => bg.clone(),

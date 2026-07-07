@@ -102,6 +102,42 @@ pub struct FlameLevelParamsGpu {
 /// every WebGPU target (verified at pipeline init, as Cymatics does).
 pub const LEVEL_PARAMS_STRIDE: u64 = 256;
 
+/// Default per-frame position lerp toward each node's target (v4: 0.8) — the
+/// snappy live-tracking / per-keystroke reform rate. The screensaver name-morph
+/// overrides `lerp_pos` with a slower, time-based value (see
+/// `crate::flame::screensaver::drive_flame_attract_sim`); the live writer
+/// (`crate::flame::systems::sim_params::update_flame_sim`) resets it here so a
+/// mid-morph value cannot leak into Active mode on wake.
+pub const LERP_POS_DEFAULT: f32 = 0.8;
+/// Default per-frame color lerp (v4: 0.75). See [`LERP_POS_DEFAULT`].
+pub const LERP_COL_DEFAULT: f32 = 0.75;
+
+/// Per-frame settle lerp `(lerp_pos, lerp_col)`, blended between the crisp v4
+/// defaults and the gentle screensaver name-morph rate by `fade_alpha`.
+///
+/// `fade_alpha` is the `ScreensaverFade` envelope: `0.0` fully awake, `1.0` fully
+/// in attract mode, ramping over ~1.5 s at each transition. At `0.0` this returns
+/// [`LERP_POS_DEFAULT`] / [`LERP_COL_DEFAULT`] (crisp live tracking + snappy
+/// per-keystroke reform); at `1.0` it returns the slow exponential
+/// `1 - exp(-dt / morph_seconds)` that eases each carousel name in. Because the
+/// live writer (`update_flame_sim`) and the screensaver writer
+/// (`drive_flame_attract_sim`) both blend on this same envelope, the sleep and
+/// wake transitions ease smoothly between crisp and slow instead of snapping the
+/// lerp on the frame the activity flips. `morph_seconds <= 0` disables the slow
+/// end (always crisp).
+#[must_use]
+pub fn settle_lerp(morph_seconds: f32, dt: f32, fade_alpha: f32) -> (f32, f32) {
+    if morph_seconds <= 0.0 {
+        return (LERP_POS_DEFAULT, LERP_COL_DEFAULT);
+    }
+    let a = fade_alpha.clamp(0.0, 1.0);
+    let slow = 1.0 - (-dt / morph_seconds).exp();
+    (
+        LERP_POS_DEFAULT + (slow - LERP_POS_DEFAULT) * a,
+        LERP_COL_DEFAULT + (slow - LERP_COL_DEFAULT) * a,
+    )
+}
+
 const _: () = assert!(std::mem::size_of::<FlameNodeGpu>() == 32);
 const _: () = assert!(std::mem::size_of::<FlameBranchGpu>() == 96);
 const _: () = assert!(std::mem::size_of::<FlameSimParamsGpu>() == 800);
@@ -144,8 +180,8 @@ pub fn encode_branches(spec: &FlameSpec) -> FlameSimParamsGpu {
     FlameSimParamsGpu {
         branches,
         warp: [0.0, 0.0],
-        lerp_pos: 0.8,
-        lerp_col: 0.75,
+        lerp_pos: LERP_POS_DEFAULT,
+        lerp_col: LERP_COL_DEFAULT,
         branch_count: u32::try_from(spec.branches.len()).unwrap_or(2),
         _pad: [0; 3],
     }
@@ -233,5 +269,32 @@ mod tests {
         let last = &slots[(n - 1) as usize];
         assert_eq!(last.level_start, deepest.start);
         assert_eq!(last.node_count, deepest.count);
+    }
+
+    /// `settle_lerp` blends crisp↔slow across the fade, so sleep/wake ease.
+    #[test]
+    fn settle_lerp_blends_crisp_to_slow_on_fade() {
+        let dt = 1.0 / 60.0;
+        // Awake (fade 0) -> crisp v4 defaults.
+        let (p0, c0) = settle_lerp(5.0, dt, 0.0);
+        assert!((p0 - LERP_POS_DEFAULT).abs() < f32::EPSILON);
+        assert!((c0 - LERP_COL_DEFAULT).abs() < f32::EPSILON);
+        // Fully in attract (fade 1) -> slow, both channels at the same rate.
+        let (p1, c1) = settle_lerp(5.0, dt, 1.0);
+        assert!(
+            p1 < LERP_POS_DEFAULT,
+            "attract pos lerp slower than default"
+        );
+        assert!((p1 - c1).abs() < f32::EPSILON, "pos and col ease together");
+        // Mid-transition sits strictly between slow and crisp (smooth ease).
+        let (pm, _) = settle_lerp(5.0, dt, 0.5);
+        assert!(
+            pm > p1 && pm < LERP_POS_DEFAULT,
+            "mid-fade between slow and crisp"
+        );
+        // Disabled -> always crisp regardless of fade.
+        let (pd, cd) = settle_lerp(0.0, dt, 1.0);
+        assert!((pd - LERP_POS_DEFAULT).abs() < f32::EPSILON);
+        assert!((cd - LERP_COL_DEFAULT).abs() < f32::EPSILON);
     }
 }

@@ -14,7 +14,7 @@ use std::f32::consts::TAU;
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
-use wc_core::input::pointer::PointerState;
+use wc_core::input::pointer::{PointerOverUi, PointerState};
 
 use crate::flame::settings::FlameSettings;
 use crate::flame::systems::hands::FlameGrabState;
@@ -185,6 +185,7 @@ pub fn update_flame_camera(
     time: Res<'_, Time>,
     settings: Res<'_, FlameSettings>,
     pointer: Res<'_, PointerState>,
+    over_ui: Res<'_, PointerOverUi>,
     mouse_buttons: Res<'_, ButtonInput<MouseButton>>,
     scroll: Res<'_, AccumulatedMouseScroll>,
     window: Single<'_, '_, &Window>,
@@ -203,13 +204,25 @@ pub fn update_flame_camera(
     // `OrbitControls` divides both axes by the client *height* (not a
     // per-axis width/height split), matching here.
     let h = window.height().max(1.0);
+    // A held left button is a drag in progress whether or not the cursor is
+    // momentarily over egui chrome, so gate on the button alone here: nulling
+    // `last_drag` when the cursor crosses onto the settings panel / name box /
+    // overlay buttons would make the `last_drag.is_none()` fling + settle-to-home
+    // branches below fire mid-drag, hitching the orbit toward home. Only the
+    // orbit *delta* is suppressed while over UI — egui owns the drag there, and
+    // orbiting the fractal underneath the panel would fight it.
     if mouse_buttons.pressed(MouseButton::Left) {
         if let Some(cursor) = pointer.cursor {
-            if let Some(last) = camera.last_drag {
-                let delta = cursor - last;
-                camera.azimuth -= delta.x / h * TAU;
-                camera.polar -= delta.y / h * TAU;
+            if !over_ui.0 {
+                if let Some(last) = camera.last_drag {
+                    let delta = cursor - last;
+                    camera.azimuth -= delta.x / h * TAU;
+                    camera.polar -= delta.y / h * TAU;
+                }
             }
+            // Advance `last_drag` even while over UI so the excursion is
+            // swallowed (no delta jump when the cursor crosses back onto the
+            // scene) and the drag stays "in progress" for the settle/fling gate.
             camera.last_drag = Some(cursor);
         }
     } else {
@@ -217,8 +230,9 @@ pub fn update_flame_camera(
     }
 
     // Wheel zoom: each scroll line scales distance by (1 - 0.1 * lines),
-    // clamped to v4's OrbitControls bounds.
-    if scroll.delta.y != 0.0 {
+    // clamped to v4's OrbitControls bounds. Suppressed while the pointer is
+    // over egui UI so scrolling the settings panel does not also zoom.
+    if !over_ui.0 && scroll.delta.y != 0.0 {
         let zoomed = camera.distance * (1.0 - ZOOM_SENSITIVITY * scroll.delta.y);
         camera.set_distance_clamped(zoomed);
     }
@@ -467,6 +481,7 @@ mod tests {
             ..FlameSettings::default()
         });
         world.insert_resource(PointerState::default());
+        world.insert_resource(PointerOverUi::default());
         world.insert_resource(ButtonInput::<MouseButton>::default());
         world.insert_resource(AccumulatedMouseScroll::default());
         world.spawn(Window::default());
@@ -502,5 +517,107 @@ mod tests {
         let released = *world.resource::<FlameCamera>();
         assert!(released.distance < 5.0, "ease resumes on release");
         assert!(released.target.x < 1.0, "ease resumes on release");
+    }
+
+    /// Scrolling while the pointer is over egui UI must NOT zoom the fractal —
+    /// the settings-panel scroll-leak regression. Starting at the home pose
+    /// (settle-to-home is a no-op there) isolates the wheel's effect: with the
+    /// guard set a nonzero wheel delta leaves the distance untouched; clearing
+    /// it lets the same delta zoom.
+    #[test]
+    fn scroll_over_ui_does_not_zoom_but_scroll_over_scene_does() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        fn distance_after_scroll(over_ui: bool) -> f32 {
+            let mut world = World::new();
+            let mut time = Time::<()>::default();
+            time.advance_by(std::time::Duration::from_millis(16));
+            world.insert_resource(time);
+            world.insert_resource(FlameSettings {
+                autorotate_speed: 0.0,
+                ..FlameSettings::default()
+            });
+            world.insert_resource(PointerState::default());
+            world.insert_resource(PointerOverUi(over_ui));
+            world.insert_resource(ButtonInput::<MouseButton>::default());
+            world.insert_resource(AccumulatedMouseScroll {
+                delta: Vec2::new(0.0, 3.0),
+                ..Default::default()
+            });
+            world.spawn(Window::default());
+            world.insert_resource(FlameCamera::default());
+            world.insert_resource(FlameGrabState::default());
+            world
+                .run_system_once(update_flame_camera)
+                .expect("update_flame_camera must run");
+            world.resource::<FlameCamera>().distance
+        }
+
+        let home = FlameCamera::default().distance;
+        assert!(
+            (distance_after_scroll(true) - home).abs() < 1e-6,
+            "scroll over UI must not zoom"
+        );
+        assert!(
+            (distance_after_scroll(false) - home).abs() > 1e-6,
+            "scroll over the scene must zoom"
+        );
+    }
+
+    /// Holding the left button while the cursor is over egui UI must NOT null
+    /// `last_drag` and trigger settle-to-home mid-drag: a drag that crosses onto
+    /// a corner button or the panel stays a drag, so the pose is held rather than
+    /// easing home. (The regression: gating the drag branch on `!over_ui` dropped
+    /// `last_drag`, activating the settle-to-home ease while the button was held.)
+    #[test]
+    fn held_drag_over_ui_does_not_settle_to_home() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(100));
+        world.insert_resource(time);
+        // Autorotate off: azimuth is not under test here.
+        world.insert_resource(FlameSettings {
+            autorotate_speed: 0.0,
+            ..FlameSettings::default()
+        });
+        // A drag in progress that has wandered onto the panel: cursor present,
+        // over UI, left button held.
+        world.insert_resource(PointerState {
+            cursor: Some(Vec2::new(200.0, 200.0)),
+            ..PointerState::default()
+        });
+        world.insert_resource(PointerOverUi(true));
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Left);
+        world.insert_resource(buttons);
+        world.insert_resource(AccumulatedMouseScroll::default());
+        world.spawn(Window::default());
+        world.insert_resource(FlameCamera {
+            distance: 5.0,
+            target: Vec3::new(1.0, 0.0, 0.0),
+            ..FlameCamera::default()
+        });
+        world.insert_resource(FlameGrabState::default());
+
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        let cam = *world.resource::<FlameCamera>();
+        assert!(
+            cam.last_drag.is_some(),
+            "a held drag over UI must stay a drag in progress"
+        );
+        assert!(
+            (cam.distance - 5.0).abs() < 1e-6,
+            "no settle-to-home while a drag is held, got distance {}",
+            cam.distance
+        );
+        assert!(
+            (cam.target.x - 1.0).abs() < 1e-6,
+            "target must not ease home mid-drag, got {}",
+            cam.target.x
+        );
     }
 }

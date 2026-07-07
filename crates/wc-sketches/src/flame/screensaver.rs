@@ -6,7 +6,7 @@
 //! - [`drive_flame_carousel`] slowly cycles [`FlameSettings::name`] through the
 //!   editable carousel list (or [`BUILTIN_SEEDS`] when it's empty). Because
 //!   `name` IS the setting the F7 name-change watcher rebuilds on, writing it
-//!   here is enough to reseed the fractal — **and** because wake re-enters
+//!   here is enough to reshape the fractal — **and** because wake re-enters
 //!   `Active` reading the same settings resource, the visitor sees whichever
 //!   carousel name is currently showing adopted into the name box for free, no
 //!   extra wiring required.
@@ -29,7 +29,7 @@ use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 use wc_core::lifecycle::screensaver::in_screensaver;
 use wc_core::lifecycle::state::AppState;
 
-use super::compute::sim_params::FlameSimParams;
+use super::compute::sim_params::{settle_lerp, FlameSimParams};
 use super::settings::FlameSettings;
 use super::systems::sim_params::{bake_flame_sim, ember_complexity, flame_cx, FlameState};
 
@@ -69,7 +69,14 @@ impl Plugin for FlameScreensaverPlugin {
         );
         app.add_systems(
             Update,
-            drive_flame_attract_sim.run_if(in_screensaver(AppState::Flame)),
+            // `.after(watch_flame_name)`: the watcher re-encodes `sim.params` on a
+            // carousel name change, resetting `lerp_pos` to the crisp default;
+            // ordering the attract writer after it lets the slow morph lerp win,
+            // so the (position-preserving) morph eases into the new name instead
+            // of snapping to it.
+            drive_flame_attract_sim
+                .after(super::systems::name_change::watch_flame_name)
+                .run_if(in_screensaver(AppState::Flame)),
         );
     }
 }
@@ -100,10 +107,14 @@ pub(crate) fn next_carousel_name<'a>(
 /// every [`FlameSettings::carousel_period_secs`], write the next name into
 /// [`FlameSettings::name`].
 ///
-/// The write allocates once per ~2 minutes (event-driven, not per-frame): it
-/// triggers the F7 name-change watcher's rebuild, F14's audio config push, and
-/// autosave, and because `name` IS the setting the wake transition adopts it
-/// for free.
+/// The name is written via `bypass_change_detection` — attract-mode display, not
+/// user intent. The value change still drives the name-change watcher's morph
+/// (it compares values, not change ticks) and the wake transition adopts whatever
+/// name is showing for free, but it does NOT mark `FlameSettings` changed, so it
+/// never triggers the per-period **synchronous autosave disk write** (a blocking
+/// read + re-serialize + write on the render thread) or persists transient
+/// carousel state as if the visitor had typed it. Skipped entirely when the next
+/// name is unchanged (e.g. a one-entry carousel re-selecting the same name).
 pub fn drive_flame_carousel(
     time: Res<'_, Time>,
     mut carousel: ResMut<'_, FlameCarousel>,
@@ -116,8 +127,10 @@ pub fn drive_flame_carousel(
     carousel.elapsed = 0.0;
     let (name, next_index) =
         next_carousel_name(&settings.carousel_names, BUILTIN_SEEDS, carousel.index);
-    settings.name = name.to_string();
     carousel.index = next_index;
+    if settings.name != name {
+        settings.bypass_change_detection().name = name.to_string();
+    }
 }
 
 /// `Update` (`in_screensaver(AppState::Flame)`): the screensaver's
@@ -129,6 +142,12 @@ pub fn drive_flame_carousel(
 /// `complexity` toward [`FlameSettings::ember_fraction`] as
 /// [`ScreensaverFade::alpha`] ramps in — the graceful decay AND the roar-back
 /// ride the same 1.5 s envelope in both directions.
+///
+/// Also drives the configurable name-morph: writes `sim.params.lerp_pos` /
+/// `lerp_col` from `settle_lerp` (blended on [`ScreensaverFade`] so sleep/wake
+/// ease smoothly) so a newly-selected carousel name eases in over
+/// [`FlameSettings::name_morph_seconds`] (paired with the watcher leaving the
+/// live node buffer untouched) instead of snapping.
 pub fn drive_flame_attract_sim(
     time: Res<'_, Time>,
     settings: Res<'_, FlameSettings>,
@@ -139,6 +158,15 @@ pub fn drive_flame_attract_sim(
     state.c_x = flame_cx(time.elapsed_secs_f64());
     state.complexity = ember_complexity(fade.alpha(), settings.ember_fraction);
     bake_flame_sim(&state, &mut sim);
+
+    // Gentle settle for the whole screensaver, blended on the fade so the
+    // sleep-in and wake-out transitions ease rather than snap: eases each morphed
+    // name in and smoothly tracks the cX sweep. Overrides the crisp default
+    // `bake_flame_sim` leaves in place (and the watcher's re-encode on a change).
+    let (lerp_pos, lerp_col) =
+        settle_lerp(settings.name_morph_seconds, time.delta_secs(), fade.alpha());
+    sim.params.lerp_pos = lerp_pos;
+    sim.params.lerp_col = lerp_col;
 }
 
 #[cfg(test)]
@@ -214,6 +242,38 @@ mod tests {
 
         assert_eq!(world.resource::<FlameSettings>().name, "Xiaohan");
         assert!((world.resource::<FlameCarousel>().elapsed - 0.0).abs() < 1e-6);
+    }
+
+    /// The carousel updates the name value but must NOT mark `FlameSettings`
+    /// changed — otherwise every advance triggers a synchronous autosave disk
+    /// write and persists transient attract state.
+    #[test]
+    fn drive_flame_carousel_does_not_mark_settings_changed() {
+        let mut world = World::new();
+        world.insert_resource(FlameSettings {
+            carousel_period_secs: 0.1,
+            ..Default::default()
+        });
+        world.insert_resource(FlameCarousel::default());
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_millis(200));
+        world.insert_resource(time);
+
+        // Reset change detection so only the system's own writes register as changes.
+        world.clear_trackers();
+        world
+            .run_system_once(drive_flame_carousel)
+            .expect("drive_flame_carousel run");
+
+        assert_eq!(
+            world.resource::<FlameSettings>().name,
+            "Xiaohan",
+            "the name value is still updated (wake adopts it)"
+        );
+        assert!(
+            !world.is_resource_changed::<FlameSettings>(),
+            "carousel write must bypass change detection (no autosave / no persist)"
+        );
     }
 
     /// `drive_flame_attract_sim` lowers `complexity` via `ember_complexity` and
