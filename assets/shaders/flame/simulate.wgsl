@@ -78,6 +78,11 @@ fn apply_variation(id: u32, p: vec3<f32>) -> vec3<f32> {
             return p * (exp(-len_sq) / sqrt(len_sq));
         }
     }
+    // Unreachable: every case above returns. FXC (Dx12) does not treat a
+    // switch-with-returns as exhaustive and rejects the function with X3507
+    // ("not all control paths return a value"); naga/Metal accept it. A
+    // trailing return keeps the Windows/FXC path compiling.
+    return p;
 }
 
 @compute @workgroup_size(256)
