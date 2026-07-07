@@ -1,25 +1,257 @@
-name: Release
+name: Promote Alpha
 
-# Builds the cross-platform v5 alpha and publishes a GitHub pre-release.
+# One manual workflow validates, builds, tags, and publishes a v5 alpha.
 #
-# - Push a `v*` tag  -> build all three platforms, then publish a pre-release with
-#   the archives attached.
-# - `workflow_dispatch` -> build all three platforms only (no publish). Use this as
-#   a dry-run to validate the Windows/macOS release builds before pushing the real
-#   tag (the cross-platform builds are otherwise first exercised at tag time).
+# Run it from the Actions UI with:
+# - `version`: the new tag, e.g. `v5.0.0-alpha.4`
+# - `target_ref`: the branch or SHA to promote, usually `v5-alpha`
+# - `publish`: `true` to create the annotated tag and GitHub pre-release after
+#   all validation and artifact builds pass; `false` to run the same checks as a
+#   dry run without creating any release state.
+#
+# This replaces the old "dry-run release, push tag, rebuild everything" flow.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Alpha tag to create, e.g. v5.0.0-alpha.4"
+        required: true
+        type: string
+      target_ref:
+        description: "Branch, tag, or commit SHA to promote"
+        required: true
+        default: v5-alpha
+        type: string
+      publish:
+        description: "Create the annotated tag and GitHub pre-release after success"
+        required: true
+        default: false
+        type: boolean
+
+run-name: ${{ inputs.version }} from ${{ inputs.target_ref }}
+
+concurrency:
+  group: promote-alpha-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  # One-shot CI build: incremental metadata is dead weight and bloats the cache.
   CARGO_INCREMENTAL: 0
 
 jobs:
+  prepare:
+    name: prepare candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      target_sha: ${{ steps.prepare.outputs.target_sha }}
+      version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Validate promote inputs
+        id: prepare
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+            echo "::error title=Invalid version::Expected a tag like v5.0.0-alpha.4, got '$VERSION'."
+            exit 1
+          fi
+
+          target_sha="$(git rev-parse HEAD)"
+          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Promote target::$VERSION will use $target_sha."
+
+          if [[ "$PUBLISH" == "true" ]] && git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::error title=Tag already exists::$VERSION already exists on origin."
+            exit 1
+          fi
+
+          if [[ "$PUBLISH" != "true" ]]; then
+            echo "::notice title=Dry run::publish=false, so this run will validate and build only."
+          fi
+
+  fmt:
+    name: rustfmt
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build deps for Bevy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+
+  check-secrets:
+    name: check-secrets
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask check-secrets
+
+  validate-shaders:
+    name: validate-shaders
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask validate-shaders
+
+  deny:
+    name: cargo-deny
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace --all-features
+
+  test-linux:
+    name: test (ubuntu-latest)
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+      LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
+      LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@v1
+      - name: Install Linux build deps for Bevy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - name: Provide unversioned LeapC soname
+        run: ln -sf libLeapC.so.6 vendor/leapc/linux-x86_64/libLeapC.so
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features
+
+  test-cross-platform:
+    name: test (${{ matrix.os }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            leap: macos-aarch64
+          - os: windows-latest
+            leap: windows-x86_64
+    env:
+      RUSTFLAGS: "-D warnings"
+      LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/${{ matrix.leap }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Leap runtime lib path
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "DYLD_FALLBACK_LIBRARY_PATH=$GITHUB_WORKSPACE/vendor/leapc/${{ matrix.leap }}" >> "$GITHUB_ENV"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/vendor/leapc/${{ matrix.leap }}" >> "$GITHUB_PATH"
+          fi
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features
+
+  doc:
+    name: doc
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build deps for Bevy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - run: cargo doc --no-deps --workspace --document-private-items
+      - run: cargo test --doc --workspace
+
   build:
     name: build (${{ matrix.os }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -41,13 +273,11 @@ jobs:
             app_path: target/dist/linux-x86_64/WaveConductor
             asset: WaveConductor-linux-x86_64.tar.gz
     env:
-      # `leaprs`'s build.rs reads this to find LeapC for linking. The
-      # `.cargo/config.toml` default points at macos-aarch64; override per runner
-      # (its `force = false` lets this env win). Absolute so the linker resolves it
-      # regardless of the build's working directory.
       LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/${{ matrix.leap }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -55,7 +285,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Linux-only: Bevy's native build deps + the mold linker (matches ci.yml).
       - name: Install Linux build deps for Bevy
         if: runner.os == 'Linux'
         run: |
@@ -66,16 +295,10 @@ jobs:
       - uses: rui314/setup-mold@v1
         if: runner.os == 'Linux'
 
-      # Linux-only: the vendored tree ships `libLeapC.so.6` but `-lLeapC` needs an
-      # unversioned `libLeapC.so` at link time. macOS vendors its unversioned alias
-      # already; Windows links against `LeapC.lib`.
       - name: Provide unversioned LeapC soname (Linux link)
         if: runner.os == 'Linux'
         run: ln -sf libLeapC.so.6 vendor/leapc/linux-x86_64/libLeapC.so
 
-      # Build the release binary, then assemble the platform staging layout. The
-      # bundler runs `cargo build -p waveconductor --release` itself; keeping it one
-      # step means LEAPSDK_LIB_PATH applies to the build.
       - name: Build + bundle
         run: cargo xtask ${{ matrix.bundle }}
 
@@ -100,66 +323,57 @@ jobs:
 
   publish:
     name: publish pre-release
-    needs: build
-    # Only publish when a tag triggered the run; workflow_dispatch stays a dry-run.
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - prepare
+      - fmt
+      - clippy
+      - check-secrets
+      - validate-shaders
+      - deny
+      - test-linux
+      - test-cross-platform
+      - doc
+      - build
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.target_sha }}
+          fetch-depth: 0
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      - name: Write release notes
+      - name: Verify release notes
+        run: test -s .github/release-notes/v5-alpha.md
+
+      - name: Create annotated tag
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
         run: |
-          cat > NOTES.md <<'EOF'
-          Third alpha of the v5 Rust + Bevy rewrite. Unsigned pre-release
-          binaries for macOS (Apple Silicon), Windows (x86_64), and Linux
-          (x86_64).
-
-          Downloads:
-          - macOS (Apple Silicon): WaveConductor-macos-arm64.zip
-          - Windows (x86_64): WaveConductor-windows-x86_64.zip
-          - Linux (x86_64): WaveConductor-linux-x86_64.tar.gz
-
-          Requirements: a WebGPU-capable GPU (Metal / DX12 / Vulkan 1.2+). Hand
-          tracking is optional and needs the Ultraleap tracking service running.
-
-          Changed since v5.0.0-alpha.2:
-          - Windows now defaults the renderer to DX12 unless WGPU_BACKEND is
-            explicitly set, avoiding older AMD Vulkan-driver startup paths.
-          - Disabled egui's optional bindless-texture request on Windows so
-            GPUs without TEXTURE_BINDING_ARRAY no longer hit that startup
-            warning/fallback path.
-          - DirectML-backed MediaPipe sessions now apply the ONNX Runtime
-            session options DirectML requires and report DirectML/CPU mixed
-            states accurately in the dev panel.
-          - Refreshed the Cargo.lock advisory surface by updating
-            crossbeam-epoch to 0.9.20.
-
-          Notes:
-          - Unsigned builds. macOS: right-click the app and choose Open (or run
-            xattr -dr com.apple.quarantine). Windows: SmartScreen may warn, so click
-            More info, then Run anyway.
-          - GPU inference acceleration: CoreML on macOS, DirectML on Windows
-            (AMD/Intel integrated GPUs), CPU on Linux.
-          - Windows temperature telemetry reads the WDDM adapter temperature as a
-            coarse throttle proxy and may be unavailable on some integrated GPUs.
-          - The 8-hour thermal soak gate is deferred for this alpha. This is a
-            pre-release for testing, not a soak-verified release.
-          - Intel Mac and web/WASM targets are not part of this alpha.
-          EOF
+          set -euo pipefail
+          git -c user.name=github-actions[bot] \
+            -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            tag -a "$VERSION" "$TARGET_SHA" -m "WaveConductor $VERSION"
+          git push origin "refs/tags/$VERSION"
 
       - name: Create GitHub pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: >
-          gh release create "${{ github.ref_name }}"
+          gh release create "$VERSION"
           --repo "${{ github.repository }}"
-          --title "WaveConductor ${{ github.ref_name }}"
-          --notes-file NOTES.md
+          --verify-tag
+          --title "WaveConductor $VERSION"
+          --notes-file .github/release-notes/v5-alpha.md
           --prerelease
           dist/*
