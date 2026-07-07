@@ -11,6 +11,7 @@ mod bundle;
 mod capture;
 mod check_secrets;
 mod manifest;
+mod msi;
 mod util;
 mod validate_shaders;
 
@@ -37,6 +38,8 @@ enum Command {
     BundleLinux(bundle::linux::Args),
     /// Build the release binary and assemble a self-contained Windows staging dir.
     BundleWindows(bundle::windows::Args),
+    /// Package the staged Windows app dir into an MSI installer.
+    PackageWindowsMsi(msi::Args),
     /// Parse + validate WGSL shaders with naga (self-contained shaders;
     /// `#import` shaders are runtime-validated).
     ValidateShaders(validate_shaders::Args),
@@ -54,6 +57,7 @@ fn main() {
         Command::BundleMac(args) => bundle::mac::run(args),
         Command::BundleLinux(args) => bundle::linux::run(args),
         Command::BundleWindows(args) => bundle::windows::run(args),
+        Command::PackageWindowsMsi(args) => msi::run(args),
         Command::ValidateShaders(args) => validate_shaders::run(args),
     };
     if let Err(e) = result {

@@ -56,6 +56,10 @@ const SUBCOMMANDS: &[Entry] = &[
         description: "Build the release binary and assemble a self-contained Windows staging dir.",
     },
     Entry {
+        name: "package-windows-msi",
+        description: "Package the staged Windows app dir into an MSI installer.",
+    },
+    Entry {
         name: "validate-shaders",
         description:
             "Parse + validate WGSL shaders with naga (self-contained; #import shaders skipped).",

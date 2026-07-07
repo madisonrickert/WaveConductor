@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX v3 product source for the WaveConductor MSI.
+
+  The file payload (exe + DLLs + assets/) is harvested from the staged app dir
+  ($(env.WC_MSI_STAGED_DIR)) at build time, so this file only declares product
+  metadata, the install location, the icon, and the Start Menu shortcut. The
+  UpgradeCode is fixed so newer versions upgrade in place. Unsigned for the
+  alpha; a signtool step slots in after `light` in CI later.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="WaveConductor"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Madison Rickert"
+           UpgradeCode="C76E7196-F78F-4780-BE0D-B1357437B232">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of WaveConductor is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="crates/waveconductor/assets/icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="WaveConductor" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <!-- HarvestedComponents is a ComponentGroup emitted by heat from the staged
+         dir; referenced here so the harvested files land under INSTALLDIR. -->
+    <Feature Id="Main" Title="WaveConductor" Level="1">
+      <ComponentGroupRef Id="HarvestedComponents" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="WaveConductorShortcut"
+                  Name="WaveConductor"
+                  Target="[INSTALLDIR]waveconductor.exe"
+                  WorkingDirectory="INSTALLDIR"
+                  Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\WaveConductor"
+                       Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Product>
+</Wix>

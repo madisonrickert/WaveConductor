@@ -27,6 +27,7 @@ const EXPECTED_SUBCOMMANDS: &[&str] = &[
     "bundle-mac",
     "bundle-linux",
     "bundle-windows",
+    "package-windows-msi",
     "validate-shaders",
 ];
 
