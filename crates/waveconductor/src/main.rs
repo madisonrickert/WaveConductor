@@ -489,7 +489,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCaptureLayer {
 /// effort) a non-blocking rolling on-disk log. Also installs the panic hook.
 ///
 /// Returns the log buffer (inserted as a resource for the dev panel) and the
-/// file writer's [`WorkerGuard`], which `main` must hold for the process
+/// file writer's `WorkerGuard`, which `main` must hold for the process
 /// lifetime so buffered log lines are flushed.
 fn init_tracing() -> (
     wc_core::diagnostics::LogBuffer,
