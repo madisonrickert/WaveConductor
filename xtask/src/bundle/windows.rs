@@ -129,6 +129,30 @@ fn assemble(
     // Vendored Leap runtime next to the .exe (adjacent-DLL resolution).
     common::copy_leap_lib(leap_lib, &app_dir.join(LEAP_LIB))?;
 
+    // Stage the ONNX Runtime DirectML DLLs that ORT's build script drops next to
+    // the release binary (present only when `hand-tracking-mediapipe` is compiled
+    // on Windows). Matched by known name so the exact provider-shared filename —
+    // which varies by ORT build — is tolerated. Best-effort per file; the report
+    // lists what was staged so CI can assert coverage. `LeapC.dll` is handled
+    // above and deliberately excluded here.
+    let bin_dir = binary.parent().unwrap_or_else(|| Path::new("."));
+    let mut runtime_dlls = Vec::new();
+    for entry in std::fs::read_dir(bin_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let lower = name.to_ascii_lowercase();
+        let is_ort = lower.starts_with("onnxruntime")
+            && Path::new(&lower).extension().is_some_and(|e| e == "dll");
+        let is_directml = lower == "directml.dll";
+        if is_ort || is_directml {
+            std::fs::copy(entry.path(), app_dir.join(file_name.as_os_str()))
+                .map_err(|e| format!("bundle-windows: cannot stage runtime dll {name}: {e}"))?;
+            runtime_dlls.push(name.into_owned());
+        }
+    }
+    runtime_dlls.sort();
+
     // Recursive assets/ copy.
     let dst_assets = app_dir.join("assets");
     let asset_count = common::copy_dir_all(assets_src, &dst_assets).map_err(|e| {
@@ -146,6 +170,7 @@ fn assemble(
         dir: app_dir,
         size_bytes,
         asset_count,
+        runtime_dlls,
     })
 }
 
@@ -153,8 +178,14 @@ fn assemble(
 fn report_out(report: &StageReport, json: bool) {
     let dir = report.dir.display();
     if json {
+        let dlls = report
+            .runtime_dlls
+            .iter()
+            .map(|d| format!("\"{d}\""))
+            .collect::<Vec<_>>()
+            .join(",");
         println!(
-            "{{\"dir\":\"{dir}\",\"size_bytes\":{},\"asset_count\":{}}}",
+            "{{\"dir\":\"{dir}\",\"size_bytes\":{},\"asset_count\":{},\"runtime_dlls\":[{dlls}]}}",
             report.size_bytes, report.asset_count
         );
     } else {
@@ -163,6 +194,7 @@ fn report_out(report: &StageReport, json: bool) {
         println!("Windows staging assembled: {dir}");
         println!("  size          {mib_whole}.{mib_frac} MiB");
         println!("  asset files   {}", report.asset_count);
+        println!("  runtime dlls  {}", report.runtime_dlls.join(", "));
         println!();
         println!("Archive with (PowerShell):  Compress-Archive -Path target/dist/windows-x86_64/WaveConductor/* -DestinationPath WaveConductor-windows-x86_64.zip");
     }
@@ -219,6 +251,48 @@ mod tests {
         );
         assert!(app.join("RUN.txt").is_file(), "run notes");
         assert_eq!(report.asset_count, 2, "two asset files copied");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn assemble_stages_ort_dlls_from_binary_dir() {
+        let tmp = unique_tmp();
+
+        let binary = tmp.join("waveconductor.exe");
+        std::fs::write(&binary, b"PE-ish binary bytes").expect("write fake exe");
+        // ORT drops these next to the release binary; DirectML.dll casing varies.
+        std::fs::write(tmp.join("onnxruntime.dll"), b"ort").expect("ort dll");
+        std::fs::write(tmp.join("onnxruntime_providers_shared.dll"), b"ort2").expect("ort shared");
+        std::fs::write(tmp.join("DirectML.dll"), b"dml").expect("dml dll");
+        // An unrelated DLL that must NOT be staged.
+        std::fs::write(tmp.join("random.dll"), b"nope").expect("random dll");
+        let leap = tmp.join("LeapC.dll");
+        std::fs::write(&leap, b"leap dll bytes").expect("write fake dll");
+        let assets = tmp.join("assets");
+        std::fs::create_dir_all(&assets).expect("mk assets");
+        std::fs::write(assets.join("a.txt"), b"a").expect("asset a");
+
+        let staging_root = tmp.join("dist");
+        let report = assemble(&binary, &leap, &assets, &staging_root).expect("assemble");
+
+        let app = staging_root.join("WaveConductor");
+        assert!(app.join("onnxruntime.dll").is_file(), "ort staged");
+        assert!(
+            app.join("onnxruntime_providers_shared.dll").is_file(),
+            "ort shared staged"
+        );
+        assert!(app.join("DirectML.dll").is_file(), "directml staged");
+        assert!(!app.join("random.dll").exists(), "unrelated dll not staged");
+        assert_eq!(
+            report.runtime_dlls,
+            vec![
+                "DirectML.dll".to_string(),
+                "onnxruntime.dll".to_string(),
+                "onnxruntime_providers_shared.dll".to_string(),
+            ],
+            "sorted staged dll list"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }

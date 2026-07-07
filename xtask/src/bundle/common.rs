@@ -31,6 +31,9 @@ pub struct StageReport {
     pub size_bytes: u64,
     /// Number of regular files copied from `assets/`.
     pub asset_count: u64,
+    /// Filenames of runtime DLLs staged next to the binary (Windows ORT
+    /// `DirectML` runtime). Empty on platforms that stage none. Sorted.
+    pub runtime_dlls: Vec<String>,
 }
 
 /// Workspace root: parent of the xtask crate dir (`CARGO_MANIFEST_DIR`).

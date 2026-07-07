@@ -140,6 +140,7 @@ fn assemble(
         dir: app_dir,
         size_bytes,
         asset_count,
+        runtime_dlls: Vec::new(),
     })
 }
 
