@@ -150,6 +150,11 @@ jobs:
         with:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Bust once: earlier macOS runs cached ort-sys build-script output with
+          # the broken Xcode 26.5 clang resource path; a fresh cache re-runs it
+          # under the selected Xcode 16.x.
+          prefix-key: "v0-xcode16"
       - name: Select working Xcode (macOS)
         if: runner.os == 'macOS'
         shell: bash
