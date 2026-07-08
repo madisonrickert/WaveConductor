@@ -184,21 +184,32 @@ fn assemble(
     })
 }
 
+/// Serialize a [`StageReport`] to a single-line JSON object.
+///
+/// All string fields are escaped via [`crate::util::json_escape`]: Windows
+/// staging paths contain backslashes (`D:\a\...`), which are invalid raw in JSON
+/// and break downstream parsers (PowerShell `ConvertFrom-Json` in CI failed on
+/// the unescaped `dir` path before this was factored out).
+fn report_json(report: &StageReport) -> String {
+    let dir = crate::util::json_escape(&report.dir.display().to_string());
+    let dlls = report
+        .runtime_dlls
+        .iter()
+        .map(|d| format!("\"{}\"", crate::util::json_escape(d)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"dir\":\"{dir}\",\"size_bytes\":{},\"asset_count\":{},\"runtime_dlls\":[{dlls}]}}",
+        report.size_bytes, report.asset_count
+    )
+}
+
 /// Print the human or JSON summary for an assembled staging directory.
 fn report_out(report: &StageReport, json: bool) {
-    let dir = report.dir.display();
     if json {
-        let dlls = report
-            .runtime_dlls
-            .iter()
-            .map(|d| format!("\"{d}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        println!(
-            "{{\"dir\":\"{dir}\",\"size_bytes\":{},\"asset_count\":{},\"runtime_dlls\":[{dlls}]}}",
-            report.size_bytes, report.asset_count
-        );
+        println!("{}", report_json(report));
     } else {
+        let dir = report.dir.display();
         let mib_whole = report.size_bytes / (1024 * 1024);
         let mib_frac = (report.size_bytes % (1024 * 1024)) * 10 / (1024 * 1024);
         println!("Windows staging assembled: {dir}");
@@ -219,6 +230,27 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn report_json_escapes_windows_backslash_path() {
+        // A staged dir on a Windows runner is e.g. `D:\a\WaveConductor\...`.
+        // Backslashes are invalid raw in JSON (`\a` is a bad escape), so the
+        // serializer must escape them or `ConvertFrom-Json` chokes (the CI
+        // failure this test pins).
+        let report = StageReport {
+            dir: PathBuf::from(r"D:\a\WaveConductor\target\dist"),
+            size_bytes: 42,
+            asset_count: 3,
+            runtime_dlls: vec!["DirectML.dll".to_string()],
+        };
+        let json = report_json(&report);
+        // Every backslash is doubled; the result is valid JSON that
+        // `ConvertFrom-Json` accepts (the raw `\a`/`\W`/`\t` broke it before).
+        assert_eq!(
+            json,
+            r#"{"dir":"D:\\a\\WaveConductor\\target\\dist","size_bytes":42,"asset_count":3,"runtime_dlls":["DirectML.dll"]}"#
+        );
+    }
 
     /// Dependency-free unique scratch directory under the system temp dir.
     fn unique_tmp() -> PathBuf {

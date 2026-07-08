@@ -312,13 +312,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # ORT's download-binaries statically links the ONNX Runtime core into
+          # the exe (libort_sys.rlib), so there is no onnxruntime.dll to ship.
+          # DirectML is the one dynamic dependency ORT drops next to the binary.
           $report = cargo xtask bundle-windows --skip-build --json | ConvertFrom-Json
           Write-Host "Staged runtime DLLs: $($report.runtime_dlls -join ', ')"
-          if (-not ($report.runtime_dlls -contains 'onnxruntime.dll')) {
-            throw "onnxruntime.dll was not staged; ORT DLL glob needs widening (see xtask/src/bundle/windows.rs)"
-          }
           if (-not ($report.runtime_dlls -contains 'DirectML.dll')) {
-            throw "DirectML.dll was not staged"
+            throw "DirectML.dll was not staged; ORT DirectML runtime is missing (see xtask/src/bundle/windows.rs)"
           }
 
       - name: Archive (macOS)
