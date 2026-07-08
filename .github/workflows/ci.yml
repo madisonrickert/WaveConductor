@@ -133,7 +133,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # Pinned to macos-15 (Sequoia, Xcode 16.x): macos-latest advanced to the
+          # macOS 26 image whose Xcode 26.5 clang resource dir is broken
+          # (`ld: library 'clang_rt.osx' not found`). Sequoia keeps arm64.
+          - os: macos-15
             leap: macos-aarch64
           - os: windows-latest
             leap: windows-x86_64

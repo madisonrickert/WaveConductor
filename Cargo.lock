@@ -7490,7 +7490,7 @@ dependencies = [
 
 [[package]]
 name = "waveconductor"
-version = "5.0.0-alpha.3"
+version = "5.0.0-alpha.4"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -7642,7 +7642,7 @@ dependencies = [
 
 [[package]]
 name = "wc-core"
-version = "5.0.0-alpha.3"
+version = "5.0.0-alpha.4"
 dependencies = [
  "bevy",
  "bevy-inspector-egui",
@@ -7681,7 +7681,7 @@ dependencies = [
 
 [[package]]
 name = "wc-core-macros"
-version = "5.0.0-alpha.3"
+version = "5.0.0-alpha.4"
 dependencies = [
  "bevy",
  "proc-macro2",
@@ -7694,7 +7694,7 @@ dependencies = [
 
 [[package]]
 name = "wc-sketches"
-version = "5.0.0-alpha.3"
+version = "5.0.0-alpha.4"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -8652,7 +8652,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "5.0.0-alpha.3"
+version = "5.0.0-alpha.4"
 dependencies = [
  "clap",
  "ignore",

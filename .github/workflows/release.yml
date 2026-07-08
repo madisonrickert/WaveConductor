@@ -198,7 +198,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # Pinned to macos-15 (Sequoia, Xcode 16.x): macos-latest rolled to the
+          # macOS 26 image whose Xcode 26.5 has a broken clang resource dir
+          # (`ld: library 'clang_rt.osx' not found`). Sequoia cannot run Xcode 26,
+          # so it stays on the working toolchain. Still Apple Silicon (arm64).
+          - os: macos-15
             leap: macos-aarch64
           - os: windows-latest
             leap: windows-x86_64
@@ -257,7 +261,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # macos-15 (Sequoia): avoids the broken Xcode 26.5 toolchain on the
+          # macOS 26 image that macos-latest now points to (see test-cross-platform).
+          - os: macos-15
             bundle: bundle-mac
             leap: macos-aarch64
             app_path: target/WaveConductor.app
