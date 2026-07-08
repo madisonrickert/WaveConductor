@@ -157,25 +157,60 @@ fn find_vc_redist_msm() -> Result<std::path::PathBuf, Box<dyn std::error::Error>
         .join("Redist")
         .join("MSVC");
     let mut candidates = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&redist_root) {
-        for entry in entries.flatten() {
-            let msm = entry
-                .path()
-                .join("MergeModules")
-                .join("Microsoft_VC143_CRT_x64.msm");
-            if msm.is_file() {
-                candidates.push(msm);
+    // Match any CRT x64 merge module regardless of toolset number: the filename
+    // is `Microsoft_VC<NNN>_CRT_x64.msm` where NNN tracks the VS version (VC143
+    // for VS17, VC144 for VS18, ...). The wxs references the file by path
+    // variable, not by name, so whichever version is installed works.
+    if let Ok(versions) = std::fs::read_dir(&redist_root) {
+        for ver in versions.flatten() {
+            let merge_dir = ver.path().join("MergeModules");
+            if let Ok(files) = std::fs::read_dir(&merge_dir) {
+                for f in files.flatten() {
+                    let name = f.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("Microsoft_VC") && name.ends_with("_CRT_x64.msm") {
+                        candidates.push(f.path());
+                    }
+                }
             }
         }
     }
     candidates.sort();
-    candidates.pop().ok_or_else(|| {
-        format!(
-            "package-windows-msi: Microsoft_VC143_CRT_x64.msm not found under {}",
-            redist_root.display()
-        )
-        .into()
-    })
+    if let Some(found) = candidates.pop() {
+        return Ok(found);
+    }
+
+    // Not found: enumerate what IS present under the redist root so the CI log
+    // reports the real on-runner layout (turns a blind failure into ground truth).
+    let mut listing = Vec::new();
+    match std::fs::read_dir(&redist_root) {
+        Ok(versions) => {
+            for ver in versions.flatten() {
+                let merge_dir = ver.path().join("MergeModules");
+                match std::fs::read_dir(&merge_dir) {
+                    Ok(files) => {
+                        for f in files.flatten() {
+                            listing.push(f.path().display().to_string());
+                        }
+                    }
+                    Err(_) => {
+                        listing.push(format!("{} (no MergeModules subdir)", ver.path().display()));
+                    }
+                }
+            }
+        }
+        Err(e) => listing.push(format!("cannot read {}: {e}", redist_root.display())),
+    }
+    let present = if listing.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        listing.join("\n  ")
+    };
+    Err(format!(
+        "package-windows-msi: no Microsoft_VC*_CRT_x64.msm under {}. Present:\n  {present}",
+        redist_root.display()
+    )
+    .into())
 }
 
 /// Build the MSI by running the `WiX` v3 toolset directly: `heat` harvests the
