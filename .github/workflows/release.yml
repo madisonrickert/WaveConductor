@@ -230,17 +230,22 @@ jobs:
         run: |
           set -euo pipefail
           echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app
-          # The runner image's default Xcode 26.5 has a broken clang resource dir
-          # (missing lib/darwin), so rustc's `-lclang_rt.osx` fails to link. Select
-          # the newest Xcode 16.x (complete toolchain). The runner presets
-          # DEVELOPER_DIR to 26.5, and DEVELOPER_DIR overrides `xcode-select`, so we
-          # must export it to GITHUB_ENV for later steps, not just run xcode-select.
+          # The runner's default Xcode 26.5 has a broken clang resource dir, and
+          # rustc emits `-lclang_rt.osx` with a link-search path pointing there
+          # (no lib/darwin) plus `-nodefaultlibs`, so the linker cannot find
+          # libclang_rt.osx.a and the native (ORT/blake3) link fails. Select a
+          # complete Xcode 16.x and add ITS compiler-rt dir to the linker search
+          # path via RUSTFLAGS, so clang_rt.osx resolves (the broken -L stays but
+          # is a harmless "search path not found" warning).
           XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
           if [ -z "$XC" ]; then echo "::error::no Xcode 16.x found on this runner"; exit 1; fi
+          DD="$XC/Contents/Developer"
           echo "Selecting $XC"
-          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
-          sudo xcode-select -s "$XC/Contents/Developer"
-          DEVELOPER_DIR="$XC/Contents/Developer" xcrun clang --version
+          echo "DEVELOPER_DIR=$DD" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$DD"
+          RTLIB="$(DEVELOPER_DIR="$DD" xcrun clang -print-resource-dir)/lib/darwin"
+          echo "clang_rt dir: $RTLIB"; ls -l "$RTLIB/libclang_rt.osx.a"
+          echo "RUSTFLAGS=${RUSTFLAGS:-} -L $RTLIB" >> "$GITHUB_ENV"
       - name: Leap runtime lib path
         shell: bash
         run: |
@@ -321,17 +326,22 @@ jobs:
         run: |
           set -euo pipefail
           echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app
-          # The runner image's default Xcode 26.5 has a broken clang resource dir
-          # (missing lib/darwin), so rustc's `-lclang_rt.osx` fails to link. Select
-          # the newest Xcode 16.x (complete toolchain). The runner presets
-          # DEVELOPER_DIR to 26.5, and DEVELOPER_DIR overrides `xcode-select`, so we
-          # must export it to GITHUB_ENV for later steps, not just run xcode-select.
+          # The runner's default Xcode 26.5 has a broken clang resource dir, and
+          # rustc emits `-lclang_rt.osx` with a link-search path pointing there
+          # (no lib/darwin) plus `-nodefaultlibs`, so the linker cannot find
+          # libclang_rt.osx.a and the native (ORT/blake3) link fails. Select a
+          # complete Xcode 16.x and add ITS compiler-rt dir to the linker search
+          # path via RUSTFLAGS, so clang_rt.osx resolves (the broken -L stays but
+          # is a harmless "search path not found" warning).
           XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
           if [ -z "$XC" ]; then echo "::error::no Xcode 16.x found on this runner"; exit 1; fi
+          DD="$XC/Contents/Developer"
           echo "Selecting $XC"
-          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
-          sudo xcode-select -s "$XC/Contents/Developer"
-          DEVELOPER_DIR="$XC/Contents/Developer" xcrun clang --version
+          echo "DEVELOPER_DIR=$DD" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$DD"
+          RTLIB="$(DEVELOPER_DIR="$DD" xcrun clang -print-resource-dir)/lib/darwin"
+          echo "clang_rt dir: $RTLIB"; ls -l "$RTLIB/libclang_rt.osx.a"
+          echo "RUSTFLAGS=${RUSTFLAGS:-} -L $RTLIB" >> "$GITHUB_ENV"
 
       - name: Install WiX Toolset (Windows)
         if: runner.os == 'Windows'
