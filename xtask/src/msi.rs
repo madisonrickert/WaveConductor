@@ -252,6 +252,11 @@ fn build_msi(
     candle_out.push(std::path::MAIN_SEPARATOR.to_string());
     let status = std::process::Command::new(wix_tool("candle"))
         .current_dir(root)
+        // Build a 64-bit package: our app is x64 and the VC++ CRT merge module is
+        // x64, and a 32-bit product (candle's default) cannot consume a 64-bit
+        // merge module (WiX LGHT0345). `-arch x64` also makes harvested
+        // components Win64 and resolves `ProgramFiles64Folder` correctly.
+        .args(["-arch", "x64"])
         .arg(format!("-dVersion={version}"))
         .arg(format!("-dVCRedistMsm={}", vc_msm.display()))
         .arg(&wxs)
