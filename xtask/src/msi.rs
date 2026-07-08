@@ -125,6 +125,59 @@ fn wix_tool(name: &str) -> std::ffi::OsString {
     }
 }
 
+/// Locate the VC++ v143 CRT merge module shipped with Visual Studio / Build Tools
+/// on the build runner, via `vswhere`. Returns the `.msm` path. Windows-only in
+/// practice (only called from `build_msi`, past the staged-dir guard), but compiles
+/// on any host.
+fn find_vc_redist_msm() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::path::PathBuf;
+    let pf86 =
+        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".to_owned());
+    let vswhere = PathBuf::from(pf86)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    let out = std::process::Command::new(&vswhere)
+        .args(["-latest", "-property", "installationPath"])
+        .output()
+        .map_err(|e| {
+            format!(
+                "package-windows-msi: cannot run vswhere ({}): {e}",
+                vswhere.display()
+            )
+        })?;
+    if !out.status.success() {
+        return Err("package-windows-msi: vswhere failed to locate Visual Studio".into());
+    }
+    let vs_path = String::from_utf8(out.stdout)?.trim().to_owned();
+    // Merge modules live under VC\Redist\MSVC\<version>\MergeModules\. The version
+    // dir varies; collect all matches and take the highest (lexicographic) one.
+    let redist_root = PathBuf::from(&vs_path)
+        .join("VC")
+        .join("Redist")
+        .join("MSVC");
+    let mut candidates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&redist_root) {
+        for entry in entries.flatten() {
+            let msm = entry
+                .path()
+                .join("MergeModules")
+                .join("Microsoft_VC143_CRT_x64.msm");
+            if msm.is_file() {
+                candidates.push(msm);
+            }
+        }
+    }
+    candidates.sort();
+    candidates.pop().ok_or_else(|| {
+        format!(
+            "package-windows-msi: Microsoft_VC143_CRT_x64.msm not found under {}",
+            redist_root.display()
+        )
+        .into()
+    })
+}
+
 /// Build the MSI by running the `WiX` v3 toolset directly: `heat` harvests the
 /// staged app dir into a `HarvestedComponents` component group (`cargo wix`
 /// does not run the directory harvester on its own), `candle` compiles the
@@ -158,11 +211,14 @@ fn build_msi(
         return Err(format!("package-windows-msi: `heat` failed with {status}").into());
     }
 
+    let vc_msm = find_vc_redist_msm()?;
+
     let mut candle_out = build_dir.clone().into_os_string();
     candle_out.push(std::path::MAIN_SEPARATOR.to_string());
     let status = std::process::Command::new(wix_tool("candle"))
         .current_dir(root)
         .arg(format!("-dVersion={version}"))
+        .arg(format!("-dVCRedistMsm={}", vc_msm.display()))
         .arg(&wxs)
         .arg(&harvest_wxs)
         .arg("-out")

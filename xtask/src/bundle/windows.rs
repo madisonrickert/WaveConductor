@@ -37,7 +37,11 @@ const RUN_NOTES: &str = "WaveConductor (v5 alpha)\r\n\
     Requires a WebGPU-capable GPU (DirectX 12). Hand tracking is optional; the\r\n\
     Ultraleap Gemini tracking service is the recommended input on Windows. This\r\n\
     is an unsigned pre-release build, so SmartScreen may warn on first launch\r\n\
-    (click More info, then Run anyway).\r\n";
+    (click More info, then Run anyway).\r\n\
+    \r\n\
+    Requires the Microsoft Visual C++ 2015-2022 x64 Redistributable (install it\r\n\
+    from Microsoft if the app fails to start). The MSI installer bundles it\r\n\
+    automatically.\r\n";
 
 /// Arguments for the bundle-windows subcommand.
 #[derive(ClapArgs)]
