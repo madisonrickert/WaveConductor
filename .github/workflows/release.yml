@@ -217,6 +217,20 @@ jobs:
         with:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@v2
+      - name: Select working Xcode (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app
+          # The runner image's default Xcode 26.5 ships a broken clang resource
+          # dir (missing lib/darwin), so rustc's `-lclang_rt.osx` fails to link.
+          # Select the newest Xcode 16.x, which has a complete toolchain.
+          XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$XC" ]; then echo "::error::no Xcode 16.x found on this runner"; exit 1; fi
+          echo "Selecting $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcrun clang --version
       - name: Leap runtime lib path
         shell: bash
         run: |
@@ -290,6 +304,21 @@ jobs:
           toolchain: 1.96.0
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Select working Xcode (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app
+          # The runner image's default Xcode 26.5 ships a broken clang resource
+          # dir (missing lib/darwin), so rustc's `-lclang_rt.osx` fails to link.
+          # Select the newest Xcode 16.x, which has a complete toolchain.
+          XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$XC" ]; then echo "::error::no Xcode 16.x found on this runner"; exit 1; fi
+          echo "Selecting $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcrun clang --version
 
       - name: Install WiX Toolset (Windows)
         if: runner.os == 'Windows'
