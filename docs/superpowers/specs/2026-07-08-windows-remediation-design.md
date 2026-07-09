@@ -375,10 +375,22 @@ New settings fields:
 
 A startup system applies the mode. The existing F11 handler
 (`lifecycle/nav.rs:63-71`) writes `start_fullscreen` back on toggle. Monitors are
-enumerated from Bevy's `Monitors`; an absent saved monitor falls back to
-`Current`. Fullscreen and monitor selection are **re-asserted on `MonitorAdded`
-/ `MonitorRemoved`**, which is what lets the app survive a TV that sleeps and
+enumerated from Bevy's `Monitor` entities; an absent saved monitor falls back to
+`Current`. Fullscreen and monitor selection are **re-asserted whenever the
+monitor set changes**, which is what lets the app survive a TV that sleeps and
 re-enumerates mid-soak.
+
+**Corrected 2026-07-09.** This paragraph originally said the re-assertion hangs
+off `MonitorAdded` / `MonitorRemoved`. ~~Those messages~~ do not exist: neither
+symbol appears anywhere in `bevy_window-0.19.0/src` or `bevy_winit-0.19.0/src`.
+Bevy 0.19 represents monitors as plain `Monitor` ECS entities, spawned and
+despawned by `bevy_winit::system::create_monitors`
+(`bevy_winit-0.19.0/src/system.rs:177`) once per event-loop iteration, with no
+dedicated event. Track the set with `Added<Monitor>` /
+`RemovedComponents<Monitor>` and keep the mode-applying system idempotent —
+write `Window::mode` only when it differs from the target, or change detection
+re-applies the mode to the OS window every frame. See
+`docs/superpowers/plans/2026-07-09-alpha5-03-fullscreen-display-settings.md`.
 
 ### Workstream 5 — Audio output device selection and recovery
 

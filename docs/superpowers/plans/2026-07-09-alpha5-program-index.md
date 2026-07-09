@@ -228,10 +228,19 @@ that sleeps and wakes drops the installation out of fullscreen for the rest of t
 
 **Decisions locked (Madison chose the flat-checkbox shape over a first-class Kiosk mode).**
 New `DisplaySettings` section owning: `start_fullscreen` (default `true` in release, `false` under
-`debug_assertions` so `cargo rund` stays sane), `hide_cursor`, `monitor: Option<String>` persisted by
+`debug_assertions` so `cargo rund` stays sane), `hide_cursor`, `monitor` persisted by
 name with fallback to `Current`. A startup system applies the mode. The existing F11 handler writes
-`start_fullscreen` back on toggle. Fullscreen and monitor are **re-asserted on `MonitorAdded` /
-`MonitorRemoved`** — that is the bit that survives a sleeping TV.
+`start_fullscreen` back on toggle. Fullscreen and monitor are **re-asserted when the monitor set
+changes** — that is the bit that survives a sleeping TV.
+
+**Correction, 2026-07-09: `MonitorAdded` / `MonitorRemoved` do not exist.** This index and the spec both
+asserted Bevy 0.19 fires them. It does not — neither symbol appears anywhere in `bevy_window-0.19.0/src`
+or `bevy_winit-0.19.0/src`. Monitors are plain `Monitor` ECS entities, spawned and despawned by
+`bevy_winit::system::create_monitors` (`bevy_winit-0.19.0/src/system.rs:177`) once per event-loop
+iteration, with no dedicated event. Caught by Plan 03's author reading the vendored source instead of
+trusting this document. Use `Added<Monitor>` / `RemovedComponents<Monitor>` to track the list, and make
+the mode-applying system idempotent, writing `Window::mode` only when it differs from the target so
+change detection does not thrash winit every frame.
 
 **`boot_into_attract` is cut. Do not implement it.** The spec assigned it to the
 `configurable-attract-mode-timeout` worktree, which in fact shipped only `attract_mode_timeout_secs`
