@@ -38,7 +38,6 @@
 use std::num::NonZeroU64;
 
 use bevy::core_pipeline::{Core2d, Core2dSystems};
-use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -319,7 +318,7 @@ pub fn line_post_process(
     pipeline_res: Option<Res<'_, PostProcessPipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
     render_queue: Res<'_, RenderQueue>,
-    mut bind_group_cache: Local<'_, (Option<UVec2>, HashMap<TextureViewId, BindGroup>)>,
+    mut bind_groups: Local<'_, [Option<(TextureViewId, BindGroup)>; 2]>,
     mut render_context: RenderContext<'_, '_>,
 ) {
     let (view_target, camera) = view.into_inner();
@@ -352,27 +351,50 @@ pub fn line_post_process(
 
     let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout_descriptor);
 
-    // Reuse the bind group for this source view if we have built it before.
-    // `post_process_write` cycles `source` between two stable views, so after the
-    // first two frames every frame is a cache hit — no per-frame
-    // `create_bind_group` on the render hot path (the project's
-    // no-hot-path-allocation rule). The other two entries (persistent uniform
-    // buffer + sampler) never change, and `write_buffer` updates the uniform
-    // contents without invalidating the binding.
+    // Two slots, one per ping-pong view, each validated against the id of the
+    // very texture view it binds. This mirrors upstream
+    // `bevy_core_pipeline::fullscreen_material::FullscreenMaterialBindGroup`,
+    // which performs the same comparison for its `a`/`b` pair.
     //
-    // A resize reallocates the view targets, minting new `TextureViewId`s. We
-    // clear the map on that transition, dropping the bind groups that still
-    // referenced the old (now freed) full-screen HDR targets. Without this the
-    // map would grow by two entries per resize for the life of the process —
-    // each pinning an `Rgba16Float` screen-sized texture. Steady state holds
-    // exactly two entries. Same shape as `hand_mesh::bone_composite`.
-    let target_size = camera.physical_target_size;
-    if bind_group_cache.0 != target_size {
-        bind_group_cache.1.clear();
-        bind_group_cache.0 = target_size;
-    }
-    let bind_group = bind_group_cache.1.entry(source.id()).or_insert_with(|| {
-        render_context.render_device().create_bind_group(
+    // Comparing the bound view's own id — rather than a proxy such as the
+    // window size — matters: Bevy reallocates a `ViewTarget` whenever any of
+    // `(camera.target, texture_usage, main_texture_format, Msaa)` changes, not
+    // only on resize. Checking the id we actually bind catches every cause
+    // without knowing which occurred, and cannot rot when Bevy adds another
+    // dimension to that key.
+    //
+    // Two slots suffice, by construction: `post_process_write()` alternates
+    // `source` between the view target's two stable main textures, so at most
+    // two distinct source views are ever live. Unlike a `HashMap`, this array
+    // cannot grow. Clearing a slot drops its `BindGroup`, releasing the
+    // full-screen `Rgba16Float` texture that bind group pinned.
+    //
+    // Steady state hits both slots, so there is no per-frame
+    // `create_bind_group` on the render hot path (the project's
+    // no-hot-path-allocation rule). The other two bindings (persistent uniform
+    // buffer + sampler) never change, and `write_buffer` updates the uniform
+    // contents without invalidating them.
+    let source_id = source.id();
+    let slot = if let Some(hit) = bind_groups
+        .iter()
+        .position(|slot| slot.as_ref().is_some_and(|(id, _)| *id == source_id))
+    {
+        hit
+    } else {
+        // Miss: either one of the first two frames, or the view targets were
+        // reallocated and every cached bind group now references a freed
+        // texture. Prefer an empty slot; otherwise drop both.
+        if let Some(index) = bind_groups.iter().position(Option::is_none) {
+            index
+        } else {
+            bind_groups[0] = None;
+            bind_groups[1] = None;
+            0
+        }
+    };
+
+    if bind_groups[slot].is_none() {
+        let created = render_context.render_device().create_bind_group(
             "line_post_bind_group",
             &layout,
             &BindGroupEntries::sequential((
@@ -380,8 +402,13 @@ pub fn line_post_process(
                 source,
                 &pipeline_res.sampler,
             )),
-        )
-    });
+        );
+        bind_groups[slot] = Some((source_id, created));
+    }
+    // Populated immediately above when it was empty.
+    let Some((_, bind_group)) = bind_groups[slot].as_ref() else {
+        return;
+    };
 
     let mut pass = render_context
         .command_encoder()
@@ -402,6 +429,6 @@ pub fn line_post_process(
             multiview_mask: None,
         });
     pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &*bind_group, &[]);
+    pass.set_bind_group(0, bind_group, &[]);
     pass.draw(0..3, 0..1);
 }
