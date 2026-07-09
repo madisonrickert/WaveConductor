@@ -37,12 +37,6 @@
 //! churn (e.g. a panel that is rebuilt with a different id), while a widget
 //! painted continuously keeps exactly one slot forever.
 
-// Transient. `SlotBook` has no non-test caller until Task 4 wires it into
-// `callback.rs`, so the lib target (compiled without `cfg(test)`) sees the whole
-// type as dead code and `clippy -D warnings` fails. Task 4, Step 6 removes this
-// attribute and verifies clippy stays clean without it.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use bevy_egui::egui;

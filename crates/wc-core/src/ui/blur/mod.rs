@@ -119,7 +119,14 @@ impl BackdropBlurPlugin {
         };
         render_app.add_systems(
             Render,
-            ensure_blur_texture.in_set(RenderSystems::PrepareResources),
+            (
+                ensure_blur_texture,
+                // Advances the composite slot book and evicts widgets that have
+                // not painted recently. Must run before the render graph, where
+                // bevy_egui's prepare_egui_pass node invokes `update`.
+                callback::tick_composite_slots,
+            )
+                .in_set(RenderSystems::PrepareResources),
         );
         node::setup_render_systems(render_app);
         node::setup_render_graph(render_app);
@@ -143,6 +150,7 @@ impl Plugin for BackdropBlurPlugin {
         };
         render_app.init_resource::<node::BackdropBlurPipeline>();
         render_app.init_resource::<callback::CompositePipeline>();
+        render_app.init_resource::<callback::CompositeSlots>();
     }
 }
 

@@ -24,8 +24,11 @@
 //! | 1      | filtering sampler           | FRAGMENT   |
 //! | 2      | uniform buffer (`CompositeUniforms`) | FRAGMENT |
 //!
-//! A fresh per-frame `CompositeUniforms` buffer is uploaded for each panel
-//! rect (32 bytes; acceptable once-per-visible-panel cost).
+//! Each panel owns one persistent 32-byte `CompositeUniforms` buffer, created
+//! on first paint and rewritten in place every frame via `Queue::write_buffer`.
+//! Buffers and bind groups live in `CompositeSlots`, keyed by the widget's
+//! stable `egui::Id`, and are evicted after `SLOT_EVICT_FRAMES` frames without
+//! a paint. Nothing is allocated on the render hot path.
 
 #![allow(
     clippy::as_conversions,
@@ -38,11 +41,11 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use bevy::render::render_resource::{
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
-    BufferBindingType, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-    FragmentState, MultisampleState, PipelineCache, PrimitiveState, RenderPipelineDescriptor,
-    SamplerBindingType, ShaderStages, ShaderType, TextureFormat, TextureSampleType,
-    TextureViewDimension, VertexState,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
+    Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CachedRenderPipelineId,
+    ColorTargetState, ColorWrites, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+    RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType, TextureFormat,
+    TextureSampleType, TextureViewDimension, TextureViewId, VertexState,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_world::RenderEntity;
@@ -74,6 +77,42 @@ pub struct CompositePipeline {
     /// Handle kept alive so the shader asset is not evicted while the
     /// pipeline is in use.
     pub shader: Handle<Shader>,
+}
+
+/// GPU resources owned by one frosted widget's composite draw.
+///
+/// The bind group holds `Arc` references to the blur texture view, the
+/// sampler, and `buffer`. Keeping the `BindGroup` alive here — rather than
+/// leaking it — is what bounds the app's GPU memory. The bind group is rebuilt
+/// only when `blur_view` changes (i.e. on a window resize); the buffer's
+/// *contents* are rewritten every frame via `Queue::write_buffer`, which does
+/// not invalidate the binding.
+pub(crate) struct CompositeGpu {
+    /// Per-widget `CompositeUniforms` buffer (32 bytes).
+    buffer: Buffer,
+    /// Bind group over (blur texture view, sampler, `buffer`).
+    bind_group: BindGroup,
+    /// Id of the blur texture view this bind group was built against. When the
+    /// blur texture is reallocated (resize), the id changes and the bind group
+    /// must be rebuilt or it would sample a freed texture.
+    blur_view: TextureViewId,
+}
+
+/// Render-world storage for every frosted widget's [`CompositeGpu`].
+///
+/// Populated by [`BackdropBlurPaintCallback::update`], read by
+/// [`BackdropBlurPaintCallback::render`], advanced and pruned once per frame by
+/// [`tick_composite_slots`].
+#[derive(Resource, Default)]
+pub(crate) struct CompositeSlots(pub(crate) super::slots::SlotBook<CompositeGpu>);
+
+/// Advance the composite slot book one frame and evict stale widgets.
+///
+/// Registered in `Render` under `RenderSystems::PrepareResources`, which runs
+/// before the render graph — and therefore before `bevy_egui`'s
+/// `prepare_egui_pass` node invokes any paint callback's `update`.
+pub(crate) fn tick_composite_slots(mut slots: ResMut<'_, CompositeSlots>) {
+    slots.0.tick();
 }
 
 /// Uniform data uploaded per-panel for the composite draw call.
@@ -257,7 +296,12 @@ pub struct BackdropBlurPaintCallback {
     /// `SlotBook`. Must be the same value on every frame the widget is
     /// painted, and distinct from every other frosted widget's id. Both
     /// construction sites pass `response.id`, which egui derives from the
-    /// containing `Ui` and the widget's allocation order.
+    /// containing `Ui` and the widget's allocation order. This invariant is
+    /// positional rather than structural: each frosted widget currently lives
+    /// in its own `egui::Area` with a fixed string id and is the first
+    /// allocation in that `Ui`, which is what makes `response.id` stable and
+    /// unique — two blurred widgets sharing one `Ui` would depend on a fixed
+    /// allocation order.
     pub id: egui::Id,
     /// Corner radius of the panel in egui points. Converted to physical pixels
     /// at render time via `info.pixels_per_point`.
@@ -268,33 +312,120 @@ pub struct BackdropBlurPaintCallback {
 }
 
 impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
-    /// No per-frame update needed. The blur texture is produced by
-    /// [`super::node::backdrop_blur`] in a separate render system that
-    /// runs before the egui pass.
+    /// Create or refresh this widget's [`CompositeGpu`] slot.
+    ///
+    /// `bevy_egui` calls `update` for every paint callback (from the
+    /// `prepare_egui_pass` render-graph node) before it calls `render` for any
+    /// of them, so writing here and reading in `render` is sound. We create the
+    /// uniform buffer and bind group **once per widget**, not once per frame:
+    /// the buffer contents are rewritten with `write_buffer`, and the bind
+    /// group is rebuilt only when the blur texture view is reallocated.
+    ///
+    /// Bails silently on any missing resource, mirroring `render`.
     fn update(
         &self,
-        _info: egui::PaintCallbackInfo,
+        info: egui::PaintCallbackInfo,
         _render_entity: RenderEntity,
         _pipeline_key: EguiPipelineKey,
-        _world: &mut World,
+        world: &mut World,
     ) {
+        let Some(uniforms) = composite_uniforms(
+            info.screen_size_px,
+            info.pixels_per_point,
+            self.rect,
+            self.corner_radius,
+        ) else {
+            return;
+        };
+
+        // Bail before `resource_scope` panics on a missing resource. In headless
+        // tests without a RenderApp the plugin never inits this.
+        if world.get_resource::<CompositeSlots>().is_none() {
+            return;
+        }
+
+        let id = self.id;
+        world.resource_scope(|world: &mut World, mut slots: Mut<'_, CompositeSlots>| {
+            let Some(pipeline_data) = world.get_resource::<CompositePipeline>() else {
+                return;
+            };
+            let Some(blur_texture) = world.get_resource::<super::BackdropBlurTexture>() else {
+                return;
+            };
+            let pipeline_cache = world.resource::<PipelineCache>();
+            let device = world.resource::<RenderDevice>();
+            let queue = world.resource::<RenderQueue>();
+
+            let blur_view = blur_texture.view.id();
+
+            // Rebuild only when absent or when the blur texture was reallocated.
+            let stale = slots
+                .0
+                .get(id)
+                .is_none_or(|gpu: &CompositeGpu| gpu.blur_view != blur_view);
+            if stale {
+                let buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some("backdrop_blur_composite_uniforms"),
+                    size: CompositeUniforms::min_size().get(),
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let layout = pipeline_cache
+                    .get_bind_group_layout(&pipeline_data.bind_group_layout_descriptor);
+                let bind_group = device.create_bind_group(
+                    Some("backdrop_blur_composite_bind_group"),
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        &blur_texture.view,
+                        &blur_texture.sampler,
+                        buffer.as_entire_binding(),
+                    )),
+                );
+                slots.0.insert(
+                    id,
+                    CompositeGpu {
+                        buffer,
+                        bind_group,
+                        blur_view,
+                    },
+                );
+            }
+
+            // Rewrite the uniform contents every frame through the reusable
+            // staging buffer. `clear()` retains capacity, so steady state does
+            // not allocate (the project's no-hot-path-allocation rule).
+            let Some((scratch, gpu)) = slots.0.scratch_and_touch(id) else {
+                return;
+            };
+            {
+                use bevy::render::render_resource::encase;
+                scratch.clear();
+                let mut staging = encase::UniformBuffer::new(std::mem::take(scratch));
+                // `write` only fails if the staging buffer is too small. `encase`
+                // grows a `Vec` backing store as needed, so a failure here is an
+                // invariant violation and a panic is correct.
+                #[allow(clippy::expect_used)]
+                staging
+                    .write(&uniforms)
+                    .expect("CompositeUniforms: write to staging buffer");
+                queue.write_buffer(&gpu.buffer, 0, staging.as_ref());
+                *scratch = staging.into_inner();
+            }
+        });
     }
 
     /// Draw the blurred backdrop quad.
     ///
-    /// Steps:
-    /// 1. Resolve `CompositePipeline` and `BackdropBlurTexture` from the
-    ///    world; bail silently if either is missing.
-    /// 2. Convert the egui-point rect to physical-pixel UVs using
-    ///    `info.pixels_per_point` and `info.screen_size_px`.
-    /// 3. Upload a 32-byte `CompositeUniforms` buffer with the UV rect,
-    ///    half-extent, and corner radius.
-    /// 4. Build a transient bind group and issue `draw(0..6, 0..1)`.
-    ///    The vertex shader triangulates the quad from a const array indexed
-    ///    by `@builtin(vertex_index)`, so no vertex buffer is needed.
+    /// All GPU resource creation happened in [`Self::update`]. This method only
+    /// looks up the pipeline and this widget's slot, then issues the draw. The
+    /// `&'pass BindGroup` that `set_bind_group` requires is borrowed straight
+    /// out of `world: &'pass World`, which is why no `Box::leak` is needed.
+    ///
+    /// The vertex shader triangulates the quad from a const array indexed by
+    /// `@builtin(vertex_index)`, so no vertex buffer is bound.
     fn render<'pass>(
         &self,
-        info: egui::PaintCallbackInfo,
+        _info: egui::PaintCallbackInfo,
         render_pass: &mut bevy::render::render_phase::TrackedRenderPass<'pass>,
         _render_entity: RenderEntity,
         _pipeline_key: EguiPipelineKey,
@@ -310,82 +441,20 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
             // Pipeline still compiling on the first few frames; not an error.
             return;
         };
-        let Some(blur_texture) = world.get_resource::<super::BackdropBlurTexture>() else {
+        let Some(slots) = world.get_resource::<CompositeSlots>() else {
             return;
         };
-
-        // --- Geometry conversion ---
-
-        let Some(uniforms) = composite_uniforms(
-            info.screen_size_px,
-            info.pixels_per_point,
-            self.rect,
-            self.corner_radius,
-        ) else {
+        // Absent when `update` bailed this frame (e.g. blur texture not yet
+        // allocated). The caller's tint rect still paints, so the panel
+        // degrades to a solid translucent fill.
+        let Some(gpu) = slots.0.get(self.id) else {
             return;
         };
-
-        // --- Uniform buffer upload ---
-
-        // Borrow device and queue from world resources. Both are `Arc`-backed
-        // handles, so cloning is cheap.
-        let device = world.resource::<RenderDevice>();
-        let queue = world.resource::<RenderQueue>();
-
-        let buffer = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-            label: Some("backdrop_blur_composite_uniforms"),
-            size: CompositeUniforms::min_size().get(),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        {
-            use bevy::render::render_resource::encase;
-            let mut staging = encase::UniformBuffer::new(Vec::<u8>::with_capacity(
-                CompositeUniforms::min_size().get() as usize,
-            ));
-            // `write` only fails if the staging buffer is too small. We sized it
-            // via `CompositeUniforms::min_size()`, so a failure is an invariant
-            // violation and a panic is correct.
-            #[allow(clippy::expect_used)]
-            staging
-                .write(&uniforms)
-                .expect("CompositeUniforms: write to staging buffer");
-            queue.write_buffer(&buffer, 0, staging.as_ref());
-        }
-
-        // --- Bind group ---
-
-        let layout =
-            pipeline_cache.get_bind_group_layout(&pipeline_data.bind_group_layout_descriptor);
-        let bind_group = device.create_bind_group(
-            Some("backdrop_blur_composite_bind_group"),
-            &layout,
-            &BindGroupEntries::sequential((
-                &blur_texture.view,
-                &blur_texture.sampler,
-                buffer.as_entire_binding(),
-            )),
-        );
-
-        // `set_bind_group` requires `&'pass BindGroup` but `bind_group` is
-        // stack-local. We extend its lifetime via `Box::leak`. The memory is
-        // small (one `BindGroup` ≈ a pointer per panel per frame) and the GPU
-        // resource itself is reference-counted internally by wgpu, so leaking
-        // the Rust wrapper is safe. The wgpu device reclaims GPU resources on
-        // the next frame when the device drops its last reference.
-        //
-        // Alternative approaches (storing in a world component via `update`,
-        // pre-allocating in `CompositePipeline`) were considered but add
-        // complexity not yet warranted for 1–3 simultaneous panels.
-        let bind_group: &'pass _ = Box::leak(Box::new(bind_group));
 
         // --- Draw ---
 
         render_pass.set_render_pipeline(pipeline);
-        render_pass.set_bind_group(0, bind_group, &[]);
-        // The vertex shader generates a 2-triangle quad from a const array of 6
-        // clip-space corners indexed by `@builtin(vertex_index)`.
+        render_pass.set_bind_group(0, &gpu.bind_group, &[]);
         render_pass.draw(0..6, 0..1);
     }
 }
