@@ -440,6 +440,125 @@ fn shift_s_targets_screensaver_within_first_60s() {
     );
 }
 
+/// Regression test for the message-reader drain bug this codebase has
+/// actually shipped once — see the "peek" / reader-cursor warning above
+/// `reset_on_interaction` in `crates/wc-core/src/lifecycle/idle.rs`.
+/// `debounce_window_resize` must drain BOTH its `WindowResized` and
+/// `WindowScaleFactorChanged` readers on every frame — including a frame
+/// where both message kinds arrive together and no `WindowResizeSettled` is
+/// emitted.
+///
+/// The regression this guards against is combining the two reads with a
+/// short-circuiting `||`, e.g.
+/// `resized.read().count() > 0 || scale_changed.read().count() > 0`.
+/// Whichever operand sits on the right only gets evaluated — and its reader
+/// drained — when the left operand is `false`. A frame carrying BOTH message
+/// kinds is exactly the combination that trips this regardless of which
+/// operand a future edit puts on which side, because the left operand is
+/// `true` and short-circuits the right one.
+///
+/// This test cannot peek `debounce_window_resize`'s private `Local` reader
+/// cursors directly, so it observes the one thing a caller CAN see: the
+/// timing of the emitted `WindowResizeSettled`. A single frame writes both a
+/// `WindowResized` and a `WindowScaleFactorChanged` message together. With
+/// both readers correctly drained, the settle fires the first frame
+/// `RESIZE_DEBOUNCE` (250 ms) after that frame. Under the short-circuit
+/// regression, the un-drained reader's message survives Bevy's one-frame
+/// message double-buffering and gets phantom-observed as a brand-new event on
+/// the very next frame, which *rearms* the debounce timer a full tick late —
+/// delaying the settle by one more tick. The assertion below lands in the gap
+/// between those two timings: it holds against the correct implementation and
+/// fails against the regression (verified by deliberately reintroducing the
+/// short-circuit and watching this test fail).
+#[test]
+fn window_resize_debounce_drains_both_readers_every_frame() {
+    use bevy::ecs::entity::Entity;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::{WindowResized, WindowScaleFactorChanged};
+    use std::time::Duration;
+    use wc_core::lifecycle::window_resize::{debounce_window_resize, WindowResizeSettled};
+
+    // Small enough to stay well under `Time<Virtual>::max_delta`'s default
+    // 250 ms cap — RESIZE_DEBOUNCE is also 250 ms, so a step anywhere near
+    // that value risks the cap silently truncating a frame's delta (see the
+    // `direct_action_input_rewinds_timer` / `shift_s_chord_...` comments
+    // above for the same trap with the 60 s idle thresholds).
+    const STEP: Duration = Duration::from_millis(60);
+
+    /// Counts `WindowResizeSettled` messages via its own independent reader,
+    /// so the test can observe emission without reaching into
+    /// `debounce_window_resize`'s private `Local` state.
+    #[derive(Resource, Default)]
+    struct SettleCount(u32);
+
+    fn count_settles(
+        mut reader: MessageReader<'_, '_, WindowResizeSettled>,
+        mut count: ResMut<'_, SettleCount>,
+    ) {
+        count.0 += u32::try_from(reader.read().count()).unwrap_or(u32::MAX);
+    }
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    // `WindowPlugin` (which normally registers these) is not part of this
+    // minimal app; register them directly, mirroring what `WindowPlugin`
+    // does upstream so `debounce_window_resize`'s `MessageReader` params
+    // resolve.
+    app.add_message::<WindowResized>();
+    app.add_message::<WindowScaleFactorChanged>();
+    app.add_message::<WindowResizeSettled>();
+    app.init_resource::<SettleCount>();
+    app.add_systems(Update, (debounce_window_resize, count_settles).chain());
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+    // Bevy's first `app.update()` only establishes the time baseline (the
+    // clock does not advance yet); `ManualDuration` takes effect from the
+    // second tick onward.
+    app.update();
+
+    // Frame 1 (t ~= STEP = 60 ms): write BOTH message kinds together — the
+    // one combination that trips a short-circuiting `||` regardless of
+    // operand order. This arms the debounce timer at t ~= 60 ms; a single
+    // arming frame never emits.
+    app.world_mut().write_message(WindowResized {
+        window: Entity::PLACEHOLDER,
+        width: 800.0,
+        height: 600.0,
+    });
+    app.world_mut().write_message(WindowScaleFactorChanged {
+        window: Entity::PLACEHOLDER,
+        scale_factor: 2.0,
+    });
+    app.update();
+    assert_eq!(
+        app.world().resource::<SettleCount>().0,
+        0,
+        "a single arming frame must not emit immediately"
+    );
+
+    // Five more quiet frames (t ~= 120, 180, 240, 300, 360 ms), no new
+    // messages written. Correct implementation: both readers were already
+    // emptied on frame 1, so the timer stays armed at t ~= 60 ms and the
+    // settle fires once elapsed time crosses 60 ms + 250 ms = 310 ms — the
+    // first such frame is t ~= 360 ms. Short-circuit regression: the
+    // un-drained reader's stale message phantom-fires exactly once more on
+    // the very next frame (t ~= 120 ms), rearming the timer there instead; its
+    // deadline becomes 120 ms + 250 ms = 370 ms, which this loop does not
+    // reach.
+    for _ in 0..5 {
+        app.update();
+    }
+
+    assert_eq!(
+        app.world().resource::<SettleCount>().0,
+        1,
+        "WindowResizeSettled must have fired exactly once by t ~= 360 ms; a \
+         count of 0 here means a reader went un-drained on the frame both \
+         events arrived together, phantom-rearming the timer and delaying \
+         the settle past this window"
+    );
+}
+
 /// When `Digit1` and `Digit3` are pressed in the same frame, the
 /// select-action that sorts first (`Line`, bound to `Digit1`) wins.
 ///
