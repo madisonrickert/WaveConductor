@@ -10,7 +10,7 @@
 //!   former operator caption was cut 2026-06-10 — see the settings module)
 //!   plus the operator's idle-to-attract-mode timeout, synced into
 //!   [`crate::lifecycle::idle::InteractionTimer`] by
-//!   [`sync_attract_timeout_from_settings`].
+//!   `sync_attract_timeout_from_settings` (private).
 //! - The [`fade::ScreensaverFade`] envelope attract layers can cross-fade
 //!   against.
 //! - Per-tier **present-rate throttling** via `bevy::winit::WinitSettings`

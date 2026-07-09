@@ -31,8 +31,8 @@ use wc_core_macros::SketchSettings;
 /// appears in the User panel and round-trips through persistence.
 ///
 /// `attract_mode_timeout_secs` is read by
-/// [`crate::lifecycle::screensaver::sync_attract_timeout_from_settings`],
-/// which splits it evenly into
+/// `crate::lifecycle::screensaver::sync_attract_timeout_from_settings`
+/// (private), which splits it evenly into
 /// [`crate::lifecycle::idle::InteractionTimer`]'s two thresholds; the other
 /// two fields below are read directly by the framework's present-rate
 /// throttle and OS display-sleep-inhibit systems.
@@ -82,8 +82,8 @@ pub struct ScreensaverSettings {
 
     /// Total time of inactivity (mouse, keyboard, touch, or hand tracking)
     /// before the screensaver's attract mode begins. Split evenly by
-    /// [`crate::lifecycle::screensaver::sync_attract_timeout_from_settings`]
-    /// into [`crate::lifecycle::idle::InteractionTimer`]'s two internal
+    /// `crate::lifecycle::screensaver::sync_attract_timeout_from_settings`
+    /// (private) into [`crate::lifecycle::idle::InteractionTimer`]'s two internal
     /// stages (`Active → Idle` throttles hand-tracking inference and freezes
     /// some sketch dispatches; `Idle → Screensaver` shows the attract
     /// visual) — that split is an implementation detail, not
