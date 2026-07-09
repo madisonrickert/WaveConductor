@@ -79,6 +79,7 @@ pub fn backdrop_blur_frame(
         let callback = EguiBevyPaintCallback::new_paint_callback(
             outer_rect,
             BackdropBlurPaintCallback {
+                id: response.id,
                 // BackdropBlurPaintCallback stores corner_radius as f32 for
                 // shader uniform upload (physical-pixel conversion happens there).
                 corner_radius: f32::from(options.corner_radius),

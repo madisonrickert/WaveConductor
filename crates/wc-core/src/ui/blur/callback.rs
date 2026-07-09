@@ -253,6 +253,12 @@ impl FromWorld for CompositePipeline {
 ///
 /// [`render`]: BackdropBlurPaintCallback::render
 pub struct BackdropBlurPaintCallback {
+    /// Stable per-widget egui id, used to key this widget's GPU slot in
+    /// `SlotBook`. Must be the same value on every frame the widget is
+    /// painted, and distinct from every other frosted widget's id. Both
+    /// construction sites pass `response.id`, which egui derives from the
+    /// containing `Ui` and the widget's allocation order.
+    pub id: egui::Id,
     /// Corner radius of the panel in egui points. Converted to physical pixels
     /// at render time via `info.pixels_per_point`.
     pub corner_radius: f32,

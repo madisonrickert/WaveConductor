@@ -332,6 +332,7 @@ pub fn overlay_icon_button(
             painter.add(EguiBevyPaintCallback::new_paint_callback(
                 rect,
                 BackdropBlurPaintCallback {
+                    id: response.id,
                     corner_radius: f32::from(style.button_corner_radius),
                     rect,
                 },
