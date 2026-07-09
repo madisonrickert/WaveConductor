@@ -55,8 +55,12 @@ cargo clippy -p <crate> --all-targets --all-features -- -D warnings
 `as_conversions` at `warn`. CI escalates all warnings to errors and passes `--all-targets`, so test code
 is held to the same bar as production code. Four of Plan 01's plan defects were this:
 
-- `.expect(…)` / `.unwrap()` in a `#[cfg(test)] mod tests` block → **denied**. Use `let ... else`,
-  `assert!(matches!(…))`, or destructure.
+- `.expect(…)` / `.unwrap()` in a `#[cfg(test)] mod tests` block is denied **unless the block opts out**.
+  The house convention (verified 2026-07-09 in `settings/hand_tracking.rs:168`,
+  `mediapipe/inference_ort.rs:346`, and `mediapipe/mod.rs:686`) is to put
+  `#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]` directly on the
+  `mod tests` declaration. Reuse it in an existing block; **add it when you create a new one** — that
+  omission is what bit Plan 01. Bare `panic!` is still denied (`clippy::panic`).
 - `assert_eq!(x.is_some(), true)` → `clippy::bool_assert_comparison`. Use `assert!(x.is_some())`.
 - `0..(N + 1)` → `clippy::range_plus_one`. Use `0..=N`.
 - `u._pad` → `clippy::used_underscore_binding`.
