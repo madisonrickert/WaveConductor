@@ -319,7 +319,7 @@ pub fn line_post_process(
     pipeline_res: Option<Res<'_, PostProcessPipeline>>,
     pipeline_cache: Res<'_, PipelineCache>,
     render_queue: Res<'_, RenderQueue>,
-    mut bind_group_cache: Local<'_, HashMap<TextureViewId, BindGroup>>,
+    mut bind_group_cache: Local<'_, (Option<UVec2>, HashMap<TextureViewId, BindGroup>)>,
     mut render_context: RenderContext<'_, '_>,
 ) {
     let (view_target, camera) = view.into_inner();
@@ -358,10 +358,20 @@ pub fn line_post_process(
     // `create_bind_group` on the render hot path (the project's
     // no-hot-path-allocation rule). The other two entries (persistent uniform
     // buffer + sampler) never change, and `write_buffer` updates the uniform
-    // contents without invalidating the binding. Steady state holds two entries;
-    // a resize recreates the view targets (new ids → fresh entries), leaving the
-    // stale pair resident — a bounded, rare cost for a kiosk app that never resizes.
-    let bind_group = bind_group_cache.entry(source.id()).or_insert_with(|| {
+    // contents without invalidating the binding.
+    //
+    // A resize reallocates the view targets, minting new `TextureViewId`s. We
+    // clear the map on that transition, dropping the bind groups that still
+    // referenced the old (now freed) full-screen HDR targets. Without this the
+    // map would grow by two entries per resize for the life of the process —
+    // each pinning an `Rgba16Float` screen-sized texture. Steady state holds
+    // exactly two entries. Same shape as `hand_mesh::bone_composite`.
+    let target_size = camera.physical_target_size;
+    if bind_group_cache.0 != target_size {
+        bind_group_cache.1.clear();
+        bind_group_cache.0 = target_size;
+    }
+    let bind_group = bind_group_cache.1.entry(source.id()).or_insert_with(|| {
         render_context.render_device().create_bind_group(
             "line_post_bind_group",
             &layout,
