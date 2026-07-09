@@ -49,6 +49,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_world::RenderEntity;
+use bevy::render::view::ExtractedWindows;
 use bevy_egui::render::{EguiBevyPaintCallbackImpl, EguiPipelineKey};
 
 /// Asset path for the composite WGSL shader, relative to `assets/`.
@@ -325,6 +326,19 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
     /// the buffer contents are rewritten with `write_buffer`, and the bind
     /// group is rebuilt only when the blur texture view is reallocated.
     ///
+    /// `update` does *not* read `info.screen_size_px`, unlike `render`. In
+    /// `bevy_egui` 0.40 the two hooks are handed different
+    /// `egui::PaintCallbackInfo` values: `render`'s copy is built from the
+    /// camera viewport and is correct, but `update`'s copy is built from
+    /// `EguiRenderTargetData::target_size`, which is declared, initialised to
+    /// zero, and never assigned anywhere in that crate — so it is always
+    /// `[0, 0]` here. Using it would make `composite_uniforms` bail on its
+    /// zero-screen guard every frame, so no `CompositeGpu` slot would ever be
+    /// created and the backdrop would never draw. Instead this reads the
+    /// primary window's physical size directly via
+    /// `primary_window_physical_size`, the same source `ensure_blur_texture`
+    /// uses to size the blur texture, so the two agree by construction.
+    ///
     /// Bails silently on any missing resource, mirroring `render`.
     fn update(
         &self,
@@ -333,20 +347,22 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
         _pipeline_key: EguiPipelineKey,
         world: &mut World,
     ) {
+        // Bail before `resource_scope` panics on a missing resource. In headless
+        // tests without a RenderApp the plugin never inits this.
+        if world.get_resource::<CompositeSlots>().is_none() {
+            return;
+        }
+        let Some(screen_size_px) = primary_window_physical_size(world) else {
+            return;
+        };
         let Some(uniforms) = composite_uniforms(
-            info.screen_size_px,
+            screen_size_px,
             info.pixels_per_point,
             self.rect,
             self.corner_radius,
         ) else {
             return;
         };
-
-        // Bail before `resource_scope` panics on a missing resource. In headless
-        // tests without a RenderApp the plugin never inits this.
-        if world.get_resource::<CompositeSlots>().is_none() {
-            return;
-        }
 
         let id = self.id;
         world.resource_scope(|world: &mut World, mut slots: Mut<'_, CompositeSlots>| {
@@ -461,6 +477,27 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
         render_pass.set_bind_group(0, &gpu.bind_group, &[]);
         render_pass.draw(0..6, 0..1);
     }
+}
+
+/// Physical size of the primary window, in pixels.
+///
+/// `update` cannot use `info.screen_size_px`: `bevy_egui` 0.40 builds that
+/// field from `EguiRenderTargetData::target_size`, which it declares
+/// (`render/systems.rs:313`), initialises to `UVec2::ZERO` (`:331`), reads
+/// (`render/render_pass.rs:33`) — and never assigns. So `update` always sees
+/// `[0, 0]`, while `render`'s copy (built from the camera viewport) is correct.
+///
+/// Reading `ExtractedWindows` here matches [`super::ensure_blur_texture`],
+/// which sizes the blur texture from the same values, so the UVs this callback
+/// computes and the texture it samples agree by construction.
+///
+/// Returns `None` during startup or while minimised, when no primary window
+/// exists or it reports a zero dimension; callers bail silently.
+fn primary_window_physical_size(world: &World) -> Option<[u32; 2]> {
+    let windows = world.get_resource::<ExtractedWindows>()?;
+    let primary = windows.primary?;
+    let window = windows.windows.get(&primary)?;
+    Some([window.physical_width, window.physical_height])
 }
 
 #[cfg(test)]
