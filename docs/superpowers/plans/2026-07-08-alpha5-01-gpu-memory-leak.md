@@ -967,112 +967,156 @@ render() for zero-sized viewports where it still calls update()."
 
 ---
 
-### Task 5: Evict the Line and Dots post-process bind-group caches
+### Task 5: Adopt upstream's two-slot, id-keyed post-process bind-group cache
 
 **Files:**
-- Modify: `crates/wc-sketches/src/line/post_process.rs:316-364`
-- Modify: `crates/wc-sketches/src/dots/post_process.rs:268-317`
+- Modify: `crates/wc-sketches/src/line/post_process.rs`
+- Modify: `crates/wc-sketches/src/dots/post_process.rs`
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: nothing consumed later. Independent of Tasks 1–4.
+- Produces: nothing consumed later. Independent of Tasks 1-4.
 
-Both systems hold `Local<'_, HashMap<TextureViewId, BindGroup>>` with no eviction. Their comments concede the flaw: *"a resize recreates the view targets (new ids → fresh entries), leaving the stale pair resident — a bounded, rare cost for a kiosk app that never resizes."* Plan 02 introduces F11 fullscreen and resize handling, which breaks that assumption. Each stranded entry pins a full-screen `Rgba16Float` texture.
+**Why this shape.** Both systems cached bind groups in a `Local<HashMap<TextureViewId, BindGroup>>` with no eviction, betting on "a kiosk app that never resizes." An intermediate fix keyed eviction on `camera.physical_target_size`. That is a *proxy*: Bevy reallocates a `ViewTarget` whenever any of `(camera.target, texture_usage, main_texture_format, Msaa)` changes, of which size is one dimension. Correct today only because nothing mutates HDR, MSAA, or the render target on this camera after `spawn_camera` (`crates/waveconductor/src/main.rs:250-282`) — an invariant nobody wrote down, and one that a future per-tier quality toggle would quietly break.
 
-The fix mirrors `crates/wc-sketches/src/hand_mesh/bone_composite.rs:237,276-280`, which pairs the map with the id of the resource whose change invalidates it. Here the invalidating signal is the camera's physical target size: a resize reallocates the view targets.
-
-- [ ] **Step 1: Change the Line cache to a size-keyed pair**
-
-In `crates/wc-sketches/src/line/post_process.rs`, change the system parameter at line 322 from:
+Bevy 0.19 solves this in `bevy_core_pipeline::fullscreen_material::FullscreenMaterialBindGroup` (`fullscreen_material.rs:244-277`): **two slots, one per ping-pong view, each validated against the `TextureViewId` of the very texture view it binds.**
 
 ```rust
-    mut bind_group_cache: Local<'_, HashMap<TextureViewId, BindGroup>>,
+if bind_groups.a.0 != main_texture_view.id()       { bind_groups.a = create_bind_group(main_texture_view); }
+if bind_groups.b.0 != main_texture_other_view.id() { bind_groups.b = create_bind_group(main_texture_other_view); }
 ```
 
-to:
+This is strictly better than any proxy key. It never asks *why* the view changed — resize, HDR toggle, MSAA change, render-target swap, or a dimension Bevy adds in 0.20 all mint a fresh `TextureViewId`, and the comparison catches every one. It is bounded at two entries **by construction** rather than by an eviction policy, because `post_process_write()` alternates `source` between exactly two stable main textures. And dropping a slot drops its `BindGroup`, releasing the full-screen `Rgba16Float` texture it pinned.
+
+- [ ] **Step 1: Change the Line cache to a two-slot, id-keyed array**
+
+In `crates/wc-sketches/src/line/post_process.rs`, change the system parameter (currently `mut bind_group_cache: Local<'_, (Option<UVec2>, HashMap<TextureViewId, BindGroup>)>`) to:
 
 ```rust
-    mut bind_group_cache: Local<'_, (Option<UVec2>, HashMap<TextureViewId, BindGroup>)>,
+    mut bind_groups: Local<'_, [Option<(TextureViewId, BindGroup)>; 2]>,
 ```
 
-Add `UVec2` to the `bevy::prelude` or math import if not already in scope (it is re-exported by `bevy::prelude::*`).
+- [ ] **Step 2: Replace the lookup, and the stale comment with it**
 
-- [ ] **Step 2: Clear on target-size change, and fix the stale comment**
-
-Replace the comment and `entry` call at lines 355-364 with:
+Replace the comment block and the `entry(...).or_insert_with(...)` call with:
 
 ```rust
-    // Reuse the bind group for this source view if we have built it before.
-    // `post_process_write` cycles `source` between two stable views, so after the
-    // first two frames every frame is a cache hit — no per-frame
-    // `create_bind_group` on the render hot path (the project's
-    // no-hot-path-allocation rule). The other two entries (persistent uniform
-    // buffer + sampler) never change, and `write_buffer` updates the uniform
-    // contents without invalidating the binding.
+    // Two slots, one per ping-pong view, each validated against the id of the
+    // very texture view it binds. This mirrors upstream
+    // `bevy_core_pipeline::fullscreen_material::FullscreenMaterialBindGroup`,
+    // which performs the same comparison for its `a`/`b` pair.
     //
-    // A resize reallocates the view targets, minting new `TextureViewId`s. We
-    // clear the map on that transition, dropping the bind groups that still
-    // referenced the old (now freed) full-screen HDR targets. Without this the
-    // map would grow by two entries per resize for the life of the process —
-    // each pinning an `Rgba16Float` screen-sized texture. Steady state holds
-    // exactly two entries. Same shape as `hand_mesh::bone_composite`.
-    let target_size = camera.physical_target_size;
-    if bind_group_cache.0 != target_size {
-        bind_group_cache.1.clear();
-        bind_group_cache.0 = target_size;
+    // Comparing the bound view's own id — rather than a proxy such as the
+    // window size — matters: Bevy reallocates a `ViewTarget` whenever any of
+    // `(camera.target, texture_usage, main_texture_format, Msaa)` changes, not
+    // only on resize. Checking the id we actually bind catches every cause
+    // without knowing which occurred, and cannot rot when Bevy adds another
+    // dimension to that key.
+    //
+    // Two slots suffice, by construction: `post_process_write()` alternates
+    // `source` between the view target's two stable main textures, so at most
+    // two distinct source views are ever live. Unlike a `HashMap`, this array
+    // cannot grow. Clearing a slot drops its `BindGroup`, releasing the
+    // full-screen `Rgba16Float` texture that bind group pinned.
+    //
+    // Steady state hits both slots, so there is no per-frame
+    // `create_bind_group` on the render hot path (the project's
+    // no-hot-path-allocation rule). The other two bindings (persistent uniform
+    // buffer + sampler) never change, and `write_buffer` updates the uniform
+    // contents without invalidating them.
+    let source_id = source.id();
+    let slot = match bind_groups
+        .iter()
+        .position(|slot| slot.as_ref().is_some_and(|(id, _)| *id == source_id))
+    {
+        Some(hit) => hit,
+        None => {
+            // Miss: either one of the first two frames, or the view targets were
+            // reallocated and every cached bind group now references a freed
+            // texture. Prefer an empty slot; otherwise drop both.
+            let empty = bind_groups.iter().position(Option::is_none);
+            match empty {
+                Some(index) => index,
+                None => {
+                    bind_groups[0] = None;
+                    bind_groups[1] = None;
+                    0
+                }
+            }
+        }
+    };
+
+    if bind_groups[slot].is_none() {
+        let created = render_context.render_device().create_bind_group(
+            "line_post_bind_group",
+            &layout,
+            &BindGroupEntries::sequential((
+                pipeline_res.post_params_buffer.as_entire_binding(),
+                source,
+                &pipeline_res.sampler,
+            )),
+        );
+        bind_groups[slot] = Some((source_id, created));
     }
-    let bind_group = bind_group_cache.1.entry(source.id()).or_insert_with(|| {
+    // Populated immediately above when it was empty.
+    let Some((_, bind_group)) = bind_groups[slot].as_ref() else {
+        return;
+    };
 ```
 
-Leave the `or_insert_with` closure body unchanged.
+Then delete the now-unused `camera.physical_target_size` read. `camera` is still needed for the `camera.hdr` guard, so keep the binding. Remove any import (`HashMap`, `UVec2`) that this leaves unused — CI runs `-D warnings` and an unused import is an error.
 
 - [ ] **Step 3: Apply the identical change to Dots**
 
-In `crates/wc-sketches/src/dots/post_process.rs`, make the same two edits: the `Local` type at line 274, and the cache-clear plus `bind_group_cache.1.entry(...)` at line 317. The surrounding comment differs only in the bind-group label (`dots_post_bind_group`); update its stale "kiosk app that never resizes" sentence to the same replacement text as Step 2.
+In `crates/wc-sketches/src/dots/post_process.rs`, make the same two edits. The files are near-identical; the only differences are the bind-group label (the real string is `dots_explode_post_bind_group`, **not** `dots_post_bind_group` — do not rename it) and the uniform type. Do not factor out a shared helper: the two crates' post-process modules are deliberately parallel, and that is out of scope.
 
-- [ ] **Step 4: Verify no unevicted caches remain**
+- [ ] **Step 4: Verify no unbounded or proxy-keyed cache remains**
 
 ```bash
-rg -n "Local<'_, HashMap<TextureViewId, BindGroup>>" crates/    # expect: no matches
+rg -n "HashMap<TextureViewId, BindGroup>" crates/          # expect: no matches
+rg -n "kiosk app that never resizes" crates/               # expect: no matches
+rg -n "physical_target_size" crates/wc-sketches/           # expect: no matches
 ```
 
-Expected: no matches. Every remaining `TextureViewId`-keyed cache is paired with an invalidation key.
+Expected: all three return nothing. Note `crates/wc-sketches/src/hand_mesh/bone_composite.rs` legitimately keeps its own id-keyed cache with an explicit clear; it is out of scope here and its `HashMap` is keyed differently.
 
 - [ ] **Step 5: Run the gate**
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features --workspace -- -D warnings
-cargo nextest run --workspace --all-features
+cargo clippy -p wc-sketches --all-targets --all-features -- -D warnings
+cargo test -p wc-sketches --lib post_process
 ```
 
-Expected: all pass.
+Expected: clippy clean; the 3 existing `dots::post_process::tests` pass.
 
-- [ ] **Step 6: Verify rendering is unchanged**
+- [ ] **Step 6: Commit**
 
-Run: `cargo xtask capture --list` to find the Line and Dots scenarios, then capture each and compare against its baseline. The bind group is rebuilt with identical bindings, so output must be pixel-identical.
-
-```bash
-cargo xtask capture <line-scenario>
-cargo xtask capture <dots-scenario>
-```
-
-Expected: no diff against baselines. If the captures come back all-black, check that the app window is foregrounded — a backgrounded capture returns `[0,0,0]` frames and is an environment problem, not a regression.
-
-- [ ] **Step 7: Commit**
+Write the message to a file and use `git commit -F`, never `-m` (backticks get shell-substituted).
 
 ```bash
 git add crates/wc-sketches/src/line/post_process.rs crates/wc-sketches/src/dots/post_process.rs
-git commit -m "fix(sketches): evict post-process bind-group caches on resize
+git commit -F <message file>
+```
+
+Message:
+
+```
+refactor(sketches): adopt upstream's two-slot post-process bind-group cache
 
 Both Line and Dots cached post-process bind groups in a never-cleared
 Local<HashMap<TextureViewId, BindGroup>>, betting that a kiosk app never
-resizes. F11 fullscreen and the incoming resize-invalidation work break
-that bet, and each stranded entry pins a full-screen Rgba16Float texture
-for the life of the process.
+resizes. An interim fix evicted on camera.physical_target_size, but that is
+a proxy: Bevy reallocates a ViewTarget on any change to
+(camera.target, texture_usage, main_texture_format, Msaa). It was correct
+only because nothing currently mutates HDR, MSAA, or the render target on
+this camera -- an invariant nobody had written down.
 
-Pair the map with the camera's physical target size and clear it on
-change, matching hand_mesh::bone_composite."
+Adopt the shape bevy_core_pipeline::fullscreen_material already uses: two
+slots, one per ping-pong view, each validated against the TextureViewId of
+the view it binds. Bounded at two entries by construction rather than by an
+eviction policy, and correct under every reallocation cause without needing
+to know which one occurred.
 ```
 
 ---

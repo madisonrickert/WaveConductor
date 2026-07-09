@@ -288,15 +288,47 @@ requires the macOS main thread while cargo's test runner uses worker threads
 (`ui_blur.rs:7-18`). `cargo nextest` skips ignored tests, so an assertion added
 there would never execute in CI.
 
-### Workstream 2 — Evict post-process bind-group caches
+### Workstream 2 — Bound the post-process bind-group caches
 
 **Files:** `crates/wc-sketches/src/line/post_process.rs`,
 `crates/wc-sketches/src/dots/post_process.rs`
 
-Replace each `Local<HashMap<TextureViewId, BindGroup>>` with the pattern already
-proven at `crates/wc-sketches/src/hand_mesh/bone_composite.rs:276-280`: hold
-`Local<Option<(TextureViewId, BindGroup)>>` and rebuild when the id changes.
-Update the stale "kiosk app that never resizes" comments.
+Replace each `Local<HashMap<TextureViewId, BindGroup>>` with the shape upstream
+already uses in `bevy_core_pipeline::fullscreen_material::FullscreenMaterialBindGroup`
+(`fullscreen_material.rs:244-277`): **two slots, one per ping-pong view, each
+validated against the `TextureViewId` of the very texture view it binds.**
+
+An earlier draft of this spec proposed keying eviction on
+`camera.physical_target_size`. That is a proxy, and review showed it is a subset
+of the real condition: Bevy reallocates a `ViewTarget` whenever any of
+`(camera.target, texture_usage, main_texture_format, Msaa)` changes. It happens
+to be correct today only because nothing mutates HDR, MSAA, or the render target
+on this camera after `spawn_camera` (`crates/waveconductor/src/main.rs:250-282`)
+— an unwritten invariant that the deferred per-tier quality scaling in §10.4 of
+the thermal design would break.
+
+Comparing the bound view's own id catches every reallocation cause without
+knowing which occurred, is bounded at two entries by construction rather than by
+an eviction policy, and cannot rot when Bevy adds a dimension to that key.
+
+Update the stale "kiosk app that never resizes" comments; they are now false.
+
+**Upstream observation, recorded for a possible Bevy issue.** Bevy's other
+pattern, `TonemappingBindGroupCache` (`tonemapping/node.rs:21`), is a *single*
+slot keyed on `source.id()`. But `ViewTarget::post_process_write()` does
+`fetch_xor(1)` on an `Arc<AtomicUsize>` that Bevy deliberately reuses across
+frames (`view/mod.rs:1307`: *"re-use the same atomics frame to frame ... to
+ensure post process writes persist through msaa writeback"*), and never resets.
+So the source view a node sees alternates every frame whenever the per-frame
+count of `post_process_write()` calls is odd — which means the tonemapping cache
+**never hits** under those configurations, and hits every frame under even ones.
+Toggling one post-process effect silently flips it. This is not a correctness
+bug (the miss path is correct) and the wasted `create_bind_group` is a few
+microseconds per camera per frame, so it is not a performance argument either.
+It is a correctness-of-intent defect: the cache exists precisely to avoid that
+allocation and, in common configurations, does nothing. Worth an upstream issue
+proposing tonemapping adopt the two-slot `fullscreen_material` shape. Not worth
+a performance-framed PR, and not on this release's critical path.
 
 ### Workstream 3 — Window-resize invalidation
 
@@ -580,3 +612,9 @@ field tester validates the outcome; he does not iterate.
 - Thermal threshold tuning against real soak data.
 - An agent-operable `cargo xtask soak-test`.
 - Instruction-screen overlay (never built; tracked separately).
+- **Upstream Bevy issue:** `TonemappingBindGroupCache` misses every frame when
+  an odd number of `post_process_write()` calls occur per frame, because the
+  ping-pong parity atomic persists across frames and is never reset. Propose it
+  adopt the two-slot `fullscreen_material` shape. File as an issue first, not a
+  PR: it is a correctness-of-intent defect, not a measurable performance win, and
+  the shared parity atomic is load-bearing for MSAA writeback. See Workstream 2.
