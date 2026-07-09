@@ -147,11 +147,36 @@ re-runs its existing spawn path, gated on that sketch being active so nothing ru
 `SketchActivity::Idle`. Rejected: rescale-in-place (Dots' grid count genuinely changes, so it must
 reallocate regardless).
 
-**Open — needs a spike before any code.** The egui panels load at the wrong size and fall off the
-right edge, then correct themselves. The trigger is known (Windows settles the scale factor a
-frame or two after window creation). The stale rect is **not** located. Scope a short
-investigation into `settings/panel_user/dock.rs` before committing to a fix. Do not guess. It may
-not resolve with the sketch respawn fix at all.
+**Spike resolved 2026-07-09. There is no stale rect in our code.** `dock_rect` is a pure function
+(`dock.rs:112`) recomputed every frame from the live window (`panel_user/mod.rs:162-169`), and the
+`egui::Area` is re-pinned every frame with `fixed_pos` + `set_min_size`/`set_max_size`
+(`mod.rs:200-207`). Nothing is cached anywhere on our side.
+
+The defect is a **one-frame lag in `bevy_egui`**. `update_ui_screen_rect` (`bevy_egui/src/lib.rs:1868`,
+scheduled in `PreUpdate`) computes egui's `screen_rect` as
+`camera.physical_viewport_rect() / egui_output.pixels_per_point`. But `egui_output.pixels_per_point` is
+written *after* the egui pass, from the previous frame's `FullOutput` (`output.rs:56`), and its default
+is `1.0` (`lib.rs:633`). The current scale factor does reach egui as
+`egui_input.viewports[ROOT].native_pixels_per_point = camera.target_scaling_factor()`
+(`input.rs:1247`), but `screen_rect` is derived from the **stale** output value, not that one.
+
+We then compound it: `dock_rect` is fed `Window::width()`, which is **Bevy logical pixels**, while
+`egui::Area::fixed_pos` consumes **egui points**. Those agree in steady state (`zoom_factor == 1.0`),
+and disagree for exactly the frames where `pixels_per_point` is stale. At 125% DPI, frame 1 has egui
+believing the screen is 2400 points wide while we place the dock at `x = 1264` — misplaced and drawn
+at 1/1.25 scale, then snapping into place. That is the reported symptom precisely.
+
+This reproduces on macOS too (`pixels_per_point == 2.0`); we never see it because the panel defaults to
+closed (`SettingsPanelVisible` default `false`) and the transient ends before anyone opens it. **The
+tester sees it because F11 changes the scale factor**, re-triggering the lag with the panel open. That
+is why he reported the panel bug and the fullscreen bug together — same trigger.
+
+**Fix (in scope for this plan, small).** Derive the dock geometry from `ctx.screen_rect()` instead of
+querying Bevy's `Window`. Both sides then speak points, nothing is mixed, and during the stale frame the
+dock stays anchored inside whatever egui believes the screen to be rather than overflowing it. This
+deletes the `Window` query at `mod.rs:162-168`. `dock_rect` stays pure and its unit tests stand.
+
+**No longer a blocker, and it does not need its own plan.**
 
 **Verification.** `cargo xtask capture` on Line and Dots, to confirm the debounced respawn does not
 destabilise the deterministic capture harness. Then a human running `cargo rund` pressing F11.
@@ -196,6 +221,40 @@ make the product *look* worse.
 
 ---
 
+### Plan 03a — Runtime-enumerated setting widget (prerequisite for 03 and 04)
+
+**Goal.** One `SettingKind` whose options are supplied at runtime, so a monitor list and an audio-device
+list can both be dropdowns instead of hand-typed strings.
+
+**Why it exists as its own plan.** Discovered 2026-07-09 while checking Plan 04's open spike. Plan 03
+(monitor picker) and Plan 04 (audio-device picker) each need it, and building it touches shared files:
+`settings/def.rs`, the `SketchSettings` derive macro, and `settings/panel_user/widgets.rs`. If both plans
+grow it independently we get two incompatible widgets and an ugly merge. Extracting it is what makes 03
+and 04 genuinely parallel afterwards.
+
+**What exists today.** `SettingKind` (`settings/def.rs:10`) has `Number`, `Boolean`, `Color`, `Text`,
+`TextList`, `FilePath`, a templates-backed picker, and `Enum { variants: &'static [&'static str] }`
+(`:54-60`). The `Enum` arm is a *compile-time* variant list, written back through reflection as a
+payload-less `DynamicEnum` (`settings/commands.rs`), so it only supports unit-variant Rust enums. It is
+the right precedent to copy and the wrong tool for this job.
+
+**Shape.** The stored value is a `String` (the device or monitor name), so persistence needs no change —
+it is a TOML string like `Text` already is. What is new is only the *widget*: a `ComboBox` whose options
+come from a runtime source, plus a free-text escape hatch so a saved name that no longer resolves is
+visible and editable rather than silently reset.
+
+**Decisions to lock while writing this plan.**
+- How options reach the widget. A `Resource` the panel reads (e.g. `AvailableAudioDevices(Vec<String>)`)
+  keeps `SettingDef` static and the derive macro untouched, which is the cheapest path. Prefer it over
+  putting a function pointer in `SettingDef`.
+- What happens when the persisted name is absent from the live list. Show it, mark it unavailable, keep
+  it persisted. Never silently rewrite the operator's choice — an HDMI TV that is merely asleep must not
+  lose its saved binding.
+
+**Blocked by.** Nothing. Small, self-contained, and **it gates the UI halves of 03 and 04.**
+
+---
+
 ### Plan 04 — Audio output device selection and recovery
 
 **Goal.** Sound comes out of the TV, and keeps coming out of it for eight hours.
@@ -221,13 +280,15 @@ stream, and restores play/pause from `AppState`. `AudioStatus` gains `Reconnecti
 WASAPI enumeration can block. The audio thread's real-time contract is unchanged: lock-free ring
 buffers only, no `Mutex`, no allocation after init.
 
-**Open — spike.** Whether `SettingDef` supports a dropdown whose options are enumerated at runtime.
-Every existing settings widget appears to be a static definition. If it does not, either extend the
-widget vocabulary in `settings/panel_user/widgets.rs` or persist a device *name* string that the
-operator edits. Resolve this before designing the UI.
+**Spike resolved 2026-07-09: it does not, and this collides with Plan 03.** `SettingKind::Enum` exists
+and renders as an `egui::ComboBox`, but its options are `variants: &'static [&'static str]`
+(`settings/def.rs:59`), filled by the derive macro from the field type's `TypeInfo` at compile time
+(`enum_variant_names`, `def.rs:63`). `cpal` discovers devices at runtime. **There is no widget for a
+runtime-enumerated list.** Plan 03's `monitor: Option<String>` needs the identical widget. See Plan 03a,
+which both consume.
 
-**Blocked by.** Nothing. Owns `audio/` and its own settings section, so it does not collide with
-Plan 03 or 06.
+**Blocked by.** Plan 03a (the widget). The audio *recovery* half — supervisor, backoff, `Reconnecting`
+status — touches no UI and can land first.
 
 ---
 
@@ -476,23 +537,26 @@ validates the outcome; he does not iterate.
 ### The graph
 
 ```
-                     ┌──────────────────────────┐
-                     │ 02 resize invalidation   │  (spike: egui panel dock.rs)
-                     └───────────┬──────────────┘
-                       soft      │      file
-                       block     │      overlap (cymatics/mod.rs)
-                  ┌──────────────┴──────────────┐
-                  ▼                             ▼
-        ┌──────────────────┐         ┌────────────────────┐
-        │ 03 fullscreen +  │         │ 07 cymatics warm   │
-        │ display settings │         │ start              │
-        └──────────────────┘         └────────────────────┘
+     ┌──────────────────────────┐        ┌──────────────────────────┐
+     │ 02 resize invalidation   │        │ 03a runtime-enum widget  │
+     │ (+ egui panel, resolved) │        │ (shared settings widget) │
+     └───────────┬──────────────┘        └───────┬──────────┬───────┘
+       soft      │      file                     │          │
+       block     │      overlap                  │ UI half  │ UI half
+  ┌──────────────┴──────────────┐                │          │
+  ▼                             ▼                ▼          ▼
+┌──────────────────┐  ┌────────────────────┐  (03)      ┌──────────────────┐
+│ 03 fullscreen +  │  │ 07 cymatics warm   │            │ 04 audio device  │
+│ display settings │  │ start              │            │ + recovery       │
+└──────────────────┘  └────────────────────┘            └──────────────────┘
+  ▲ also needs 03a                                        ▲ recovery half
+                                                            needs nothing
 
   fully independent, no shared files:
-        ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-        │ 04 audio device  │  │ 05 thermal WMI   │  │ 06 ONNX EP       │
-        │ + recovery       │  │ chain            │  │ resilience       │
-        └──────────────────┘  └──────────────────┘  └──────────────────┘
+        ┌──────────────────┐  ┌──────────────────┐
+        │ 05 thermal WMI   │  │ 06 ONNX EP       │
+        │ chain            │  │ resilience       │
+        └──────────────────┘  └──────────────────┘
 
   separate branch, needs a Windows box:
         ┌──────────────────────────────────────────┐
@@ -502,41 +566,68 @@ validates the outcome; he does not iterate.
 
 ### Why so much is parallel
 
-Because settings are decentralised (Part 1), the three plans that add operator-facing knobs each own a
+Because settings are decentralised (Part 1), the plans that add operator-facing knobs each own a
 different module:
 
-| Plan | Owns | Settings section |
-| --- | --- | --- |
-| 03 | `waveconductor/src/main.rs`, `lifecycle/nav.rs`, new display settings module | `DisplaySettings` (new) |
-| 04 | `wc-core/src/audio/` | `AudioSettings` (new) |
-| 06 | `input/providers/mediapipe/` | `settings/hand_tracking.rs` (existing) |
+| Plan | Owns | Settings section | Needs 03a? |
+| --- | --- | --- | --- |
+| 03 | `waveconductor/src/main.rs`, `lifecycle/nav.rs`, new display settings module | `DisplaySettings` (new) | **yes** — monitor picker |
+| 04 | `wc-core/src/audio/` | `AudioSettings` (new) | **yes** — device picker |
+| 06 | `input/providers/mediapipe/` | `settings/hand_tracking.rs` (existing) | no — `Auto\|ForceGpu\|ForceCpu` is a static unit-variant enum, which `ty = Enum` already handles (see `HandProviderChoice`, `hand_tracking.rs:59`) |
 
-No two of them write the same file. This was the single biggest surprise while writing this index —
-the spec assumed a shared `settings.rs` and a merge-conflict hotspot that does not exist.
+**Correction, 2026-07-09.** An earlier revision of this section claimed no two of them write the same
+file. That was wrong for the 03/04 pair: both need a runtime-enumerated dropdown, which does not exist
+and must be built in shared files (`settings/def.rs`, the derive macro, `panel_user/widgets.rs`). Hence
+Plan 03a. The underlying observation still holds — the spec's assumed monolithic `settings.rs`
+merge-conflict hotspot genuinely does not exist, and 06 collides with nobody.
 
-### Recommended waves
+### Writing the plans vs. implementing them
 
-**Wave 1 — start these together.** 02, 04, 05, 06, 08. Five plans, disjoint file sets.
+These parallelise differently and the distinction matters.
 
-- 02 is the highest value: it fixes three of the tester's reports at once, and it unblocks 03.
-- 08 can start immediately (write the probe on macOS); only its *run* waits on a Windows box.
-- 05 and 06 touch nobody else.
-- 04's backend work is independent; only its widget question is open.
+**Writing plan documents is fully parallel.** Seven markdown files in `docs/superpowers/plans/`, disjoint,
+**no cargo builds**. Build contention is the whole cost of parallel work on this machine; doc-writing has
+none. Every plan-writing agent must be handed Part 1 of this index, or each will independently rediscover
+the `--all-targets` clippy gap and the doc gate's private-intra-doc-link rule.
 
-**Wave 2 — after 02 lands.** 03 and 07.
+**Implementing is serial.** Three constraints stack and all point the same way:
 
-- 03 because startup fullscreen without resize handling ships the "framed fullscreen" bug to every kiosk boot.
-- 07 because it edits `cymatics/mod.rs`, which 02 also edits for the sim-grid re-init.
+1. No concurrent cargo builds (`target/` exceeds 40 GB; the data volume runs near full) and no worktrees,
+   for the same reason. So parallel implementers cannot each verify their own work.
+2. `subagent-driven-development` forbids parallel implementation subagents outright (conflicts).
+3. **Plan 01's three real defects were each caught by a review gate on a small isolated diff** — the
+   vacuous leak-regression test, the AGENTS.md citation of a nonexistent path, and the blur that silently
+   never drew. The last was invisible to *every* automated gate, because there are no GPU tests in CI. A
+   batched build at the end of five parallel plans would have returned green on broken rendering.
+
+Serial is also less slow than it looks: 02 is the long pole and it unblocks the two plans behind it.
+
+### Recommended order
+
+**Wave 1 — 02 and 03a.** Both are prerequisites and neither blocks the other.
+
+- 02 is the highest value: three of the tester's reports, one root cause, and it unblocks 03 and 07.
+- 03a is small and gates the UI halves of 03 and 04.
+
+**Wave 2 — 05, 06, 04, 07, 03.** After Wave 1, these are mutually independent.
+
+- 05 and 06 touch nobody else and could have gone in Wave 1; they sit here only because implementation is serial.
+- 04's *recovery* half (supervisor, backoff, `Reconnecting`) needs no UI and does not wait on 03a.
+- 07 edits `cymatics/mod.rs`, which 02 also edits for the sim-grid re-init.
+- 03 must follow 02: startup fullscreen without resize handling ships the "framed fullscreen" bug to every kiosk boot.
+
+**Alongside, on its own branch — 08.** Its real cost is a probe run on the Windows box, so it never
+competes for this machine's build slot. Write `probe-ep` on macOS now.
 
 03 and 07 were once entangled through `boot_into_attract`. They are not any more: cutting that feature
-left 07 self-contained in `crates/wc-sketches/src/cymatics/` and 03 with no dependency on it. Their
-only remaining relationship is that both sit behind 02.
+left 07 self-contained in `crates/wc-sketches/src/cymatics/`. Their only remaining relationship is that
+both sit behind 02.
 
-### The two genuine blockers
+### The one genuine blocker
 
-1. **Plan 02's egui panel bug is unscoped.** Spike `settings/panel_user/dock.rs` before writing the
-   plan. It may not resolve with the sketch respawn fix, in which case it becomes its own plan.
-2. **Plan 08's rung 0 needs a Windows machine.** Everything else on 08 is macOS work.
+**Plan 08's rung 0 needs a Windows machine.** Everything else on 08 is macOS work.
+
+Plan 02's egui panel bug is **no longer a blocker** — spiked and root-caused on 2026-07-09; see Plan 02.
 
 ### What is *not* a blocker, despite appearances
 
@@ -564,9 +655,18 @@ only remaining relationship is that both sit behind 02.
 - **Instruction-screen overlay.** Never built. Madison's note: *"Instructions should appear as an
   overlay at the bottom with an image of the head/sensor and showing the hands waving."* Needs a design
   pass, not just a plan. Not on the alpha.5 critical path.
-- **Two upstream Bevy issues**, recorded in the spec's follow-ups: `bevy_egui`'s unassigned
-  `target_size`, and `TonemappingBindGroupCache` never hitting under odd `post_process_write()` parity.
-  File as issues, not PRs.
+- **Three upstream Bevy / `bevy_egui` issues.** File as issues, not PRs.
+  1. `bevy_egui`'s `EguiRenderTargetData::target_size` is declared, zero-initialised, read into every
+     paint callback's `update()` hook, and never assigned (found in Plan 01).
+  2. `TonemappingBindGroupCache` never hits when the per-frame count of `post_process_write()` calls is
+     odd (found in Plan 01).
+  3. `update_ui_screen_rect` (`bevy_egui/src/lib.rs:1868`) derives `screen_rect` from
+     `egui_output.pixels_per_point`, which is written *after* the egui pass from the previous frame's
+     `FullOutput` (`output.rs:56`) and defaults to `1.0`. So `screen_rect` lags the scale factor by one
+     frame, even though the current value is already available as
+     `egui_input.viewports[ROOT].native_pixels_per_point` (`input.rs:1247`). Visible on any
+     `pixels_per_point != 1.0` display at startup and on every scale-factor change. Found in Plan 02's
+     spike, 2026-07-09.
 - **VRAM budget telemetry** (`IDXGIAdapter3::QueryVideoMemoryInfo`) — explicitly deferred.
 - **`cargo xtask soak-test`** — planned, not implemented. Do not cite it as if it exists.
 - **Thermal threshold tuning** — gated on a real soak log from the deployment hardware.
