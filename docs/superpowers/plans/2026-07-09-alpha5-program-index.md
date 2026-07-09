@@ -161,7 +161,7 @@ destabilise the deterministic capture harness. Then a human running `cargo rund`
 
 ---
 
-### Plan 03 — Fullscreen, display settings, and boot-into-attract
+### Plan 03 — Fullscreen and display settings
 
 **Goal.** Make the app usable as an unattended kiosk without a keyboard.
 
@@ -182,14 +182,13 @@ name with fallback to `Current`. A startup system applies the mode. The existing
 `start_fullscreen` back on toggle. Fullscreen and monitor are **re-asserted on `MonitorAdded` /
 `MonitorRemoved`** — that is the bit that survives a sleeping TV.
 
-**Scope correction.** The spec assigned "boot into attract mode" to the
-`configurable-attract-mode-timeout` worktree. **That worktree shipped only
-`attract_mode_timeout_secs`** (`lifecycle/screensaver/settings.rs:103`); `boot_into_attract` does not
-exist anywhere in `crates/`. The field tester explicitly asked for it ("Yes always boot in attract
-mode"). **This plan now owns it.**
-
-**Open.** Where `boot_into_attract` belongs: `DisplaySettings` or `ScreensaverSettings`. Leaning
-`ScreensaverSettings`, next to the timeout it pairs with.
+**`boot_into_attract` is cut. Do not implement it.** The spec assigned it to the
+`configurable-attract-mode-timeout` worktree, which in fact shipped only `attract_mode_timeout_secs`
+(`lifecycle/screensaver/settings.rs:103`). An earlier draft of this index therefore reassigned it
+here. Both were wrong about *why* it existed. It was never a requirement: the field tester asked that
+Cymatics not launch blank, Madison proposed booting into attract mode as the mechanism, and he agreed
+to the mechanism. The mechanism does not work (see Plan 07), so it goes, and the requirement is met
+by Plan 07 instead. The residual kiosk-boot gap is recorded in Part 4.
 
 **Blocked by.** Plan 02 in practice. Startup fullscreen with no resize handling means every kiosk
 boots into the "framed fullscreen" bug the tester already reported. Shipping 03 without 02 would
@@ -338,12 +337,58 @@ right away, so folks don't think it's a blue screen of death **when cycling thru
 `navigate target=Cymatics` at 23:22:42, 23:22:58, 23:23:23 and 23:23:31 — four cold starts in under a
 minute.
 
-**Note the correction.** Booting into attract mode (Plan 03) does **not** address this. It changes
-what is on screen at t=0. It does not change what a partygoer sees the fifth time they press z/x.
-These are different fixes.
+**Why this is a warm start and not "enter attract mode."** Attract mode was the originally proposed
+mechanism. It is the wrong one, for three reasons, and the reasons are worth keeping because they are
+not obvious:
 
-**Decisions locked.** Seed texture A with the resting two-blob field on `OnEnter` rather than starting
-from a zeroed texture. Self-contained in `crates/wc-sketches/src/cymatics/`.
+1. **It does not fix the reported bug.** Attract-on-boot changes what is on screen at t=0. The tester
+   said *"when cycling thru."* It does not change what a partygoer sees the fifth time they press z/x.
+2. **It cannot work without a cooldown, structurally.** `advance_activity` (`lifecycle/idle.rs:403`)
+   is the sole writer of `NextState<SketchActivity>` and recomputes its target from the idle timer
+   every frame; a competing writer produces the show↔hide flap that `apply_force_screensaver`
+   (`screensaver/mod.rs:459-470`) exists to avoid. Worse, **the navigation input is itself an
+   interaction**: the keypress or picker click that entered Cymatics lands in `reset_on_interaction`,
+   which calls `timer.mark()` unconditionally (`idle.rs:232-242`), and even key-*up* events count.
+   `skip_to_screensaver`'s doc records the resulting bug verbatim (`idle.rs:305-316`): *"A one-shot
+   rewind on `just_pressed` would be cancelled by those releases and the screensaver would flash and
+   wake."* Shift+S survives only by staying **armed** until the keyboard goes quiet. So any
+   attract-on-launch needs a window where interaction is ignored.
+3. **The required cooldown is what makes it hostile.** `SketchActivity::Screensaver` also throttles
+   the present rate to 20 fps (`apply_present_rate`), closes the settings panel (`mod.rs:152`), and
+   silences audio (attract is *"intentionally silent"*, `cymatics/screensaver.rs:222`). A visitor who
+   taps the Cymatics tile would get a silent 20 fps screensaver that ignores their first touch, then
+   lurches into `Active`. That is worse than the blank screen.
+
+None of the three effects that make attract mode *look* good require being in the screensaver state.
+Do them directly, in `Active`, on entry.
+
+**Decisions locked.** Seed `CymaticsState` on `OnEnter(AppState::Cymatics)` and let the normal
+`Active` systems take over. No state-machine change, no cooldown, no throttle, no silenced audio, and
+it fixes **every** entry rather than only boot. Self-contained in `crates/wc-sketches/src/cymatics/`.
+
+**The three seed parameters.** Each corresponds to one independent cause of the blankness:
+
+| Field | Default | Why it is blank | Seed |
+| --- | --- | --- | --- |
+| `center` / `center2` | both `(0.5, 0.5)` (`mod.rs:129-130`) | the two centres **overlap**, so a bloomed mask shows one blob, not the two the tester asked for | `wander_centers(0.0, &LissajousSpeeds::from_settings(&settings))` |
+| `active_radius` | `MINIMUM_ACTIVE_RADIUS` = `0.1` (`mod.rs:63,131`) | the resting alive-mask; `settings.rs:422` says `0.1` is *"a nearly invisible mask"* | toward `attract_radius` (default `1.0`) |
+| `ramp_time` | `0.0` (`mod.rs:135`) | the shader's alive-bloom ramp is `(time-500)/500`, still below its foot; advances `N·dt`/frame, capped at `RAMP_TIME_CAP` = `1000` (`mod.rs:75`) | past the ramp foot |
+
+`wander_centers` (`cymatics/screensaver.rs:81`) is pure, already unit-tested, and at `t=0` returns
+`(0.5, 0.8)` and roughly `(0.80, 0.75)` — precisely the two separated blobs. Reuse it; do not
+hand-roll coordinates.
+
+**Do not try to reuse the raindrop scheduler.** `drive_cymatics_pings` is gated
+`in_screensaver(AppState::Cymatics)` (`screensaver.rs:243`), so in `Active` the source is the
+continuous oscillator at `center`, not raindrops. "Launch with a ring already expanding" is therefore
+not free — it would mean seeding the texture directly. Letting the oscillator build from a
+pre-bloomed, two-centre mask is far cheaper and probably looks right.
+
+**Task 1 is a spike, and a human runs it.** Seed the three fields, run `cargo rund`, enter Cymatics
+from the picker several times, and pick the values by eye. Only then write the test against what
+landed. Do **not** derive `ramp_time`'s seed on paper and assert a magic number: there are no GPU
+tests in CI (Part 1), and `cargo xtask capture` returns black frames for a backgrounded window, so an
+agent cannot verify this. Madison must look at it.
 
 **Blocked by.** Nothing, but it touches `cymatics/mod.rs`, which **Plan 02 also touches** (sim-grid
 re-init on resize). Land 02 first, or coordinate the two.
@@ -441,8 +486,7 @@ validates the outcome; he does not iterate.
         ┌──────────────────┐         ┌────────────────────┐
         │ 03 fullscreen +  │         │ 07 cymatics warm   │
         │ display settings │         │ start              │
-        │ + boot-to-attract│         └────────────────────┘
-        └──────────────────┘
+        └──────────────────┘         └────────────────────┘
 
   fully independent, no shared files:
         ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
@@ -484,6 +528,10 @@ the spec assumed a shared `settings.rs` and a merge-conflict hotspot that does n
 - 03 because startup fullscreen without resize handling ships the "framed fullscreen" bug to every kiosk boot.
 - 07 because it edits `cymatics/mod.rs`, which 02 also edits for the sim-grid re-init.
 
+03 and 07 were once entangled through `boot_into_attract`. They are not any more: cutting that feature
+left 07 self-contained in `crates/wc-sketches/src/cymatics/` and 03 with no dependency on it. Their
+only remaining relationship is that both sit behind 02.
+
 ### The two genuine blockers
 
 1. **Plan 02's egui panel bug is unscoped.** Spike `settings/panel_user/dock.rs` before writing the
@@ -501,6 +549,18 @@ the spec assumed a shared `settings.rs` and a merge-conflict hotspot that does n
 
 ## Part 4 — Still unowned
 
+- **Kiosk boot gap (the residue of `boot_into_attract`).** A power-cycled kiosk comes up on
+  `AppState::Home` (`lifecycle/state.rs:14-15`) showing a static picker, and sits there until someone
+  touches it. Nobody has reported this; it is a real gap, but a different feature with a different
+  trigger, and it is not what the Cymatics complaint was about. **If it is ever built, note the trap:**
+  `SketchActivity` is a sub-state whose `#[source]` covers the five sketches but **not** `Home`
+  (`state.rs:115-117`), so at Home there is no attract mode to boot into and `advance_activity` returns
+  early. "Boot into attract" therefore silently implies "boot into a *sketch*", and someone must choose
+  which — first-in-cycle, a configured pick, or last-used. Prefer the first two; persisting the last
+  sketch across launches adds a new state surface to a machine that gets power-cycled. No cooldown is
+  needed here (unlike attract-on-navigation): at boot nothing has been interacted with, and the existing
+  `force_screensaver` flag (`idle.rs:43`) is checked ahead of the elapsed-time thresholds
+  (`idle.rs:409-411`), so it holds until the first real interaction clears it.
 - **Instruction-screen overlay.** Never built. Madison's note: *"Instructions should appear as an
   overlay at the bottom with an image of the head/sensor and showing the hands waving."* Needs a design
   pass, not just a plan. Not on the alpha.5 critical path.

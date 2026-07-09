@@ -209,9 +209,16 @@ break it.
 - **Per-backend inference latency benchmarking as a release gate.** The probe
   tool reports latency, but the decision about whether DirectML is even the right
   default on a shared-die APU is a follow-up.
-- **Attract-mode idle timeout slider and boot-into-attract-mode.** Owned by the
-  in-flight `configurable-attract-mode-timeout` worktree. This spec never touches
-  them.
+- **Attract-mode idle timeout slider.** Shipped by the
+  `configurable-attract-mode-timeout` worktree (merged, `5ea5d338`). Not touched here.
+- **Boot-into-attract-mode.** ~~Owned by that same worktree.~~ **Corrected 2026-07-09:**
+  the worktree shipped only `attract_mode_timeout_secs`; this feature was never
+  implemented anywhere. It has since been **cut outright**, not merely deferred. It
+  was a proposed *mechanism* for the Cymatics blank-launch complaint, never a
+  requirement of its own, and it does not work as one — the navigation input that
+  enters a sketch is itself an interaction and wakes the attract mode it just forced.
+  The requirement is met by the Cymatics warm start instead. See
+  `docs/superpowers/plans/2026-07-09-alpha5-program-index.md`, Plan 07.
 
 ## 4. Design
 
@@ -355,8 +362,9 @@ This is deliberately left unspecified rather than guessed at.
 
 **New:** `crates/wc-core/src/settings/panel_user/display.rs` (one concern per
 file). Its rows are only: Start fullscreen, Hide cursor, Monitor, Audio output.
-"Boot into attract mode" and "Attract after N s idle" belong to the
-`configurable-attract-mode-timeout` worktree and are not touched here.
+"Attract after N s idle" already shipped in the `configurable-attract-mode-timeout`
+worktree and is not touched here. "Boot into attract mode" was **cut on 2026-07-09**
+(see Non-goals); do not add a row for it.
 
 New settings fields:
 
