@@ -62,6 +62,10 @@ Create `crates/wc-core/src/ui/blur/slots.rs` containing *only* the test module f
 
 ```rust
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "test assertions; expect_used is denied workspace-wide for non-test code"
+)]
 mod tests {
     use super::*;
 
@@ -136,8 +140,8 @@ mod tests {
             book.tick();
             let _ = book.touch(id(1));
         }
-        assert_eq!(book.get(id(1)).is_some(), true, "touched slot survives");
-        assert_eq!(book.get(id(2)).is_none(), true, "untouched slot is evicted");
+        assert!(book.get(id(1)).is_some(), "touched slot survives");
+        assert!(book.get(id(2)).is_none(), "untouched slot is evicted");
         assert_eq!(book.len(), 1);
     }
 
@@ -281,6 +285,11 @@ impl<T> SlotBook<T> {
     }
 
     /// The current frame counter.
+    ///
+    /// Test-only: production code never reads the counter directly. Without the
+    /// `cfg(test)` gate, rustc's `dead_code` lint fires when the lib target is
+    /// compiled without `cfg(test)`, and CI runs clippy with `-D warnings`.
+    #[cfg(test)]
     pub(crate) fn frame(&self) -> u64 {
         self.frame
     }
@@ -301,6 +310,11 @@ impl<T> SlotBook<T> {
     /// Refresh a slot's `last_seen` stamp and borrow its payload mutably.
     ///
     /// Returns `None` if the slot does not exist.
+    ///
+    /// Test-only: production code uses [`SlotBook::scratch_and_touch`], which
+    /// does the same refresh and also hands back the staging buffer. Gated for
+    /// the same `dead_code` reason as [`SlotBook::frame`].
+    #[cfg(test)]
     pub(crate) fn touch(&mut self, id: egui::Id) -> Option<&mut T> {
         let frame = self.frame;
         self.slots.get_mut(&id).map(|slot| {
@@ -320,7 +334,11 @@ impl<T> SlotBook<T> {
         Some((&mut self.scratch, &mut slot.gpu))
     }
 
-    /// Number of live slots. Used by tests to assert the map stays bounded.
+    /// Number of live slots.
+    ///
+    /// Test-only, for the bounded-growth assertions. Gated for the same
+    /// `dead_code` reason as [`SlotBook::frame`].
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
@@ -363,6 +381,10 @@ Add to the footer of `crates/wc-core/src/ui/blur/callback.rs` (create the `mod t
 
 ```rust
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "test assertions; expect_used is denied workspace-wide for non-test code"
+)]
 mod tests {
     use super::*;
 
