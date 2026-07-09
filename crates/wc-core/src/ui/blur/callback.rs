@@ -312,7 +312,11 @@ pub struct BackdropBlurPaintCallback {
 }
 
 impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
-    /// Create or refresh this widget's [`CompositeGpu`] slot.
+    /// Create or refresh this widget's `CompositeGpu` slot.
+    ///
+    /// A plain code span, not an intra-doc link: `update` is a public
+    /// trait-impl method while `CompositeGpu` is `pub(crate)`, so a link trips
+    /// `rustdoc::private_intra_doc_links`, which CI denies.
     ///
     /// `bevy_egui` calls `update` for every paint callback (from the
     /// `prepare_egui_pass` render-graph node) before it calls `render` for any

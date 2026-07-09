@@ -11,6 +11,10 @@ enum-variant-name-threshold = 5
 # leaked BindGroup pins its uniform buffer, texture view, and sampler forever.
 # This cost v5.0.0-alpha.4 a release. See
 # docs/superpowers/specs/2026-07-08-windows-remediation-design.md
+# The ban is workspace-wide and unconditional. A genuinely non-GPU `'static` leak
+# (a deliberate process-lifetime allocation) can opt out with a local
+# `#[allow(clippy::disallowed_methods, reason = "...")]` — but justify it, because
+# a leaked wgpu handle looks exactly like a leaked `&'static str` at the call site.
 disallowed-methods = [
-    { path = "std::boxed::Box::leak", reason = "leaks the GPU resources the handle owns; store in a render-world resource and borrow for 'pass instead" },
+    { path = "std::boxed::Box::leak", reason = "a leaked wgpu handle pins every resource it binds; store it in a render-world resource and borrow it for 'pass instead. Non-GPU process-lifetime leaks may #[allow] this with a justification" },
 ]
