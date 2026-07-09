@@ -29,6 +29,10 @@ Copied verbatim from `AGENTS.md` and the spec. Every task's requirements implici
 - **Branch:** all work lands on `windows-remediation`, branched from `v5-alpha` **after** `configurable-attract-mode-timeout` merges.
 - **Do not** put `bevy/dynamic_linking` in any manifest `[features]` table. Use `cargo rund` for manual smoke tests.
 
+The clippy gate uses `--all-targets`, not `--lib`. `--lib` skips the test
+target, and two of this plan's own test snippets tripped `range_plus_one`
+and `used_underscore_binding` there before this was caught.
+
 ## Testing note (deviation from the spec)
 
 The spec proposed asserting bounded allocations in `crates/wc-core/tests/ui_blur.rs`. **That will not work as a CI gate.** Every test in that file is `#[ignore]`d, because `DefaultPlugins` pulls in winit, which requires the macOS main thread while cargo's test runner uses worker threads (see `ui_blur.rs:7-18`). `cargo nextest` skips ignored tests, so an assertion added there would never run in CI.
@@ -143,7 +147,8 @@ mod tests {
         book.tick();
         book.insert(id(1), ());
         book.insert(id(2), ());
-        for _ in 0..(SLOT_EVICT_FRAMES + 1) {
+        // `0..=N` rather than `0..(N + 1)`: clippy::range_plus_one is denied.
+        for _ in 0..=SLOT_EVICT_FRAMES {
             book.tick();
             let _ = book.touch(id(1));
         }
@@ -377,7 +382,7 @@ The workspace-wide clippy gate is deliberately *not* run here: it takes long eno
 
 ```bash
 cargo fmt --all
-cargo clippy -p wc-core --lib --all-features -- -D warnings
+cargo clippy -p wc-core --all-targets --all-features -- -D warnings
 cargo test -p wc-core --lib ui::blur::slots
 git add crates/wc-core/src/ui/blur/slots.rs crates/wc-core/src/ui/blur/mod.rs
 git commit -m "feat(ui/blur): add SlotBook, frame-stamped per-widget GPU slot storage"
@@ -406,6 +411,10 @@ Add to the footer of `crates/wc-core/src/ui/blur/callback.rs` (create the `mod t
 #[allow(
     clippy::expect_used,
     reason = "test assertions; expect_used is denied workspace-wide for non-test code"
+)]
+#[allow(
+    clippy::used_underscore_binding,
+    reason = "`_pad` is shader struct padding; asserting it stays 0.0 is the point"
 )]
 mod tests {
     use super::*;
