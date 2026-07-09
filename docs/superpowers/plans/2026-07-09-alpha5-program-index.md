@@ -49,6 +49,28 @@ code until the whole-workspace gate ran. Always:
 cargo clippy -p <crate> --all-targets --all-features -- -D warnings
 ```
 
+### Clippy is `-D warnings` over `pedantic`, **including inside `#[cfg(test)]`**
+
+`Cargo.toml:206-211` sets `pedantic = warn` plus `unwrap_used`, `expect_used`, `panic`, and
+`as_conversions` at `warn`. CI escalates all warnings to errors and passes `--all-targets`, so test code
+is held to the same bar as production code. Four of Plan 01's plan defects were this:
+
+- `.expect(…)` / `.unwrap()` in a `#[cfg(test)] mod tests` block → **denied**. Use `let ... else`,
+  `assert!(matches!(…))`, or destructure.
+- `assert_eq!(x.is_some(), true)` → `clippy::bool_assert_comparison`. Use `assert!(x.is_some())`.
+- `0..(N + 1)` → `clippy::range_plus_one`. Use `0..=N`.
+- `u._pad` → `clippy::used_underscore_binding`.
+
+A plan that puts any of these in its own example code hands the implementer a build failure.
+
+### Test-only helpers need `#[cfg(test)]`, and a type with no non-test caller is dead code
+
+An accessor used only from `mod tests` trips `dead_code` on the lib target. Worse: a whole new type with
+no production caller yet (because the caller lands in a later task) fails `-D warnings` on the lib target
+for every task in between. Plan 01 solved this with a transient `#![allow(dead_code)]` carrying an
+explicit deletion step in the task that introduced the first real caller. If a plan introduces a type
+before its consumer, it **must** say so and schedule the removal.
+
 ### The doc gate has no `--all-features`, and denies public→private intra-doc links
 
 CI runs exactly `cargo doc --no-deps --workspace --document-private-items` with
