@@ -197,10 +197,20 @@ closed (`SettingsPanelVisible` default `false`) and the transient ends before an
 tester sees it because F11 changes the scale factor**, re-triggering the lag with the panel open. That
 is why he reported the panel bug and the fullscreen bug together — same trigger.
 
-**Fix (in scope for this plan, small).** Derive the dock geometry from `ctx.screen_rect()` instead of
+**Fix (in scope for this plan, small).** Derive the dock geometry from **`ctx.content_rect()`** instead of
 querying Bevy's `Window`. Both sides then speak points, nothing is mixed, and during the stale frame the
 dock stays anchored inside whatever egui believes the screen to be rather than overflowing it. This
 deletes the `Window` query at `mod.rs:162-168`. `dock_rect` stays pure and its unit tests stand.
+
+**Not `screen_rect()`.** An earlier revision of this index said `screen_rect()`. That method is
+`#[deprecated]` in egui 0.34.3 (`egui-0.34.3/src/context.rs:2842-2846`: *"screen_rect has been split into
+viewport_rect() and content_rect(). You likely should use content_rect()"*), so under CI's `-D warnings`
+it is a hard error. `content_rect()` (`:2823`) is the non-deprecated equivalent — `screen_rect`'s body is
+literally `self.input(|i| i.content_rect()).round_ui()` — and the codebase already uses it at
+`crates/wc-core/src/ui/reload_overlay.rs:47`. Caught by Plan 02's author declining the instruction.
+
+**Corollary for every plan: the workspace denies deprecated APIs.** `-D warnings` covers
+`deprecated`. Grep the vendored source for `#[deprecated]` before citing an upstream method.
 
 **No longer a blocker, and it does not need its own plan.**
 
