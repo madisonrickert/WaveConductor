@@ -313,6 +313,21 @@ and renders as an `egui::ComboBox`, but its options are `variants: &'static [&'s
 runtime-enumerated list.** Plan 03's `monitor: Option<String>` needs the identical widget. See Plan 03a,
 which both consume.
 
+**Cross-plan risk found while authoring, 2026-07-09: a reconnect may come back silent.** The rebuilt
+`DspHost` has no synth graph, because each sketch issues its `Add*Synth` commands only on
+`OnEnter(AppState::That)`. So a mid-sketch reconnect can restore `AudioStatus::Running` and still emit
+nothing — which would make this plan fail its own goal. Two ways out:
+
+- **(a) Re-enter the sketch.** Plan 02 introduces `ReloadReason::WindowResize`, a *silent, instant*
+  reload (one black frame, master volume untouched). An `AudioDeviceReconnect` reason would reuse the
+  same primitive: re-running `OnEnter` re-adds the synth graph and restores play state for free. Costs a
+  dependency on Plan 02 and one black frame on reconnect.
+- **(b) Re-issue the synth commands from the supervisor**, which requires it to remember what was added.
+
+Prefer (a): it reuses machinery Plan 02 already builds and needs no new bookkeeping. But **do not build
+either until Task 5's human check answers the question**. The plan's `cargo rund` unplug/replug step must
+explicitly report *audible vs. silent* after reconnect. If it is audible, neither is needed.
+
 **Blocked by.** Plan 03a (the widget). The audio *recovery* half — supervisor, backoff, `Reconnecting`
 status — touches no UI and can land first.
 
@@ -532,9 +547,11 @@ valid test bed**, even though it is not the tester's hardware:
 
 **Remaining rungs, cheapest first, each falsifiable by the probe.**
 
-1. Ship a newer `DirectML.dll`. The staged DLL (`xtask/src/bundle/windows.rs:244`) is whatever pyke's
-   `ort` rc.12 built against. DirectML is independently redistributable and fusion fixes for older GCN
-   hardware land in it.
+1. Ship a newer `DirectML.dll`. The staged DLL is whatever pyke's `ort` rc.12 built against. DirectML is
+   independently redistributable and fusion fixes for older GCN hardware land in it. **Anchor corrected
+   2026-07-09:** the staging loop is `xtask/src/bundle/windows.rs:136-164` (the `is_directml` predicate at
+   `:157`). An earlier revision of this index cited `:244`, which is a `runtime_dlls: vec!["DirectML.dll"]`
+   test fixture literal, not the staging code. Caught by Plan 08's author.
 2. Lower the graph optimization level (`Level1`, then `Disable`). ONNX Runtime issue #12538 suggests
    this may not rescue DML, but it is one flag and instantly falsifiable.
 3. `optimization.disable_specified_optimizers` against named transformers.
