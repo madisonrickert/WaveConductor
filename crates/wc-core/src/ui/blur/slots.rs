@@ -54,14 +54,6 @@ use bevy_egui::egui;
 /// enough that a churning id cannot accumulate.
 pub(crate) const SLOT_EVICT_FRAMES: u64 = 600;
 
-/// One widget's GPU payload plus the frame on which it was last painted.
-struct Slot<T> {
-    /// The GPU resources this widget owns.
-    gpu: T,
-    /// Value of [`SlotBook::frame`] the last time this slot was touched.
-    last_seen: u64,
-}
-
 /// A frame-stamped map from [`egui::Id`] to a per-widget GPU payload, plus a
 /// reusable CPU staging buffer.
 ///
@@ -93,6 +85,10 @@ impl<T> SlotBook<T> {
     ///
     /// Must be called exactly once per rendered frame, before any `update`
     /// hook touches the book.
+    ///
+    /// On `u64` wraparound a stale slot's age computes as 0 and it becomes
+    /// immortal rather than being evicted. At 60 fps that is ~10 billion years
+    /// away, so we accept silently-wrong over a panic on the render hot path.
     pub(crate) fn tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
         let frame = self.frame;
@@ -129,7 +125,7 @@ impl<T> SlotBook<T> {
     ///
     /// Test-only: production code uses [`SlotBook::scratch_and_touch`], which
     /// does the same refresh and also hands back the staging buffer. Gated for
-    /// the same `dead_code` reason as [`SlotBook::frame`].
+    /// the same `dead_code` reason as `frame()`.
     #[cfg(test)]
     pub(crate) fn touch(&mut self, id: egui::Id) -> Option<&mut T> {
         let frame = self.frame;
@@ -153,11 +149,22 @@ impl<T> SlotBook<T> {
     /// Number of live slots.
     ///
     /// Test-only, for the bounded-growth assertions. Gated for the same
-    /// `dead_code` reason as [`SlotBook::frame`].
+    /// `dead_code` reason as `frame()`.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
+}
+
+/// One widget's GPU payload plus the frame on which it was last painted.
+///
+/// Private helper, placed below the public API per AGENTS.md.
+struct Slot<T> {
+    /// The GPU resources this widget owns.
+    gpu: T,
+    /// Value of the `SlotBook` frame counter the last time this slot was
+    /// touched. Compared against the current frame by [`SlotBook::tick`].
+    last_seen: u64,
 }
 
 #[cfg(test)]
@@ -181,23 +188,30 @@ mod tests {
     }
 
     #[test]
-    fn a_widget_painted_every_frame_occupies_exactly_one_slot() {
+    fn a_widget_painted_every_frame_creates_its_payload_exactly_once() {
         // This is the regression test for the `Box::leak` bug: the old code
         // allocated a fresh bind group + uniform buffer per widget per frame
-        // and never freed either. Here, 5000 frames of the same widget must
-        // never exceed one slot.
+        // and never freed either.
+        //
+        // Counting inserts is what makes this non-vacuous. Asserting only
+        // `len() == 1` would pass even if `touch()` never worked, because
+        // `insert()` overwrites the entry for a key that already exists — and
+        // an insert per frame is precisely the per-frame GPU allocation this
+        // module exists to prevent.
         let mut book = SlotBook::<u32>::default();
+        let mut payloads_created = 0_u32;
         for _ in 0..5_000 {
             book.tick();
             if book.touch(id(1)).is_none() {
                 book.insert(id(1), 0);
+                payloads_created += 1;
             }
         }
         assert_eq!(
-            book.len(),
-            1,
-            "one widget painted every frame must occupy exactly one slot"
+            payloads_created, 1,
+            "the widget's GPU payload must be created once, not once per frame"
         );
+        assert_eq!(book.len(), 1, "and it must occupy exactly one slot");
     }
 
     #[test]
