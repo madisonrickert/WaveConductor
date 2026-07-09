@@ -34,11 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust
         with:
-          toolchain: 1.96.0
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       - name: Install Linux build deps for Bevy
         run: |
           sudo apt-get update
@@ -47,38 +45,40 @@ jobs:
             libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
 
-  check-secrets:
-    name: check-secrets
+  # `check-secrets` and `validate-shaders` share a job: both build only `xtask`,
+  # so as separate jobs they compiled it twice and held two ~220 MB cache entries
+  # against the repo's 10 GB cache budget.
+  #
+  # No Bevy build deps needed: xtask depends only on naga + CLI crates, not the
+  # app's alsa/udev/wayland stack.
+  xtask-checks:
+    name: xtask-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
       - run: cargo xtask check-secrets
-
-  validate-shaders:
-    name: validate-shaders
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.96.0
-      - uses: Swatinem/rust-cache@v2
-      # No Bevy build deps needed: xtask depends only on naga + CLI crates, not
-      # the app's alsa/udev/wayland stack (same as the check-secrets job).
       - run: cargo xtask validate-shaders
 
+  # Runs cargo-deny as a prebuilt binary rather than via cargo-deny-action, which
+  # is a Docker action: it rebuilt its `rust:1.85.0-alpine` image every run (~9s)
+  # and then, hitting our rust-toolchain.toml, downloaded a complete 1.96.0 musl
+  # toolchain -- rustc, rust-std, clippy, rustfmt, llvm-tools (~19s) -- for a tool
+  # that compiles nothing. That was 29s of overhead around 12s of real work.
+  #
+  # No rust-cache here: cargo-deny reads Cargo.lock, so there is no target/ dir
+  # worth caching, and a cache entry would only eat into the 10 GB repo budget.
+  # cargo-deny's global flags must precede the `check` subcommand.
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@master
         with:
-          arguments: --workspace --all-features
+          toolchain: 1.96.0
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny --workspace --all-features check
 
   # (The separate `cargo-audit` job was retired 2026-07-02: it read the same
   # RustSec DB as `cargo deny check` above but did NOT honor deny.toml's ignore
@@ -97,14 +97,12 @@ jobs:
     # .cargo/config.toml, so the test binary has no baked Leap rpath and would
     # otherwise fail to load libLeapC.so.6 (exit 127) when nextest lists tests.
     env:
+      RUSTDOCFLAGS: "-D warnings"
       LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
       LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/leapc/linux-x86_64
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
       # mold linker: drop-in replacement for ld that's 3-10x faster on Bevy's
       # dep tree. Linux-only; macOS uses ld64 and Windows uses link.exe.
       - uses: rui314/setup-mold@v1
@@ -121,6 +119,11 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
+      # Doctests live here, not in the `doc` job: nextest cannot run them, and
+      # rustdoc needs the dependency rlibs that nextest has just built. In the
+      # `doc` job they saw only `cargo doc`'s rmeta and forced a second full
+      # codegen build of the whole tree (20 min of a 26 min cold run).
+      - run: cargo test --doc --workspace --all-features
 
   # Cross-platform tests run on main pushes. PR and v5-alpha feedback comes from
   # Linux; the Promote Alpha workflow runs macOS/Windows tests before it tags and
@@ -146,10 +149,7 @@ jobs:
       LEAPSDK_LIB_PATH: ${{ github.workspace }}/vendor/leapc/${{ matrix.leap }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
           # Bust once: earlier macOS runs cached ort-sys build-script output with
           # the broken Xcode 26.5 clang resource path; a fresh cache re-runs it
@@ -188,6 +188,7 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features
 
+  # Rustdoc build only. Doctests run in `test-linux` (see the note there).
   doc:
     name: doc
     runs-on: ubuntu-latest
@@ -195,10 +196,7 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
       - name: Install Linux build deps for Bevy
         run: |
           sudo apt-get update
@@ -206,4 +204,3 @@ jobs:
             libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
       - run: cargo doc --no-deps --workspace --document-private-items
-      - run: cargo test --doc --workspace
