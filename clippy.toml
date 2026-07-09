@@ -6,3 +6,11 @@ cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 8
 # Allow longer enum variant names (HandTrackingProvider etc.)
 enum-variant-name-threshold = 5
+# `Box::leak` in a render callback leaks the GPU resources the leaked handle
+# owns: a wgpu BindGroup holds Arc references to every resource it binds, so a
+# leaked BindGroup pins its uniform buffer, texture view, and sampler forever.
+# This cost v5.0.0-alpha.4 a release. See
+# docs/superpowers/specs/2026-07-08-windows-remediation-design.md
+disallowed-methods = [
+    { path = "std::boxed::Box::leak", reason = "leaks the GPU resources the handle owns; store in a render-world resource and borrow for 'pass instead" },
+]
