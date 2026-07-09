@@ -64,6 +64,15 @@ is held to the same bar as production code. Four of Plan 01's plan defects were 
 - `assert_eq!(x.is_some(), true)` → `clippy::bool_assert_comparison`. Use `assert!(x.is_some())`.
 - `0..(N + 1)` → `clippy::range_plus_one`. Use `0..=N`.
 - `u._pad` → `clippy::used_underscore_binding`.
+- `Duration::from_millis(1_000)` → `clippy::duration_suboptimal_units`. Use `Duration::from_secs(1)`.
+- `a + D - Duration::from_millis(1)` → `clippy::unchecked_time_subtraction`. Use
+  `a + D.saturating_sub(Duration::from_millis(1))`. **Note clippy's own suggested fix
+  (`.checked_sub(..).unwrap()`) trips `unwrap_used`** — one lint proposing what another denies. Reach for
+  `saturating_sub`, and mind the precedence change: the method binds tighter than `+`, so
+  `a + (D - 1ms)`, not `(a + D) - 1ms`. Both happen to be equal for `Duration`, but check each case.
+
+Both of the last two were found by Plan 02 Task 1's implementer, in the plan's own example code, on the
+first build. Assume this list is still incomplete.
 
 A plan that puts any of these in its own example code hands the implementer a build failure.
 
