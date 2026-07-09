@@ -7,7 +7,10 @@
 //!   [`crate::sketch::sketch_active`]) so a sketch gates its attract systems on
 //!   "this sketch is up AND the screensaver is showing".
 //! - The core [`settings::ScreensaverSettings`] resource (the FPS cap; the
-//!   former operator caption was cut 2026-06-10 — see the settings module).
+//!   former operator caption was cut 2026-06-10 — see the settings module)
+//!   plus the operator's idle-to-attract-mode timeout, synced into
+//!   [`crate::lifecycle::idle::InteractionTimer`] by
+//!   [`sync_attract_timeout_from_settings`].
 //! - The [`fade::ScreensaverFade`] envelope attract layers can cross-fade
 //!   against.
 //! - Per-tier **present-rate throttling** via `bevy::winit::WinitSettings`
@@ -77,6 +80,17 @@ impl Plugin for ScreensaverPlugin {
     fn build(&self, app: &mut App) {
         // Attract-mode settings (persisted, User panel).
         app.register_sketch_settings::<settings::ScreensaverSettings>();
+
+        // Sync the operator's "time until attract mode" setting into the
+        // idle timer, split evenly across its two internal stages.
+        // `resource_changed` fires on initial insertion too, so a persisted
+        // non-default value takes effect from the first frame.
+        app.add_systems(
+            Update,
+            sync_attract_timeout_from_settings
+                .run_if(resource_changed::<settings::ScreensaverSettings>)
+                .before(crate::lifecycle::idle::advance_activity),
+        );
 
         // Fade envelope (consumed by attract layers that want a smooth
         // appear/disappear; the caption overlay that used to read it is gone).
@@ -176,6 +190,50 @@ pub fn effective_tier(
 /// PANIC in `Duration::from_secs_f64` (TOML accepts `nan` as a float).
 const SCREENSAVER_FPS_MIN: f64 = 1.0;
 const SCREENSAVER_FPS_MAX: f64 = 240.0;
+
+/// Guard rails on the persisted `attract_mode_timeout_secs` setting,
+/// mirroring [`SCREENSAVER_FPS_MIN`]/[`SCREENSAVER_FPS_MAX`]: a hand-edited
+/// TOML outside the slider's 10–600 s range is clamped here rather than
+/// feeding a degenerate (zero/negative/NaN/infinite) value into
+/// `Duration::from_secs_f32`, which panics on all four.
+const ATTRACT_TIMEOUT_MIN_SECS: f32 = 1.0;
+const ATTRACT_TIMEOUT_MAX_SECS: f32 = 3600.0;
+
+/// Split the operator-facing "time until attract mode" into the two
+/// [`crate::lifecycle::idle::InteractionTimer`] thresholds it drives,
+/// evenly: half throttles hand-tracking inference and freezes some sketch
+/// dispatches (`Active → Idle`), half shows the attract visual
+/// (`Idle → Screensaver`). Extracted as a pure function so the split (and
+/// its degenerate-value guard) is unit-tested directly, matching this
+/// module's `tier_present_wait` / `screensaver_update_mode` pattern.
+#[must_use]
+#[allow(
+    clippy::manual_clamp,
+    reason = "max().min() is deliberate: clamp() passes NaN through, and a NaN duration panics \
+              in Duration::from_secs_f32 — max/min sanitize a degenerate persisted TOML to the rail"
+)]
+fn split_attract_timeout(total_secs: f32) -> (Duration, Duration) {
+    let clamped = total_secs
+        .max(ATTRACT_TIMEOUT_MIN_SECS)
+        .min(ATTRACT_TIMEOUT_MAX_SECS);
+    let half = Duration::from_secs_f32(clamped / 2.0);
+    (half, half)
+}
+
+/// Copy the operator's `attract_mode_timeout_secs` setting into
+/// [`crate::lifecycle::idle::InteractionTimer`] whenever it changes —
+/// including on initial load, so a persisted non-default value takes effect
+/// from the first frame rather than only after the next edit. Registered to
+/// run before [`crate::lifecycle::idle::advance_activity`] so a same-frame
+/// change is visible to it immediately.
+fn sync_attract_timeout_from_settings(
+    settings: Res<'_, settings::ScreensaverSettings>,
+    mut timer: ResMut<'_, crate::lifecycle::idle::InteractionTimer>,
+) {
+    let (idle, screensaver) = split_attract_timeout(settings.attract_mode_timeout_secs);
+    timer.idle_threshold = idle;
+    timer.screensaver_threshold = screensaver;
+}
 
 /// Target present interval (frame-to-frame wait) per tier while in the
 /// screensaver, capped by the operator's "Screensaver FPS cap" setting
@@ -549,5 +607,85 @@ mod tests {
         };
         assert_eq!(effective_tier(&thermal, Some(&forced)), ThermalTier::Hot);
         assert_eq!(effective_tier(&thermal, None), ThermalTier::Cool);
+    }
+
+    #[test]
+    fn split_attract_timeout_splits_evenly() {
+        // The 60 s default reproduces today's hardcoded 30 s / 30 s split.
+        assert_eq!(
+            split_attract_timeout(60.0),
+            (Duration::from_secs(30), Duration::from_secs(30))
+        );
+        assert_eq!(
+            split_attract_timeout(10.0),
+            (Duration::from_secs(5), Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn split_attract_timeout_clamps_degenerate_values() {
+        // A hand-edited TOML with a zero/negative/absurd/NaN total must not
+        // panic Duration::from_secs_f32 (which panics on all four).
+        let floor = Duration::from_secs_f32(ATTRACT_TIMEOUT_MIN_SECS / 2.0);
+        assert_eq!(split_attract_timeout(0.0), (floor, floor));
+        assert_eq!(split_attract_timeout(-10.0), (floor, floor));
+
+        let ceiling = Duration::from_secs_f32(ATTRACT_TIMEOUT_MAX_SECS / 2.0);
+        assert_eq!(split_attract_timeout(1_000_000.0), (ceiling, ceiling));
+
+        let (idle, screensaver) = split_attract_timeout(f32::NAN);
+        assert_eq!(idle, floor);
+        assert_eq!(screensaver, floor);
+    }
+
+    #[test]
+    fn sync_attract_timeout_only_writes_when_settings_change() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<crate::lifecycle::idle::InteractionTimer>();
+        app.insert_resource(settings::ScreensaverSettings {
+            attract_mode_timeout_secs: 20.0,
+            ..settings::ScreensaverSettings::default()
+        });
+        app.add_systems(
+            Update,
+            sync_attract_timeout_from_settings
+                .run_if(resource_changed::<settings::ScreensaverSettings>),
+        );
+
+        app.update(); // initial insertion counts as a change
+        {
+            let timer = app
+                .world()
+                .resource::<crate::lifecycle::idle::InteractionTimer>();
+            assert_eq!(timer.idle_threshold, Duration::from_secs(10));
+            assert_eq!(timer.screensaver_threshold, Duration::from_secs(10));
+        }
+
+        // Hand-edit the timer to a sentinel value with the setting untouched:
+        // the next update must NOT overwrite it, since ScreensaverSettings
+        // hasn't changed.
+        app.world_mut()
+            .resource_mut::<crate::lifecycle::idle::InteractionTimer>()
+            .idle_threshold = Duration::from_secs(999);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<crate::lifecycle::idle::InteractionTimer>()
+                .idle_threshold,
+            Duration::from_secs(999),
+            "system must not run when ScreensaverSettings is unchanged"
+        );
+
+        // Now actually change the setting: the next update picks it up.
+        app.world_mut()
+            .resource_mut::<settings::ScreensaverSettings>()
+            .attract_mode_timeout_secs = 100.0;
+        app.update();
+        let timer = app
+            .world()
+            .resource::<crate::lifecycle::idle::InteractionTimer>();
+        assert_eq!(timer.idle_threshold, Duration::from_secs(50));
+        assert_eq!(timer.screensaver_threshold, Duration::from_secs(50));
     }
 }
