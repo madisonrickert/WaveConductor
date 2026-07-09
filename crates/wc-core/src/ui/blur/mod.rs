@@ -18,6 +18,7 @@
 
 pub mod callback;
 pub mod node;
+pub(crate) mod slots;
 
 use bevy::math::UVec2;
 use bevy::prelude::*;
