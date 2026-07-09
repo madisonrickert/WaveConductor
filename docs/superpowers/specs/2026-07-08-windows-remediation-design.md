@@ -276,9 +276,17 @@ Bounded by widget count. Zero steady-state allocation. No positional coupling.
 
 Also add `Box::leak` to `disallowed-methods` in `clippy.toml`.
 
-**Test:** extend `crates/wc-core/tests/ui_blur.rs` to render N frames and assert
-a bounded count of buffer creations. A leak that manifests over minutes is
-otherwise invisible to CI.
+**Test:** the slot bookkeeping is factored into a GPU-free generic
+(`SlotBook<T>`) whose eviction and bounded-growth properties are unit-tested
+with `T = ()`. The regression test that matters — *a widget painted every frame
+for 5000 frames occupies exactly one slot* — then runs on every CI push with no
+GPU.
+
+`crates/wc-core/tests/ui_blur.rs` is **not** the right home for this. Every test
+in that file is `#[ignore]`d because `DefaultPlugins` pulls in winit, which
+requires the macOS main thread while cargo's test runner uses worker threads
+(`ui_blur.rs:7-18`). `cargo nextest` skips ignored tests, so an assertion added
+there would never execute in CI.
 
 ### Workstream 2 — Evict post-process bind-group caches
 
@@ -523,8 +531,9 @@ field tester validates the outcome; he does not iterate.
 ## 6. Verification
 
 - Unit tests per module, colocated as `#[cfg(test)] mod tests`.
-- `crates/wc-core/tests/ui_blur.rs` gains a bounded-allocation assertion
-  (workstream 1).
+- Workstream 1's leak regression is a GPU-free unit test over `SlotBook<T>`, not
+  an integration test in `crates/wc-core/tests/ui_blur.rs` — everything in that
+  file is `#[ignore]`d for winit main-thread reasons and never runs in CI.
 - Thermal zone selection is unit-tested behind a trait (workstream 6).
 - Full CI gate per AGENTS.md: `cargo fmt --check`, `cargo clippy --all-targets
   --all-features --workspace -- -D warnings`, `cargo nextest run --workspace
