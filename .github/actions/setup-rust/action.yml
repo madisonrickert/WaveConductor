@@ -1,0 +1,49 @@
+name: Set up Rust
+description: >-
+  Installs the pinned toolchain, removes the runner image's ambient toolchains so
+  the cargo cache key stays stable, and restores the cargo cache.
+
+inputs:
+  components:
+    description: "Extra rustup components, comma-separated (e.g. `clippy`)."
+    required: false
+    default: ""
+  prefix-key:
+    description: "Cache key prefix, passed through to Swatinem/rust-cache."
+    required: false
+    default: "v0-rust"
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.96.0
+        components: ${{ inputs.components }}
+
+    # rust-cache derives its environment hash from `rustup toolchain list`, i.e.
+    # from EVERY installed toolchain, not just the pinned one. The runner images
+    # ship their own `stable`, so when GitHub rolls that stable forward (1.96.0 ->
+    # 1.96.1 on 2026-07-08) the hash flips even though our compiler never changed.
+    # That hash sits in rust-cache's *restore* key, so there is no prefix fallback:
+    # every job misses outright and rebuilds the whole Bevy tree (~26 min vs ~3).
+    # Uninstalling the ambient toolchains pins the hash to the toolchain we chose.
+    - name: Drop ambient toolchains
+      shell: bash
+      run: |
+        set -euo pipefail
+        keep="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
+        echo "Keeping active toolchain: $keep"
+        # `grep -v` exits 1 when nothing is left to uninstall; that is success here.
+        ambient="$(rustup toolchain list | awk '{print $1}' | grep -vFx "$keep" || true)"
+        for tc in $ambient; do
+          echo "Uninstalling ambient toolchain: $tc"
+          rustup toolchain uninstall "$tc"
+        done
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: ${{ inputs.prefix-key }}
+        # Without this, a red run discards its cache and the next push -- the one
+        # pushing the fix -- pays a full cold rebuild.
+        cache-on-failure: "true"
