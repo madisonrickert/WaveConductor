@@ -46,7 +46,7 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 
 use crate::audio::state::AudioState;
-use crate::lifecycle::reload::SketchReloadState;
+use crate::lifecycle::reload::{ReloadReason, SketchReloadState};
 use crate::lifecycle::state::AppState;
 use crate::render::{BloomComposite, TonemapChoice};
 use crate::settings::{SketchRestart, SketchSettings};
@@ -148,7 +148,12 @@ pub fn restart_on_settings_change<S: SketchLifecycle>(
             // started — headless tests and early startup before the cpal
             // stream is active.
             let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
-            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, S::STATE);
+            reload_state.begin_fade_out(
+                time.elapsed(),
+                pre_fade_volume,
+                S::STATE,
+                ReloadReason::SettingsRestart,
+            );
             *last_change_at = None;
             tracing::debug!(
                 "sketch settings ('{}') debounce elapsed — beginning reload FadeOut",
