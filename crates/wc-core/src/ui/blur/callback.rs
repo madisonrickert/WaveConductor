@@ -352,6 +352,12 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
         if world.get_resource::<CompositeSlots>().is_none() {
             return;
         }
+        // Reads the *primary window's* size. `render()`'s viewport comes from the
+        // egui camera's `physical_viewport_size`. Those are the same value only
+        // because this app spawns a single `Camera2d` with no viewport sub-rect,
+        // targeting the primary window (`waveconductor/src/main.rs`, `spawn_camera`).
+        // A viewport sub-rect, a second egui window, or a render-to-texture egui
+        // camera would make them diverge and the UVs would be wrong.
         let Some(screen_size_px) = primary_window_physical_size(world) else {
             return;
         };
@@ -497,7 +503,19 @@ fn primary_window_physical_size(world: &World) -> Option<[u32; 2]> {
     let windows = world.get_resource::<ExtractedWindows>()?;
     let primary = windows.primary?;
     let window = windows.windows.get(&primary)?;
-    Some([window.physical_width, window.physical_height])
+    nonzero_size(window.physical_width, window.physical_height)
+}
+
+/// Reject a window size with a zero dimension.
+///
+/// A minimised or not-yet-mapped window reports zero width or height. The blur
+/// texture allocator guards the same case (`super::ensure_blur_texture`), so
+/// keeping the guard here means both agree on which frames are paintable.
+fn nonzero_size(physical_width: u32, physical_height: u32) -> Option<[u32; 2]> {
+    if physical_width == 0 || physical_height == 0 {
+        return None;
+    }
+    Some([physical_width, physical_height])
 }
 
 #[cfg(test)]
@@ -550,5 +568,25 @@ mod tests {
         let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(10.0, 10.0));
         assert!(composite_uniforms([0, 500], 1.0, rect, 0.0).is_none());
         assert!(composite_uniforms([1000, 0], 1.0, rect, 0.0).is_none());
+    }
+
+    #[test]
+    fn nonzero_size_accepts_a_normal_size() {
+        assert_eq!(nonzero_size(1000, 500), Some([1000, 500]));
+    }
+
+    #[test]
+    fn nonzero_size_rejects_a_zero_width() {
+        assert!(nonzero_size(0, 500).is_none());
+    }
+
+    #[test]
+    fn nonzero_size_rejects_a_zero_height() {
+        assert!(nonzero_size(1000, 0).is_none());
+    }
+
+    #[test]
+    fn nonzero_size_rejects_both_dimensions_zero() {
+        assert!(nonzero_size(0, 0).is_none());
     }
 }
