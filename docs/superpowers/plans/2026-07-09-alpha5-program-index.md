@@ -333,9 +333,14 @@ nothing — which would make this plan fail its own goal. Two ways out:
   dependency on Plan 02 and one black frame on reconnect.
 - **(b) Re-issue the synth commands from the supervisor**, which requires it to remember what was added.
 
-Prefer (a): it reuses machinery Plan 02 already builds and needs no new bookkeeping. But **do not build
-either until Task 5's human check answers the question**. The plan's `cargo rund` unplug/replug step must
-explicitly report *audible vs. silent* after reconnect. If it is audible, neither is needed.
+Resolved in favour of (a), as the plan's **conditional Task 5R** (`ReloadReason::AudioDeviceReconnect`,
+same zero-fade / no-audio-touch policy as `WindowResize`). Blocked on Plan 02, which introduces
+`ReloadReason`. (b) was rejected because a supervisor replaying `Add*Synth` duplicates each sketch's
+source of truth and drifts the moment a sketch changes; re-entry replays nothing and cannot drift.
+
+**Task 5R is gated on a human answer and must not be built speculatively.** Plan 04's Task 5 Step 7 is a
+`cargo rund` unplug/replug test whose sole job is to report *audible vs. silent* after reconnect. Audible
+→ delete 5R, it was never needed. Silent → implement it. Do not let an implementer skip the gate.
 
 **Blocked by.** Plan 03a (the widget). The audio *recovery* half — supervisor, backoff, `Reconnecting`
 status — touches no UI and can land first.

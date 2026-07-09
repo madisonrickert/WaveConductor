@@ -10,6 +10,8 @@
 
 **Depends on:** Plan 03a (runtime-enumerated setting widget) — for the UI tasks (6 and 7) only. The recovery tasks (1–5) depend on nothing and land first.
 
+**Known risk that shapes this plan — a reconnect must return *audible* sound, not just `AudioStatus::Running`.** The rebuilt `DspHost` starts with **no synth graph**: each sketch issues its `Add*Synth` command only on `OnEnter(AppState::…)`, which does not re-fire on a device reconnect. So `rebuild_engine` alone — which restores the stream and its play/pause transport — can leave the app `Running` while emitting silence mid-sketch, which would make this plan fail its own goal ("sound keeps coming out for eight hours"). The plan handles this deliberately: Task 5's human check is the **gate** (audible vs. silent after unplug/replug), and a clearly-marked **conditional** task (Task 5R, not in the main flow) supplies the remedy **only if** the check reports silent — by reusing Plan 02's reload primitive (`ReloadReason::AudioDeviceReconnect`, a silent, instant `OnEnter` re-entry that re-adds the synth graph), not by teaching the supervisor to remember and replay synth commands. If reconnected audio comes back audible, none of Task 5R is needed. This is not deferred housekeeping; it is the difference between the recovery half working and appearing to work.
+
 ## Global Constraints
 
 Copied from `AGENTS.md` and the program index's Part 1 (`docs/superpowers/plans/2026-07-09-alpha5-program-index.md`). Every task's requirements implicitly include this section.
@@ -50,6 +52,8 @@ Recovery half (no UI, depends on nothing):
   3  device.rs pure logic                 (name resolver + topology diff + resources)
   4  device-watcher thread + drain system (native; wired into AudioPlugin)
   5  engine rebuild + supervise_audio      (ties 1–4 together; removes the transient allows)
+                                          ├─ human gate: is reconnected audio audible or silent?
+ 5R  CONDITIONAL silent-reconnect remedy   (ONLY if the gate reports silent; depends on Plan 02)
 
 Selection / UI half (BLOCKED ON PLAN 03a):
   6  AudioSettings { output_device }        (persist by name; wire into the resolver)
@@ -1420,7 +1424,12 @@ This cannot be unit-tested (no CI audio device). Run: `cargo rund`. Then:
 3. Watch the log: it should show `Entering Reconnecting`, then `audio stream rebuilt device=… in_sketch=true` within the backoff window (≤ ~1–2 s for the first attempt), and sound should return **without restarting the app**.
 4. Leave a device unplugged and confirm the retry backs off (1 s, 2 s, 4 s, …, capped 30 s) rather than busy-looping, then replug and confirm it re-acquires promptly (the watcher's topology change should trigger an early attempt).
 
-Note in your report whether audio returned **audible** or merely `Running`-but-silent — if silent, that is the synth-reactivation gap in the open questions, not a rebuild failure.
+**This is the gate for whether Task 5R is needed. Report the answer explicitly: after the reconnect in step 3, was the sound _audible_, or was the status `Running` but the output _silent_?**
+
+- **Audible** → the DSP graph survived (or was re-established) and the recovery half is complete. **Task 5R is not needed — do not implement it.**
+- **Silent** (`Running`, no sound, until you navigate away and back) → this is the synth-reactivation gap the header warns about: the rebuilt `DspHost` has no synth graph because `Add*Synth` fires only on `OnEnter`. Proceed to **Task 5R**.
+
+Record which outcome you observed, on which platform, in your report — the next agent chooses whether to run Task 5R based on it.
 
 - [ ] **Step 8: Commit**
 
@@ -1443,11 +1452,174 @@ re-decode them (a small memory cost that buys mid-run reconnect). Removes the
 transient dead-code allows from supervisor.rs and device.rs now that every
 item has a production caller.
 
-Known gap (see plan open questions): rebuild restores the stream transport,
-not the active sketch's synth voice graph.
+Reconnect restores the stream transport. Whether it also restores the
+active sketch's synth graph is decided by the Task 5 human gate; the
+conditional Task 5R remedies a silent reconnect if the gate reports one.
 EOF
 git show --stat HEAD
 ```
+
+---
+
+### Task 5R (CONDITIONAL): re-add the synth graph on reconnect via a silent reload
+
+> **Do not implement this task unless the Task 5, Step 7 gate reported _silent_.** If reconnected audio was audible, the DSP graph already survives and this task is dead weight — skip it entirely.
+>
+> **Blocked on Plan 02.** This reuses the reload primitive Plan 02 adds to `crates/wc-core/src/lifecycle/reload.rs`: `enum ReloadReason`, `fn fade_duration(reason) -> Duration`, `fn fades_audio(reason) -> bool`. As of writing, `reload.rs` has `FADE_DURATION` and `ReloadPhase` but **not** `ReloadReason` (verified: `rg ReloadReason crates/` returns nothing) — so Plan 02 must land first. If Plan 02's names differ from those three, adapt to what it shipped; the shape (a reason enum with per-reason fade/audio policy) is what matters.
+
+**Why re-entry, not replay.** A device reconnect returns `AudioStatus::Running` with a fresh `DspHost` that has no voices, because each sketch's `Add*Synth` command is issued only from its `OnEnter(AppState::…)` system, which a reconnect does not re-run. The cheapest correct fix is to make the sketch re-enter its own state: a `sketch → Home → sketch` round-trip re-runs `OnEnter`, which re-adds the synth graph and re-seeds its parameters through the sketch's normal path. Plan 02's reload state machine already performs exactly that round-trip; we only need a **reason** that makes it silent and instant so a reconnect does not flash a 200 ms black fade or duck the master volume.
+
+**The remedy is one new `ReloadReason` variant plus one trigger call.**
+
+**Files:**
+- Modify: `crates/wc-core/src/lifecycle/reload.rs` (add the `ReloadReason::AudioDeviceReconnect` variant + its `fade_duration`/`fades_audio` arms; update any exhaustive match Plan 02 introduced over `ReloadReason`)
+- Modify: `crates/wc-core/src/audio/supervisor.rs` (trigger the reload after a successful rebuild while in a sketch)
+
+**Interfaces:**
+- Consumes (Plan 02): `ReloadReason`, `fade_duration`, `fades_audio`, and Plan 02's reload-begin entry point (whatever it is named after Plan 02 — e.g. a `SketchReloadState::begin(reason, time, pre_fade_volume, return_state)`; match the real signature).
+- Produces: `ReloadReason::AudioDeviceReconnect` — `fade_duration` returns `Duration::ZERO`, `fades_audio` returns `false` (identical policy to Plan 02's `WindowResize`: one black frame, master volume untouched, `OnEnter` re-runs).
+
+- [ ] **Step 1: Write the failing test for the new reason's policy**
+
+Add to `crates/wc-core/src/lifecycle/reload.rs`'s `#[cfg(test)] mod tests`:
+
+```rust
+    #[test]
+    fn audio_device_reconnect_is_silent_and_instant() {
+        // A reconnect must not flash a fade or duck the volume: the sketch just
+        // re-enters its own state so OnEnter re-adds the synth graph. Same
+        // policy as WindowResize.
+        assert_eq!(fade_duration(ReloadReason::AudioDeviceReconnect), std::time::Duration::ZERO);
+        assert!(!fades_audio(ReloadReason::AudioDeviceReconnect));
+    }
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cargo test -p wc-core --lib lifecycle::reload 2>&1 | head -20`
+
+Expected: FAIL to compile — `no variant AudioDeviceReconnect on ReloadReason`.
+
+- [ ] **Step 3: Add the variant and its policy arms**
+
+In `crates/wc-core/src/lifecycle/reload.rs`, add the variant to `ReloadReason` (Plan 02's enum), with rustdoc:
+
+```rust
+    /// A cpal output-device reconnect rebuilt the stream, but the fresh DspHost
+    /// has no voices (each sketch's `Add*Synth` fires only on `OnEnter`). Re-enter
+    /// the current sketch state silently and instantly so `OnEnter` re-adds the
+    /// synth graph. No fade, no audio duck — the visitor should not see or hear
+    /// the round-trip. See `docs/superpowers/plans/2026-07-09-alpha5-04-…`.
+    AudioDeviceReconnect,
+```
+
+Add its arms to `fade_duration` and `fades_audio` (grouping with `WindowResize`, whose policy is identical, keeps `clippy::match_same_arms` quiet):
+
+```rust
+// in fade_duration(reason):
+    ReloadReason::WindowResize | ReloadReason::AudioDeviceReconnect => Duration::ZERO,
+// in fades_audio(reason):
+    ReloadReason::WindowResize | ReloadReason::AudioDeviceReconnect => false,
+```
+
+Grep for any other exhaustive `match` on `ReloadReason` Plan 02 added and give it an `AudioDeviceReconnect` arm:
+
+```bash
+rg -n "ReloadReason::" crates/ --glob '!*/lifecycle/reload.rs'
+```
+
+- [ ] **Step 4: Trigger the reload from the supervisor on a successful in-sketch rebuild**
+
+In `crates/wc-core/src/audio/supervisor.rs`, change the recovered branch of `supervise_audio` so that, after `record_success`, it re-enters the current sketch state via the reload machinery. Release the `AudioSupervisor` borrow first, then re-borrow `world`:
+
+```rust
+    if recovered {
+        {
+            let mut sup = world.resource_mut::<AudioSupervisor>();
+            sup.record_success();
+        }
+        // Re-add the sketch's synth graph. Only meaningful in a sketch (Home has
+        // no synth). A silent, instant reload re-runs OnEnter without any fade or
+        // volume duck. Match Plan 02's actual begin-reload entry point.
+        trigger_reconnect_reload(world);
+    } else {
+        let mut sup = world.resource_mut::<AudioSupervisor>();
+        sup.record_failure(now);
+    }
+```
+
+Add the helper below `supervise_audio` (adapt the begin-reload call to Plan 02's real signature):
+
+```rust
+/// Re-enter the active sketch state after a reconnect so its `OnEnter` re-adds
+/// the synth graph (a reconnect leaves the DspHost voiceless). No-op at `Home`.
+///
+/// Uses [`ReloadReason::AudioDeviceReconnect`], which Plan 02's reload machine
+/// renders as a silent, instant `sketch → Home → sketch` round-trip.
+#[cfg(not(target_arch = "wasm32"))]
+fn trigger_reconnect_reload(world: &mut bevy::prelude::World) {
+    use crate::lifecycle::reload::ReloadReason;
+    use crate::lifecycle::state::AppState;
+
+    let current = *world.resource::<bevy::prelude::State<AppState>>().get();
+    if !current.is_sketch() {
+        return; // no synth graph to restore at Home
+    }
+    let now = world
+        .resource::<bevy::prelude::Time<bevy::prelude::Real>>()
+        .elapsed_secs_f64();
+    let volume = world.resource::<crate::audio::state::AudioState>().volume;
+    // Plan 02 owns the begin-reload entry point; call whatever it shipped, with
+    // reason = AudioDeviceReconnect, pre_fade_volume = volume, return_state =
+    // current. This illustrative call must be reconciled to Plan 02's signature.
+    crate::lifecycle::reload::begin_reload(
+        world,
+        ReloadReason::AudioDeviceReconnect,
+        now,
+        volume,
+        current,
+    );
+}
+```
+
+> **Coupling note.** `begin_reload` is a placeholder for Plan 02's actual reload entry point (it may be a method on `SketchReloadState` taking `&mut self, &Time, …`, or a free function). Read Plan 02's merged `reload.rs` and reconcile this call to it; keep `reason = AudioDeviceReconnect`, `return_state = current`, and the `is_sketch` guard. If `rebuild_engine` still calls `stream.play()` for the recovery-only stage, that stays correct — the reload's `OnExit(Home)` resume is idempotent with it.
+
+- [ ] **Step 5: Run the test and the full gate**
+
+```bash
+cargo test -p wc-core --lib lifecycle::reload
+cargo fmt --all
+cargo clippy --all-targets --all-features --workspace -- -D warnings
+cargo nextest run --workspace --all-features
+cargo test --doc --workspace
+cargo doc --no-deps --workspace --document-private-items
+```
+
+Expected: all pass.
+
+- [ ] **Step 6: Human re-verification — the gate must now report audible**
+
+Run: `cargo rund`, enter a sound-making sketch, trigger a device blip (unplug/replug or sleep/wake the output). Confirm sound returns **audible** within the backoff window, with at most a single-frame black flash and no volume dip, and **without** the visitor needing to navigate away. If it is still silent, the reload is not re-adding the synth graph — debug the `OnEnter` path (is the sketch's `Add*Synth` gated on something the round-trip does not satisfy?) before claiming this done.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/wc-core/src/lifecycle/reload.rs crates/wc-core/src/audio/supervisor.rs
+git commit -F - <<'EOF'
+fix(audio): re-add the synth graph on reconnect via a silent reload
+
+A device reconnect returned AudioStatus::Running with a voiceless DspHost:
+each sketch issues Add*Synth only on OnEnter, which a reconnect does not
+re-run, so mid-sketch audio came back silent. Rather than teach the
+supervisor to remember and replay synth commands, re-enter the active sketch
+state through Plan 02's reload machine with a new AudioDeviceReconnect reason
+(silent, instant, no volume duck), so OnEnter re-adds the graph on its normal
+path. No-op at Home. Gated on the Task 5 human check having reported silent.
+EOF
+git show --stat HEAD
+```
+
+**Rejected alternative — supervisor replays the synth commands.** The supervisor could remember which `Add*Synth` was last issued (and every `SetParam` since) and re-push them onto the new command ring after a rebuild. Rejected: it forces the audio supervisor to maintain a shadow copy of every sketch's DSP activation and parameter state — duplicating what each sketch's `OnEnter`/param systems already own — and it would drift the moment a sketch adds a voice or a parameter without updating the supervisor's replay list. Re-entry reuses the one code path that is already the source of truth for "this sketch's audio, freshly established," costs one enum variant, and cannot drift because it replays nothing. The only price is a single black frame, which `ReloadReason::AudioDeviceReconnect` makes imperceptible.
 
 ---
 
@@ -1464,15 +1636,14 @@ git show --stat HEAD
 - Modify: `crates/wc-core/src/audio/device.rs` (read the saved name in `drain_device_topology`)
 
 **Interfaces:**
-- **Consumes (Plan 03a):** the runtime-enumerated widget. Its contract, which this task writes against:
-  - the stored value is a `String` (the device name);
-  - the dropdown's options come from a Bevy `Resource` the panel reads — here `device::AvailableAudioDevices(Vec<String>)`;
-  - a saved name absent from the live list is **shown, marked unavailable, and kept persisted** — never silently rewritten (a sleeping HDMI TV must not lose its binding).
-  - The exact `SettingKind` variant / attribute spelling 03a introduces (e.g. `ty = RuntimeEnum` plus a way to name the options resource) is defined by Plan 03a. Use whatever 03a shipped; do **not** invent it here. If 03a's attribute differs from the placeholder below, adjust the `#[setting(...)]` line to match 03a and leave the field type (`String`) and semantics unchanged.
+- **Consumes (Plan 03a, shipped contract — verified against `docs/superpowers/plans/2026-07-09-alpha5-03a-runtime-enum-widget.md`):**
+  - `SettingKind::RuntimeEnum { options_key }` — the field stays a plain `String` and persists exactly like `Text`; the `#[setting(...)]` attribute names a **string-literal `options_key`**, never a resource type. The panel resolves that key against a registry, so it never names the concrete options resource — that indirection is the whole point of 03a.
+  - The options come from a `Resource` that `impl`s `RuntimeEnumOptionsSource` (`const OPTIONS_KEY: &'static str; fn options(&self) -> &[String]`) and is registered with `app.register_runtime_enum_options::<R>()`. **That impl and registration are Task 7's job**, not this task's — keeping `AvailableAudioDevices` a plain `Resource` newtype (Task 3) means the recovery half never depends on 03a.
+  - A saved name absent from the live list is **shown, marked unavailable, and kept persisted** — 03a's widget guarantees this (a free-text field alongside the dropdown); a sleeping HDMI TV never loses its binding.
 - Produces:
-  - `pub struct AudioSettings { pub output_device: String }` (`SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq`), `storage_key = "audio"`, section `"Audio"`.
+  - `pub struct AudioSettings { pub output_device: String }` (`SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq`), `storage_key = "audio"`, section `"Audio"`, the field declared `ty = RuntimeEnum, options_key = "audio_output_devices"`.
 
-**Design.** `output_device` is a `String`; the empty string is the "system default / follow OS" sentinel (the resolver already maps `Some("")` and `None` alike to `Fallback`). Persistence needs no new machinery — it is a TOML string like `Text`. Registering the section in `AudioPlugin::build` inserts the resource before `Startup`, so `start_audio_engine` can read it.
+**Design.** `output_device` is a `String`; the empty string is the "system default / follow OS" sentinel (the resolver already maps `Some("")` and `None` alike to `Fallback`). Persistence needs no new machinery — it is a TOML string like `Text`. Registering the section in `AudioPlugin::build` inserts the resource before `Startup`, so `start_audio_engine` can read it. The `options_key` string `"audio_output_devices"` is the contract shared with Task 7, which binds it to `AvailableAudioDevices` via `RuntimeEnumOptionsSource::OPTIONS_KEY`. Until Task 7 registers that source, the field renders with no dropdown options (03a's free-text fallback) but still persists and resolves correctly — so Task 6 is functional on its own.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1549,13 +1720,15 @@ pub struct AudioSettings {
     /// asleep) the engine falls back to the default **and keeps this value**,
     /// so the binding is restored when the device reappears.
     ///
-    /// Rendered with Plan 03a's runtime-enumerated widget; options come from
-    /// [`crate::audio::device::AvailableAudioDevices`]. Adjust the `ty = …`
-    /// below to the attribute Plan 03a shipped.
+    /// Rendered with Plan 03a's runtime-enumerated widget: the panel resolves
+    /// `options_key` against the `RuntimeEnumOptionsSource` registry, which
+    /// Task 7 binds to `crate::audio::device::AvailableAudioDevices` under the
+    /// key `"audio_output_devices"`. The key is a plain string literal — the
+    /// derive never names the concrete options resource.
     #[setting(
         default = String::new(),
         ty = RuntimeEnum,
-        options = crate::audio::device::AvailableAudioDevices,
+        options_key = "audio_output_devices",
         category = User,
         section = "Audio",
         label = "Audio output device"
@@ -1573,7 +1746,7 @@ impl Default for AudioSettings {
 }
 ```
 
-> **03a coupling:** the `ty = RuntimeEnum` and `options = …` lines are placeholders for whatever Plan 03a's derive macro accepts. If 03a named the attribute differently, change only those lines. The field type stays `String` and the `Default`/serde behaviour stays as written.
+> **03a coupling:** `ty = RuntimeEnum, options_key = "audio_output_devices"` matches Plan 03a's shipped derive attribute for `SettingKind::RuntimeEnum { options_key }` (a string-literal key). Confirm the exact attribute spelling against the merged 03a derive macro before relying on it; the field type stays `String` and the `Default`/serde behaviour stays as written regardless.
 
 - [ ] **Step 4: Register the section and wire the saved name into all three resolver sites**
 
@@ -1643,45 +1816,85 @@ git show --stat HEAD
 ### Task 7: Render the device picker with Plan 03a's widget
 
 **Files:**
-- Modify: whichever file Plan 03a designates for a runtime-enum widget row (its `panel_user/widgets.rs` change). This task adds **no** new widget; it relies on `AudioSettings`'s `ty = RuntimeEnum` field (Task 6) being rendered by 03a's generic path, fed by `AvailableAudioDevices`.
+- Modify: `crates/wc-core/src/audio/device.rs` (add `impl RuntimeEnumOptionsSource for AvailableAudioDevices`)
+- Modify: `crates/wc-core/src/audio/mod.rs` (register the source in `AudioPlugin::build`)
+
+This task adds **no** widget — 03a's generic path renders the `ty = RuntimeEnum` field from Task 6. It only binds `AvailableAudioDevices` to the `"audio_output_devices"` key so the dropdown has options.
 
 **Interfaces:**
-- **Consumes (Plan 03a):** the generic runtime-enum rendering path, which reads the options `Resource` named in the `#[setting(options = …)]` attribute. This task's only job is to confirm the wiring end-to-end and handle the unresolvable-name presentation, per 03a's contract.
-- Produces: nothing new in code — the value flows `AudioSettings.output_device` ⇄ persistence ⇄ resolver (all built in Task 6).
+- **Consumes (Plan 03a, shipped):**
+  - `pub trait RuntimeEnumOptionsSource: bevy::prelude::Resource { const OPTIONS_KEY: &'static str; fn options(&self) -> &[String]; }`
+  - `pub trait RegisterRuntimeEnumOptionsExt { fn register_runtime_enum_options<R: RuntimeEnumOptionsSource>(&mut self) -> &mut Self; }` (impl'd for `App`)
+  - `SettingKind::RuntimeEnum { options_key }` — the panel snapshots every registered source per frame and resolves a field's `options_key` against it. A persisted value absent from the live list is shown, marked unavailable, and kept editable (03a's guarantee).
+- Produces:
+  - `impl RuntimeEnumOptionsSource for AvailableAudioDevices { const OPTIONS_KEY: &'static str = "audio_output_devices"; fn options(&self) -> &[String] { &self.0 } }`
+  - one `app.register_runtime_enum_options::<AvailableAudioDevices>()` call.
 
-**Why this is thin.** Because 03a builds the widget and Task 6 declares the field with `ty = RuntimeEnum` + `options = AvailableAudioDevices`, the settings panel already renders the dropdown through 03a's generic path. This task is verification plus the presentation edge case (saved name not in the live list), which 03a's contract already specifies — confirm it holds for audio.
+**Why this is thin.** 03a built the widget and the registry; Task 6 declared the field with `options_key = "audio_output_devices"`. This task supplies the one impl + one registration that map that key to the live device list, then verifies end-to-end. `AvailableAudioDevices` stays a plain `Resource` newtype in Task 3 — this impl is added here so the recovery half never depends on 03a's trait.
 
-- [ ] **Step 1: Confirm the field renders and the options resource is populated**
+- [ ] **Step 1: Implement `RuntimeEnumOptionsSource`**
 
-Read Plan 03a's merged widget code to confirm the attribute spelling and options-resource lookup match what Task 6 wrote. If they differ, reconcile Task 6's `#[setting(...)]` line to 03a's actual attribute (field type stays `String`). Grep to confirm the section is registered and the resource exists:
+In `crates/wc-core/src/audio/device.rs`, add below the `AvailableAudioDevices` definition (import the trait: `use crate::settings::RuntimeEnumOptionsSource;` — confirm the exact re-export path against 03a's merged `settings/mod.rs`):
 
-```bash
-rg -n "AudioSettings|AvailableAudioDevices|RuntimeEnum" crates/wc-core/src/settings crates/wc-core/src/audio
+```rust
+impl RuntimeEnumOptionsSource for AvailableAudioDevices {
+    /// Shared with `AudioSettings::output_device`'s `options_key` (Task 6).
+    const OPTIONS_KEY: &'static str = "audio_output_devices";
+
+    fn options(&self) -> &[String] {
+        &self.0
+    }
+}
 ```
 
-- [ ] **Step 2: Human verification — sound reaches the TV, and the binding survives a blip**
+- [ ] **Step 2: Register the source**
+
+In `crates/wc-core/src/audio/mod.rs`, bring the extension trait into scope (`use crate::settings::RegisterRuntimeEnumOptionsExt;` — confirm the path) and add to `AudioPlugin::build`, next to the `register_sketch_settings` call:
+
+```rust
+        app.register_runtime_enum_options::<device::AvailableAudioDevices>();
+```
+
+- [ ] **Step 3: Confirm the wiring statically**
+
+```bash
+rg -n "audio_output_devices|RuntimeEnumOptionsSource|register_runtime_enum_options|RuntimeEnum" crates/wc-core/src/settings crates/wc-core/src/audio
+```
+
+Expected: the `options_key` string on the field (Task 6) and `OPTIONS_KEY` on the impl (this task) are the identical literal `"audio_output_devices"`; the source is registered exactly once. Then run the gate:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features --workspace -- -D warnings
+cargo nextest run --workspace --all-features
+```
+
+- [ ] **Step 4: Human verification — sound reaches the TV, and the binding survives a blip**
 
 No CI test can cover this (no audio device). Run: `cargo rund`, open the user settings panel (the Audio section), and:
 
-1. With an HDMI TV connected, confirm it appears in the "Audio output device" dropdown. Select it. Confirm sound moves to the TV **without restarting** (the setting change should re-resolve; if 03a's path does not re-open the stream on change, add a change-listener that calls the engine rebuild — note this as a finding, since re-open-on-change may belong here or in 03a's generic apply path).
+1. With an HDMI TV connected, confirm it appears in the "Audio output device" dropdown. Select it. Confirm sound moves to the TV **without restarting**. The setting change must re-resolve the device: if selecting a device does **not** move the audio (03a's generic apply path does not re-open the stream on change), add a change-listener system on `AudioSettings` that calls the supervisor's `request_now` (or `rebuild_engine`) so a picker selection takes effect live. Whether that listener belongs here or in 03a's generic apply path is open question 2 — record which you did.
 2. Confirm the choice persists: quit, relaunch, and verify the TV is still selected and receiving audio.
-3. Put the TV to sleep (or switch its input) so its endpoint drops. Confirm the dropdown still **shows the saved name, marked unavailable**, and that the persisted value is unchanged (inspect the saved TOML: `output_device = "…"` is still the TV). Wake the TV and confirm audio migrates back to it within a couple of seconds (the watcher's reappearance trigger).
+3. Put the TV to sleep (or switch its input) so its endpoint drops. Confirm the dropdown still **shows the saved name, marked unavailable**, and the persisted value is unchanged (inspect the saved TOML: `output_device = "…"` is still the TV). Wake the TV and confirm audio migrates back within a couple of seconds (the watcher's reappearance trigger → `request_now`).
 
-- [ ] **Step 3: Commit (only if this task changed code)**
-
-If Task 7 required a code change (e.g. a re-open-on-change listener, or reconciling the attribute), stage exactly those files and commit with `git commit -F`. If it was verification-only, there is nothing to commit — record the findings in your report instead.
+- [ ] **Step 5: Commit**
 
 ```bash
-# only if code changed:
-git add <named files>
+git add crates/wc-core/src/audio/device.rs crates/wc-core/src/audio/mod.rs
 git commit -F - <<'EOF'
-feat(audio): re-open the output stream when the device setting changes
+feat(audio): bind the output-device dropdown to the live device list
 
-<describe the change, e.g. a change-listener on AudioSettings that calls the
-engine rebuild so a picker selection takes effect without a restart>
+Implement Plan 03a's RuntimeEnumOptionsSource for AvailableAudioDevices under
+the key "audio_output_devices" (the options_key on AudioSettings.output_device)
+and register it, so the settings panel renders the picker from the watcher's
+live enumeration. AvailableAudioDevices stays a plain Resource newtype where it
+is defined; only this trait impl and registration touch 03a, keeping the
+recovery half independent of it.
 EOF
 git show --stat HEAD
 ```
+
+> If Step 4 required a device-change listener (open question 2), stage that file too and describe it in the commit body.
 
 ---
 
@@ -1701,12 +1914,13 @@ git show --stat HEAD
 | `AudioStatus` gains `Reconnecting` | Task 1 |
 | Enumeration/rebuild off the audio callback **and** the render thread | watcher thread (Task 4); main-thread event-driven rebuild (Task 5); documented per module |
 | Audio thread contract unchanged (lock-free, no Mutex, no alloc after init) | untouched — the error callback still only stores one atomic; nothing new runs on it |
+| Reconnected audio must be *audible*, not just `Running` | Task 5 human gate; conditional Task 5R (`ReloadReason::AudioDeviceReconnect`, reuses Plan 02) |
 
-**Recovery before UI, 03a confined to the UI.** Tasks 1–5 (recovery) depend on nothing and land first; after Task 5 the install recovers with zero UI. The Plan 03a dependency appears only in Tasks 6–7 (header, and Task 6's Interfaces block), and only for the widget — the field type (`String`), persistence, and the resolver are all built in the recovery half and merely *read* by the UI.
+**Recovery before UI, 03a confined to the UI.** Tasks 1–5 (recovery) depend on nothing and land first; after Task 5 the install recovers with zero UI. Conditional Task 5R (silent-reconnect remedy) depends only on **Plan 02**, not 03a. The Plan 03a dependency appears only in Tasks 6–7, and only for the widget — the field type (`String`), persistence, and the resolver are all built in the recovery half and merely *read* by the UI. Task 7 now consumes 03a's **shipped** contract (`RuntimeEnumOptionsSource` + `register_runtime_enum_options` + `SettingKind::RuntimeEnum { options_key }`), not a guess.
 
 **Per-path thread placement.** Audio callback: unchanged (one atomic store). Watcher thread: the only steady-state enumeration; owns its own host; never touches Bevy/render/audio-callback. Main thread: `drain_device_topology` (moves an already-built vec; allocates nothing in the common `None` case), `supervise_audio` + `rebuild_engine` (event-driven blocking enumeration on reconnect only). Nothing allocates on the audio callback; the one forced allocation (the watcher's per-change snapshot clone) is documented and fires only on real topology changes.
 
-**No placeholders.** Every code step shows complete code. The two 03a-coupled spots (Task 6's `ty = RuntimeEnum` attribute and Task 7's rendering) are explicitly marked as consuming 03a's contract and say exactly what to adjust if 03a's spelling differs; they are dependencies, not TBDs.
+**No placeholders.** Every code step shows complete code. The 03a-coupled spots (Task 6's `options_key = "audio_output_devices"` attribute and Task 7's `RuntimeEnumOptionsSource` impl + registration) are written against 03a's **shipped** contract, verified against `docs/superpowers/plans/2026-07-09-alpha5-03a-runtime-enum-widget.md`; each says to confirm the exact re-export path against 03a's merged code. Task 5R's `begin_reload` call is the one spot written against a not-yet-merged interface (Plan 02's reload-begin entry point) and is explicitly flagged to be reconciled to Plan 02's real signature — it is a marked dependency, not a TBD, and Task 5R only runs if the human gate demands it.
 
 **Type consistency (Produces ⇄ Consumes).** `resolve_output_device(Option<&str>, &[String]) -> DeviceResolution` is produced in Task 3 and consumed in `open_output_device`/`rebuild_engine`/`start_audio_engine` (Task 5) and `drain_device_topology` (Tasks 4/6). `AudioSupervisor::{begin,request_now,poll,record_failure,record_success}` (Task 2) are consumed by `supervise_audio` and `drain_device_topology`. `SupervisorAction` compared with `==` (derives `PartialEq, Eq`). `AvailableAudioDevices(Vec<String>)` / `BoundOutputDevice(Option<String>)` (Task 3) written by Tasks 4/5, read by 4/6/7. `AudioSettings.output_device: String` (Task 6) feeds `resolve_output_device` via `(!s.is_empty()).then_some(s.as_str())`.
 
@@ -1716,9 +1930,9 @@ git show --stat HEAD
 
 ## Open questions (could not be resolved by reading code; need a build or a human)
 
-1. **Synth re-activation after reconnect.** The locked scope is "restore play/pause from `AppState`," which `rebuild_engine` does. But the new `DspHost` starts with no synth graph, and the sketches' `Add*Synth` commands fire only on `OnEnter`, which does not re-fire on reconnect — so a reconnect mid-sketch may yield `Running`-but-silent audio until the visitor navigates away and back. A minimal fix is to map the active `AppState` to its `Add{Sketch}Synth` command and push it after a successful rebuild (idempotent per `command.rs`), but per-parameter state would still be stale until the sketch's next param write. This is deliberately **not** implemented (it is beyond the locked "play/pause" decision and risks audible double-adds). The Task 5 human step asks the operator to report whether reconnected audio is audible or silent; decide then whether to add the `AppState → Add*Synth` push.
+1. **Synth re-activation after reconnect — now a gated, designed remedy, not an open unknown.** The new `DspHost` starts with no synth graph (`Add*Synth` fires only on `OnEnter`), so a reconnect mid-sketch may return `Running`-but-silent. This is called out prominently in the header, made the explicit **gate** in Task 5 Step 7 (audible vs. silent), and remedied by the conditional **Task 5R** (`ReloadReason::AudioDeviceReconnect`, a silent instant `OnEnter` re-entry reusing Plan 02's reload primitive) — implemented **only if** the gate reports silent. The one thing that cannot be settled by reading code is which way the gate falls: whether the existing state round-trip already re-establishes voices on the target hardware. A human running `cargo rund` decides.
 
-2. **Does a settings *change* re-open the stream?** Task 7 assumes selecting a device in the panel takes effect live. Whether Plan 03a's generic apply path re-opens the audio stream on change, or whether Plan 04 must add its own change-listener that calls `rebuild_engine`, cannot be determined without seeing 03a's merged code. Flagged in Task 7, Step 2.
+2. **Does a settings *change* re-open the stream?** Task 7 assumes selecting a device in the panel takes effect live. Whether Plan 03a's generic apply path re-opens the audio stream on change, or whether Plan 04 must add its own change-listener that calls the supervisor's `request_now`/`rebuild_engine`, cannot be determined without exercising 03a's merged code. Flagged in Task 7, Step 4; the fix (a listener on `AudioSettings` change) is small and named there.
 
 3. **`SampleAssets` `Clone`.** `rebuild_engine` and the retained-startup path `.cloned()` the encoded assets. Task 5, Step 1 instructs verifying `SampleAssets` derives `Clone` and adding it if not — this needs a read of `audio/background.rs` at implementation time (the exact derive set was not confirmed here) and a compile to be sure.
 
