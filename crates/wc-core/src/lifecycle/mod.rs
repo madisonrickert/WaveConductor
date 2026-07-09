@@ -24,6 +24,7 @@ pub mod reload;
 pub mod screensaver;
 pub mod state;
 pub mod thermal;
+pub mod window_resize;
 
 pub use idle::RegisterIdleVetoExt;
 pub use reload::SketchReloadState;
@@ -61,6 +62,10 @@ impl Plugin for LifecyclePlugin {
             // the registration; registering here ensures lifecycle tests that do
             // not add HandTrackingPlugin still compile and run.
             .add_message::<crate::input::state::HandTrackingFrame>()
+            // Plan 02: debounced window-resize settling signal (see
+            // `window_resize`). Registered here so it exists even for lifecycle
+            // tests that do not add a sketch plugin.
+            .add_message::<window_resize::WindowResizeSettled>()
             // Systems
             .add_systems(
                 Update,
@@ -84,6 +89,13 @@ impl Plugin for LifecyclePlugin {
                 )
                     .chain(),
             );
+
+        // Plan 02: debounce `WindowResized` / `WindowScaleFactorChanged` into a
+        // single `WindowResizeSettled` (250 ms after the last event). Always-on
+        // message listener — it must observe resize events in every state
+        // (including `Home`) and no-ops cheaply on any frame with no event, the
+        // same always-on category as `reload::drive_reload_state`.
+        app.add_systems(Update, window_resize::debounce_window_resize);
 
         // Adaptive thermal signal (Plan 11.8, Seam 1). Spawns the background
         // temperature sampler and maintains `Res<ThermalState>`. Built before
