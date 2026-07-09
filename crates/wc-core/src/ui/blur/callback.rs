@@ -99,6 +99,45 @@ pub(crate) struct CompositeUniforms {
     pub _pad: f32,
 }
 
+/// Convert a panel rect in egui points into the [`CompositeUniforms`] the
+/// composite shader expects.
+///
+/// `screen_size_px` is the egui render target size in *physical pixels*;
+/// `rect` and `corner_radius_points` are in *egui points*. Both are scaled by
+/// `pixels_per_point` where the shader needs physical pixels.
+///
+/// Returns `None` when either screen dimension is zero, which happens on the
+/// first frame before the window reports a size. Callers bail silently.
+pub(crate) fn composite_uniforms(
+    screen_size_px: [u32; 2],
+    pixels_per_point: f32,
+    rect: egui::Rect,
+    corner_radius_points: f32,
+) -> Option<CompositeUniforms> {
+    // `screen_size_px` is [width, height] of the egui render target in
+    // physical pixels. We use it to normalise the panel rect into UVs.
+    let screen_w = screen_size_px[0] as f32;
+    let screen_h = screen_size_px[1] as f32;
+    if screen_w <= 0.0 || screen_h <= 0.0 {
+        return None;
+    }
+
+    let ppp = pixels_per_point;
+    // Convert panel rect (points) → physical pixels → [0,1] UVs.
+    let uv_min = Vec2::new(rect.min.x * ppp / screen_w, rect.min.y * ppp / screen_h);
+    let uv_max = Vec2::new(rect.max.x * ppp / screen_w, rect.max.y * ppp / screen_h);
+
+    // Half-extent in physical pixels, used by the SDF in the shader.
+    let half_extent = Vec2::new((rect.width() * ppp) * 0.5, (rect.height() * ppp) * 0.5);
+
+    Some(CompositeUniforms {
+        uv_rect: Vec4::new(uv_min.x, uv_min.y, uv_max.x, uv_max.y),
+        half_extent,
+        corner_radius: corner_radius_points * ppp,
+        _pad: 0.0,
+    })
+}
+
 impl FromWorld for CompositePipeline {
     fn from_world(world: &mut World) -> Self {
         // Build the bind-group layout entries for the three WGSL bindings at
@@ -271,39 +310,16 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
 
         // --- Geometry conversion ---
 
-        // `screen_size_px` is [width, height] of the egui render target in
-        // physical pixels. We use it to normalise the panel rect into UVs.
-        let screen_w = info.screen_size_px[0] as f32;
-        let screen_h = info.screen_size_px[1] as f32;
-        if screen_w <= 0.0 || screen_h <= 0.0 {
+        let Some(uniforms) = composite_uniforms(
+            info.screen_size_px,
+            info.pixels_per_point,
+            self.rect,
+            self.corner_radius,
+        ) else {
             return;
-        }
-
-        let ppp = info.pixels_per_point;
-        // Convert panel rect (points) → physical pixels → [0,1] UVs.
-        let uv_min = Vec2::new(
-            self.rect.min.x * ppp / screen_w,
-            self.rect.min.y * ppp / screen_h,
-        );
-        let uv_max = Vec2::new(
-            self.rect.max.x * ppp / screen_w,
-            self.rect.max.y * ppp / screen_h,
-        );
-
-        // Half-extent in physical pixels, used by the SDF in the shader.
-        let half_extent = Vec2::new(
-            (self.rect.width() * ppp) * 0.5,
-            (self.rect.height() * ppp) * 0.5,
-        );
+        };
 
         // --- Uniform buffer upload ---
-
-        let uniforms = CompositeUniforms {
-            uv_rect: Vec4::new(uv_min.x, uv_min.y, uv_max.x, uv_max.y),
-            half_extent,
-            corner_radius: self.corner_radius * ppp,
-            _pad: 0.0,
-        };
 
         // Borrow device and queue from world resources. Both are `Arc`-backed
         // handles, so cloning is cheap.
@@ -365,5 +381,54 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
         // The vertex shader generates a 2-triangle quad from a const array of 6
         // clip-space corners indexed by `@builtin(vertex_index)`.
         render_pass.draw(0..6, 0..1);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "test assertions; expect_used is denied workspace-wide for non-test code"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uniforms_map_a_rect_to_normalised_uvs_at_unit_scale() {
+        let rect = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(300.0, 150.0));
+        let u = composite_uniforms([1000, 500], 1.0, rect, 8.0).expect("non-zero screen");
+
+        assert!((u.uv_rect.x - 0.1).abs() < 1e-6, "uv min x");
+        assert!((u.uv_rect.y - 0.1).abs() < 1e-6, "uv min y");
+        assert!((u.uv_rect.z - 0.3).abs() < 1e-6, "uv max x");
+        assert!((u.uv_rect.w - 0.3).abs() < 1e-6, "uv max y");
+        assert!((u.half_extent.x - 100.0).abs() < 1e-6, "half width in px");
+        assert!((u.half_extent.y - 50.0).abs() < 1e-6, "half height in px");
+        assert!((u.corner_radius - 8.0).abs() < 1e-6);
+        assert!((u._pad - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uniforms_scale_points_to_physical_pixels_by_pixels_per_point() {
+        let rect = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(300.0, 150.0));
+        let u = composite_uniforms([1000, 500], 2.0, rect, 8.0).expect("non-zero screen");
+
+        // Rect is in points; screen_size_px is already physical.
+        assert!((u.uv_rect.x - 0.2).abs() < 1e-6);
+        assert!((u.uv_rect.y - 0.2).abs() < 1e-6);
+        assert!((u.uv_rect.z - 0.6).abs() < 1e-6);
+        assert!((u.uv_rect.w - 0.6).abs() < 1e-6);
+        assert!((u.half_extent.x - 200.0).abs() < 1e-6);
+        assert!((u.half_extent.y - 100.0).abs() < 1e-6);
+        assert!(
+            (u.corner_radius - 16.0).abs() < 1e-6,
+            "corner radius is scaled too"
+        );
+    }
+
+    #[test]
+    fn uniforms_bail_on_a_zero_sized_screen() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(10.0, 10.0));
+        assert!(composite_uniforms([0, 500], 1.0, rect, 0.0).is_none());
+        assert!(composite_uniforms([1000, 0], 1.0, rect, 0.0).is_none());
     }
 }
