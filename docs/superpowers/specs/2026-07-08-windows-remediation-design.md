@@ -612,6 +612,16 @@ field tester validates the outcome; he does not iterate.
 - Thermal threshold tuning against real soak data.
 - An agent-operable `cargo xtask soak-test`.
 - Instruction-screen overlay (never built; tracked separately).
+- **Upstream `bevy_egui` bug (found while implementing workstream 1):**
+  `EguiRenderTargetData::target_size` is declared (`render/systems.rs:313`),
+  initialised to `UVec2::ZERO` (`:331`), read to build the `PaintCallbackInfo`
+  handed to every paint callback's `update` hook (`render/render_pass.rs:33`) —
+  and **never assigned anywhere in the crate**. Contrast `pixels_per_point`,
+  which is assigned at `render/systems.rs:378`. So `update` always sees
+  `screen_size_px == [0, 0]`, while `render`'s copy (built from the camera
+  viewport) is correct. Any callback that computes geometry in `update` is
+  silently broken. We work around it by reading `ExtractedWindows` directly. This
+  is a clear upstream defect worth reporting against `bevy_egui` 0.40.
 - **Upstream Bevy issue:** `TonemappingBindGroupCache` misses every frame when
   an odd number of `post_process_write()` calls occur per frame, because the
   ping-pong parity atomic persists across frames and is never reset. Propose it
