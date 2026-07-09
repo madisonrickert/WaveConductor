@@ -2,7 +2,7 @@
 //!
 //! A core (not per-sketch) [`SketchSettings`](crate::settings::SketchSettings)
 //! resource persisted by the normal settings layer. Carries the attract-mode
-//! present-rate cap.
+//! present-rate cap and the idle-to-attract-mode timeout.
 //!
 //! ## History: the instruction caption is gone
 //!
@@ -29,6 +29,13 @@ use wc_core_macros::SketchSettings;
 /// Lives as a Bevy `Resource`; the overlay reads it with `Res<ScreensaverSettings>`.
 /// Registered with the settings system via `register_sketch_settings` so it
 /// appears in the User panel and round-trips through persistence.
+///
+/// `attract_mode_timeout_secs` is read by
+/// [`crate::lifecycle::screensaver::sync_attract_timeout_from_settings`],
+/// which splits it evenly into
+/// [`crate::lifecycle::idle::InteractionTimer`]'s two thresholds; the other
+/// two fields below are read directly by the framework's present-rate
+/// throttle and OS display-sleep-inhibit systems.
 #[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
 #[settings(storage_key = "screensaver")]
@@ -72,6 +79,28 @@ pub struct ScreensaverSettings {
     )]
     #[serde(default = "default_keep_display_awake")]
     pub keep_display_awake: bool,
+
+    /// Total time of inactivity (mouse, keyboard, touch, or hand tracking)
+    /// before the screensaver's attract mode begins. Split evenly by
+    /// [`crate::lifecycle::screensaver::sync_attract_timeout_from_settings`]
+    /// into [`crate::lifecycle::idle::InteractionTimer`]'s two internal
+    /// stages (`Active → Idle` throttles hand-tracking inference and freezes
+    /// some sketch dispatches; `Idle → Screensaver` shows the attract
+    /// visual) — that split is an implementation detail, not
+    /// operator-facing. Default 60 (30 s + 30 s), matching the app's
+    /// long-standing hardcoded behavior before this setting existed.
+    #[setting(
+        default = 60.0_f32,
+        min = 10.0,
+        max = 600.0,
+        step = 5.0,
+        section = "Attract Mode",
+        category = User,
+        label = "Idle timeout",
+        unit = "s"
+    )]
+    #[serde(default = "default_attract_mode_timeout_secs")]
+    pub attract_mode_timeout_secs: f32,
 }
 
 /// Serde fallback so a config saved before `screensaver_fps` existed still
@@ -83,6 +112,12 @@ fn default_screensaver_fps() -> f32 {
 /// Serde fallback: kiosk-first default, the display stays awake.
 fn default_keep_display_awake() -> bool {
     true
+}
+
+/// Serde fallback so a config saved before `attract_mode_timeout_secs`
+/// existed still loads at the documented default (today's hardcoded 60 s).
+fn default_attract_mode_timeout_secs() -> f32 {
+    60.0
 }
 
 #[cfg(test)]
@@ -109,5 +144,34 @@ mod tests {
         let legacy = r#"caption_headline = "hi""#;
         let parsed: ScreensaverSettings = toml::from_str(legacy).expect("legacy TOML must parse");
         assert_eq!(parsed.screensaver_fps, 20.0);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "test-only: comparing an exact literal default"
+    )]
+    fn attract_mode_timeout_defaults_to_60_seconds() {
+        assert_eq!(
+            ScreensaverSettings::default().attract_mode_timeout_secs,
+            60.0
+        );
+    }
+
+    /// Forward-compat: TOML persisted before `attract_mode_timeout_secs`
+    /// existed (only setting `screensaver_fps`) still parses, landing the
+    /// new field on its documented default.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        clippy::float_cmp,
+        reason = "test-only: panic on bad TOML is the intended failure mode; \
+                  the serde default is an exact literal"
+    )]
+    fn legacy_toml_without_attract_timeout_key_still_parses() {
+        let legacy = "screensaver_fps = 25.0";
+        let parsed: ScreensaverSettings = toml::from_str(legacy).expect("legacy TOML must parse");
+        assert_eq!(parsed.screensaver_fps, 25.0);
+        assert_eq!(parsed.attract_mode_timeout_secs, 60.0);
     }
 }
