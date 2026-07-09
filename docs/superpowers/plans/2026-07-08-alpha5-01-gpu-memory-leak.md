@@ -227,6 +227,12 @@ Prepend to `crates/wc-core/src/ui/blur/slots.rs`, above the test module:
 //! churn (e.g. a panel that is rebuilt with a different id), while a widget
 //! painted continuously keeps exactly one slot forever.
 
+// Transient. `SlotBook` has no non-test caller until Task 4 wires it into
+// `callback.rs`, so the lib target (compiled without `cfg(test)`) sees the whole
+// type as dead code and `clippy -D warnings` fails. Task 4, Step 6 removes this
+// attribute and verifies clippy stays clean without it.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use bevy_egui::egui;
@@ -351,11 +357,13 @@ Run: `cargo test -p wc-core --lib ui::blur::slots`
 
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Run the full gate and commit**
+- [ ] **Step 5: Run the scoped gate and commit**
+
+The workspace-wide clippy gate is deliberately *not* run here: it takes long enough to time out a subagent, and the controller runs it between tasks.
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features --workspace -- -D warnings
+cargo clippy -p wc-core --lib --all-features -- -D warnings
 cargo test -p wc-core --lib ui::blur::slots
 git add crates/wc-core/src/ui/blur/slots.rs crates/wc-core/src/ui/blur/mod.rs
 git commit -m "feat(ui/blur): add SlotBook, frame-stamped per-widget GPU slot storage"
@@ -879,9 +887,22 @@ And in `finish` (lines 139-145), init the resource next to the pipeline:
 
 > **Note:** `tick_composite_slots` is registered exactly once. Registering the same system twice in one schedule creates an ambiguous `SystemTypeSet` and panics at startup when anything orders against it.
 
-- [ ] **Step 6: Verify no leak remains and the gate passes**
+- [ ] **Step 6: Remove the transient dead-code allow, verify no leak remains, run the gate**
+
+`SlotBook` now has non-test callers (`update`, `render`, `tick_composite_slots`), so the transient attribute added in Task 1 must go. Delete these six lines from the top of `crates/wc-core/src/ui/blur/slots.rs`:
+
+```rust
+// Transient. `SlotBook` has no non-test caller until Task 4 wires it into
+// `callback.rs`, so the lib target (compiled without `cfg(test)`) sees the whole
+// type as dead code and `clippy -D warnings` fails. Task 4, Step 6 removes this
+// attribute and verifies clippy stays clean without it.
+#![allow(dead_code)]
+```
+
+If clippy then reports `dead_code` on any `SlotBook` method, that method has no production caller and the wiring in Steps 2, 3, and 5 is incomplete. Fix the wiring; do not restore the attribute.
 
 ```bash
+rg -n "allow\(dead_code\)" crates/wc-core/src/ui/blur/slots.rs   # expect: no matches
 rg -n "Box::leak" crates/    # expect: no matches
 cargo fmt --all
 cargo clippy --all-targets --all-features --workspace -- -D warnings
