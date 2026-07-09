@@ -250,7 +250,8 @@ mod tests {
         book.tick();
         book.insert(id(1), ());
         book.insert(id(2), ());
-        for _ in 0..(SLOT_EVICT_FRAMES + 1) {
+        // `0..=N` rather than `0..(N + 1)`: clippy::range_plus_one is denied.
+        for _ in 0..=SLOT_EVICT_FRAMES {
             book.tick();
             let _ = book.touch(id(1));
         }

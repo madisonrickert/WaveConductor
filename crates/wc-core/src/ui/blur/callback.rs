@@ -464,6 +464,10 @@ impl EguiBevyPaintCallbackImpl for BackdropBlurPaintCallback {
     clippy::expect_used,
     reason = "test assertions; expect_used is denied workspace-wide for non-test code"
 )]
+#[allow(
+    clippy::used_underscore_binding,
+    reason = "`_pad` is shader struct padding; asserting it stays 0.0 is the point"
+)]
 mod tests {
     use super::*;
 
