@@ -24,8 +24,8 @@ pub mod scheduling;
 
 pub use cleanup::despawn_with;
 pub use lifecycle::{
-    apply_render_profile, reset_render_profile, restart_on_settings_change, RenderProfile,
-    SketchLifecycle, RESTART_DEBOUNCE,
+    apply_render_profile, reload_on_resize_settled, reset_render_profile,
+    restart_on_settings_change, RenderProfile, SketchLifecycle, RESTART_DEBOUNCE,
 };
 pub use manifest::{
     register_sketch_tile, RegisterSketchManifestExt, SketchManifest, SketchManifestEntry,

@@ -374,4 +374,146 @@ mod tests {
             "FadeIn with zero duration is fully transparent, got {b}"
         );
     }
+
+    /// Guards the whole reload mechanism's premise: `drive_reload_state` must
+    /// actually walk `FadeOut -> Switch -> FadeIn`, hopping through
+    /// `AppState::Home` for at least one frame and re-firing the sketch's
+    /// `OnEnter` exactly once.
+    ///
+    /// Why this matters: the reload works by bouncing `sketch -> Home ->
+    /// sketch`, because Bevy does not re-fire `OnEnter` for a state it is
+    /// already in. The `Home` hop in the `Switch` phase is the *only* thing
+    /// that re-runs a sketch's spawn systems, which is how a sketch rebuilds
+    /// its window-size-dependent resources (particle counts, the Cymatics sim
+    /// grid) after a resize. If the zero-duration `WindowResize` path were
+    /// ever "optimised" by folding the `Switch` arm into `FadeOut` — writing
+    /// both `NextState(Home)` and `NextState(return_state)` in the same
+    /// frame — Bevy would apply only the last `NextState` write; `OnExit`
+    /// and `OnEnter` would never fire, and every sketch would silently stop
+    /// respawning on resize while every *other* existing test kept passing
+    /// (none of them drive `drive_reload_state` past `FadeOut`).
+    ///
+    /// Headless and GPU-free: `MinimalPlugins` + `StatesPlugin`, no window, no
+    /// egui, no audio. Uses `ReloadReason::WindowResize` (a zero-length fade,
+    /// see `window_resize_is_instant_and_silent` above) so every phase
+    /// transition is unconditionally due on the very next frame regardless of
+    /// elapsed wall-clock time — no `TimeUpdateStrategy` needed for the
+    /// `>= fade` comparisons to hold, though we still install a small
+    /// `ManualDuration` step for deterministic `Time::elapsed()` values in the
+    /// assertions.
+    #[test]
+    fn window_resize_reload_hops_through_home_and_refires_on_enter() {
+        use bevy::state::app::StatesPlugin;
+        use bevy::time::TimeUpdateStrategy;
+
+        /// Counts how many times `OnEnter(AppState::Line)` has run.
+        #[derive(Resource, Default)]
+        struct EnterCount(u32);
+
+        fn count_enter(mut count: ResMut<'_, EnterCount>) {
+            count.0 += 1;
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<SketchReloadState>();
+        app.init_resource::<EnterCount>();
+        app.add_systems(OnEnter(AppState::Line), count_enter);
+        app.add_systems(Update, drive_reload_state);
+
+        // Enter Line directly (not via the reload overlay) and settle.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Line);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line,
+            "precondition: must be in Line before the reload starts"
+        );
+        assert_eq!(
+            app.world().resource::<EnterCount>().0,
+            1,
+            "precondition: OnEnter(Line) fired exactly once for the initial entry"
+        );
+
+        // Deterministic small per-frame step from here on.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            10,
+        )));
+
+        // Begin a silent, instant WindowResize reload while sitting in Line.
+        {
+            let now = app.world().resource::<Time>().elapsed();
+            let mut reload_state = app.world_mut().resource_mut::<SketchReloadState>();
+            reload_state.begin_fade_out(now, 1.0, AppState::Line, ReloadReason::WindowResize);
+        }
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::FadeOut
+        );
+
+        // Frame 1: FadeOut's fade duration is ZERO for WindowResize, so
+        // `drive_reload_state` completes the leg immediately this Update,
+        // calls `NextState::set(Home)`, and advances phase -> Switch.
+        // `NextState` writes made during `Update` are applied by the
+        // `StateTransition` schedule at the START of the *next* `app.update()`
+        // — the same one-tick lag every other test in this codebase accounts
+        // for (see e.g. `select_line_transitions_into_line_state` in
+        // `tests/lifecycle.rs`: "Pending transitions resolve on the next
+        // update tick") — so `State<AppState>` still reads `Line` here.
+        app.update();
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Switch,
+            "FadeOut's zero-length fade must complete on the very first frame"
+        );
+
+        // Frame 2: StateTransition (start of this frame) applies the pending
+        // `NextState(Home)` write from Frame 1 — THIS is where the Home hop
+        // becomes observable. Then Update runs `drive_reload_state` again:
+        // Switch sets `NextState(return_state = Line)` and advances phase ->
+        // FadeIn.
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home,
+            "the reload MUST pass through Home for at least one frame — this \
+             is the only thing that re-fires the sketch's OnEnter, since Bevy \
+             does not re-run OnEnter for a state it is already in"
+        );
+        assert_eq!(
+            app.world().resource::<EnterCount>().0,
+            1,
+            "OnEnter(Line) must not have re-fired yet — the Home hop only \
+             just became active this frame"
+        );
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::FadeIn
+        );
+
+        // Frame 3: StateTransition (start of this frame) applies the pending
+        // `NextState(Line)` write from Frame 2, re-entering Line and
+        // re-running `OnEnter(Line)`. Then Update runs `drive_reload_state`:
+        // FadeIn's zero-length fade completes immediately, returning phase to
+        // Idle.
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line
+        );
+        assert_eq!(
+            app.world().resource::<EnterCount>().0,
+            2,
+            "OnEnter(Line) must fire exactly once more, driven solely by the \
+             reload's Home hop"
+        );
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle
+        );
+    }
 }
