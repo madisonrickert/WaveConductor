@@ -159,14 +159,8 @@ fn draw_user_panel(world: &mut World) {
     #[cfg(feature = "templates")]
     let mut template_dirty = false;
 
-    // Read window size for the right-dock geometry; fall back to 1280×720.
-    let (window_width, window_height) = {
-        let mut q =
-            world.query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world)
-            .map_or((1280.0, 720.0), |w| (w.width(), w.height()))
-    };
-    let (dock_x, dock_y, dock_w, dock_h) = dock::dock_rect(window_width, window_height);
+    // Dock geometry is derived from egui's content rect below, after the egui
+    // context is cloned (see the note there) — not from Bevy's `Window`.
 
     // Tab + Advanced state: read the persisted values, mutate them from the
     // header this frame, write them back after the Area closure releases world.
@@ -190,6 +184,29 @@ fn draw_user_panel(world: &mut World) {
     // borrow before the `show` closure re-enters `World` to render each section.
     let ctx = ctx.clone();
     state.apply(world);
+
+    // Right-dock geometry from egui's own content rect (points), NOT Bevy's
+    // `Window` (logical pixels). The two agree in steady state but diverge for
+    // the one frame after a scale-factor change: `bevy_egui`'s screen rect still
+    // reflects the previous frame's `pixels_per_point` (a one-frame upstream
+    // lag), while `Window` already reports the new size. Mixing the two placed
+    // the dock using new-size pixels inside egui's stale-size layout, so it
+    // overflowed the right edge for a frame and then snapped in — exactly the
+    // reported "panel loads oversized then corrects itself". Feeding `dock_rect`
+    // the same units egui lays out in keeps the dock anchored inside whatever
+    // egui currently believes the screen to be. `dock_rect` stays pure; only its
+    // input source changed, so its unit tests stand. `content_rect()` is the
+    // non-deprecated call (see `ui::reload_overlay`); `screen_rect()` is
+    // deprecated in egui 0.34 and would fail `-D warnings`.
+    let content = ctx.content_rect();
+    let (screen_w, screen_h) = if content.width() > 1.0 && content.height() > 1.0 {
+        (content.width(), content.height())
+    } else {
+        // egui has not reported a real size yet (the very first frames); fall
+        // back to the old default so the dock is never wildly misplaced.
+        (1280.0, 720.0)
+    };
+    let (dock_x, dock_y, dock_w, dock_h) = dock::dock_rect(screen_w, screen_h);
 
     // Snapshot the template library into display rows (lazily decoding each
     // thumbnail into a cached egui texture) before the dock closure borrows
