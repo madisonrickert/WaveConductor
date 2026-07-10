@@ -66,6 +66,16 @@ impl Plugin for LifecyclePlugin {
             // `window_resize`). Registered here so it exists even for lifecycle
             // tests that do not add a sketch plugin.
             .add_message::<window_resize::WindowResizeSettled>()
+            // The two upstream window messages `debounce_window_resize` reads.
+            // `WindowPlugin` registers both in the real app, and `add_message` is
+            // guarded by `if !contains_resource::<Messages<T>>()`, so this is a
+            // no-op there. It matters for the many headless harnesses that add
+            // `LifecyclePlugin` without `WindowPlugin`: without it, the always-on
+            // `debounce_window_resize` fails `MessageReader` param validation on
+            // its first run and panics the whole schedule. Same reason
+            // `HandTrackingFrame` is registered above.
+            .add_message::<bevy::window::WindowResized>()
+            .add_message::<bevy::window::WindowScaleFactorChanged>()
             // Systems
             .add_systems(
                 Update,
