@@ -202,8 +202,14 @@ fn draw_user_panel(world: &mut World) {
     let (screen_w, screen_h) = if content.width() > 1.0 && content.height() > 1.0 {
         (content.width(), content.height())
     } else {
-        // egui has not reported a real size yet (the very first frames); fall
-        // back to the old default so the dock is never wildly misplaced.
+        // Belt-and-braces against a degenerate rect; unreachable in practice,
+        // because `bevy_egui` never publishes one (`update_ui_screen_rect` skips
+        // any viewport under 1 point). It is deliberately NOT a guard for egui's
+        // *un-initialized* rect: that default is 10000x10000, which passes the
+        // check above rather than landing here. Guarding it is unnecessary — the
+        // panel cannot draw before a real rect exists, since `settings_panel_visible`
+        // requires the operator to have entered a sketch and toggled the cog, long
+        // after `update_ui_screen_rect` runs in `PreUpdate`.
         (1280.0, 720.0)
     };
     let (dock_x, dock_y, dock_w, dock_h) = dock::dock_rect(screen_w, screen_h);
