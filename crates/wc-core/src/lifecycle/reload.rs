@@ -61,10 +61,20 @@ pub const FADE_DURATION: Duration = Duration::from_millis(200);
 /// Why a reload was requested. Selects the fade profile.
 ///
 /// A settings restart fades to black and dips audio over [`FADE_DURATION`]; a
-/// window resize is silent and instant (one black repaint frame nobody sees, no
-/// audio command), because the reload exists only to re-run the sketch's spawn
-/// path at the new extent — there is nothing to fade, and a kiosk waking from
-/// sleep must not have its sound cut.
+/// window resize is instant (one black repaint frame nobody sees) and pushes **no
+/// master-volume command**, because the reload exists only to re-run the sketch's
+/// spawn path at the new extent, and a kiosk waking from sleep must not have its
+/// output fade to silence.
+///
+/// **This does not mean a resize is inaudible.** The reload still hops through
+/// `Home`, so the sketch's own `OnExit`/`OnEnter` audio hooks run: Line and Dots
+/// tear down and rebuild their synth voice graph and momentarily drop their
+/// background bed to zero. On the `SettingsRestart` path the 200 ms fade is what
+/// masks that churn. `WindowResize` skips the fade, so the churn happens at full
+/// master volume. Whether it is audible depends on whether the DSP host ramps
+/// parameter changes or applies them as hard steps; that has not been measured.
+/// If it clicks, the fix is either a short (~30-50 ms) master fade for this
+/// reason, or skipping the per-sketch audio hooks when the reload is a resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReloadReason {
     /// A `requires_restart` settings change. The historical behaviour: 200 ms

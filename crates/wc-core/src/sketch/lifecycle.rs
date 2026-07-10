@@ -173,10 +173,13 @@ pub fn restart_on_settings_change<S: SketchLifecycle>(
 /// the cleanest "respawn at the new size" is to re-run `OnEnter`. The reload
 /// overlay already performs exactly that `Sketch -> Home -> Sketch` round-trip
 /// (see [`crate::lifecycle::reload`]); the `WindowResize` reason makes it cost a
-/// single black repaint frame with no audio dropout. Rebuilding rather than
-/// rescaling in place is required because a sketch's element *count* changes
-/// with size (Dots' grid, Line's particle count), so the GPU buffers must be
-/// reallocated.
+/// single black repaint frame and pushes no master-volume command. Note it is not
+/// silent in the wider sense: the `Home` hop runs the sketch's own `OnExit`/
+/// `OnEnter` audio hooks, so the synth graph is rebuilt and the background bed
+/// briefly drops — see `ReloadReason` for why that is unmasked here and what to
+/// do if it proves audible. Rebuilding rather than rescaling in place is required
+/// because a sketch's element *count* changes with size (Dots' grid, Line's
+/// particle count), so the GPU buffers must be reallocated.
 ///
 /// Registered **always-on** (no `run_if`), mirroring `restart_on_settings_change`
 /// and gating internally on being the running sketch with no reload in flight.
