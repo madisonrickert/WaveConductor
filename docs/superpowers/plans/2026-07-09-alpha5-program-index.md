@@ -39,6 +39,26 @@ touching a shared file. This is why Plans 03, 04 and 06 are *not* serialised on 
 Existing examples to copy: `lifecycle/screensaver/settings.rs`, `settings/hand_tracking.rs`,
 `wc-sketches/src/line/settings.rs`.
 
+### A filtered test gate is not a test gate
+
+Plan 02 Tasks 1-3 were gated on `cargo nextest run -p wc-core --all-features -E 'test(window_resize)'`.
+All three passed. Task 4 ran the full workspace suite and found **47 failures**, introduced by Task 1 and
+invisible to the next two gates.
+
+The cause: Task 1 added an always-on `Update` system taking `MessageReader<WindowResized>`. `WindowPlugin`
+registers that message in the real app; the many headless harnesses that add `LifecyclePlugin` *without*
+`WindowPlugin` do not. The system failed param validation on its first run and panicked the schedule. Any
+test touching `LifecyclePlugin` died — none of them matched `test(window_resize)`.
+
+**Run `cargo nextest run --workspace --all-features` before calling a task done.** A `-p` or `-E` filter
+tells you only that the code you were looking at still works. Adding a system to an always-on schedule
+changes every harness in the workspace.
+
+Corollary: when a new system takes a `MessageReader<M>` for an upstream `M`, `add_message::<M>()` in the
+plugin. `add_message` is guarded by `if !contains_resource::<Messages<T>>()`
+(`bevy_app-0.19.0/src/sub_app.rs:386`), so it is a no-op where the message already exists and cannot
+double-register the update system. `LifecyclePlugin` does this for `HandTrackingFrame` for the same reason.
+
 ### The per-task clippy gate must use `--all-targets`
 
 `cargo clippy -p <crate> --lib` skips the test target. CI runs `--all-targets`. In Plan 01
