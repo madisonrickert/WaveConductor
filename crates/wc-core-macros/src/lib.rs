@@ -460,9 +460,13 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
 
 /// Build the `SettingKind::...` construction tokens for one field, dispatched
 /// on its parsed [`Kind`]. Split out of [`emit_trait_impl`] (which maps this
-/// over every field) purely to keep that function's body under Clippy's
-/// `too_many_lines` threshold — the `Kind` match itself has grown one arm per
-/// setting kind and reads better as its own unit.
+/// over every field): the per-`Kind` token emission is a coherent unit in its
+/// own right — one arm per setting kind, each building the tokens for that
+/// kind's `SettingKind` variant — and factoring it out keeps `emit_trait_impl`
+/// itself and this function each fitting on one screen, per `AGENTS.md`'s
+/// function-body guidance. It also happens to keep this function's body under
+/// Clippy's `too_many_lines` threshold, though that follows from the split
+/// rather than motivating it.
 fn emit_kind_tokens(f: &FieldInfo) -> TokenStream2 {
     match f.kind {
         Kind::Number => {
@@ -558,5 +562,70 @@ fn opt_to_f64_tokens(opt: Option<&Expr>) -> TokenStream2 {
         quote! { ::core::option::Option::Some(::core::convert::From::from(#expr)) }
     } else {
         quote! { ::core::option::Option::None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand;
+
+    /// A `ty = RuntimeEnum` field that also supplies `options_key` expands
+    /// without error. This is the positive control for the negative test
+    /// below: it confirms the failure asserted there is actually caused by
+    /// the missing `options_key`, not by some unrelated part of the input.
+    #[test]
+    fn runtime_enum_with_options_key_expands_ok() {
+        let input: syn::DeriveInput = syn::parse_quote! {
+            #[settings(storage_key = "t")]
+            struct S {
+                #[setting(default = String::new(), ty = RuntimeEnum, options_key = "audio_devices", category = User)]
+                device: String,
+            }
+        };
+        expand(&input).expect("a ty = RuntimeEnum field with options_key must be accepted");
+    }
+
+    /// `ty = RuntimeEnum` without `options_key` must be rejected at macro
+    /// expansion time -- this is the headline compile-time check the
+    /// `RuntimeEnum` setting kind exists to provide (see the module docs,
+    /// `## ty = RuntimeEnum`). `expand` touches only `syn`/`proc_macro2`
+    /// types, never `proc_macro::TokenStream`, so it is callable directly
+    /// from a unit test without a `trybuild`-style compile-fail harness.
+    #[test]
+    fn runtime_enum_without_options_key_is_rejected() {
+        let input: syn::DeriveInput = syn::parse_quote! {
+            #[settings(storage_key = "t")]
+            struct S {
+                #[setting(default = String::new(), ty = RuntimeEnum, category = User)]
+                device: String,
+            }
+        };
+        let err = expand(&input)
+            .expect_err("a ty = RuntimeEnum field with no options_key must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("device"),
+            "error should name the offending field: got {message}"
+        );
+        assert!(
+            message.contains("options_key"),
+            "error should mention options_key: got {message}"
+        );
+    }
+
+    /// A struct with no `#[settings(storage_key = "...")]` attribute at all
+    /// must be rejected by `parse_storage_key`'s error branch, exercised
+    /// here through `expand`.
+    #[test]
+    fn missing_storage_key_attribute_is_rejected() {
+        let input: syn::DeriveInput = syn::parse_quote! {
+            struct S {
+                #[setting(default = 0_u32)]
+                count: u32,
+            }
+        };
+        let err = expand(&input)
+            .expect_err("a struct with no #[settings(storage_key = ...)] must be rejected");
+        assert!(err.to_string().contains("storage_key"), "got: {err}");
     }
 }
