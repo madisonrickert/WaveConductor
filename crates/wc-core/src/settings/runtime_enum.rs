@@ -193,6 +193,9 @@ pub(crate) fn options_for<'a>(
 )]
 mod tests {
     use super::*;
+    use crate::settings::{SettingKind, SketchSettings};
+    use serde::{Deserialize, Serialize};
+    use wc_core_macros::SketchSettings;
 
     #[derive(Resource, Default)]
     struct FakeAudioDevices(Vec<String>);
@@ -257,5 +260,53 @@ mod tests {
     fn options_for_an_unregistered_key_is_an_empty_slice() {
         let snap = RuntimeEnumOptionsSnapshot::new();
         assert!(options_for(&snap, "nothing_registered").is_empty());
+    }
+
+    /// The exact usage shape alpha.5 Plan 03 (monitor picker) and Plan 04
+    /// (audio-device picker) will follow: a module registers its own
+    /// `RuntimeEnumOptionsSource` resource, and a `#[derive(SketchSettings)]`
+    /// struct elsewhere declares a `ty = RuntimeEnum` field with a matching
+    /// `options_key`. Nothing here is aware of the other's existence beyond
+    /// that shared string key.
+    #[derive(
+        SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq,
+    )]
+    #[reflect(Resource, Default)]
+    #[settings(storage_key = "fixture_audio")]
+    struct FixtureAudioSettings {
+        #[setting(
+            default = String::new(),
+            ty = RuntimeEnum,
+            options_key = "audio_output_devices",
+            category = User,
+            label = "Output device"
+        )]
+        #[serde(default)]
+        output_device: String,
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion — panic on wrong variant is intentional"
+    )]
+    fn macro_generated_runtime_enum_field_resolves_through_the_registry() {
+        let mut app = App::new();
+        app.register_runtime_enum_options::<FakeAudioDevices>();
+        app.insert_resource(FakeAudioDevices(vec![
+            "Built-in Speakers".to_owned(),
+            "HDMI TV".to_owned(),
+        ]));
+
+        let defs = FixtureAudioSettings::settings_def();
+        let SettingKind::RuntimeEnum { options_key } = &defs[0].kind else {
+            panic!("expected RuntimeEnum kind for output_device");
+        };
+
+        let snap = snapshot(app.world());
+        assert_eq!(
+            options_for(&snap, options_key).to_vec(),
+            vec!["Built-in Speakers".to_owned(), "HDMI TV".to_owned()]
+        );
     }
 }
