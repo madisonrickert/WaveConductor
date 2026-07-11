@@ -33,6 +33,7 @@ pub mod input_capture;
 pub mod panel_dev;
 pub mod persistence;
 pub mod registry;
+pub mod runtime_enum;
 pub mod trait_def;
 
 mod panel_user;
@@ -45,6 +46,9 @@ pub use hand_tracking::{HandProviderChoice, HandTrackingSettings};
 pub use input_capture::{EguiKeyboardCaptured, EguiPointerCaptured};
 pub use panel_dev::DevPanelVisible;
 pub use registry::{RegisterSketchSettingsExt, SettingsRegistry};
+pub use runtime_enum::{
+    RegisterRuntimeEnumOptionsExt, RuntimeEnumOptionsRegistry, RuntimeEnumOptionsSource,
+};
 pub use trait_def::SketchSettings;
 
 use bevy::prelude::*;
@@ -61,6 +65,7 @@ impl Plugin for SettingsPlugin {
         app.init_resource::<SettingsRegistry>()
             .init_resource::<DevPanelVisible>()
             .init_resource::<custom_section::CustomDockSections>()
+            .init_resource::<runtime_enum::RuntimeEnumOptionsRegistry>()
             .init_resource::<autosave::AutosaveState>()
             .init_resource::<EguiPointerCaptured>()
             .init_resource::<EguiKeyboardCaptured>()
