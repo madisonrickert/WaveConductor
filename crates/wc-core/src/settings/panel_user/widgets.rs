@@ -386,6 +386,48 @@ fn render_vec3(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
     }
 }
 
+/// Whether a runtime-enumerated field's persisted value is currently present
+/// in its live option list. Pure and UI-free so the "never silently rewrite
+/// an unresolved name" contract (an HDMI TV that is merely asleep must not
+/// lose its saved binding — see `AGENTS.md`) is unit-tested directly, without
+/// an egui context or a GPU.
+//
+// Transient. Has no non-test caller until Task 3 of this plan wires
+// `render_runtime_enum` in. No `expect(dead_code)` needed here: the one on
+// `classify_runtime_enum_selection` below makes that function a live
+// dead-code-analysis root even in the non-test lib target, and this enum is
+// only reachable through it -- an `expect` here would be unfulfilled (the
+// enum is never independently flagged) and fail the `-D warnings` gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeEnumSelection {
+    /// No value persisted yet (`current` is empty).
+    Empty,
+    /// `current` matches one of the live options.
+    Known,
+    /// `current` is non-empty but does not appear in the live option list.
+    /// Never treated as "reset me" — the caller must keep showing it and
+    /// keep it selectable/editable.
+    Unavailable,
+}
+
+/// Classify `current` against `options`. See `RuntimeEnumSelection`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no non-test caller until alpha.5 Plan 03a Task 3 wires render_runtime_enum in"
+    )
+)]
+fn classify_runtime_enum_selection(current: &str, options: &[String]) -> RuntimeEnumSelection {
+    if current.is_empty() {
+        RuntimeEnumSelection::Empty
+    } else if options.iter().any(|o| o == current) {
+        RuntimeEnumSelection::Known
+    } else {
+        RuntimeEnumSelection::Unavailable
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +510,37 @@ mod tests {
             );
         }
         assert_eq!(value, Palette::Mono, "last applied variant should stick");
+    }
+
+    #[test]
+    fn classify_runtime_enum_selection_cases() {
+        let opts = vec!["Speakers".to_owned(), "HDMI TV".to_owned()];
+        assert_eq!(
+            classify_runtime_enum_selection("", &opts),
+            RuntimeEnumSelection::Empty
+        );
+        assert_eq!(
+            classify_runtime_enum_selection("HDMI TV", &opts),
+            RuntimeEnumSelection::Known
+        );
+        assert_eq!(
+            classify_runtime_enum_selection("Living Room TV", &opts),
+            RuntimeEnumSelection::Unavailable,
+            "a persisted name absent from the live list must classify as \
+             Unavailable, never silently dropped"
+        );
+    }
+
+    #[test]
+    fn classify_runtime_enum_selection_with_empty_live_list_is_unavailable_not_empty() {
+        // No source registered yet, or enumeration hasn't run: the live
+        // list is empty, but a persisted (non-empty) value must still
+        // classify as Unavailable, not Empty -- Empty means "nothing
+        // persisted," a different UI state (no "(unavailable)" marker, no
+        // reset-cell affordance driven off it).
+        assert_eq!(
+            classify_runtime_enum_selection("Living Room TV", &[]),
+            RuntimeEnumSelection::Unavailable
+        );
     }
 }
