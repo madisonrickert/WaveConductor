@@ -237,3 +237,43 @@ fn text_list_default_is_empty_and_roundtrips_toml() {
     let back: TextListFixture = toml::from_str(&toml_str).expect("deserialize");
     assert_eq!(back, with_names);
 }
+
+/// Fixture exercising `ty = RuntimeEnum`: a `String` setting whose dropdown
+/// options come from a runtime-registered source, not a compile-time enum
+/// (contrast `Quality` / `ty = Enum` above).
+#[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Resource, Default)]
+#[settings(storage_key = "derive_test_runtime_enum")]
+struct RuntimeEnumFixture {
+    #[setting(
+        default = String::new(),
+        ty = RuntimeEnum,
+        options_key = "fixture_devices",
+        label = "Device",
+        category = User
+    )]
+    #[serde(default)]
+    device: String,
+}
+
+#[test]
+fn runtime_enum_kind_carries_options_key() {
+    let defs = RuntimeEnumFixture::settings_def();
+    let SettingKind::RuntimeEnum { options_key } = &defs[0].kind else {
+        panic!("expected RuntimeEnum kind for device");
+    };
+    assert_eq!(*options_key, "fixture_devices");
+    assert_eq!(defs[0].label, "Device");
+}
+
+#[test]
+fn runtime_enum_default_is_empty_and_roundtrips_toml() {
+    let d = RuntimeEnumFixture::default();
+    assert!(d.device.is_empty());
+    let with_device = RuntimeEnumFixture {
+        device: "Living Room TV".to_owned(),
+    };
+    let toml_str = toml::to_string(&with_device).expect("serialize");
+    let back: RuntimeEnumFixture = toml::from_str(&toml_str).expect("deserialize");
+    assert_eq!(back, with_device);
+}

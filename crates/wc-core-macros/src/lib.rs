@@ -37,10 +37,11 @@
 //! | `unit`             | string    | `""` (suffix on `Number` values, e.g. `"ms"`) |
 //! | `section`          | string    | `""` (no section header)         |
 //! | `category`         | `User` \| `Dev` | `Dev`                       |
-//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `TextList` \| `FilePath` \| `TemplateLibrary` \| `Enum` | `Number` |
+//! | `ty`               | `Number` \| `Boolean` \| `Color` \| `Text` \| `TextList` \| `FilePath` \| `TemplateLibrary` \| `Enum` \| `RuntimeEnum` | `Number` |
 //! | `min`, `max`, `step` | numeric expr | none (only meaningful on `Number`) |
 //! | `extensions`       | `["ext", ...]` | none (only meaningful on `FilePath`) |
 //! | `filter_label`     | string    | `"File"` (only meaningful on `FilePath`) |
+//! | `options_key`      | string    | none (**required** on `RuntimeEnum`) |
 //! | `requires_restart` | flag      | absent                           |
 //!
 //! ## `ty = Enum`
@@ -60,6 +61,22 @@
 //! The variant names are also the panel's display strings: there is no
 //! per-variant label mapping yet, so pick variant identifiers that read well
 //! in a dropdown.
+//!
+//! ## `ty = RuntimeEnum`
+//!
+//! The field's Rust type must be `String` (checked only at render time via
+//! `try_downcast_mut`, exactly like `ty = Text` — the macro cannot verify
+//! field types beyond the `bool` special-case in `default_kind_for_type`).
+//! Unlike `ty = Enum`, whose variant list can only be checked at runtime (a
+//! proc macro cannot see a field type's own definition), `options_key` is a
+//! literal string in the attribute itself, so the macro checks it directly:
+//! `ty = RuntimeEnum` without `options_key = "..."` is a **compile error**.
+//! The live option list at that key comes from whichever
+//! `wc_core::settings::RuntimeEnumOptionsSource` a module registers via
+//! `wc_core::settings::RegisterRuntimeEnumOptionsExt::register_runtime_enum_options`
+//! — see that trait's docs for the registration side. Use this instead of
+//! `ty = Enum` whenever the candidate list is only known at runtime (an
+//! enumerated audio device, a connected monitor), not fixed by a Rust enum.
 
 #![allow(
     clippy::expect_used,
@@ -85,6 +102,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let struct_name = &input.ident;
     let storage_key = parse_storage_key(input)?;
     let fields = parse_fields(input)?;
+    validate_fields(&fields)?;
 
     let default_impl = emit_default(struct_name, &fields);
     let trait_impl = emit_trait_impl(struct_name, &storage_key, &fields);
@@ -117,6 +135,10 @@ enum Kind {
     /// from the field type's reflection info at runtime, not listed in the
     /// attribute — see the module docs (`## ty = Enum`).
     Enum,
+    /// `String`-valued `ComboBox` whose options come from a
+    /// runtime-registered `RuntimeEnumOptionsSource`, not a Rust enum. See
+    /// the module docs (`## ty = RuntimeEnum`).
+    RuntimeEnum,
 }
 
 struct FieldInfo {
@@ -140,6 +162,10 @@ struct FieldInfo {
     extensions: Option<Vec<String>>,
     /// Human-facing filter label for `Kind::FilePath`. None for other kinds.
     filter_label: Option<String>,
+    /// Options-source key for `Kind::RuntimeEnum`. `None` for other kinds;
+    /// required (checked in `validate_fields`) when `kind` is
+    /// `Kind::RuntimeEnum`.
+    options_key: Option<String>,
 }
 
 fn parse_storage_key(input: &DeriveInput) -> syn::Result<String> {
@@ -206,6 +232,7 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
             step: None,
             extensions: None,
             filter_label: None,
+            options_key: None,
         };
 
         for attr in &field.attrs {
@@ -218,6 +245,29 @@ fn parse_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
         out.push(info);
     }
     Ok(out)
+}
+
+/// Attribute combinations `parse_setting_attr` cannot reject on its own
+/// because they depend on more than one attribute key at once --
+/// `options_key` is only meaningful together with `ty = RuntimeEnum`, and
+/// unlike `ty = Enum`'s variant-list contract (checked only at runtime; see
+/// `enum_variant_names`'s docs in `wc_core::settings::def` for why), this one
+/// the macro can and does check here, because `options_key` is a literal in
+/// the attribute itself rather than something requiring the field type's own
+/// definition.
+fn validate_fields(fields: &[FieldInfo]) -> syn::Result<()> {
+    for f in fields {
+        if matches!(f.kind, Kind::RuntimeEnum) && f.options_key.is_none() {
+            return Err(syn::Error::new(
+                f.ident.span(),
+                format!(
+                    "`ty = RuntimeEnum` on `{}` requires `options_key = \"...\"`",
+                    f.ident
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse a single `key = value` (or bare flag) inside `#[setting(...)]`.
@@ -240,6 +290,9 @@ fn parse_setting_attr(
     } else if meta.path.is_ident("filter_label") {
         let value: LitStr = meta.value()?.parse()?;
         info.filter_label = Some(value.value());
+    } else if meta.path.is_ident("options_key") {
+        let value: LitStr = meta.value()?.parse()?;
+        info.options_key = Some(value.value());
     } else if meta.path.is_ident("category") {
         let ident: Ident = meta.value()?.parse()?;
         info.category = match ident.to_string().as_str() {
@@ -262,9 +315,10 @@ fn parse_setting_attr(
             "FilePath" => Kind::FilePath,
             "TemplateLibrary" => Kind::TemplateLibrary,
             "Enum" => Kind::Enum,
+            "RuntimeEnum" => Kind::RuntimeEnum,
             other => {
                 return Err(meta.error(format!(
-                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `TextList`, `FilePath`, `TemplateLibrary`, or `Enum`)"
+                    "unknown ty `{other}` (expected `Number`, `Boolean`, `Color`, `Text`, `TextList`, `FilePath`, `TemplateLibrary`, `Enum`, or `RuntimeEnum`)"
                 )))
             }
         };
@@ -379,71 +433,7 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
             Category::Dev => quote! { ::wc_core::settings::SettingsCategory::Dev },
         };
         let requires_restart = f.requires_restart;
-        let kind_tokens = match f.kind {
-            Kind::Number => {
-                let min = opt_to_f64_tokens(f.min.as_ref());
-                let max = opt_to_f64_tokens(f.max.as_ref());
-                let step = opt_to_f64_tokens(f.step.as_ref());
-                quote! {
-                    ::wc_core::settings::SettingKind::Number(
-                        ::wc_core::settings::NumberRange {
-                            min: #min,
-                            max: #max,
-                            step: #step,
-                        }
-                    )
-                }
-            }
-            Kind::Boolean => quote! { ::wc_core::settings::SettingKind::Boolean },
-            Kind::Color => quote! { ::wc_core::settings::SettingKind::Color },
-            Kind::Text => quote! { ::wc_core::settings::SettingKind::Text },
-            Kind::TextList => quote! { ::wc_core::settings::SettingKind::TextList },
-            Kind::FilePath => {
-                let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
-                let exts: Vec<&str> = f
-                    .extensions
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                quote! {
-                    ::wc_core::settings::SettingKind::FilePath {
-                        filter_label: #filter_label,
-                        extensions: &[ #( #exts, )* ],
-                    }
-                }
-            }
-            Kind::TemplateLibrary => {
-                let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
-                let exts: Vec<&str> = f
-                    .extensions
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                quote! {
-                    ::wc_core::settings::SettingKind::TemplateLibrary {
-                        filter_label: #filter_label,
-                        extensions: &[ #( #exts, )* ],
-                    }
-                }
-            }
-            Kind::Enum => {
-                // Variant names come from the field type's reflection info at
-                // runtime — `enum_variant_names` returns the `&'static` slice
-                // baked into the enum's `TypeInfo`, and debug-asserts the
-                // unit-variants-only contract (a proc macro cannot see the
-                // enum definition, so this cannot be a compile error).
-                let field_ty = &f.ty;
-                quote! {
-                    ::wc_core::settings::SettingKind::Enum {
-                        variants: ::wc_core::settings::enum_variant_names::<#field_ty>(),
-                    }
-                }
-            }
-        };
+        let kind_tokens = emit_kind_tokens(f);
         quote! {
             ::wc_core::settings::SettingDef {
                 field_name: #field_name,
@@ -463,6 +453,96 @@ fn emit_trait_impl(struct_name: &Ident, storage_key: &str, fields: &[FieldInfo])
 
             fn settings_def() -> ::std::vec::Vec<::wc_core::settings::SettingDef> {
                 ::std::vec![ #( #setting_defs, )* ]
+            }
+        }
+    }
+}
+
+/// Build the `SettingKind::...` construction tokens for one field, dispatched
+/// on its parsed [`Kind`]. Split out of [`emit_trait_impl`] (which maps this
+/// over every field) purely to keep that function's body under Clippy's
+/// `too_many_lines` threshold — the `Kind` match itself has grown one arm per
+/// setting kind and reads better as its own unit.
+fn emit_kind_tokens(f: &FieldInfo) -> TokenStream2 {
+    match f.kind {
+        Kind::Number => {
+            let min = opt_to_f64_tokens(f.min.as_ref());
+            let max = opt_to_f64_tokens(f.max.as_ref());
+            let step = opt_to_f64_tokens(f.step.as_ref());
+            quote! {
+                ::wc_core::settings::SettingKind::Number(
+                    ::wc_core::settings::NumberRange {
+                        min: #min,
+                        max: #max,
+                        step: #step,
+                    }
+                )
+            }
+        }
+        Kind::Boolean => quote! { ::wc_core::settings::SettingKind::Boolean },
+        Kind::Color => quote! { ::wc_core::settings::SettingKind::Color },
+        Kind::Text => quote! { ::wc_core::settings::SettingKind::Text },
+        Kind::TextList => quote! { ::wc_core::settings::SettingKind::TextList },
+        Kind::FilePath => {
+            let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
+            let exts: Vec<&str> = f
+                .extensions
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(String::as_str)
+                .collect();
+            quote! {
+                ::wc_core::settings::SettingKind::FilePath {
+                    filter_label: #filter_label,
+                    extensions: &[ #( #exts, )* ],
+                }
+            }
+        }
+        Kind::TemplateLibrary => {
+            let filter_label = f.filter_label.clone().unwrap_or_else(|| "File".to_string());
+            let exts: Vec<&str> = f
+                .extensions
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(String::as_str)
+                .collect();
+            quote! {
+                ::wc_core::settings::SettingKind::TemplateLibrary {
+                    filter_label: #filter_label,
+                    extensions: &[ #( #exts, )* ],
+                }
+            }
+        }
+        Kind::Enum => {
+            // Variant names come from the field type's reflection info at
+            // runtime — `enum_variant_names` returns the `&'static` slice
+            // baked into the enum's `TypeInfo`, and debug-asserts the
+            // unit-variants-only contract (a proc macro cannot see the
+            // enum definition, so this cannot be a compile error).
+            let field_ty = &f.ty;
+            quote! {
+                ::wc_core::settings::SettingKind::Enum {
+                    variants: ::wc_core::settings::enum_variant_names::<#field_ty>(),
+                }
+            }
+        }
+        Kind::RuntimeEnum => {
+            // `validate_fields` already rejected a missing `options_key`
+            // for this kind -- unlike `Kind::Enum`'s variant list, which
+            // must be checked at runtime because a proc macro cannot see
+            // the field type's own definition, `options_key` is a
+            // literal in the attribute itself, so the macro checks it
+            // here at compile time instead.
+            let options_key = f
+                .options_key
+                .as_deref()
+                .expect("validate_fields already rejected a missing options_key");
+            quote! {
+                ::wc_core::settings::SettingKind::RuntimeEnum {
+                    options_key: #options_key,
+                }
             }
         }
     }
