@@ -164,6 +164,21 @@ impl Plugin for CymaticsPlugin {
             wc_core::sketch::restart_on_settings_change::<CymaticsSettings>,
         );
 
+        // Plan 02: re-run the spawn path at the new window size when a resize
+        // settles, via a silent/instant reload. This is also what re-inits the
+        // sim grid, which `spawn_cymatics` derives from the window aspect.
+        // Registered ALWAYS-ON (no run_if), mirroring `restart_on_settings_change`
+        // above — a resize during idle/screensaver (a display re-enumerating
+        // after sleep) must still respawn; the listener gates internally.
+        // Defensive `add_message` so a test that builds this plugin without
+        // wc-core's LifecyclePlugin still has the message (Bevy dedups;
+        // LifecyclePlugin is canonical).
+        app.add_message::<wc_core::lifecycle::window_resize::WindowResizeSettled>();
+        app.add_systems(
+            Update,
+            wc_core::sketch::reload_on_resize_settled::<CymaticsSettings>,
+        );
+
         // Shared wireframe bone overlay (mirrors Line/Dots). Cymatics renders in
         // the main 2D pass with no post-process node, so no
         // `HandMeshCompositeSet` ordering edge is needed — the composite runs

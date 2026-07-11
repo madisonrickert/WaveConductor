@@ -46,8 +46,9 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 
 use crate::audio::state::AudioState;
-use crate::lifecycle::reload::SketchReloadState;
+use crate::lifecycle::reload::{ReloadReason, SketchReloadState};
 use crate::lifecycle::state::AppState;
+use crate::lifecycle::window_resize::WindowResizeSettled;
 use crate::render::{BloomComposite, TonemapChoice};
 use crate::settings::{SketchRestart, SketchSettings};
 
@@ -148,7 +149,12 @@ pub fn restart_on_settings_change<S: SketchLifecycle>(
             // started — headless tests and early startup before the cpal
             // stream is active.
             let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
-            reload_state.begin_fade_out(time.elapsed(), pre_fade_volume, S::STATE);
+            reload_state.begin_fade_out(
+                time.elapsed(),
+                pre_fade_volume,
+                S::STATE,
+                ReloadReason::SettingsRestart,
+            );
             *last_change_at = None;
             tracing::debug!(
                 "sketch settings ('{}') debounce elapsed — beginning reload FadeOut",
@@ -156,6 +162,72 @@ pub fn restart_on_settings_change<S: SketchLifecycle>(
             );
         }
     }
+}
+
+/// Window-resize listener: re-runs sketch `S`'s spawn path when the window has
+/// settled at a new size, by driving the reload overlay with
+/// [`ReloadReason::WindowResize`] (instant and silent — no fade, no audio dip).
+///
+/// Reuse rationale: a sketch derives its window-size-dependent resources
+/// (particle counts; the Cymatics sim grid) in its `OnEnter` spawn systems, so
+/// the cleanest "respawn at the new size" is to re-run `OnEnter`. The reload
+/// overlay already performs exactly that `Sketch -> Home -> Sketch` round-trip
+/// (see [`crate::lifecycle::reload`]); the `WindowResize` reason makes it cost a
+/// single black repaint frame and pushes no master-volume command. Note it is not
+/// silent in the wider sense: the `Home` hop runs the sketch's own `OnExit`/
+/// `OnEnter` audio hooks, so the synth graph is rebuilt and the background bed
+/// briefly drops — see `ReloadReason` for why that is unmasked here and what to
+/// do if it proves audible. Rebuilding rather than rescaling in place is required
+/// because a sketch's element *count* changes with size (Dots' grid, Line's
+/// particle count), so the GPU buffers must be reallocated.
+///
+/// Registered **always-on** (no `run_if`), mirroring `restart_on_settings_change`
+/// and gating internally on being the running sketch with no reload in flight.
+/// It deliberately does **not** gate on `sketch_active`: a resize during `Idle`
+/// or the attract screensaver (e.g. a TV re-enumerating after sleep) must still
+/// respawn the sketch at the new size. The `Home` hop resets the sketch's
+/// `SketchActivity` sub-state to `Active`, after which the idle timer re-engages
+/// normally — acceptable for an unattended kiosk. It is a sanctioned always-on
+/// listener (see AGENTS.md); it no-ops in one cheap branch when no settle
+/// arrived.
+///
+/// `resize_reload_should_fire` (private; see below) encodes the gate.
+pub fn reload_on_resize_settled<S: SketchLifecycle>(
+    mut settled: MessageReader<'_, '_, WindowResizeSettled>,
+    time: Res<'_, Time>,
+    current: Res<'_, State<AppState>>,
+    mut reload_state: ResMut<'_, SketchReloadState>,
+    // Absent in headless (MinimalPlugins) test harnesses and before the cpal
+    // stream is up; fall back to full volume then. (A resize never dips audio,
+    // so this value is only carried for symmetry with the settings-restart path.)
+    audio_state: Option<Res<'_, AudioState>>,
+) {
+    // Drain the reader every frame regardless of the decision.
+    let got_settle = settled.read().count() > 0;
+    if !resize_reload_should_fire(got_settle, **current == S::STATE, reload_state.is_idle()) {
+        return;
+    }
+    let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
+    reload_state.begin_fade_out(
+        time.elapsed(),
+        pre_fade_volume,
+        S::STATE,
+        ReloadReason::WindowResize,
+    );
+    tracing::debug!(
+        "window resize settled while in '{}' — beginning a silent, instant reload at the new size",
+        S::STORAGE_KEY
+    );
+}
+
+/// Whether a settled resize should begin a reload this frame.
+///
+/// Pure so the gate is unit-testable without an app: fire only when a settle
+/// arrived AND this is the running sketch AND no reload is already in progress
+/// (a reload drives its own `Sketch -> Home -> Sketch` transition, which must
+/// not re-trigger one).
+fn resize_reload_should_fire(got_settle: bool, in_state: bool, reload_idle: bool) -> bool {
+    got_settle && in_state && reload_idle
 }
 
 /// Write sketch `S`'s tonemapping + bloom profile onto the main camera each
@@ -195,5 +267,35 @@ pub fn reset_render_profile(
 ) {
     for (mut tonemapping, mut bloom) in &mut camera {
         crate::render::reset_camera_render_profile(&mut tonemapping, &mut bloom);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reload only begins on a real settle while this is the running sketch
+    /// and no reload is already in flight. The negatives are the ones that
+    /// matter: no stray fire, no firing for another sketch, and no re-trigger
+    /// mid-reload (the reload drives its own `Sketch → Home → Sketch` hop, which
+    /// would otherwise loop).
+    #[test]
+    fn fires_only_on_a_settle_in_this_sketch_while_reload_is_idle() {
+        assert!(
+            resize_reload_should_fire(true, true, true),
+            "settle, our sketch, idle → fire"
+        );
+        assert!(
+            !resize_reload_should_fire(false, true, true),
+            "no settle → nothing"
+        );
+        assert!(
+            !resize_reload_should_fire(true, false, true),
+            "settle but not our sketch → nothing"
+        );
+        assert!(
+            !resize_reload_should_fire(true, true, false),
+            "settle mid-reload must not re-trigger (its own Home hop would loop)"
+        );
     }
 }

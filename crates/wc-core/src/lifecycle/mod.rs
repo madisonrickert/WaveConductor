@@ -24,6 +24,7 @@ pub mod reload;
 pub mod screensaver;
 pub mod state;
 pub mod thermal;
+pub mod window_resize;
 
 pub use idle::RegisterIdleVetoExt;
 pub use reload::SketchReloadState;
@@ -61,6 +62,20 @@ impl Plugin for LifecyclePlugin {
             // the registration; registering here ensures lifecycle tests that do
             // not add HandTrackingPlugin still compile and run.
             .add_message::<crate::input::state::HandTrackingFrame>()
+            // Plan 02: debounced window-resize settling signal (see
+            // `window_resize`). Registered here so it exists even for lifecycle
+            // tests that do not add a sketch plugin.
+            .add_message::<window_resize::WindowResizeSettled>()
+            // The two upstream window messages `debounce_window_resize` reads.
+            // `WindowPlugin` registers both in the real app, and `add_message` is
+            // guarded by `if !contains_resource::<Messages<T>>()`, so this is a
+            // no-op there. It matters for the many headless harnesses that add
+            // `LifecyclePlugin` without `WindowPlugin`: without it, the always-on
+            // `debounce_window_resize` fails `MessageReader` param validation on
+            // its first run and panics the whole schedule. Same reason
+            // `HandTrackingFrame` is registered above.
+            .add_message::<bevy::window::WindowResized>()
+            .add_message::<bevy::window::WindowScaleFactorChanged>()
             // Systems
             .add_systems(
                 Update,
@@ -84,6 +99,13 @@ impl Plugin for LifecyclePlugin {
                 )
                     .chain(),
             );
+
+        // Plan 02: debounce `WindowResized` / `WindowScaleFactorChanged` into a
+        // single `WindowResizeSettled` (250 ms after the last event). Always-on
+        // message listener — it must observe resize events in every state
+        // (including `Home`) and no-ops cheaply on any frame with no event, the
+        // same always-on category as `reload::drive_reload_state`.
+        app.add_systems(Update, window_resize::debounce_window_resize);
 
         // Adaptive thermal signal (Plan 11.8, Seam 1). Spawns the background
         // temperature sampler and maintains `Res<ThermalState>`. Built before
