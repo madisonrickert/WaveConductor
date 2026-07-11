@@ -57,13 +57,6 @@ pub(super) fn render_section_by_key(
         return;
     }
 
-    // Snapshot every registered runtime-enum options source now, while
-    // `world` is still a shared borrow -- once `reflect_mut` below is taken,
-    // `world` is borrowed for the rest of this function and no widget below
-    // can re-enter it. Mirrors the `defs` snapshot immediately above. See
-    // `crate::settings::runtime_enum` for the registration side.
-    let runtime_enum_options = runtime_enum::snapshot(world);
-
     // Walk the type registry to find the settings type by its
     // SketchSettings::STORAGE_KEY. Compare by value, not pointer identity.
     let type_id = world
@@ -89,6 +82,19 @@ pub(super) fn render_section_by_key(
         .read()
         .get_type_data::<bevy::reflect::std_traits::ReflectDefault>(type_id)
         .map(bevy::reflect::std_traits::ReflectDefault::default);
+
+    // Snapshot every registered runtime-enum options source now, while
+    // `world` is still a shared borrow -- once `reflect_mut` below is taken,
+    // `world` is borrowed for the rest of this function and no widget below
+    // can re-enter it. Mirrors the `defs` snapshot near the top of this
+    // function. Deferred past the TypeRegistry bail above so a section
+    // whose settings type isn't registered doesn't pay for a snapshot it
+    // can't use; it cannot also be deferred past the "resource not present"
+    // bail below, since that bail is discovered *by* the
+    // `reflect_resource_mut` call this snapshot must precede. See
+    // `crate::settings::runtime_enum` for the registration side.
+    let runtime_enum_options = runtime_enum::snapshot(world);
+
     // Bevy 0.19 made `ReflectResource` a ZST; resources are now reflected via
     // `ReflectComponent` on their backing entity (see `reflect_resource_mut`).
     let Some(mut reflect_mut) = reflect_resource_mut(world, type_id) else {

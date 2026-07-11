@@ -65,14 +65,14 @@ pub trait RuntimeEnumOptionsSource: Resource {
     const OPTIONS_KEY: &'static str;
 
     /// The current option list, in the order it should appear in the
-    /// dropdown. Called at most once per settings-panel-visible frame per
-    /// registered source (see `snapshot`), so this should be a cheap field
-    /// read — not a fresh OS enumeration call.
+    /// dropdown. Called at most once per rendered section per registered
+    /// source (see `snapshot`), so this should be a cheap field read — not a
+    /// fresh OS enumeration call.
     fn options(&self) -> &[String];
 }
 
 /// One registered source's option list, captured by `snapshot` for the
-/// current frame.
+/// section currently being rendered.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeEnumOptionsSnapshotEntry {
     /// The source's `RuntimeEnumOptionsSource::OPTIONS_KEY`.
