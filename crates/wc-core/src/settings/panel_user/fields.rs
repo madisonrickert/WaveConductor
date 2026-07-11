@@ -20,6 +20,7 @@ use super::provider_status::{render_provider_status_row, ProviderStatusLine};
 use super::widgets::render_widget_value;
 use crate::settings::def::{SettingDef, SettingsCategory};
 use crate::settings::registry::{reflect_resource_mut, SettingsRegistry};
+use crate::settings::runtime_enum::{self, RuntimeEnumOptionsSnapshotEntry};
 use crate::ui::OverlayStyle;
 
 /// Look up the type registration matching `storage_key` and render its
@@ -55,6 +56,13 @@ pub(super) fn render_section_by_key(
     if !defs.iter().any(|d| super::dock::field_visible(d, advanced)) {
         return;
     }
+
+    // Snapshot every registered runtime-enum options source now, while
+    // `world` is still a shared borrow -- once `reflect_mut` below is taken,
+    // `world` is borrowed for the rest of this function and no widget below
+    // can re-enter it. Mirrors the `defs` snapshot immediately above. See
+    // `crate::settings::runtime_enum` for the registration side.
+    let runtime_enum_options = runtime_enum::snapshot(world);
 
     // Walk the type registry to find the settings type by its
     // SketchSettings::STORAGE_KEY. Compare by value, not pointer identity.
@@ -93,6 +101,7 @@ pub(super) fn render_section_by_key(
         defs.as_ref(),
         storage_key,
         provider_status,
+        &runtime_enum_options,
         #[cfg(feature = "templates")]
         template_rows,
         #[cfg(feature = "templates")]
@@ -128,18 +137,16 @@ pub(super) fn render_section_by_key(
 /// that two settings structs using the same section or field names don't
 /// collide in egui's id-to-state map (colliding Grids share column widths;
 /// colliding `ComboBox`es share popup open/close state).
-#[cfg_attr(
-    feature = "templates",
-    expect(
-        clippy::too_many_arguments,
-        reason = "the settings render chain threads the template snapshot + dirty flag through this fn when the feature is on"
-    )
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settings render chain threads the provider-status snapshot, the runtime-enum options snapshot, and (when the `templates` feature is on) the template rows + dirty flag through this fn; bundling them into a struct is a larger refactor out of scope here"
 )]
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    runtime_enum_options: &[RuntimeEnumOptionsSnapshotEntry],
     #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
     #[cfg(feature = "templates")] template_dirty: &mut bool,
     default: Option<&dyn Reflect>,
@@ -209,6 +216,7 @@ fn render_user_fields_via_reflect(
                         field,
                         def,
                         storage_key,
+                        runtime_enum_options,
                         #[cfg(feature = "templates")]
                         template_rows,
                         #[cfg(feature = "templates")]

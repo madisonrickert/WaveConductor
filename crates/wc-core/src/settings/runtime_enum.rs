@@ -19,8 +19,7 @@
 //! resource type: `snapshot` walks every registered entry through its
 //! stored function pointer and returns a small keyed list, which the panel
 //! matches against each field's `SettingKind::RuntimeEnum { options_key }` at
-//! render time (see `panel_user::widgets::render_runtime_enum`, added in
-//! Task 3 of this plan).
+//! render time (see `panel_user::widgets::render_runtime_enum`).
 //!
 //! This indirection is what lets two unrelated consumers (a monitor picker
 //! and an audio-device picker) each register their own resource type without
@@ -145,10 +144,10 @@ fn snapshot_one<R: RuntimeEnumOptionsSource>(world: &World) -> Option<Arc<[Strin
 
 /// Snapshot every registered source's current options.
 ///
-/// Called from `panel_user::fields::render_section_by_key` (wired in Task 3
-/// of this plan) before the reflected field borrow that needs `world`, which
-/// makes `world` unavailable to the widgets that consume this snapshot — the
-/// same ordering constraint the panel's own `SettingDef` list is read under.
+/// Called from `panel_user::fields::render_section_by_key` before the
+/// reflected field borrow that needs `world`, which makes `world` unavailable
+/// to the widgets that consume this snapshot — the same ordering constraint
+/// the panel's own `SettingDef` list is read under.
 ///
 /// `world.get_resource::<RuntimeEnumOptionsRegistry>()` and each entry's
 /// `snapshot_fn(world)` are both shared (`&World`) borrows, so — unlike
@@ -156,29 +155,6 @@ fn snapshot_one<R: RuntimeEnumOptionsSource>(world: &World) -> Option<Arc<[Strin
 /// list *before* re-entering `world` because its per-type functions need
 /// `&mut World` — this reads the registry and calls every entry's
 /// `snapshot_fn` in one pass without a two-phase snapshot.
-// Dead in the lib target until Task 3 of this plan wires
-// `panel_user::fields::render_section_by_key` to call it. Three deliberate
-// choices here, mirrored on `options_for` below:
-//   - `expect`, not `allow`, so `unfulfilled_lint_expectations` becomes a
-//     hard error under `-D warnings` the moment Task 3 supplies the real
-//     caller. A bare `allow` would sit here forever AND would silently
-//     defeat Task 3's own wiring-completeness check, which is precisely
-//     "does clippy still report dead_code in this module?".
-//   - `cfg_attr(not(test), ...)`, because `--all-targets` also builds the
-//     lib *test* target, where `mod tests` does call this — there the
-//     expectation would be unfulfilled and would fail the gate by itself.
-//   - the `reason` names the task that removes it.
-// The three types above need no attribute of their own: an expect/allow on a
-// fn makes it a live root for dead-code analysis, so everything it names
-// (`RuntimeEnumOptionsSnapshot`, `RuntimeEnumOptionsSnapshotEntry`,
-// `RuntimeEnumOptionsRegistryEntry`) is reachable through these two.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no non-test caller until alpha.5 Plan 03a Task 3 wires render_runtime_enum in"
-    )
-)]
 pub(crate) fn snapshot(world: &World) -> RuntimeEnumOptionsSnapshot {
     let Some(registry) = world.get_resource::<RuntimeEnumOptionsRegistry>() else {
         return RuntimeEnumOptionsSnapshot::new();
@@ -200,15 +176,6 @@ pub(crate) fn snapshot(world: &World) -> RuntimeEnumOptionsSnapshot {
 /// currently reports that key (not yet enumerated, or no source registered
 /// at all) — callers must not treat that as an error; the persisted value
 /// still renders regardless (see `panel_user::widgets::render_runtime_enum`).
-// The widget call site (Task 3 of this plan) uses this; the lib target sees
-// it as dead until then.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no non-test caller until alpha.5 Plan 03a Task 3 wires render_runtime_enum in"
-    )
-)]
 pub(crate) fn options_for<'a>(
     snapshot: &'a [RuntimeEnumOptionsSnapshotEntry],
     options_key: &str,
