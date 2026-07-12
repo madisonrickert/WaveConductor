@@ -38,6 +38,8 @@ use bevy::prelude::Resource;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::prelude::{Real, Res, ResMut, Time};
 
+use crate::settings::RuntimeEnumOptionsSource;
+
 /// The chosen output device after matching a saved name against the live list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceResolution {
@@ -109,14 +111,43 @@ pub fn saved_device_reappeared(
     current.iter().any(|d| d == name) && !previous.iter().any(|d| d == name)
 }
 
-/// Live list of output-device names, refreshed by the device-watcher thread
-/// (Task 4). Read by the audio settings panel (Task 7, via Plan 03a's
-/// runtime-enumerated dropdown) and by the supervisor's migrate-back check.
+/// Live list of output-device names, refreshed by the device-watcher thread.
+/// Read by the audio settings panel (via Plan 03a's runtime-enumerated dropdown,
+/// see the [`RuntimeEnumOptionsSource`] impl below) and by the supervisor's
+/// migrate-back check.
 ///
 /// Main-thread-only resource; the watcher thread never touches it directly (it
 /// sends snapshots over a channel that a main-thread system drains into here).
+///
+/// An empty list is a normal state, not an error: before the watcher's first
+/// poll lands — and forever, in a headless harness — there is nothing to report.
+/// 03a omits the key from its snapshot in that case and still renders the
+/// persisted value.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct AvailableAudioDevices(pub Vec<String>);
+
+/// Feeds the live output-device list to Plan 03a's runtime-enum settings widget.
+///
+/// [`crate::audio::settings::AudioSettings::output_device`] declares
+/// `options_key = "audio_output_devices"`, and 03a's panel resolves that key
+/// against every registered [`RuntimeEnumOptionsSource`] at render time — so this
+/// key and the field's must stay identical. Two tests pin the halves together:
+/// `settings::output_device_options_key_matches_its_options_source` (the two
+/// literals agree) and `crate::audio::tests::the_output_device_fields_options_key_resolves_against_a_registered_source`
+/// (the source is actually registered with the `App`). A debug-build startup
+/// check (`settings::runtime_enum::warn_on_unresolved_options_keys`) catches a
+/// drift at runtime.
+///
+/// This is a cheap field read, as the trait requires: the blocking cpal
+/// enumeration happens on the watcher thread, never here — the panel renders per
+/// frame.
+impl RuntimeEnumOptionsSource for AvailableAudioDevices {
+    const OPTIONS_KEY: &'static str = "audio_output_devices";
+
+    fn options(&self) -> &[String] {
+        &self.0
+    }
+}
 
 /// Name of the output device the live stream is currently bound to, or `None`
 /// before the engine starts / when it failed to build.
