@@ -545,15 +545,18 @@ fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sen
 /// `None`, and the system returns. When a snapshot *has* arrived it only moves an
 /// already-built `Vec<String>` into the resource.
 ///
-/// `saved` is `None` in this recovery-only stage — Task 6 wires the persisted
-/// `AudioSettings::output_device` in — so migrate-back is inert until a device can
-/// actually be chosen. Until then the list is still kept fresh (Task 7's dropdown
-/// reads it) and recovery-to-the-default is the behaviour.
+/// `saved` is the operator's persisted
+/// [`crate::audio::settings::AudioSettings::output_device`], read (never written)
+/// as a `&str`: the migrate-back edge is "the name the operator chose has just
+/// reappeared". `Option<Res<…>>` degrades cleanly if the settings resource is
+/// somehow absent (a harness that loads `AudioPlugin`'s systems without its
+/// settings registration); in the app it is inserted at plugin build.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn drain_device_topology(
     receiver: Option<bevy::ecs::system::NonSend<'_, DeviceTopologyReceiver>>,
     mut available: ResMut<'_, AvailableAudioDevices>,
     bound: Res<'_, BoundOutputDevice>,
+    settings: Option<Res<'_, crate::audio::settings::AudioSettings>>,
     mut supervisor: ResMut<'_, crate::audio::supervisor::AudioSupervisor>,
     time: Res<'_, Time<Real>>,
 ) {
@@ -566,8 +569,13 @@ pub fn drain_device_topology(
     let Some(incoming) = receiver.latest() else {
         return;
     };
-    // Task 6 replaces this `None` with the persisted device name.
-    let saved: Option<&str> = None;
+    // Borrowed, not cloned: this system runs every frame, and the empty string is
+    // the "no preference" sentinel `resolve_output_device`/`saved_device_reappeared`
+    // already understand.
+    let saved: Option<&str> = settings
+        .as_ref()
+        .map(|s| s.output_device.as_str())
+        .filter(|name| !name.is_empty());
     if apply_topology(&mut available.0, incoming, saved, bound.0.as_deref()) {
         // Bring the next reconnect attempt forward instead of waiting out a
         // backoff that may be as long as 30 s. `Time<Real>` is the monotonic

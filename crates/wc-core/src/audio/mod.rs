@@ -61,6 +61,7 @@ pub mod line_synth;
 pub mod nav;
 pub mod ring;
 pub mod sample_bank;
+pub mod settings;
 pub mod state;
 pub mod supervisor;
 
@@ -70,6 +71,7 @@ use bevy::prelude::*;
 use self::engine::AudioStream;
 use self::state::AudioState;
 use crate::lifecycle::state::AppState;
+use crate::settings::RegisterSketchSettingsExt;
 
 /// Single plugin that wires the audio engine into the Bevy [`App`].
 ///
@@ -97,6 +99,12 @@ pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
+        // The persisted output-device choice. Registered here (not in a Startup
+        // system) so the resource exists — loaded from disk — before
+        // `start_audio_engine` runs and reads it: the first stream of the
+        // session must open the operator's device, not the system default.
+        app.register_sketch_settings::<settings::AudioSettings>();
+
         app
             // AudioState is always present so consumers can read it even before
             // the engine has started; status will be `NotStarted` until the

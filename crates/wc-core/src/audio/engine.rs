@@ -103,10 +103,16 @@ pub fn start_audio_engine(world: &mut World) {
         .cloned()
         .unwrap_or_default();
 
-    // Recovery-only stage: no persisted device name yet (Task 6 wires it in), so
-    // resolve to the system default. The enumeration is a one-shot main-thread
-    // cost at `Startup`, never a per-frame one.
-    let resolution = super::device::resolve_output_device(None, &host_output_names());
+    // The operator's persisted choice, or the system default when they never made
+    // one (the empty-string sentinel). `AudioPlugin::build` registers
+    // `AudioSettings` — hence loads it from disk — before `Startup`, so the very
+    // first stream of the session already opens the chosen device. `get_resource`
+    // (not `resource`) so a harness that builds the engine without the settings
+    // plugin degrades to the default rather than panicking. The enumeration is a
+    // one-shot main-thread cost at `Startup`, never a per-frame one.
+    let saved = saved_output_device(world);
+    let resolution =
+        super::device::resolve_output_device(saved_name(saved.as_str()), &host_output_names());
 
     match build_engine(&assets, &resolution) {
         Ok(built) => {
@@ -177,6 +183,27 @@ pub fn start_audio_engine(world: &mut World) {
     }
 }
 
+/// The operator's persisted output-device name, or the empty string when they
+/// have expressed no preference (or the settings resource is absent, as in a
+/// headless harness that builds the engine alone).
+///
+/// Read-only, and deliberately by value: the saved name is **never** rewritten
+/// from the engine. A name that currently matches no device is a device that is
+/// merely away (a sleeping HDMI TV), not an invalid choice — see
+/// [`super::device::resolve_output_device`].
+fn saved_output_device(world: &World) -> String {
+    world
+        .get_resource::<super::settings::AudioSettings>()
+        .map(|settings| settings.output_device.clone())
+        .unwrap_or_default()
+}
+
+/// The saved name as the resolver wants it: `None` for the empty-string
+/// "follow the system default" sentinel, `Some(name)` otherwise.
+fn saved_name(saved: &str) -> Option<&str> {
+    (!saved.is_empty()).then_some(saved)
+}
+
 /// The host's output-device names, or an empty list when we could not ask.
 ///
 /// **Can block** (enumeration); main-thread (re)build path only. An enumeration
@@ -202,8 +229,10 @@ fn host_output_names() -> Vec<String> {
 ///
 /// Exclusive main-thread access, called **only** from
 /// [`super::supervisor::supervise_audio`] on a backoff-gated attempt — never per
-/// frame. Re-resolves the device (Task 6 supplies the saved name; until then, the
-/// host default), builds a fresh stream + rings + error flag, and replaces the
+/// frame. Re-resolves the device from the persisted
+/// [`super::settings::AudioSettings::output_device`] (falling back to the host
+/// default when it is unset or currently absent, without ever rewriting it),
+/// builds a fresh stream + rings + error flag, and replaces the
 /// non-send `AudioStream`, `AudioCommandSender`, `AudioMessageReceiver`, and the
 /// `AudioErrorFlag`. Inserting the new `AudioStream` drops the old one, which
 /// stops the dead stream.
@@ -241,8 +270,12 @@ pub(crate) fn rebuild_engine(world: &mut World) -> bool {
         .cloned()
         .unwrap_or_default();
 
-    // Task 6 replaces this `None` with the persisted device name.
-    let resolution = super::device::resolve_output_device(None, &host_output_names());
+    // Re-resolve the operator's persisted choice on every rebuild — that is what
+    // makes a reconnect *migrate back* to the saved device rather than settling
+    // permanently on whatever the system default was at the moment of the outage.
+    let saved = saved_output_device(world);
+    let resolution =
+        super::device::resolve_output_device(saved_name(saved.as_str()), &host_output_names());
 
     let built = match build_engine(&assets, &resolution) {
         Ok(built) => built,
