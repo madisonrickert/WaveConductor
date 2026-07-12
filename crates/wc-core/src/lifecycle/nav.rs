@@ -1,8 +1,13 @@
 //! Translates [`WaveConductorAction`] presses into [`AppState`] transitions and
 //! window-level effects (fullscreen toggle).
+//!
+//! The fullscreen toggle only flips `DisplaySettings::start_fullscreen`
+//! (`crate::settings::DisplaySettings`); it does not write `Window` directly.
+//! `crate::lifecycle::display::apply_display_mode` is the sole writer of
+//! `Window::mode` and `CursorOptions::visible`, ordered to run immediately
+//! after this system each frame.
 
 use bevy::prelude::*;
-use bevy::window::WindowMode;
 
 use super::action_map::{ActionInput, ActionPhase};
 use super::actions::WaveConductorAction;
@@ -15,11 +20,11 @@ use super::state::AppState;
 /// transition by fixed precedence (sketch-select, Home, Next, Prev) so two
 /// select keys landing the same frame resolve deterministically — matching the
 /// previous else-if ordering.
-pub fn handle_navigation_actions(
+pub(crate) fn handle_navigation_actions(
     mut actions: MessageReader<'_, '_, ActionInput>,
     current: Res<'_, State<AppState>>,
     mut next: ResMut<'_, NextState<AppState>>,
-    mut windows: Query<'_, '_, &mut Window>,
+    mut display_settings: ResMut<'_, crate::settings::DisplaySettings>,
 ) {
     use WaveConductorAction as A;
 
@@ -61,15 +66,101 @@ pub fn handle_navigation_actions(
     }
 
     if fullscreen {
-        for mut window in &mut windows {
-            window.mode = match window.mode {
-                WindowMode::Windowed => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-                _ => WindowMode::Windowed,
-            };
-            tracing::info!(mode = ?window.mode, "toggle fullscreen");
-        }
+        // Only the flag flips here. `crate::lifecycle::display::apply_display_mode`
+        // is the single writer of `Window::mode` / `CursorOptions::visible`;
+        // it is ordered `.after(handle_navigation_actions)` in `Update`, so
+        // this toggle takes effect the same frame, and it re-derives the
+        // target from DisplaySettings plus the live monitor set rather than
+        // this handler guessing at a MonitorSelection directly.
+        display_settings.start_fullscreen = !display_settings.start_fullscreen;
+        tracing::info!(
+            start_fullscreen = display_settings.start_fullscreen,
+            "toggle fullscreen"
+        );
     }
 
     // ToggleVolume is handled by crate::audio::nav::handle_volume_toggle (Plan 4).
     // ToggleDevPanel is handled by crate::settings::panel_dev::handle_dev_panel_toggle (Plan 5).
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+    use crate::lifecycle::LifecyclePlugin;
+    use crate::settings::DisplaySettings;
+
+    /// Build the minimal headless app needed to exercise
+    /// `handle_navigation_actions` end-to-end through `LifecyclePlugin`
+    /// (which wires up `DisplayPlugin` and, with it, `DisplaySettings`).
+    ///
+    /// Mirrors `crates/wc-core/tests/common/app.rs::lifecycle_test_app`
+    /// (`MinimalPlugins` + `InputPlugin` + `StatesPlugin` + `LifecyclePlugin`,
+    /// plus a bare `Window` entity). That helper lives in the external
+    /// `tests/` integration-test crate and cannot see `DisplaySettings` —
+    /// it is `pub(crate)` by design (see the module doc on
+    /// `crate::lifecycle::display::apply_display_mode` for why: an
+    /// unresolvable saved monitor name must never be silently rewritten, and
+    /// keeping the type out of the public surface is part of enforcing that).
+    /// This copy lives beside the code it tests so the assertions below can
+    /// read the resource directly.
+    fn test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::input::InputPlugin);
+        app.add_plugins(StatesPlugin);
+        app.add_plugins(LifecyclePlugin);
+        app.world_mut().spawn(Window::default());
+        app
+    }
+
+    /// Regression test for the dead-F11 bug this task fixes.
+    ///
+    /// Before this change, `handle_navigation_actions` wrote `Window::mode`
+    /// directly, and `apply_display_mode` — ordered right after it in
+    /// `Update` — reverted that write from the unchanged `DisplaySettings`
+    /// on the very same frame: F11 pressed and released with no observable
+    /// effect (confirmed empirically against the pre-fix code). Nothing in
+    /// the test suite exercised F11 before this test, which is exactly why
+    /// that regression shipped invisibly.
+    ///
+    /// Injects `ActionInput { action: ToggleFullscreen, phase: Pressed }`
+    /// directly into the message queue (bypassing physical key simulation),
+    /// matching the `direct_action_input_rewinds_timer` pattern in
+    /// `crates/wc-core/tests/lifecycle.rs`, and asserts
+    /// `DisplaySettings::start_fullscreen` flips on the very next `update()`
+    /// — the observable effect `apply_display_mode` then re-derives
+    /// `Window::mode` from — then flips back on a second press.
+    #[test]
+    fn toggle_fullscreen_flips_display_settings_start_fullscreen() {
+        let mut app = test_app();
+        app.update();
+
+        let initial = app.world().resource::<DisplaySettings>().start_fullscreen;
+
+        app.world_mut().write_message(ActionInput {
+            action: WaveConductorAction::ToggleFullscreen,
+            phase: ActionPhase::Pressed,
+        });
+        app.update();
+
+        let after_first = app.world().resource::<DisplaySettings>().start_fullscreen;
+        assert_ne!(
+            after_first, initial,
+            "F11 (ToggleFullscreen) must flip DisplaySettings::start_fullscreen"
+        );
+
+        app.world_mut().write_message(ActionInput {
+            action: WaveConductorAction::ToggleFullscreen,
+            phase: ActionPhase::Pressed,
+        });
+        app.update();
+
+        let after_second = app.world().resource::<DisplaySettings>().start_fullscreen;
+        assert_eq!(
+            after_second, initial,
+            "a second F11 press must flip DisplaySettings::start_fullscreen back"
+        );
+    }
 }
