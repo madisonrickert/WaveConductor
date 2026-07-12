@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
 pub mod detector;
+pub mod mask;
 pub mod roi;
 
 /// Number of `BlazePose` body landmarks published to consumers.
