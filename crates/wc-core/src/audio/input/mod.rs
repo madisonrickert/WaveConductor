@@ -129,8 +129,63 @@ impl Plugin for AudioInputPlugin {
             .register_runtime_enum_options::<devices::AvailableAudioInputDevices>()
             .add_systems(Startup, devices::enumerate_input_devices)
             .add_systems(Update, devices::refresh_devices_on_request_added)
-            .add_systems(PreUpdate, analysis::drain_and_analyze);
-        // Task 8 chains capture::drive_capture ahead of the drain.
+            .add_systems(
+                PreUpdate,
+                (capture::drive_capture, analysis::drain_and_analyze).chain(),
+            );
+
+        // Debug-only manual smoke harness: WC_AUDIO_INPUT_SMOKE=1 requests
+        // default-device capture at startup and logs the analysis at 1 Hz,
+        // so the full mic -> ring -> analysis path can be exercised with
+        // cargo rund before any sketch consumes it (Plan C). The env check
+        // happens once, at plugin build — a normal debug run carries no
+        // extra systems.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("WC_AUDIO_INPUT_SMOKE").is_some() {
+            app.add_systems(Startup, smoke::insert_smoke_request)
+                .add_systems(Update, smoke::log_analysis);
+        }
+    }
+}
+
+/// Debug-only manual smoke harness (see the plugin body). Not compiled into
+/// release; not registered unless `WC_AUDIO_INPUT_SMOKE` is set.
+#[cfg(debug_assertions)]
+mod smoke {
+    use bevy::prelude::*;
+
+    use super::{AudioAnalysis, AudioCaptureRequest};
+
+    /// Startup system: request default-device capture, as Plan C will.
+    pub(super) fn insert_smoke_request(mut commands: Commands<'_, '_>) {
+        commands.insert_resource(AudioCaptureRequest {
+            device_name: None,
+            paused: false,
+        });
+        tracing::info!("WC_AUDIO_INPUT_SMOKE: default-device capture requested");
+    }
+
+    /// Update system: log the analysis snapshot once per second.
+    pub(super) fn log_analysis(
+        time: Res<'_, Time>,
+        analysis: Res<'_, AudioAnalysis>,
+        mut accumulated: Local<'_, f32>,
+    ) {
+        *accumulated += time.delta_secs();
+        if *accumulated < 1.0 {
+            return;
+        }
+        *accumulated = 0.0;
+        tracing::info!(
+            active = analysis.active,
+            rms = analysis.rms,
+            peak = analysis.peak,
+            gain = analysis.gain,
+            onset = analysis.onset,
+            beat = analysis.beat_confidence,
+            bands = ?analysis.bands,
+            "audio input analysis",
+        );
     }
 }
 

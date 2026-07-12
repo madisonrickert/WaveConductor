@@ -99,7 +99,11 @@ fn current_input_device_names() -> Vec<String> {
 /// necessarily hold with `asio` enabled, where `cpal::default_host()`
 /// explicitly prefers WASAPI over ASIO despite ASIO listing first — this
 /// project doesn't enable that feature today.
-fn default_host_fallible() -> Result<cpal::Host, cpal::HostUnavailable> {
+///
+/// `pub(super)`: `capture::try_build_capture` (Task 8) also needs a
+/// panic-free host, so this is shared across the `input` module rather than
+/// duplicated.
+pub(super) fn default_host_fallible() -> Result<cpal::Host, cpal::HostUnavailable> {
     let available = cpal::available_hosts();
     let id = pick_default_host_id(&available).ok_or(cpal::HostUnavailable)?;
     cpal::host_from_id(id)
