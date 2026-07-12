@@ -175,8 +175,9 @@ fn build_engine(assets: &SampleAssets) -> Result<BuiltEngine, EngineBuildError> 
     // push) and runs on an OS audio thread, so it must not allocate, lock, or
     // log. It only flips this flag with a single relaxed atomic store; the
     // main thread's `pump_audio_messages` observes it and drives
-    // `AudioStatus::Errored`. One clone stays here (installed as
-    // `AudioErrorFlag`), the other moves into the closure.
+    // `AudioStatus::Reconnecting` — stream death is recoverable, not terminal.
+    // One clone stays here (installed as `AudioErrorFlag`), the other moves
+    // into the closure.
     let error_flag = Arc::new(AtomicBool::new(false));
     let error_flag_cb = Arc::clone(&error_flag);
 
