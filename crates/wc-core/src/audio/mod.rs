@@ -61,6 +61,7 @@ pub mod nav;
 pub mod ring;
 pub mod sample_bank;
 pub mod state;
+pub mod supervisor;
 
 use bevy::ecs::system::NonSend;
 use bevy::prelude::*;
