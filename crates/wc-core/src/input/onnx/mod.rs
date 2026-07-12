@@ -1,10 +1,11 @@
-//! ONNX inference behind a runtime-agnostic trait.
+//! ONNX inference behind a runtime-agnostic trait, shared by the MediaPipe
+//! hand pipeline and the BlazePose body pipeline.
 //!
 //! Defines the shared types used by all inference backends: [`Tensor`] (a dense
-//! row-major `f32` buffer with a shape), [`InferenceError`], and [`HandInference`]
-//! (run one ONNX model stage, input tensor → raw output tensors). The concrete
-//! implementation is [`super::inference_ort::OrtInference`] (`ort`/ONNX Runtime
-//! with `CoreML` acceleration on macOS).
+//! row-major `f32` buffer with a shape), [`InferenceError`], and
+//! [`ModelInference`] (run one ONNX model stage, input tensor → raw output
+//! tensors). The concrete implementation is [`ort::OrtInference`]
+//! (`ort`/ONNX Runtime with `CoreML` acceleration on macOS).
 //!
 //! Pre/post-processing (anchor decode, NMS, ROI affine) lives in the sibling
 //! `palm`/`landmark` modules, not here, so this trait stays runtime-agnostic:
@@ -17,6 +18,10 @@
 //! path — hence the per-item `#[allow(dead_code)]` each carries.
 
 use thiserror::Error;
+
+/// ONNX Runtime (`ort`) backend; the sole concrete [`ModelInference`]
+/// implementation used by the hand and body pipelines.
+pub mod ort;
 
 /// Error from loading or running an inference model.
 #[derive(Debug, Error)]
@@ -87,7 +92,7 @@ impl Tensor {
 }
 
 /// Runs one ONNX model stage.
-pub trait HandInference: Send {
+pub trait ModelInference: Send {
     /// Run the model on `input`, writing the raw output tensors (in the model's
     /// declared output order) into `out`.
     ///
@@ -100,6 +105,11 @@ pub trait HandInference: Send {
     /// Returns [`InferenceError::Run`] if the forward pass fails.
     fn run(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError>;
 }
+
+/// Historical name from when this trait lived inside the hand provider; the
+/// mediapipe hand modules still import it as `HandInference`. New code uses
+/// [`ModelInference`].
+pub use ModelInference as HandInference;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect is appropriate in test code")]

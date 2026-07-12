@@ -1,6 +1,6 @@
-//! ONNX Runtime (`ort`) inference backend for the MediaPipe hand-tracking pipeline.
+//! ONNX Runtime (`ort`) inference backend for the MediaPipe hand and BlazePose body pipelines.
 //!
-//! `OrtInference` is the sole concrete [`HandInference`] implementation. It
+//! `OrtInference` is the sole concrete [`ModelInference`] implementation. It
 //! registers a platform GPU execution provider so the conv-heavy palm and landmark
 //! models run off the CPU: `CoreML` on macOS (GPU/Neural Engine; measured ~164 ms
 //! CPU-only down to well under the 33 ms/frame budget at 30 Hz) and `DirectML` on
@@ -30,15 +30,15 @@ use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use super::inference::{HandInference, InferenceError, Tensor};
+use super::{InferenceError, ModelInference, Tensor};
 
 /// Backend label when the session runs on ONNX Runtime's CPU execution provider
 /// (no GPU EP for this target, or the EP failed to register and fell back).
-pub(super) const BACKEND_CPU: &str = "ort/CPU";
+pub(crate) const BACKEND_CPU: &str = "ort/CPU";
 /// Backend label when the macOS `CoreML` execution provider registered.
-pub(super) const BACKEND_COREML: &str = "ort/CoreML";
+pub(crate) const BACKEND_COREML: &str = "ort/CoreML";
 /// Backend label when the Windows `DirectML` execution provider registered.
-pub(super) const BACKEND_DIRECTML: &str = "ort/DirectML";
+pub(crate) const BACKEND_DIRECTML: &str = "ort/DirectML";
 
 /// `ort`-backed inference for one ONNX model stage.
 ///
@@ -285,7 +285,7 @@ fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
     }
 }
 
-impl HandInference for OrtInference {
+impl ModelInference for OrtInference {
     /// Run one stage.
     ///
     /// Allocation-free on the steady-state hot path. The input is bound as a

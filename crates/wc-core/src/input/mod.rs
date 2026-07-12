@@ -59,6 +59,14 @@ pub mod entity;
 pub mod gesture;
 pub mod hand;
 pub mod idle_pause;
+/// Shared ONNX inference (tensor types + the ort backend with its CoreML
+/// per-model cache), consumed by the MediaPipe hand provider and the
+/// body-tracking pipeline.
+#[cfg(any(
+    feature = "hand-tracking-mediapipe",
+    feature = "body-tracking-mediapipe"
+))]
+pub mod onnx;
 pub mod pointer;
 pub mod projection;
 pub mod provider;
