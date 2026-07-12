@@ -1,10 +1,10 @@
 //! ONNX inference behind a runtime-agnostic trait, shared by the MediaPipe
 //! hand pipeline and the BlazePose body pipeline.
 //!
-//! Defines the shared types used by all inference backends: [`Tensor`] (a dense
-//! row-major `f32` buffer with a shape), [`InferenceError`], and
-//! [`ModelInference`] (run one ONNX model stage, input tensor → raw output
-//! tensors). The concrete implementation is [`ort::OrtInference`]
+//! Defines the shared types used by all inference backends: [`crate::input::onnx::Tensor`]
+//! (a dense row-major `f32` buffer with a shape), [`crate::input::onnx::InferenceError`], and
+//! [`crate::input::onnx::ModelInference`] (run one ONNX model stage, input tensor → raw output
+//! tensors). The concrete implementation is [`crate::input::onnx::ort::OrtInference`]
 //! (`ort`/ONNX Runtime with `CoreML` acceleration on macOS).
 //!
 //! Pre/post-processing (anchor decode, NMS, ROI affine) lives in the sibling
@@ -12,7 +12,8 @@
 //! it runs one model stage on one pre-shaped input tensor and returns the raw
 //! output tensors.
 //!
-//! [`Tensor::new`], [`Tensor::zeros`], and [`InferenceError::ShapeMismatch`]
+//! [`crate::input::onnx::Tensor::new`], [`crate::input::onnx::Tensor::zeros`], and
+//! [`crate::input::onnx::InferenceError::ShapeMismatch`]
 //! are testing/construction helpers: part of this module's API surface and
 //! used by tests across the pipeline, but never called on the production hot
 //! path — hence the per-item `#[allow(dead_code)]` each carries.

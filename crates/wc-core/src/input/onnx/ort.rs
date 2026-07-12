@@ -59,7 +59,7 @@ pub struct OrtInference {
 
 impl OrtInference {
     /// Load an ONNX model from its bytes, registering the platform GPU execution
-    /// provider (see [`register_accelerator`]). ONNX Runtime falls back to CPU for
+    /// provider (see `register_accelerator`). ONNX Runtime falls back to CPU for
     /// any op the EP cannot place, so load never fails closed.
     ///
     /// The session's CPU thread pool is capped to two intra-op threads with
@@ -119,7 +119,7 @@ impl OrtInference {
 
     /// The inference backend this session registered: `"ort/CoreML"` (macOS) or
     /// `"ort/DirectML"` (Windows) when the platform GPU EP attached, or
-    /// [`BACKEND_CPU`] (`"ort/CPU"`) when there is no GPU EP for the target or it
+    /// `BACKEND_CPU` (`"ort/CPU"`) when there is no GPU EP for the target or it
     /// fell back.
     ///
     /// This reflects registration success, not whole-graph placement: the EP may
