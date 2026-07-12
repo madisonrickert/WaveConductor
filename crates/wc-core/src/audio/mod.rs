@@ -31,6 +31,9 @@
 //! - [`ring::AudioMessageReceiver`] (`NonSendMut<…>`) — raw access for systems
 //!   that want low-level events; most systems can ignore this and just read
 //!   `AudioState`.
+//! - [`input::AudioAnalysis`] (`Res<…>`) — live audio-*input* analysis
+//!   (RMS/bands/onset) for audio-reactive sketches; neutral unless a sketch
+//!   has inserted [`input::AudioCaptureRequest`]. See the `input` module.
 //!
 //! ## Lifecycle and home-screen silence
 //!
@@ -56,6 +59,7 @@ pub mod dots_synth;
 pub mod dsp;
 pub mod engine;
 pub mod flame_synth;
+pub mod input;
 pub mod line_synth;
 pub mod nav;
 pub mod ring;
@@ -83,6 +87,10 @@ pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
+        // Audio *input* capture + analysis (Radiance Unit A). Registered here
+        // so the input path is core audio plumbing, present in every app that
+        // has audio output — sketches only insert/remove AudioCaptureRequest.
+        app.add_plugins(input::AudioInputPlugin);
         app
             // AudioState is always present so consumers can read it even before
             // the engine has started; status will be `NotStarted` until the
