@@ -1411,13 +1411,13 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
 mod tests {
+    use super::super::capture::{FrameSource, MockFrameSource};
     use super::super::coords::{
         distance_m_to_leap_z_mm, size_estimated_distance_m, MEDIAPIPE_DEPTH_PROXY_MM,
     };
     use super::super::signals;
     use super::*;
     use crate::input::hand::LandmarkIndex;
-    use crate::input::providers::mediapipe::capture::{FrameSource, MockFrameSource};
 
     fn model(name: &str) -> Box<dyn HandInference> {
         use super::super::inference_ort::OrtInference;
