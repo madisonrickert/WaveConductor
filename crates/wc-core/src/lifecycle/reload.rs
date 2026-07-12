@@ -84,25 +84,60 @@ pub enum ReloadReason {
     /// A settled window resize (F11, monitor re-enumeration, startup scale
     /// settle). Instant and silent.
     WindowResize,
+    /// The audio output stream was rebuilt after a device reconnect (a sleeping
+    /// HDMI TV woke, a USB interface came back). Instant and silent, exactly like
+    /// [`Self::WindowResize`].
+    ///
+    /// ## Why a reload at all
+    ///
+    /// A rebuild constructs a **fresh `DspHost`**, which has no synth voice. The
+    /// only producers of `AddLineSynth` / `AddDotsSynth` / `AddCymaticsSynth` /
+    /// `AddFlameSynth` are the four sketches' `OnEnter(AppState::…)` systems, and
+    /// a stream rebuild does not re-run `OnEnter`; the per-frame `Set*Param`
+    /// commands do not repair it either, because `DspHost::apply` routes them to
+    /// a voice that does not exist. So a mid-sketch reconnect used to report
+    /// `Running` with a playing transport and **no sound** until a visitor
+    /// happened to navigate away and back. On an unattended kiosk that is
+    /// indistinguishable from the outage it was recovering from. The reload's
+    /// `sketch → Home → sketch` hop re-runs `OnEnter`, which re-adds the synth
+    /// graph and re-seeds its parameters through the sketch's own normal path.
+    ///
+    /// ## Why instant and silent
+    ///
+    /// The audio has *just* come back. A 200 ms black fade would be a visible
+    /// flash for a visitor who saw nothing wrong, and dipping the master volume
+    /// would duck the output we are in the middle of restoring. Same profile as a
+    /// resize: [`Duration::ZERO`], no master-volume command. (The same "not
+    /// inaudible" caveat as `WindowResize` applies — the `Home` hop still churns
+    /// the sketch's own audio hooks — but here the alternative is *permanent*
+    /// silence.)
+    AudioDeviceReconnect,
 }
 
 /// Fade-leg duration for a reload `reason`: [`FADE_DURATION`] for a settings
-/// restart, [`Duration::ZERO`] for a window resize (which advances on the first
-/// frame). Pure so the mapping is unit-testable without an app.
+/// restart, [`Duration::ZERO`] for a window resize or an audio-device reconnect
+/// (both of which advance on the first frame). Pure so the mapping is
+/// unit-testable without an app.
+///
+/// A zero duration is a supported value, not a degenerate one:
+/// [`SketchReloadState::overlay_alpha`] short-circuits to the terminal alpha
+/// rather than dividing by it (which would be `0.0 / 0.0` = NaN, and
+/// `NaN.clamp` is NaN).
 fn fade_duration(reason: ReloadReason) -> Duration {
     match reason {
         ReloadReason::SettingsRestart => FADE_DURATION,
-        ReloadReason::WindowResize => Duration::ZERO,
+        ReloadReason::WindowResize | ReloadReason::AudioDeviceReconnect => Duration::ZERO,
     }
 }
 
-/// Whether a reload `reason` fades the master volume. A window resize must not
-/// touch audio (a kiosk waking from sleep would otherwise cut its sound). Pure
-/// so the mapping is unit-testable without an app.
+/// Whether a reload `reason` fades the master volume. Neither a window resize (a
+/// kiosk waking from sleep would otherwise cut its sound) nor an audio-device
+/// reconnect (which would duck the output it is in the middle of restoring) may
+/// touch audio. Pure so the mapping is unit-testable without an app.
 fn fades_audio(reason: ReloadReason) -> bool {
     match reason {
         ReloadReason::SettingsRestart => true,
-        ReloadReason::WindowResize => false,
+        ReloadReason::WindowResize | ReloadReason::AudioDeviceReconnect => false,
     }
 }
 
@@ -352,6 +387,50 @@ mod tests {
     fn window_resize_is_instant_and_silent() {
         assert_eq!(fade_duration(ReloadReason::WindowResize), Duration::ZERO);
         assert!(!fades_audio(ReloadReason::WindowResize));
+    }
+
+    /// The reconnect reload's policy is *identical* to a resize's: a visitor who
+    /// never noticed the outage must not see a 200 ms black flash, and the master
+    /// volume must not be ducked on the output we have just restored. Both halves
+    /// are pinned, because either one drifting would be silently wrong (the fade
+    /// would look like a glitch; the audio dip would be inaudible-by-accident only
+    /// when the graph happens to be empty anyway).
+    #[test]
+    fn an_audio_device_reconnect_is_instant_and_silent_exactly_like_a_resize() {
+        assert_eq!(
+            fade_duration(ReloadReason::AudioDeviceReconnect),
+            fade_duration(ReloadReason::WindowResize),
+        );
+        assert_eq!(
+            fade_duration(ReloadReason::AudioDeviceReconnect),
+            Duration::ZERO,
+        );
+        assert!(!fades_audio(ReloadReason::AudioDeviceReconnect));
+    }
+
+    /// The zero-duration fade path has a NaN hazard (`elapsed / 0.0`), guarded in
+    /// `overlay_alpha`. `WindowResize` is covered below; this pins that the new
+    /// reason genuinely takes the same guarded path rather than a fresh one.
+    #[test]
+    fn a_reconnect_reload_takes_the_guarded_zero_fade_path_without_nan() {
+        let fade_out = SketchReloadState {
+            phase: ReloadPhase::FadeOut,
+            reason: ReloadReason::AudioDeviceReconnect,
+            ..Default::default()
+        };
+        let a = fade_out.overlay_alpha(Duration::ZERO);
+        assert!(a.is_finite(), "alpha must not be NaN");
+        assert!(a > 0.99, "zero-length FadeOut is fully opaque, got {a}");
+
+        let fade_in = SketchReloadState {
+            phase: ReloadPhase::FadeIn,
+            reason: ReloadReason::AudioDeviceReconnect,
+            started_at: Duration::ZERO,
+            ..Default::default()
+        };
+        let b = fade_in.overlay_alpha(Duration::ZERO);
+        assert!(b.is_finite(), "alpha must not be NaN");
+        assert!(b < 0.01, "zero-length FadeIn is fully transparent, got {b}");
     }
 
     #[test]

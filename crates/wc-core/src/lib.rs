@@ -70,6 +70,16 @@ impl Plugin for CorePlugin {
     }
 }
 
+/// Tests for [`CorePlugin`]'s composition.
+///
+/// **These deliberately never call `app.update()`.** `AudioPlugin`'s `Startup`
+/// system (`audio::engine::start_audio_engine`) unconditionally spawns the
+/// device-watcher OS thread, which builds a `cpal::Host` and enumerates output
+/// devices every ~2 s. `add_plugins` alone never runs `Startup`, so no thread is
+/// spawned here. The first test in this module that *does* call `update()` will
+/// spawn one real cpal-enumerating thread **per test** in this binary — which is
+/// tolerable (each `App`'s `DeviceWatcher` stops and joins its thread on drop) but
+/// is not free, and is a surprise worth not tripping over.
 #[cfg(test)]
 mod tests {
     use super::*;
