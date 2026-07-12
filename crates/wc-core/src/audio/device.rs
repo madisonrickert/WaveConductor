@@ -24,7 +24,9 @@
 //! ~2 s poll.
 //!
 //! [`enumerate_output_names`] calls into cpal and **can block** (WASAPI
-//! enumeration in particular). It is therefore only ever called from (a) the
+//! enumeration in particular). It returns an `Option` precisely because "the
+//! host has no output devices" and "we could not ask the host" are opposite
+//! facts to the differ — see its docs. It is only ever called from (a) the
 //! one-shot startup path and event-driven rebuilds on the **main thread**, and
 //! (b) the device-watcher OS thread added in Task 4 — never the audio callback
 //! and never a per-frame render system. On WASAPI, cpal initialises COM
@@ -127,10 +129,27 @@ pub struct BoundOutputDevice(pub Option<String>);
 ///
 /// **Can block** (WASAPI). Only called on the main thread (startup / rebuild)
 /// or the watcher thread — see the module header. A device whose name cannot be
-/// read is skipped. Returns an empty vec if enumeration itself errors, which the
-/// resolver treats as "nothing available -> fall back to default". An empty list
-/// is a real, expected state, not a bug: when the only endpoint is a sleeping
-/// TV, the host enumerates nothing.
+/// read is skipped.
+///
+/// ## `None` is not `Some(vec![])`
+///
+/// - `Some(names)` — we asked the host and this is the answer. `Some(vec![])`
+///   means it genuinely enumerates **no** output device right now, which is a
+///   real, expected state and not a bug: when the only endpoint is a sleeping
+///   HDMI TV, the host reports nothing.
+/// - `None` — we could not ask (`host.output_devices()` itself errored). This
+///   carries **no information about the topology**.
+///
+/// The distinction matters to the *differ*, not the resolver.
+/// [`saved_device_reappeared`] compares a previous snapshot against a current
+/// one, so folding a failed enumeration into an empty list would read as "every
+/// endpoint vanished" — and the next successful poll would then look like a
+/// **rising edge**, provoking a spurious stream rebuild. Task 4's watcher must
+/// therefore treat `None` as "don't diff; keep the previous snapshot" and simply
+/// skip the tick. [`resolve_output_device`], by contrast, is right to treat an
+/// empty list as "nothing available -> fall back to the default (and keep the
+/// saved name)": at build time we must pick *something*, and there is nothing to
+/// pick.
 ///
 /// The result is **sorted** and *not* de-duplicated. Sorting makes the snapshot
 /// canonical, so a host that re-orders its enumeration between polls does not
@@ -142,17 +161,19 @@ pub struct BoundOutputDevice(pub Option<String>);
 /// cpal's API and is acceptable because it runs at most every ~2 s on a
 /// background thread, never on the audio callback or a per-frame render system.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn enumerate_output_names(host: &cpal::Host) -> Vec<String> {
+pub fn enumerate_output_names(host: &cpal::Host) -> Option<Vec<String>> {
     use cpal::traits::{DeviceTrait, HostTrait};
     match host.output_devices() {
         Ok(devices) => {
             let mut names: Vec<String> = devices.filter_map(|d| d.name().ok()).collect();
             names.sort_unstable();
-            names
+            Some(names)
         }
         Err(err) => {
+            // Not "every device disappeared" — "we could not ask". The caller
+            // must keep its previous snapshot rather than diff against this.
             tracing::warn!(?err, "cpal output_devices enumeration failed");
-            Vec::new()
+            None
         }
     }
 }
