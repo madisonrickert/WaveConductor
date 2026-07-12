@@ -126,6 +126,23 @@ const PEAK_DECAY_TAU_S: f32 = 0.5;
 /// Seconds without a single new sample before `active` drops to false
 /// (device stall / unplugged-but-not-yet-errored).
 pub const ACTIVE_TIMEOUT_S: f32 = 0.5;
+/// Number of usable spectrum bins from a real FFT of `FFT_SIZE` samples.
+pub const SPECTRUM_LEN: usize = FFT_SIZE / 2;
+/// Log-spaced (octave) band edges in Hz: 8 bands from 50 Hz to 12.8 kHz.
+/// Chosen for the room-mic bar: bass emphasis at the bottom, and nothing
+/// above 12.8 kHz where a party-room mic is mostly noise.
+pub const BAND_EDGES_HZ: [f32; AUDIO_BAND_COUNT + 1] = [
+    50.0, 100.0, 200.0, 400.0, 800.0, 1_600.0, 3_200.0, 6_400.0, 12_800.0,
+];
+/// Amplitude normalization for Hann-windowed magnitudes: `4 / FFT_SIZE`
+/// (2x for the discarded negative frequencies, 2x for the Hann window's 0.5
+/// coherent gain). Kept as a literal to avoid a runtime cast.
+/// Invariant: must equal `4.0 / FFT_SIZE`.
+const SPECTRUM_NORM: f32 = 0.003_906_25;
+/// Band smoothing when a band is rising (fast, so hits read as hits).
+const BAND_RISE_TAU_S: f32 = 0.04;
+/// Band smoothing when a band is falling (slower, for visual stability).
+const BAND_FALL_TAU_S: f32 = 0.3;
 
 /// Pure, device-free analysis core for the audio-input path.
 ///
@@ -152,6 +169,16 @@ pub struct AnalysisEngine {
     /// Scratch the analysis window is copied into. Also the in-place FFT
     /// buffer from Task 4 onward.
     fft_scratch: Vec<f32>,
+    /// Precomputed periodic Hann window, length `FFT_SIZE`.
+    hann: Vec<f32>,
+    /// Normalized magnitude spectrum of the most recent window,
+    /// length `SPECTRUM_LEN`.
+    magnitudes: Vec<f32>,
+    /// Per-band bin ranges: `(lo, hi, 1/(hi-lo))`, computed once from the
+    /// sample rate.
+    band_bins: [(usize, usize, f32); AUDIO_BAND_COUNT],
+    /// One-pole smoothed band energies (the published `bands`).
+    bands: [f32; AUDIO_BAND_COUNT],
     /// Automatic gain control (post-AGC signal feeds every feature).
     agc: Agc,
     /// One-pole smoothed post-AGC RMS (the published `rms`).
@@ -175,6 +202,10 @@ impl AnalysisEngine {
             pending: 0,
             seconds_since_sample: ACTIVE_TIMEOUT_S,
             fft_scratch: vec![0.0; FFT_SIZE],
+            hann: hann_window(),
+            magnitudes: vec![0.0; SPECTRUM_LEN],
+            band_bins: band_bins(sample_rate),
+            bands: [0.0; AUDIO_BAND_COUNT],
             agc: Agc::new(),
             smoothed_rms: 0.0,
             peak: 0.0,
@@ -221,12 +252,46 @@ impl AnalysisEngine {
             ((raw_rms * gain).min(1.0) - self.smoothed_rms) * one_pole_coeff(dt, RMS_SMOOTH_TAU_S);
         self.peak = ((window_peak * gain).min(1.0)).max(self.peak * (-dt / PEAK_DECAY_TAU_S).exp());
 
+        // Window + gain, FFT in place, magnitudes. Applying the AGC gain to
+        // the samples makes every spectral feature post-AGC (spec: bands are
+        // post-AGC so a quiet room mic and a hot line-in drive the sketch
+        // identically).
+        for (s, &w) in self.fft_scratch.iter_mut().zip(self.hann.iter()) {
+            *s *= w * gain;
+        }
+        // `real_fft` panics on a non-power-of-two length; `fft_scratch` is
+        // always exactly FFT_SIZE (1024, supported), so this is an invariant,
+        // not a reachable panic. It transforms in place and returns the
+        // buffer transmuted to SPECTRUM_LEN complex bins (Nyquist packed
+        // into bin 0's imaginary part — irrelevant here, we skip bin 0).
+        let spectrum = fundsp::fft::real_fft(&mut self.fft_scratch);
+        self.magnitudes[0] = 0.0;
+        for (m, s) in self.magnitudes.iter_mut().zip(spectrum.iter()).skip(1) {
+            *m = s.norm() * SPECTRUM_NORM;
+        }
+
+        // Log-spaced band energies: RMS of the magnitudes across each band's
+        // bins, smoothed asymmetrically (fast rise, slower fall).
+        for (band, &(lo, hi, inv_count)) in self.bands.iter_mut().zip(self.band_bins.iter()) {
+            let mut energy = 0.0_f32;
+            for &m in &self.magnitudes[lo..hi] {
+                energy += m * m;
+            }
+            let raw = (energy * inv_count).sqrt().min(1.0);
+            let tau = if raw > *band {
+                BAND_RISE_TAU_S
+            } else {
+                BAND_FALL_TAU_S
+            };
+            *band += (raw - *band) * one_pole_coeff(dt, tau);
+        }
+
         AudioAnalysis {
             rms: self.smoothed_rms,
             gain,
-            bands: [0.0; AUDIO_BAND_COUNT], // spectral bands land in Task 4
-            onset: 0.0,                     // spectral flux lands in Task 5
-            beat_confidence: 0.0,           // beat debounce lands in Task 5
+            bands: self.bands,
+            onset: 0.0,           // spectral flux lands in Task 5
+            beat_confidence: 0.0, // beat debounce lands in Task 5
             peak: self.peak,
             active: self.is_live(),
         }
@@ -268,6 +333,46 @@ impl AnalysisEngine {
             self.fft_scratch[first_len..].copy_from_slice(&self.history[..rest]);
         }
     }
+}
+
+/// Precompute the periodic Hann window: `0.5 * (1 - cos(2*pi*n / N))`.
+/// Init-time only; the index-to-f32 casts are exact for n < 2^24.
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "init-time window build; indices < 1024 are exact in f32"
+)]
+fn hann_window() -> Vec<f32> {
+    (0..FFT_SIZE)
+        .map(|n| 0.5 * (1.0 - (core::f32::consts::TAU * (n as f32) / FFT_SIZE_F32).cos()))
+        .collect()
+}
+
+/// Map `BAND_EDGES_HZ` onto FFT bin ranges for the given sample rate:
+/// `(lo, hi, 1/(hi-lo))` per band, contiguous, each at least one bin wide,
+/// DC (bin 0) excluded. The first band starts at bin 1 regardless of its
+/// nominal low edge — a documented approximation at ~47 Hz resolution.
+/// Init-time only.
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "init-time bin mapping; edge/bin values are small, positive, and \
+              value-safe in this domain (bins <= 512, rates <= 192 kHz)"
+)]
+fn band_bins(sample_rate: u32) -> [(usize, usize, f32); AUDIO_BAND_COUNT] {
+    let bin_hz = f64::from(sample_rate) / f64::from(FFT_SIZE_F32);
+    let mut out = [(1_usize, 2_usize, 1.0_f32); AUDIO_BAND_COUNT];
+    let mut lo = 1_usize;
+    for (band, slot) in out.iter_mut().enumerate() {
+        let raw_hi = (f64::from(BAND_EDGES_HZ[band + 1]) / bin_hz).floor() as usize;
+        // At least one bin per band; never past the spectrum end.
+        let hi = raw_hi.clamp(lo + 1, SPECTRUM_LEN);
+        *slot = (lo, hi, 1.0 / ((hi - lo) as f32));
+        lo = hi;
+    }
+    out
 }
 
 #[cfg(test)]

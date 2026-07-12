@@ -204,3 +204,83 @@ fn engine_reset_returns_to_neutral_and_counts_from_zero() {
     assert!(!out.active);
     assert!(out.rms.abs() < f32::EPSILON);
 }
+
+// ---------------------------------------------------------------------------
+// AnalysisEngine: spectral bands (Task 4)
+// ---------------------------------------------------------------------------
+
+/// Index of the strongest band in an analysis output.
+fn dominant_band(bands: &[f32; AUDIO_BAND_COUNT]) -> usize {
+    let mut best = 0;
+    for (i, &b) in bands.iter().enumerate() {
+        if b > bands[best] {
+            best = i;
+        }
+    }
+    best
+}
+
+/// Feed 4 s of a steady tone and assert the given band dominates decisively.
+fn assert_tone_lands_in_band(freq: f32, expected_band: usize) {
+    let mut engine = AnalysisEngine::new(48_000);
+    let out = run_frames(&mut engine, &sine(freq, 0.25, 48_000 * 4));
+    assert_eq!(
+        dominant_band(&out.bands),
+        expected_band,
+        "tone at {freq} Hz should dominate band {expected_band}, bands: {:?}",
+        out.bands
+    );
+    assert!(
+        out.bands[expected_band] > 0.02,
+        "dominant band should carry real energy, bands: {:?}",
+        out.bands
+    );
+    for (i, &b) in out.bands.iter().enumerate() {
+        if i != expected_band {
+            assert!(
+                out.bands[expected_band] > 5.0 * b,
+                "band {expected_band} should dominate band {i} by 5x, bands: {:?}",
+                out.bands
+            );
+        }
+    }
+}
+
+#[test]
+fn a_250_hz_tone_lands_in_band_2() {
+    // BAND_EDGES_HZ: band 2 spans 200–400 Hz.
+    assert_tone_lands_in_band(250.0, 2);
+}
+
+#[test]
+fn a_3_khz_tone_lands_in_band_5() {
+    // BAND_EDGES_HZ: band 5 spans 1600–3200 Hz.
+    assert_tone_lands_in_band(3_000.0, 5);
+}
+
+#[test]
+fn silence_produces_zero_bands() {
+    let mut engine = AnalysisEngine::new(48_000);
+    let out = run_frames(&mut engine, &vec![0.0; 48_000]);
+    assert!(
+        out.bands.iter().all(|b| b.abs() < 1.0e-3),
+        "silent input must not excite bands: {:?}",
+        out.bands
+    );
+}
+
+#[test]
+fn band_bins_are_monotonic_and_in_range_at_both_common_rates() {
+    for rate in [44_100_u32, 48_000_u32] {
+        let bins = band_bins(rate);
+        let mut prev_hi = 1;
+        for &(lo, hi, inv) in &bins {
+            assert!(lo >= 1, "DC bin excluded");
+            assert!(hi > lo, "every band has at least one bin");
+            assert_eq!(lo, prev_hi, "bands tile the spectrum contiguously");
+            assert!(hi <= SPECTRUM_LEN);
+            assert!(inv > 0.0);
+            prev_hi = hi;
+        }
+    }
+}
