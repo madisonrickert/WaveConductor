@@ -287,6 +287,47 @@ mod tests {
     }
 
     #[test]
+    fn project_rotated_landmark_lands_on_the_alignment_axis() {
+        // Sideways alignment: scale point to the RIGHT of centre, so
+        // roi_from_alignment_points rotates the crop 90°.
+        //
+        //   d = scale_point - center = (0.2, 0.0)
+        //   rotation = FRAC_PI_2 - atan2(-d.y, d.x) = π/2 - atan2(-0.0, 0.2)
+        //            = π/2 - 0 = π/2
+        //   size = 2 · |d| · ROI_EXPANSION = 2 · 0.2 · 1.25 = 0.5
+        let roi = roi_from_alignment_points(Vec2::new(0.5, 0.5), Vec2::new(0.7, 0.5));
+        assert!((roi.size - 0.5).abs() < 1e-5, "size={}", roi.size);
+        assert!(
+            (roi.rotation - FRAC_PI_2).abs() < 1e-5,
+            "rot={}",
+            roi.rotation
+        );
+
+        // Raw landmark at the crop's straight-up position: x = 128 (crop
+        // centre column), y = 0 (crop top row).
+        //
+        //   u = (128/256 - 0.5) · 0.5 = 0
+        //   v = (0/256   - 0.5) · 0.5 = -0.25
+        //
+        // project_body_landmarks applies R(rotation) to (u, v) with
+        // rotation = π/2 → (sin, cos) = (1, 0):
+        //
+        //   x = cx + u·cos - v·sin = 0.5 + 0·0 - (-0.25)·1 = 0.5 + 0.25 = 0.75
+        //   y = cy + u·sin + v·cos = 0.5 + 0·1 + (-0.25)·0 = 0.5
+        //
+        // Crop "up" must land toward the scale point (the alignment axis,
+        // here straight +x from centre): x exceeds 0.5, y is unchanged. A
+        // sign flip in either the rotation convention or the rotation
+        // matrix would instead send this landmark to x=0.25 or y=0.75.
+        let mut raw = [0.0_f32; LANDMARK_ROWS * LANDMARK_VALUES];
+        raw[0] = LANDMARK_INPUT / 2.0; // x = 128
+        raw[1] = 0.0; // y = 0
+        let rows = project_body_landmarks(&raw, &roi);
+        assert!((rows[0].pos.x - 0.75).abs() < 1e-5, "x={}", rows[0].pos.x);
+        assert!((rows[0].pos.y - 0.5).abs() < 1e-5, "y={}", rows[0].pos.y);
+    }
+
+    #[test]
     fn tracking_roi_comes_from_the_aux_rows() {
         let mut rows = [RawBodyLandmark::default(); LANDMARK_ROWS];
         rows[AUX_CENTER_ROW].pos = Vec3::new(0.5, 0.55, 0.0);
