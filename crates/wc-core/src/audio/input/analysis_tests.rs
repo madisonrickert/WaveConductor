@@ -319,7 +319,10 @@ fn silence_produces_zero_onset_and_no_beats() {
     for _ in 0..120 {
         out = step(&mut engine, &silent_frame());
     }
-    assert!(out.onset.abs() < f32::EPSILON, "flux of silence is exactly 0");
+    assert!(
+        out.onset.abs() < f32::EPSILON,
+        "flux of silence is exactly 0"
+    );
     assert!(out.beat_confidence < 1.0e-3);
     assert_eq!(engine.beat_count(), 0);
 }
@@ -492,5 +495,79 @@ fn missing_capture_resources_hold_neutral() {
     assert_eq!(
         *app.world().resource::<crate::audio::input::AudioAnalysis>(),
         crate::audio::input::AudioAnalysis::neutral()
+    );
+}
+
+#[test]
+fn pausing_after_activity_resets_the_engine_exactly_once() {
+    // The genuine transition path: capture ACTIVE with non-neutral
+    // analysis, then the request flips to paused. The one-shot reset
+    // guarded by `analysis != neutral()` (analysis.rs) must fire exactly
+    // once on that transition frame, not on every subsequent paused frame.
+    let (mut app, mut producer) = drain_test_app(AudioCaptureRequest {
+        device_name: None,
+        paused: false,
+    });
+    // Drive several loud, active frames so analysis is genuinely non-neutral
+    // (not just technically unequal by one field) before the pause.
+    for _ in 0..3 {
+        for _ in 0..RING_SAMPLE_CAPACITY {
+            producer.push(0.5).expect("fits within capacity");
+        }
+        app.update();
+    }
+    let active_analysis = *app.world().resource::<crate::audio::input::AudioAnalysis>();
+    assert!(active_analysis.active, "loud frames must report active");
+    assert_ne!(
+        active_analysis,
+        crate::audio::input::AudioAnalysis::neutral(),
+        "loud active frames must produce non-neutral analysis before pausing"
+    );
+    assert!(
+        app.world().resource::<AnalysisState>().0.samples_received() > 0,
+        "engine should have accumulated samples while active"
+    );
+
+    // Flip to paused: the very next frame must fire the one-shot reset.
+    app.world_mut().resource_mut::<AudioCaptureRequest>().paused = true;
+    app.update();
+    assert_eq!(
+        *app.world().resource::<crate::audio::input::AudioAnalysis>(),
+        crate::audio::input::AudioAnalysis::neutral(),
+        "the pause transition frame must publish neutral analysis"
+    );
+    assert_eq!(
+        app.world().resource::<AnalysisState>().0.samples_received(),
+        0,
+        "reset() must have fired on the transition frame, zeroing the engine"
+    );
+
+    // Prove the guard does not re-fire on every subsequent paused frame:
+    // push a sentinel directly into the engine (bypassing the ring, which a
+    // paused frame only discards from) so an unwanted reset() on the next
+    // frame is observable — the discarded-ring-samples path alone can't
+    // distinguish "reset fired again" from "reset stayed off", since both
+    // leave samples_received at 0.
+    for _ in 0..500 {
+        app.world_mut().resource_mut::<AnalysisState>().0.push(0.5);
+    }
+    for _ in 0..1_000 {
+        producer.push(0.5).expect("fits within capacity");
+    }
+    app.update();
+    assert_eq!(
+        app.world().resource::<AnalysisState>().0.samples_received(),
+        500,
+        "reset() must not re-fire once analysis is already neutral, or the sentinel would be wiped"
+    );
+    assert_eq!(
+        *app.world().resource::<crate::audio::input::AudioAnalysis>(),
+        crate::audio::input::AudioAnalysis::neutral(),
+        "analysis stays neutral while paused"
+    );
+    assert_eq!(
+        producer.slots(),
+        RING_SAMPLE_CAPACITY,
+        "paused drain still discards newly queued samples"
     );
 }

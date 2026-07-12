@@ -483,6 +483,10 @@ pub fn drain_and_analyze(
         // starts fresh. The stream itself is paused by the capture driver,
         // so this loop is empty in steady state.
         while ring.pop().is_some() {}
+        // Equality-to-neutral is a proxy for "just transitioned to paused",
+        // not a direct transition flag — a session already decayed to
+        // neutral before pausing would skip the reset below too, harmlessly
+        // (there is no non-neutral state left to clear).
         if *analysis != super::AudioAnalysis::neutral() {
             // One-shot on the pause transition (guarded by the equality
             // check): clear the engine so AGC/smoothers do not carry stale
