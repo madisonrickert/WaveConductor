@@ -43,6 +43,8 @@ pub mod devices;
 
 use bevy::prelude::*;
 
+use crate::settings::RegisterRuntimeEnumOptionsExt;
+
 /// Number of log-spaced spectral bands published in [`AudioAnalysis::bands`].
 pub const AUDIO_BAND_COUNT: usize = 8;
 
@@ -121,11 +123,14 @@ pub struct AudioInputPlugin;
 impl Plugin for AudioInputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AudioAnalysis>()
+            .init_resource::<devices::AvailableAudioInputDevices>()
             .init_resource::<capture::AudioInputStatus>()
             .init_resource::<capture::CaptureRuntime>()
+            .register_runtime_enum_options::<devices::AvailableAudioInputDevices>()
+            .add_systems(Startup, devices::enumerate_input_devices)
+            .add_systems(Update, devices::refresh_devices_on_request_added)
             .add_systems(PreUpdate, analysis::drain_and_analyze);
         // Task 8 chains capture::drive_capture ahead of the drain.
-        // Later tasks extend this further: devices registry (Task 7).
     }
 }
 
