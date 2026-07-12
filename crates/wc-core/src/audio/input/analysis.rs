@@ -143,6 +143,17 @@ const SPECTRUM_NORM: f32 = 0.003_906_25;
 const BAND_RISE_TAU_S: f32 = 0.04;
 /// Band smoothing when a band is falling (slower, for visual stability).
 const BAND_FALL_TAU_S: f32 = 0.3;
+/// Time constant of the running mean the spectral flux is normalized by.
+const FLUX_MEAN_TAU_S: f32 = 2.0;
+/// Floor for the flux running mean, so the first sound after silence cannot
+/// register as an unbounded onset.
+const FLUX_MEAN_FLOOR: f32 = 0.05;
+/// Normalized-onset value that (subject to debounce) counts as a beat.
+const BEAT_ONSET_THRESHOLD: f32 = 2.5;
+/// Minimum spacing between beats — the debounce window (240 BPM ceiling).
+const MIN_BEAT_INTERVAL_S: f32 = 0.25;
+/// Decay time constant of the published beat confidence between beats.
+const BEAT_CONFIDENCE_DECAY_TAU_S: f32 = 0.3;
 
 /// Pure, device-free analysis core for the audio-input path.
 ///
@@ -179,6 +190,16 @@ pub struct AnalysisEngine {
     band_bins: [(usize, usize, f32); AUDIO_BAND_COUNT],
     /// One-pole smoothed band energies (the published `bands`).
     bands: [f32; AUDIO_BAND_COUNT],
+    /// Magnitude spectrum of the previous window (spectral-flux reference).
+    prev_magnitudes: Vec<f32>,
+    /// Slow running mean of the spectral flux (onset normalizer).
+    flux_mean: f32,
+    /// Seconds since the last debounced beat.
+    seconds_since_beat: f32,
+    /// Published beat confidence: 1.0 at a beat, exponential decay between.
+    beat_confidence: f32,
+    /// Total debounced beats detected (test/diagnostic counter).
+    beats: u64,
     /// Automatic gain control (post-AGC signal feeds every feature).
     agc: Agc,
     /// One-pole smoothed post-AGC RMS (the published `rms`).
@@ -206,6 +227,12 @@ impl AnalysisEngine {
             magnitudes: vec![0.0; SPECTRUM_LEN],
             band_bins: band_bins(sample_rate),
             bands: [0.0; AUDIO_BAND_COUNT],
+            prev_magnitudes: vec![0.0; SPECTRUM_LEN],
+            flux_mean: 0.0,
+            // Start "ready": the first onset may immediately be a beat.
+            seconds_since_beat: MIN_BEAT_INTERVAL_S,
+            beat_confidence: 0.0,
+            beats: 0,
             agc: Agc::new(),
             smoothed_rms: 0.0,
             peak: 0.0,
@@ -286,12 +313,40 @@ impl AnalysisEngine {
             *band += (raw - *band) * one_pole_coeff(dt, tau);
         }
 
+        // Spectral flux: positive-only magnitude change since the previous
+        // window, summed over the spectrum (bin 0 excluded — it is zeroed
+        // above). Onset strength is flux relative to its own slow running
+        // mean, floored so silence cannot make the next sound register as an
+        // unbounded onset.
+        let mut flux = 0.0_f32;
+        for (m, p) in self.magnitudes[1..]
+            .iter()
+            .zip(self.prev_magnitudes[1..].iter())
+        {
+            flux += (m - p).max(0.0);
+        }
+        self.prev_magnitudes.copy_from_slice(&self.magnitudes);
+        let onset = flux / self.flux_mean.max(FLUX_MEAN_FLOOR);
+        self.flux_mean += (flux - self.flux_mean) * one_pole_coeff(dt, FLUX_MEAN_TAU_S);
+
+        // Debounced beat: an onset spike no sooner than MIN_BEAT_INTERVAL_S
+        // after the previous beat snaps confidence to 1.0; between beats the
+        // confidence decays exponentially.
+        self.seconds_since_beat += dt;
+        if onset > BEAT_ONSET_THRESHOLD && self.seconds_since_beat >= MIN_BEAT_INTERVAL_S {
+            self.seconds_since_beat = 0.0;
+            self.beat_confidence = 1.0;
+            self.beats = self.beats.saturating_add(1);
+        } else {
+            self.beat_confidence *= (-dt / BEAT_CONFIDENCE_DECAY_TAU_S).exp();
+        }
+
         AudioAnalysis {
             rms: self.smoothed_rms,
             gain,
             bands: self.bands,
-            onset: 0.0,           // spectral flux lands in Task 5
-            beat_confidence: 0.0, // beat debounce lands in Task 5
+            onset,
+            beat_confidence: self.beat_confidence,
             peak: self.peak,
             active: self.is_live(),
         }
@@ -308,6 +363,12 @@ impl AnalysisEngine {
     /// Total samples ever pushed (test/diagnostic surface).
     pub fn samples_received(&self) -> u64 {
         self.total_pushed
+    }
+
+    /// Total debounced beats detected since construction/reset
+    /// (test/diagnostic surface).
+    pub fn beat_count(&self) -> u64 {
+        self.beats
     }
 
     /// Raw (pre-AGC) RMS of the most recent analysis window

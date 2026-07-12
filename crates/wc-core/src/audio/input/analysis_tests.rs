@@ -284,3 +284,113 @@ fn band_bins_are_monotonic_and_in_range_at_both_common_rates() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// AnalysisEngine: onset + beat (Task 5)
+// ---------------------------------------------------------------------------
+
+/// One 60 Hz frame (800 samples at 48 kHz) that is silent except for a
+/// broadband click: the first 100 samples at 0.8.
+fn click_frame() -> Vec<f32> {
+    let mut frame = vec![0.0_f32; 800];
+    for s in frame.iter_mut().take(100) {
+        *s = 0.8;
+    }
+    frame
+}
+
+/// One silent 60 Hz frame.
+fn silent_frame() -> Vec<f32> {
+    vec![0.0_f32; 800]
+}
+
+/// Push one frame of samples and analyze it.
+fn step(engine: &mut AnalysisEngine, frame: &[f32]) -> crate::audio::input::AudioAnalysis {
+    for &s in frame {
+        engine.push(s);
+    }
+    engine.analyze(DT)
+}
+
+#[test]
+fn silence_produces_zero_onset_and_no_beats() {
+    let mut engine = AnalysisEngine::new(48_000);
+    let mut out = engine.analyze(DT);
+    for _ in 0..120 {
+        out = step(&mut engine, &silent_frame());
+    }
+    assert!(out.onset.abs() < f32::EPSILON, "flux of silence is exactly 0");
+    assert!(out.beat_confidence < 1.0e-3);
+    assert_eq!(engine.beat_count(), 0);
+}
+
+#[test]
+fn a_click_train_produces_debounced_beats_half_second_apart() {
+    let mut engine = AnalysisEngine::new(48_000);
+    // Settle on silence first so the click is a clean onset.
+    for _ in 0..60 {
+        step(&mut engine, &silent_frame());
+    }
+    // Two clicks 0.5 s apart (frames 0 and 30): both register as beats.
+    let mut max_onset = 0.0_f32;
+    for i in 0..60 {
+        let out = if i == 0 || i == 30 {
+            step(&mut engine, &click_frame())
+        } else {
+            step(&mut engine, &silent_frame())
+        };
+        max_onset = max_onset.max(out.onset);
+        if i == 0 || i == 30 {
+            assert!(
+                (out.beat_confidence - 1.0).abs() < f32::EPSILON,
+                "click frame {i} snaps beat confidence to 1.0 (got {})",
+                out.beat_confidence
+            );
+        }
+    }
+    assert_eq!(engine.beat_count(), 2);
+    assert!(
+        max_onset > BEAT_ONSET_THRESHOLD,
+        "click onsets must clear the beat threshold (max {max_onset})"
+    );
+}
+
+#[test]
+fn beats_within_the_minimum_interval_are_debounced() {
+    let mut engine = AnalysisEngine::new(48_000);
+    for _ in 0..60 {
+        step(&mut engine, &silent_frame());
+    }
+    // Clicks at frames 0 and 3 — 0.05 s apart, inside MIN_BEAT_INTERVAL_S.
+    for i in 0..10 {
+        if i == 0 || i == 3 {
+            step(&mut engine, &click_frame());
+        } else {
+            step(&mut engine, &silent_frame());
+        }
+    }
+    assert_eq!(
+        engine.beat_count(),
+        1,
+        "the second click is inside the debounce window"
+    );
+}
+
+#[test]
+fn beat_confidence_decays_between_beats() {
+    let mut engine = AnalysisEngine::new(48_000);
+    for _ in 0..60 {
+        step(&mut engine, &silent_frame());
+    }
+    let at_beat = step(&mut engine, &click_frame());
+    assert!((at_beat.beat_confidence - 1.0).abs() < f32::EPSILON);
+    let mut later = at_beat;
+    for _ in 0..30 {
+        later = step(&mut engine, &silent_frame());
+    }
+    assert!(
+        later.beat_confidence < 0.3,
+        "confidence should have decayed well below 1 after 0.5 s (got {})",
+        later.beat_confidence
+    );
+}
