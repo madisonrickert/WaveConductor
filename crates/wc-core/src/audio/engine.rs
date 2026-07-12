@@ -221,12 +221,17 @@ fn host_output_names() -> Vec<String> {
 /// - **Mixer**: master volume and mute are re-pushed from [`AudioState`], because
 ///   the fresh `DspHost` starts at its defaults (volume 1.0, unmuted). Without
 ///   this, a reconnect would un-mute a muted kiosk at full volume.
-/// - **Not the synth graph.** Each sketch issues its `Add*Synth` command from
-///   `OnEnter(AppState::…)`, which a rebuild does not re-run, so the fresh
-///   `DspHost` has no voices: mid-sketch, this returns `Running` and *silent*
-///   until the visitor navigates away and back. The `*_synth_active` mirrors are
-///   cleared here so `AudioState` tells the truth about that. Closing the gap is
-///   Task 5R's job (re-enter the sketch state via the reload machine).
+/// - **Not the synth graph — not here.** Each sketch issues its `Add*Synth`
+///   command from `OnEnter(AppState::…)`, which a rebuild does not re-run, so the
+///   fresh `DspHost` this installs has no voices. The `*_synth_active` mirrors are
+///   cleared here so `AudioState` tells the truth about that in the meantime. The
+///   graph is restored by the *caller*: on a successful rebuild
+///   [`super::supervisor::supervise_audio`] raises
+///   [`super::supervisor::SynthGraphReloadPending`], which drives a silent,
+///   instant `sketch → Home → sketch` reload so the sketch's own `OnEnter` re-adds
+///   its voice and re-seeds its parameters. Without that step this function
+///   returns `Running` and *silent* — indistinguishable, on an unattended kiosk,
+///   from the outage it just recovered from.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn rebuild_engine(world: &mut World) -> bool {
     use crate::lifecycle::state::AppState;

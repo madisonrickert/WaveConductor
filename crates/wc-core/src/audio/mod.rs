@@ -139,6 +139,12 @@ impl Plugin for AudioPlugin {
             device::drain_device_topology.after(state::pump_audio_messages),
         );
 
+        // Task 5R's bookkeeping: a rebuilt stream carries a voiceless `DspHost`
+        // until the sketch re-enters its own state. Native-only, like the
+        // supervisor that owns it.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<supervisor::SynthGraphReloadPending>();
+
         // The reconnect supervisor (native only — it rebuilds a cpal stream).
         // The second sanctioned always-on system: a stream can die, or an
         // endpoint can finally appear, in *any* `AppState` — including `Idle`

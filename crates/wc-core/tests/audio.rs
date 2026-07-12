@@ -194,3 +194,192 @@ fn toggle_volume_action_pushes_set_muted_command() {
         other => panic!("expected SetMuted, got {other:?}"),
     }
 }
+
+/// Task 5R's harness: a headless app carrying exactly the resources and systems
+/// `AudioPlugin` registers for the supervisor, minus the cpal stream (CI has no
+/// audio device, and none is needed — the reload is driven by the *pending* flag a
+/// successful rebuild raises, which the test sets directly).
+///
+/// `AudioStatus::Running` with no `AudioStream` resource is the shape that keeps
+/// `supervise_audio` off its reconnect path: it wants a cycle only on
+/// `Reconnecting`, or on `NotStarted`/`Errored` with no stream. So the system runs
+/// its Task 5R half and nothing else — no cpal call is ever reached.
+#[cfg(not(target_arch = "wasm32"))]
+fn test_app_with_supervisor() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    // `LifecyclePlugin`'s action map reads `ButtonInput<KeyCode>`, which only
+    // `InputPlugin` inserts.
+    app.add_plugins(InputPlugin);
+    app.add_plugins(StatesPlugin);
+    // Brings `AppState`, `SketchReloadState`, and `drive_reload_state`.
+    app.add_plugins(wc_core::lifecycle::LifecyclePlugin);
+    app.init_resource::<AudioState>();
+    app.init_resource::<AudioSupervisor>();
+    app.init_resource::<wc_core::audio::supervisor::SynthGraphReloadPending>();
+    app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
+    app.add_systems(Update, wc_core::audio::supervisor::supervise_audio);
+    app
+}
+
+/// Drive `AppState` to `state` and settle the transition.
+#[cfg(not(target_arch = "wasm32"))]
+fn enter_state(app: &mut App, state: wc_core::lifecycle::state::AppState) {
+    app.world_mut()
+        .resource_mut::<NextState<wc_core::lifecycle::state::AppState>>()
+        .set(state);
+    app.update();
+    assert_eq!(
+        *app.world()
+            .resource::<State<wc_core::lifecycle::state::AppState>>()
+            .get(),
+        state,
+    );
+}
+
+/// The defect Task 5R closes: a rebuilt stream carries a **fresh `DspHost` with
+/// no synth voice**, because the only producers of `Add*Synth` are the sketches'
+/// `OnEnter` systems and a stream rebuild does not re-run `OnEnter`. Mid-sketch,
+/// the app therefore reported `Running`, played its transport, and made **no
+/// sound** — on an unattended kiosk, indistinguishable from the outage it had just
+/// recovered from.
+///
+/// So a successful rebuild (which raises `SynthGraphReloadPending`, simulated here)
+/// must drive the reload round-trip, and the sketch's `OnEnter` must actually
+/// re-fire — that re-run is the entire repair.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn a_successful_rebuild_mid_sketch_re_enters_the_sketch_to_restore_its_synth_graph() {
+    use wc_core::audio::supervisor::SynthGraphReloadPending;
+    use wc_core::lifecycle::reload::{ReloadPhase, ReloadReason, SketchReloadState};
+    use wc_core::lifecycle::state::AppState;
+
+    /// Stands in for the sketch's `OnEnter` synth-graph installer (the real one
+    /// pushes `AddLineSynth`).
+    #[derive(Resource, Default)]
+    struct SynthAdds(u32);
+
+    let mut app = test_app_with_supervisor();
+    app.init_resource::<SynthAdds>();
+    app.add_systems(
+        OnEnter(AppState::Line),
+        |mut adds: ResMut<'_, SynthAdds>| adds.0 += 1,
+    );
+
+    enter_state(&mut app, AppState::Line);
+    assert_eq!(
+        app.world().resource::<SynthAdds>().0,
+        1,
+        "precondition: the sketch installed its voice once on first entry",
+    );
+
+    // The stream dies and is rebuilt while the visitor is still in the sketch.
+    // `rebuild_engine` returning true is what raises this flag.
+    app.world_mut().resource_mut::<SynthGraphReloadPending>().0 = true;
+    app.update();
+
+    {
+        let reload = app.world().resource::<SketchReloadState>();
+        assert!(
+            !reload.is_idle(),
+            "the rebuild must have started a reload, not left the sketch voiceless",
+        );
+        assert_eq!(
+            reload.reason,
+            ReloadReason::AudioDeviceReconnect,
+            "and it must carry the reconnect profile (instant, no audio dip)",
+        );
+        assert_eq!(reload.return_state, AppState::Line);
+    }
+    assert!(
+        !app.world().resource::<SynthGraphReloadPending>().0,
+        "the intent is spent, so it cannot fire a second round-trip",
+    );
+
+    // Let the round-trip run: FadeOut (zero-length) -> Home -> back into Line.
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line,
+    );
+    assert_eq!(
+        app.world().resource::<SketchReloadState>().phase,
+        ReloadPhase::Idle,
+    );
+    assert_eq!(
+        app.world().resource::<SynthAdds>().0,
+        2,
+        "OnEnter must have re-fired exactly once — that re-run IS the synth-graph repair",
+    );
+
+    // And it fires *once* per rebuild: the reload changes `AppState`, not
+    // `AudioState`, so nothing it does can arm another cycle. Many quiet frames
+    // later, no second round-trip has started.
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<SynthAdds>().0,
+        2,
+        "no respawn loop: one successful rebuild buys exactly one re-entry",
+    );
+    assert!(app.world().resource::<SketchReloadState>().is_idle());
+}
+
+/// At `Home` there is no synth graph to restore, so the round-trip would be a
+/// pointless `Home → Home` flicker. The intent is discarded, not spent — and not
+/// left pending, which would fire it the instant a visitor picked a sketch.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn a_successful_rebuild_at_home_starts_no_reload() {
+    use wc_core::audio::supervisor::SynthGraphReloadPending;
+    use wc_core::lifecycle::reload::SketchReloadState;
+    use wc_core::lifecycle::state::AppState;
+
+    let mut app = test_app_with_supervisor();
+    app.update();
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Home
+    );
+
+    app.world_mut().resource_mut::<SynthGraphReloadPending>().0 = true;
+    app.update();
+
+    assert!(
+        app.world().resource::<SketchReloadState>().is_idle(),
+        "no sketch is running, so there is nothing to re-enter",
+    );
+    assert!(
+        !app.world().resource::<SynthGraphReloadPending>().0,
+        "and the intent is cleared, not left to fire on the next sketch entry",
+    );
+}
+
+/// A **failed** rebuild owes nothing: there is no new `DspHost` to populate, so no
+/// flag is raised and the sketch keeps the voice it already has. Pinned as the
+/// negative of the test above — `supervise_audio` must not reload on every frame
+/// it happens to run in a sketch.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn no_pending_flag_means_no_reload() {
+    use wc_core::lifecycle::reload::SketchReloadState;
+    use wc_core::lifecycle::state::AppState;
+
+    let mut app = test_app_with_supervisor();
+    enter_state(&mut app, AppState::Line);
+
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<SketchReloadState>().is_idle(),
+        "nothing pending, nothing reloaded",
+    );
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Line
+    );
+}

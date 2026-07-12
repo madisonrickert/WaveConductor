@@ -239,6 +239,74 @@ impl AudioSupervisor {
     }
 }
 
+/// Set when a stream rebuild succeeds; cleared when the sketch has been made to
+/// re-enter its own state (which is what re-adds the synth graph), or when there
+/// is no graph to restore.
+///
+/// ## Why a flag and not a direct call
+///
+/// A rebuild constructs a fresh `DspHost` with **no synth voice**, and only a
+/// sketch's `OnEnter` produces the `Add*Synth` command that installs one. The
+/// repair is therefore a `sketch → Home → sketch` round-trip through
+/// [`crate::lifecycle::reload`] — but that machine can only be started when it is
+/// **idle**. If a settings-restart reload is already in flight when the device
+/// reconnects, clobbering its `SketchReloadState` would interleave two reloads
+/// (wrong reason, wrong return state, a fade that never restores its volume). So
+/// the intent is *recorded* here and fired on the first frame the reload machine
+/// is idle — never dropped, which would leave a voiceless graph and a kiosk that
+/// reports `Running` while playing nothing.
+///
+/// Read once per frame by [`supervise_audio`] (a `bool`; no allocation, no work on
+/// a quiet frame).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct SynthGraphReloadPending(pub bool);
+
+/// What [`supervise_audio`] should do about a pending synth-graph reload this
+/// frame.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynthGraphReload {
+    /// Nothing is pending; do nothing.
+    Nothing,
+    /// Begin the `sketch → Home → sketch` reload and clear the flag.
+    Begin,
+    /// A reload is already in flight. Keep the flag and try again next frame —
+    /// dropping it here is what would leave the sketch running with no voice.
+    Defer,
+    /// We are at `Home` (or otherwise not in a sketch): there is no synth graph to
+    /// restore, and the round-trip would be a pointless flicker. Clear the flag;
+    /// the next sketch entered runs `OnEnter` against the fresh `DspHost` anyway.
+    Discard,
+}
+
+/// The pure gate behind [`SynthGraphReloadPending`]. Extracted so the decision is
+/// unit-testable with no app, no cpal, and no reload machine.
+///
+/// Ordering matters: `Defer` outranks `Discard`, because a reload in flight is
+/// *itself* on its way back into a sketch (its `return_state` is always a sketch),
+/// and the frames it spends in `Home` must not be mistaken for "there is nothing
+/// to restore".
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn synth_graph_reload_action(
+    pending: bool,
+    in_sketch: bool,
+    reload_idle: bool,
+) -> SynthGraphReload {
+    if !pending {
+        return SynthGraphReload::Nothing;
+    }
+    if !reload_idle {
+        return SynthGraphReload::Defer;
+    }
+    if in_sketch {
+        SynthGraphReload::Begin
+    } else {
+        SynthGraphReload::Discard
+    }
+}
+
 /// Main-thread exclusive system (`Update`) that drives audio reconnection. This
 /// is where the pure state machine above meets the real cpal stream.
 ///
@@ -276,6 +344,28 @@ impl AudioSupervisor {
 /// an `AudioStream` resource exists: a failed rebuild leaves the old, dead stream
 /// installed, so "a stream is present" is not evidence of anything.
 ///
+/// ## Step 5: put the synth graph back (Task 5R)
+///
+/// A successful rebuild raises [`SynthGraphReloadPending`] and immediately tries
+/// to spend it (see `apply_pending_synth_graph_reload`): the fresh `DspHost` has
+/// no voice, and only a sketch's `OnEnter` can install one, so the sketch is made
+/// to re-enter its own state through [`crate::lifecycle::reload`]. A **failed**
+/// rebuild raises nothing (there is no new host to populate), and at `Home` the
+/// flag is discarded rather than spent (no graph exists there; the round-trip
+/// would be a pointless flicker).
+///
+/// **It fires exactly once per successful rebuild.** The flag is set only on
+/// `rebuild_engine(world) == true`, and `rebuild_engine` runs only on a
+/// [`SupervisorAction::Rebuild`], which [`AudioSupervisor::poll`] hands out at
+/// most once per backoff deadline (it consumes the due-ness as it returns).
+/// [`AudioSupervisor::record_success`] then disarms the schedule entirely, so the
+/// next frames are quiet ones. The reload it begins cannot feed back: it changes
+/// `AppState`, not `AudioState`, so nothing about it can raise
+/// `Reconnecting` or start another cycle.
+///
+/// The pending flag is the only per-frame cost this adds on a quiet frame: one
+/// `bool` read.
+///
 /// The clock is `Time<Real>` (`elapsed_secs_f64`), which is monotonic. A wall
 /// clock would be a bug: an NTP correction stepping time backward overnight
 /// postpones the next attempt by the size of the jump.
@@ -288,6 +378,13 @@ pub fn supervise_audio(world: &mut bevy::prelude::World) {
 
     use crate::audio::engine::{rebuild_engine, AudioStream};
     use crate::audio::state::{AudioState, AudioStatus};
+
+    // A synth-graph reload owed from an earlier rebuild that landed while another
+    // reload was in flight. One `bool` read on a quiet frame; the flag is almost
+    // always `false`.
+    if world.resource::<SynthGraphReloadPending>().0 {
+        apply_pending_synth_graph_reload(world);
+    }
 
     let now = world.resource::<Time<Real>>().elapsed_secs_f64();
     let status = world.resource::<AudioState>().status;
@@ -314,8 +411,65 @@ pub fn supervise_audio(world: &mut bevy::prelude::World) {
 
     if rebuild_engine(world) {
         world.resource_mut::<AudioSupervisor>().record_success(now);
+        // The rebuilt stream is playing a *voiceless* DspHost. Owe a sketch
+        // re-entry, and spend it now if the reload machine is free.
+        world.resource_mut::<SynthGraphReloadPending>().0 = true;
+        apply_pending_synth_graph_reload(world);
     }
-    // On failure: report nothing. `poll` already armed the next backoff step.
+    // On failure: report nothing (and owe nothing — there is no new host to
+    // populate). `poll` already armed the next backoff step.
+}
+
+/// Spend a pending synth-graph reload if this frame allows it.
+///
+/// The fresh `DspHost` a rebuild installs has no synth voice, and only a sketch's
+/// `OnEnter(AppState::…)` emits the `Add*Synth` command that installs one — which
+/// a stream rebuild does not re-run. So the repair is to make the sketch re-enter
+/// its own state: [`crate::lifecycle::reload`] already performs exactly that
+/// `sketch → Home → sketch` round-trip, and
+/// [`crate::lifecycle::reload::ReloadReason::AudioDeviceReconnect`] gives it a
+/// zero-length fade and no master-volume command, so it is instant and silent.
+///
+/// The three outcomes are decided by the pure [`synth_graph_reload_action`]; see
+/// its docs and [`SynthGraphReloadPending`] for why a reload already in flight
+/// **defers** rather than being dropped or clobbered.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_pending_synth_graph_reload(world: &mut bevy::prelude::World) {
+    use bevy::prelude::{State, Time};
+
+    use crate::audio::state::AudioState;
+    use crate::lifecycle::reload::{ReloadReason, SketchReloadState};
+    use crate::lifecycle::state::AppState;
+
+    let pending = world.resource::<SynthGraphReloadPending>().0;
+    let current = *world.resource::<State<AppState>>().get();
+    let reload_idle = world.resource::<SketchReloadState>().is_idle();
+
+    match synth_graph_reload_action(pending, current.is_sketch(), reload_idle) {
+        SynthGraphReload::Nothing | SynthGraphReload::Defer => {}
+        SynthGraphReload::Discard => {
+            world.resource_mut::<SynthGraphReloadPending>().0 = false;
+        }
+        SynthGraphReload::Begin => {
+            // `Time` (not `Time<Real>`): the reload machine measures its fade legs
+            // against the same clock `drive_reload_state` reads.
+            let now = world.resource::<Time>().elapsed();
+            // Carried for symmetry with the other reload paths; a reconnect never
+            // dips the master volume, so it is never actually restored from here.
+            let pre_fade_volume = world.resource::<AudioState>().volume;
+            world.resource_mut::<SketchReloadState>().begin_fade_out(
+                now,
+                pre_fade_volume,
+                current,
+                ReloadReason::AudioDeviceReconnect,
+            );
+            world.resource_mut::<SynthGraphReloadPending>().0 = false;
+            tracing::info!(
+                sketch = ?current,
+                "audio stream rebuilt mid-sketch — re-entering the sketch to restore its synth graph"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -567,5 +721,71 @@ mod tests {
         sup.begin(death);
         assert_eq!(sup.attempts(), 0);
         assert_eq!(sup.poll(death + 1.0), SupervisorAction::Rebuild);
+    }
+
+    /// Task 5R's gate. A rebuilt stream plays a `DspHost` with no synth voice, so
+    /// a successful rebuild owes the sketch a re-entry — but only *in* a sketch,
+    /// and only when the reload machine is free.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod synth_graph {
+        use super::*;
+
+        /// The quiet frame: nothing owed, nothing done. This is the state the app
+        /// is in for essentially all of an 8-hour soak.
+        #[test]
+        fn nothing_pending_is_nothing_to_do() {
+            assert_eq!(
+                synth_graph_reload_action(false, true, true),
+                SynthGraphReload::Nothing,
+            );
+            assert_eq!(
+                synth_graph_reload_action(false, false, false),
+                SynthGraphReload::Nothing,
+            );
+        }
+
+        /// The case the whole task exists for: the TV woke, the stream was
+        /// rebuilt mid-sketch, and the fresh `DspHost` has no voice. Re-enter the
+        /// sketch.
+        #[test]
+        fn a_rebuild_in_a_sketch_with_an_idle_reload_begins_the_round_trip() {
+            assert_eq!(
+                synth_graph_reload_action(true, true, true),
+                SynthGraphReload::Begin,
+            );
+        }
+
+        /// At `Home` there is no synth graph to restore and the `Home → Home` hop
+        /// would be a pointless flicker. Drop the intent; the next sketch entered
+        /// runs its `OnEnter` against the fresh host anyway.
+        #[test]
+        fn a_rebuild_at_home_discards_the_intent_rather_than_flickering() {
+            assert_eq!(
+                synth_graph_reload_action(true, false, true),
+                SynthGraphReload::Discard,
+            );
+        }
+
+        /// A settings-restart reload is already walking `sketch → Home → sketch`
+        /// when the device reconnects. Starting a second one would clobber its
+        /// `SketchReloadState` — wrong reason, wrong return state, a dipped volume
+        /// that is never restored. Wait instead.
+        ///
+        /// `Defer` must outrank `Discard`: an in-flight reload spends a frame or
+        /// two *at* `Home`, and mistaking those for "nothing to restore" would
+        /// drop the intent and leave the sketch running silent for the rest of the
+        /// night — which is exactly the bug Task 5R exists to close.
+        #[test]
+        fn a_reload_already_in_flight_defers_and_is_never_dropped() {
+            assert_eq!(
+                synth_graph_reload_action(true, true, false),
+                SynthGraphReload::Defer,
+            );
+            assert_eq!(
+                synth_graph_reload_action(true, false, false),
+                SynthGraphReload::Defer,
+                "mid-reload at the Home hop: still owed, not discarded",
+            );
+        }
     }
 }
