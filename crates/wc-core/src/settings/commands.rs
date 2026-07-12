@@ -64,9 +64,15 @@ pub fn set_setting(
         SettingKind::Number(range) => apply_number(field_ref, range, value)?,
         SettingKind::Boolean => apply_bool(field_ref, value)?,
         SettingKind::Enum { variants } => apply_enum(field_ref, variants, value)?,
-        // A file path / template path is stored as a plain String, so a string
-        // value works.
-        SettingKind::Text | SettingKind::FilePath { .. } | SettingKind::TemplateLibrary { .. } => {
+        // A file path / template path / runtime-enum value is stored as a
+        // plain String, so a string value works. The console does not
+        // validate against the live options list -- that is the same
+        // free-text escape hatch the panel widget offers, just via `set`
+        // instead of the TextEdit next to the ComboBox.
+        SettingKind::Text
+        | SettingKind::FilePath { .. }
+        | SettingKind::TemplateLibrary { .. }
+        | SettingKind::RuntimeEnum { .. } => {
             apply_text(field_ref, value)?;
         }
         SettingKind::Color => {

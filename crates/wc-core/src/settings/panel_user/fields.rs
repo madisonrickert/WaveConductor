@@ -18,8 +18,11 @@ use egui_phosphor::regular as phosphor;
 
 use super::provider_status::{render_provider_status_row, ProviderStatusLine};
 use super::widgets::render_widget_value;
-use crate::settings::def::{SettingDef, SettingsCategory};
+use crate::settings::def::{SettingDef, SettingKind, SettingsCategory};
 use crate::settings::registry::{reflect_resource_mut, SettingsRegistry};
+use crate::settings::runtime_enum::{
+    self, RuntimeEnumOptionsSnapshot, RuntimeEnumOptionsSnapshotEntry,
+};
 use crate::ui::OverlayStyle;
 
 /// Look up the type registration matching `storage_key` and render its
@@ -81,6 +84,33 @@ pub(super) fn render_section_by_key(
         .read()
         .get_type_data::<bevy::reflect::std_traits::ReflectDefault>(type_id)
         .map(bevy::reflect::std_traits::ReflectDefault::default);
+
+    // Snapshot every registered runtime-enum options source now, while
+    // `world` is still a shared borrow -- once `reflect_mut` below is taken,
+    // `world` is borrowed for the rest of this function and no widget below
+    // can re-enter it. Mirrors the `defs` snapshot near the top of this
+    // function. Deferred past the TypeRegistry bail above so a section
+    // whose settings type isn't registered doesn't pay for a snapshot it
+    // can't use; it cannot also be deferred past the "resource not present"
+    // bail below, since that bail is discovered *by* the
+    // `reflect_resource_mut` call this snapshot must precede. See
+    // `crate::settings::runtime_enum` for the registration side.
+    //
+    // Skipped entirely for a section with no runtime-enum field, which is
+    // every section today: `snapshot` deep-copies each source's option
+    // Strings (see `RuntimeEnumOptionsSnapshotEntry::options`), and this runs
+    // per rendered section, per frame. An empty snapshot is the correct input
+    // for such a section anyway -- `options_for` on it yields an empty slice,
+    // and no widget in the section asks.
+    let runtime_enum_options = if defs
+        .iter()
+        .any(|d| matches!(d.kind, SettingKind::RuntimeEnum { .. }))
+    {
+        runtime_enum::snapshot(world)
+    } else {
+        RuntimeEnumOptionsSnapshot::new()
+    };
+
     // Bevy 0.19 made `ReflectResource` a ZST; resources are now reflected via
     // `ReflectComponent` on their backing entity (see `reflect_resource_mut`).
     let Some(mut reflect_mut) = reflect_resource_mut(world, type_id) else {
@@ -93,6 +123,7 @@ pub(super) fn render_section_by_key(
         defs.as_ref(),
         storage_key,
         provider_status,
+        &runtime_enum_options,
         #[cfg(feature = "templates")]
         template_rows,
         #[cfg(feature = "templates")]
@@ -128,18 +159,16 @@ pub(super) fn render_section_by_key(
 /// that two settings structs using the same section or field names don't
 /// collide in egui's id-to-state map (colliding Grids share column widths;
 /// colliding `ComboBox`es share popup open/close state).
-#[cfg_attr(
-    feature = "templates",
-    expect(
-        clippy::too_many_arguments,
-        reason = "the settings render chain threads the template snapshot + dirty flag through this fn when the feature is on"
-    )
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settings render chain threads the provider-status snapshot, the runtime-enum options snapshot, and (when the `templates` feature is on) the template rows + dirty flag through this fn; bundling them into a struct is a larger refactor out of scope here"
 )]
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
     storage_key: &'static str,
     provider_status: Option<ProviderStatusLine>,
+    runtime_enum_options: &[RuntimeEnumOptionsSnapshotEntry],
     #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
     #[cfg(feature = "templates")] template_dirty: &mut bool,
     default: Option<&dyn Reflect>,
@@ -209,6 +238,7 @@ fn render_user_fields_via_reflect(
                         field,
                         def,
                         storage_key,
+                        runtime_enum_options,
                         #[cfg(feature = "templates")]
                         template_rows,
                         #[cfg(feature = "templates")]

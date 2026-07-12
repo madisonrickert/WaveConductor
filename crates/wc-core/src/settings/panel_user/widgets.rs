@@ -38,11 +38,17 @@ use crate::ui::OverlayStyle;
 /// `field` is `&mut dyn PartialReflect` as returned by [`bevy::reflect::structs::Struct::field_mut`].
 ///
 /// `storage_key` is the owning settings struct's storage key, threaded through
-/// to widgets that need a unique egui id (currently [`render_enum`]).
+/// to widgets that need a unique egui id (currently [`render_enum`] and
+/// [`render_runtime_enum`]).
+///
+/// `runtime_enum_options` is the whole-panel runtime-enum options snapshot,
+/// forwarded to [`render_runtime_enum`] for `SettingKind::RuntimeEnum`
+/// fields; every other kind ignores it.
 pub(super) fn render_widget_value(
     field: &mut dyn bevy::reflect::PartialReflect,
     def: &SettingDef,
     storage_key: &'static str,
+    runtime_enum_options: &[crate::settings::runtime_enum::RuntimeEnumOptionsSnapshotEntry],
     #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
     #[cfg(feature = "templates")] template_dirty: &mut bool,
     #[cfg(feature = "templates")] style: &OverlayStyle,
@@ -82,6 +88,16 @@ pub(super) fn render_widget_value(
         }
         SettingKind::Enum { variants } => {
             render_enum(field, storage_key, def.field_name, variants, ui);
+        }
+        SettingKind::RuntimeEnum { options_key } => {
+            render_runtime_enum(
+                field,
+                storage_key,
+                def.field_name,
+                options_key,
+                runtime_enum_options,
+                ui,
+            );
         }
     }
 }
@@ -301,6 +317,64 @@ fn set_enum_variant(
     }
 }
 
+/// Render the runtime-enumerated dropdown (`ComboBox`) for a field whose
+/// candidate list is supplied by a registered
+/// `crate::settings::RuntimeEnumOptionsSource` at render time, rather than
+/// known at compile time (contrast [`render_enum`]). No label — Grid column 1
+/// already holds it.
+///
+/// `runtime_enum_options` is the whole-panel snapshot taken once per rendered
+/// section in `super::fields::render_section_by_key`, before the reflected field borrow
+/// it needs `world` for makes `world` unavailable down here; `options_key`
+/// selects this field's entry out of it via
+/// `crate::settings::runtime_enum::options_for`.
+///
+/// The persisted value is never silently replaced:
+/// `classify_runtime_enum_selection` decides whether it is in the live
+/// list, and when it is not (source hasn't enumerated yet, device is
+/// asleep/unplugged, or the name was typed by hand), it is still shown in the
+/// `ComboBox` — marked "(unavailable)" — and stays selected. A `TextEdit`
+/// alongside the `ComboBox` is the free-text escape hatch for exactly that
+/// case: it lets the operator retype or correct the value directly instead of
+/// waiting on enumeration.
+fn render_runtime_enum(
+    field: &mut dyn bevy::reflect::PartialReflect,
+    storage_key: &'static str,
+    field_name: &'static str,
+    options_key: &'static str,
+    runtime_enum_options: &[crate::settings::runtime_enum::RuntimeEnumOptionsSnapshotEntry],
+    ui: &mut egui::Ui,
+) {
+    let Some(current) = field.try_downcast_mut::<String>() else {
+        ui.label("(expected String)");
+        return;
+    };
+    let options = crate::settings::runtime_enum::options_for(runtime_enum_options, options_key);
+    let selection = classify_runtime_enum_selection(current.as_str(), options);
+    let mut selected = current.clone();
+
+    ui.horizontal(|ui| {
+        let combo_label = runtime_enum_combo_label(selection, current.as_str());
+        egui::ComboBox::from_id_salt(("wc-setting-runtime-enum", storage_key, field_name))
+            .selected_text(combo_label)
+            .show_ui(ui, |ui| {
+                if selection == RuntimeEnumSelection::Unavailable {
+                    let label = runtime_enum_combo_label(selection, current.as_str());
+                    ui.selectable_value(&mut selected, current.clone(), label);
+                }
+                for opt in options {
+                    ui.selectable_value(&mut selected, opt.clone(), opt.as_str());
+                }
+            });
+        // Free-text escape hatch, always present.
+        ui.add(egui::TextEdit::singleline(&mut selected).desired_width(120.0));
+    });
+
+    if selected != *current {
+        *current = selected;
+    }
+}
+
 /// Render the filesystem-path widget (`[file name][Browse…]`) for a field.
 ///
 /// No label — Grid column 1 already holds it. The field stores the full path,
@@ -386,6 +460,52 @@ fn render_vec3(field: &mut dyn bevy::reflect::PartialReflect, ui: &mut egui::Ui)
     }
 }
 
+/// Whether a runtime-enumerated field's persisted value is currently present
+/// in its live option list. Pure and UI-free so the "never silently rewrite
+/// an unresolved name" contract (an HDMI TV that is merely asleep must not
+/// lose its saved binding — see `AGENTS.md`) is unit-tested directly, without
+/// an egui context or a GPU.
+///
+/// Consumed by [`render_runtime_enum`], which turns each case into the
+/// dropdown's selected-text and option list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeEnumSelection {
+    /// No value persisted yet (`current` is empty).
+    Empty,
+    /// `current` matches one of the live options.
+    Known,
+    /// `current` is non-empty but does not appear in the live option list.
+    /// Never treated as "reset me" — the caller must keep showing it and
+    /// keep it selectable/editable.
+    Unavailable,
+}
+
+/// Classify `current` against `options`. See [`RuntimeEnumSelection`].
+fn classify_runtime_enum_selection(current: &str, options: &[String]) -> RuntimeEnumSelection {
+    if current.is_empty() {
+        RuntimeEnumSelection::Empty
+    } else if options.iter().any(|o| o == current) {
+        RuntimeEnumSelection::Known
+    } else {
+        RuntimeEnumSelection::Unavailable
+    }
+}
+
+/// The `ComboBox`'s collapsed label for a runtime-enumerated field. Pure and
+/// UI-free so the "(unavailable)" marker — the visible half of the
+/// never-silently-drop contract — is unit-tested without an egui context.
+///
+/// [`render_runtime_enum`] calls this for both the collapsed `selected_text`
+/// and the `Unavailable` entry's popup label, so the two can never drift out
+/// of agreement with each other.
+fn runtime_enum_combo_label(selection: RuntimeEnumSelection, current: &str) -> String {
+    match selection {
+        RuntimeEnumSelection::Empty => "(none)".to_owned(),
+        RuntimeEnumSelection::Known => current.to_owned(),
+        RuntimeEnumSelection::Unavailable => format!("{current} (unavailable)"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +588,136 @@ mod tests {
             );
         }
         assert_eq!(value, Palette::Mono, "last applied variant should stick");
+    }
+
+    #[test]
+    fn classify_runtime_enum_selection_cases() {
+        let opts = vec!["Speakers".to_owned(), "HDMI TV".to_owned()];
+        assert_eq!(
+            classify_runtime_enum_selection("", &opts),
+            RuntimeEnumSelection::Empty
+        );
+        assert_eq!(
+            classify_runtime_enum_selection("HDMI TV", &opts),
+            RuntimeEnumSelection::Known
+        );
+        assert_eq!(
+            classify_runtime_enum_selection("Living Room TV", &opts),
+            RuntimeEnumSelection::Unavailable,
+            "a persisted name absent from the live list must classify as \
+             Unavailable, never silently dropped"
+        );
+    }
+
+    #[test]
+    fn classify_runtime_enum_selection_with_empty_live_list_is_unavailable_not_empty() {
+        // No source registered yet, or enumeration hasn't run: the live
+        // list is empty, but a persisted (non-empty) value must still
+        // classify as Unavailable, not Empty -- Empty means "nothing
+        // persisted," a different UI state (no "(unavailable)" marker, no
+        // reset-cell affordance driven off it).
+        assert_eq!(
+            classify_runtime_enum_selection("Living Room TV", &[]),
+            RuntimeEnumSelection::Unavailable
+        );
+    }
+
+    #[test]
+    fn runtime_enum_combo_label_empty_reads_none() {
+        assert_eq!(
+            runtime_enum_combo_label(RuntimeEnumSelection::Empty, ""),
+            "(none)"
+        );
+    }
+
+    #[test]
+    fn runtime_enum_combo_label_known_reads_the_bare_value() {
+        assert_eq!(
+            runtime_enum_combo_label(RuntimeEnumSelection::Known, "Speakers"),
+            "Speakers"
+        );
+    }
+
+    #[test]
+    fn runtime_enum_combo_label_unavailable_carries_the_marker() {
+        // The visible half of the never-silently-drop contract: a persisted
+        // name absent from the live list must still read in the ComboBox,
+        // flagged so the operator knows it isn't currently selectable from
+        // the live list.
+        assert_eq!(
+            runtime_enum_combo_label(RuntimeEnumSelection::Unavailable, "Living Room TV"),
+            "Living Room TV (unavailable)"
+        );
+    }
+
+    #[test]
+    fn render_runtime_enum_keeps_a_known_value_unmutated() {
+        // Mirrors `render_runtime_enum_keeps_persisted_value_when_absent_from_live_list`
+        // below, but for the `Known` case: a value present in the live list
+        // must also survive a render unmutated.
+        let ctx = egui::Context::default();
+        let mut value = String::from("Speakers");
+        let snapshot = [
+            crate::settings::runtime_enum::RuntimeEnumOptionsSnapshotEntry {
+                options_key: "audio_output_devices",
+                options: std::sync::Arc::from(["Speakers".to_owned()]),
+            },
+        ];
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
+            render_runtime_enum(
+                field,
+                "audio",
+                "output_device",
+                "audio_output_devices",
+                &snapshot,
+                ui,
+            );
+        });
+        assert_eq!(
+            value, "Speakers",
+            "a value present in the live list must survive the render unmutated"
+        );
+    }
+
+    #[test]
+    fn render_runtime_enum_keeps_persisted_value_when_absent_from_live_list() {
+        let ctx = egui::Context::default();
+        let mut value = String::from("Living Room TV");
+        let snapshot = [
+            crate::settings::runtime_enum::RuntimeEnumOptionsSnapshotEntry {
+                options_key: "audio_output_devices",
+                options: std::sync::Arc::from(["Speakers".to_owned()]),
+            },
+        ];
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
+            render_runtime_enum(
+                field,
+                "audio",
+                "output_device",
+                "audio_output_devices",
+                &snapshot,
+                ui,
+            );
+        });
+        assert_eq!(
+            value, "Living Room TV",
+            "a persisted name absent from the live list must survive the render, not reset"
+        );
+    }
+
+    #[test]
+    fn render_runtime_enum_on_a_non_string_field_labels_the_mismatch_and_does_not_panic() {
+        let ctx = egui::Context::default();
+        let mut value: u32 = 7;
+        let snapshot: [crate::settings::runtime_enum::RuntimeEnumOptionsSnapshotEntry; 0] = [];
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let field: &mut dyn bevy::reflect::PartialReflect = &mut value;
+            render_runtime_enum(field, "s", "f", "k", &snapshot, ui);
+        });
+        // Reaching here without a panic is the assertion (mirrors the
+        // existing `(unsupported number type)` / `(expected bool)` degrade
+        // pattern the other render_* helpers use on a type mismatch).
     }
 }

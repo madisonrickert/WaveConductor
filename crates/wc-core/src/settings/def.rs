@@ -58,6 +58,46 @@ pub enum SettingKind {
         /// string appears in the persisted TOML.
         variants: &'static [&'static str],
     },
+    /// A `String`-valued setting whose selectable options are supplied at
+    /// **runtime**, in contrast to [`SettingKind::Enum`] (whose `variants`
+    /// list is fixed at compile time from a Rust enum's reflection info).
+    /// Used for pickers whose candidates are only known once the OS
+    /// enumerates hardware — an audio-output device list, a monitor list.
+    ///
+    /// Persists exactly like [`SettingKind::Text`] (a plain TOML string), so
+    /// this kind required no persistence change; only the widget differs.
+    /// Rendered as an `egui::ComboBox` sourced from whichever registered
+    /// `crate::settings::RuntimeEnumOptionsSource` resource's
+    /// `OPTIONS_KEY` matches `options_key`, plus a free-text field so a
+    /// persisted name the live source doesn't currently report — a sleeping
+    /// TV, a device unplugged mid-session — stays visible and directly
+    /// editable rather than being silently reset. See
+    /// `crate::settings::runtime_enum` for the resource-registration side.
+    ///
+    /// ## Consumers must debounce: the value changes per keystroke
+    ///
+    /// The free-text half of the widget writes back on **every keystroke**, as
+    /// `SettingKind::Text` and `SettingKind::FilePath` already do: typing
+    /// `"Living Room TV"` walks the field through `"L"`, `"Li"`, `"Liv"`, …
+    /// Also note a plain `Changed<S>` consumer is useless here — the panel's
+    /// `DerefMut` marks the settings resource changed on every frame it
+    /// renders — so any consumer *must* value-diff, and every value-diffing
+    /// consumer inherits the per-keystroke sequence.
+    ///
+    /// So do not act directly on each observed value change. Marking the field
+    /// `requires_restart` fires one `crate::settings::SketchRestart` per
+    /// keystroke (`registry`'s restart diff is a value diff); a device opener
+    /// would likewise try to open `"L"`, then `"Li"`. Debounce, or commit on
+    /// focus-loss / Enter, and act on the settled value.
+    RuntimeEnum {
+        /// Matched against
+        /// `crate::settings::RuntimeEnumOptionsSource::OPTIONS_KEY` to find
+        /// the resource supplying this field's live option list at render
+        /// time. Distinct `options_key`s let two unrelated runtime-enum
+        /// fields (e.g. a monitor picker and an audio-device picker) coexist
+        /// without collision.
+        options_key: &'static str,
+    },
 }
 
 /// Returns the variant names of a reflected enum type, in declaration order.

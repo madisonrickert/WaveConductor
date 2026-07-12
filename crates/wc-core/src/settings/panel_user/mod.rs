@@ -38,8 +38,8 @@
 //! - [`provider_status`] — the hand-tracking provider status row shown under
 //!   the "Tracking provider" dropdown.
 //! - [`widgets`] — the typed value widgets (`Number`, `Boolean`, `Color`,
-//!   `Text`, `Enum`, `FilePath`, plus the unreachable-for-now `Vec2`/`Vec3`
-//!   branches).
+//!   `Text`, `Enum`, `RuntimeEnum`, `FilePath`, plus the unreachable-for-now
+//!   `Vec2`/`Vec3` branches).
 //! - [`template_picker`] (feature `templates`) — the template-library
 //!   `ComboBox` widget, its thumbnail cache, and its two-step delete confirm.
 

@@ -107,10 +107,19 @@ before its consumer, it **must** say so and schedule the removal.
 ### The doc gate has no `--all-features`, and denies public→private intra-doc links
 
 CI runs exactly `cargo doc --no-deps --workspace --document-private-items` with
-`RUSTDOCFLAGS="-D warnings"` (`.github/workflows/ci.yml:208`). Two traps:
+`RUSTDOCFLAGS="-D warnings"` (`.github/workflows/ci.yml:208`). Three traps:
 
-- **Do not add `--all-features`** when reproducing it. Feature-gated modules (`leap_native`,
-  `template_picker`) surface unrelated errors and send you chasing ghosts.
+- **Reproduce it verbatim. Change neither the feature flags nor the package scope.** Both
+  knobs produce the *same* phantom failure — a pile of `unresolved link to
+  crate::input::providers::leap_native` errors that look like pre-existing rot and are not.
+  Adding `--all-features` does it. So does narrowing `--workspace` to `-p wc-core`: on its own,
+  `wc-core` doesn't get the hand-tracking features that the workspace build unifies onto it
+  from `waveconductor`, so the `leap_native` module is `cfg`'d out and every doc link into it
+  dangles. **Verified 2026-07-11: the exact CI command reports 0 errors on the same tree where
+  `-p wc-core` reports errors in `leap_native` and `template_picker`.**
+  Four separate agents have now "found" this phantom and reported it as pre-existing breakage.
+  It is an artifact of the command they typed. If you see `leap_native` in a doc error, you
+  scoped the command wrong — rerun it exactly as CI does before believing it.
 - A **public** item's rustdoc linking to a `pub(crate)` item trips
   `rustdoc::private_intra_doc_links`, which is denied. Demote to a plain code span. This broke
   Plan 01 twice. Public trait-impl methods count as public.
