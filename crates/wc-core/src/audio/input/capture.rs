@@ -9,11 +9,15 @@
 //!   either (the `audio::engine` discipline, in reverse).
 //! - The **Bevy main thread** owns everything else: [`AudioInputRing`]
 //!   (non-send consumer, drained by `analysis::drain_and_analyze`) and the
-//!   capture driver (Task 8) that builds/pauses/tears down the stream in
-//!   response to `super::AudioCaptureRequest`.
+//!   capture driver ([`drive_capture`]) that builds/pauses/tears down the
+//!   stream in response to `super::AudioCaptureRequest`.
 //!
-//! This file lands in two steps: the data-handoff types here (Task 6), then
-//! the stream build + `drive_capture` driver (Task 8).
+//! The data-handoff types ([`AudioInputRing`], [`AudioInputErrorFlag`],
+//! [`AudioInputStatus`], [`CaptureRuntime`]) land above; the stream build,
+//! `decide` policy table, and [`drive_capture`] driver land below. (`decide`
+//! is crate-private, so it's a plain code span here rather than a link — the
+//! `cargo doc` gate builds default features/visibility only and rejects a
+//! public module doc linking to a lower-visibility item.)
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
