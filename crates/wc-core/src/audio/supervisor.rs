@@ -226,12 +226,96 @@ impl AudioSupervisor {
         self.attempts
     }
 
-    /// Whether a reconnect cycle is in progress. Test-only accessor; not part of
-    /// the shipped API.
-    #[cfg(test)]
+    /// Whether a reconnect cycle is in progress — i.e. an attempt is scheduled,
+    /// whether by [`Self::begin`] (a stream death or a failed startup build) or
+    /// by [`Self::request_now`] (the saved endpoint reappeared).
+    ///
+    /// [`supervise_audio`] reads this to decide whether it has anything to do at
+    /// all: on a quiet frame (the overwhelmingly common case — stream healthy,
+    /// no cycle) this is `false` and the system returns without touching cpal.
+    #[must_use]
     pub fn is_reconnecting(&self) -> bool {
         self.next_attempt_at.is_some()
     }
+}
+
+/// Main-thread exclusive system (`Update`) that drives audio reconnection. This
+/// is where the pure state machine above meets the real cpal stream.
+///
+/// ## Per-frame cost
+///
+/// On a quiet frame — stream healthy, no cycle scheduled — it reads three
+/// resources and returns. **No enumeration, no stream build, no allocation.**
+/// Both of those cpal calls block, and they happen only on a backoff-gated
+/// attempt.
+///
+/// ## The decision
+///
+/// 1. A cycle *should* be running when the status is
+///    [`crate::audio::state::AudioStatus::Reconnecting`] (a live stream's cpal
+///    error callback fired)
+///    **or** when there is no stream at all and the status is
+///    `NotStarted`/`Errored` (the startup build failed — the kiosk booted before
+///    its TV woke). The second trigger is not optional: with no stream there is
+///    no error callback, so nothing else can ever start the cycle, and the
+///    installation would stay silent all night while the device-watcher happily
+///    reported the TV appearing.
+/// 2. If one should be running and none is, [`AudioSupervisor::begin`] starts it.
+/// 3. A cycle may also be armed while the stream is *healthy*:
+///    `drain_device_topology` calls [`AudioSupervisor::request_now`] when the
+///    operator's saved endpoint reappears, to migrate back to it. So the poll is
+///    gated on [`AudioSupervisor::is_reconnecting`], not on the status.
+/// 4. When [`AudioSupervisor::poll`] returns [`SupervisorAction::Rebuild`],
+///    `crate::audio::engine::rebuild_engine` (private) runs. On success —
+///    and *only* on success — [`AudioSupervisor::record_success`] disarms the
+///    schedule. On failure nothing is reported: `poll` already armed the next
+///    step, so a failed attempt simply retries one backoff step later. There is
+///    no `record_failure`, by design.
+///
+/// The outcome is judged by `rebuild_engine`'s return value, **not** by whether
+/// an `AudioStream` resource exists: a failed rebuild leaves the old, dead stream
+/// installed, so "a stream is present" is not evidence of anything.
+///
+/// The clock is `Time<Real>` (`elapsed_secs_f64`), which is monotonic. A wall
+/// clock would be a bug: an NTP correction stepping time backward overnight
+/// postpones the next attempt by the size of the jump.
+///
+/// Runs on the main thread only — never the audio callback, never the render
+/// thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn supervise_audio(world: &mut bevy::prelude::World) {
+    use bevy::prelude::{Real, Time};
+
+    use crate::audio::engine::{rebuild_engine, AudioStream};
+    use crate::audio::state::{AudioState, AudioStatus};
+
+    let now = world.resource::<Time<Real>>().elapsed_secs_f64();
+    let status = world.resource::<AudioState>().status;
+    let has_stream = world.get_non_send::<AudioStream>().is_some();
+
+    // Trigger 1: a live stream died. Trigger 2: no stream ever came up.
+    let wants_reconnect = matches!(status, AudioStatus::Reconnecting)
+        || (!has_stream && matches!(status, AudioStatus::NotStarted | AudioStatus::Errored));
+
+    let action = {
+        let mut supervisor = world.resource_mut::<AudioSupervisor>();
+        if wants_reconnect && !supervisor.is_reconnecting() {
+            supervisor.begin(now);
+        }
+        if !supervisor.is_reconnecting() {
+            // The quiet frame: nothing scheduled, nothing to do.
+            return;
+        }
+        supervisor.poll(now)
+    };
+    if action == SupervisorAction::Idle {
+        return;
+    }
+
+    if rebuild_engine(world) {
+        world.resource_mut::<AudioSupervisor>().record_success(now);
+    }
+    // On failure: report nothing. `poll` already armed the next backoff step.
 }
 
 #[cfg(test)]
@@ -445,5 +529,43 @@ mod tests {
         sup.record_success(5.0);
         assert!(!sup.is_reconnecting());
         assert_eq!(sup.poll(10_000.0), SupervisorAction::Idle);
+    }
+
+    /// The status→action wiring `supervise_audio` relies on, pinned as a test:
+    /// the status has just become `Reconnecting` and no cycle is scheduled, so
+    /// the system calls `begin` — and one backoff step later an attempt is due.
+    /// If a later edit changes `begin`'s scheduling, this is what catches it.
+    #[test]
+    fn a_fresh_reconnecting_status_begins_a_cycle_then_becomes_due() {
+        let mut sup = AudioSupervisor::default();
+        assert!(!sup.is_reconnecting());
+        sup.begin(10.0);
+        assert!(sup.is_reconnecting());
+        assert_eq!(sup.poll(10.0 + 0.9), SupervisorAction::Idle);
+        assert_eq!(sup.poll(10.0 + 1.0), SupervisorAction::Rebuild);
+    }
+
+    /// `supervise_audio`'s quiet frame, stated as a test. A healthy stream has
+    /// no cycle scheduled, so the system's `is_reconnecting` gate is `false` and
+    /// it returns *before* polling — which is what keeps a blocking cpal
+    /// enumeration off the 60 Hz path. `record_success` must therefore be called
+    /// exactly once per stream-up (at startup and after a rebuild), **never**
+    /// every healthy frame: doing the latter would keep resetting
+    /// `last_success_at` to `now`, so no stream would ever be seen to have
+    /// survived `STREAM_SETTLE_WINDOW` and the backoff would never reset.
+    #[test]
+    fn a_healthy_stream_leaves_no_cycle_armed_and_still_earns_its_settle() {
+        let mut sup = AudioSupervisor::default();
+        // Startup succeeded: the stream came up at t = 0.
+        sup.record_success(0.0);
+        assert!(!sup.is_reconnecting());
+
+        // Hours of quiet frames later, the stream dies. Because success was
+        // recorded once (not per frame), the stream is seen to have settled and
+        // the backoff restarts at 1 s rather than inheriting an old attempt count.
+        let death = 8.0 * 3600.0;
+        sup.begin(death);
+        assert_eq!(sup.attempts(), 0);
+        assert_eq!(sup.poll(death + 1.0), SupervisorAction::Rebuild);
     }
 }

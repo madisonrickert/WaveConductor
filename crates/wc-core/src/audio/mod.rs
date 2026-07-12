@@ -138,6 +138,22 @@ impl Plugin for AudioPlugin {
             PreUpdate,
             device::drain_device_topology.after(state::pump_audio_messages),
         );
+
+        // The reconnect supervisor (native only — it rebuilds a cpal stream).
+        // The second sanctioned always-on system: a stream can die, or an
+        // endpoint can finally appear, in *any* `AppState` — including `Idle`
+        // and the attract screensaver, which is exactly the TV-wakes-up case —
+        // so it cannot be gated on a sketch being active. Its quiet-frame cost
+        // is three resource reads and a return; the blocking cpal calls happen
+        // only on a backoff-gated rebuild attempt. See
+        // `supervisor::supervise_audio`.
+        //
+        // `Update`, not `PreUpdate`, so the whole of this frame's `PreUpdate`
+        // (the message pump, then the topology drain) has already landed: the
+        // supervisor sees the freshest status *and* any `request_now` a
+        // reappearing device asked for, in the same frame it arrived.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, supervisor::supervise_audio);
     }
 }
 
