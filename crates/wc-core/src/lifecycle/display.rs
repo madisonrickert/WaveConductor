@@ -48,11 +48,13 @@
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, Monitor};
 
-use crate::settings::RegisterSketchSettingsExt;
 use crate::settings::{compute_display_mode, AvailableMonitors, DisplaySettings};
+use crate::settings::{RegisterRuntimeEnumOptionsExt, RegisterSketchSettingsExt};
 
-/// Plugin: registers `DisplaySettings`, initialises `AvailableMonitors`,
-/// and wires `apply_display_mode` / `sync_available_monitors`.
+/// Plugin: registers `DisplaySettings`, initialises `AvailableMonitors` and
+/// registers it as the `"monitors"` runtime-enum options source (which is what
+/// makes the `monitor` setting render as a dropdown), and wires
+/// `apply_display_mode` / `sync_available_monitors`.
 ///
 /// Registered by [`crate::lifecycle::LifecyclePlugin`].
 pub struct DisplayPlugin;
@@ -61,6 +63,11 @@ impl Plugin for DisplayPlugin {
     fn build(&self, app: &mut App) {
         app.register_sketch_settings::<DisplaySettings>();
         app.init_resource::<AvailableMonitors>();
+        // Expose the live monitor list to Plan 03a's runtime-enum widget so
+        // the `monitor` setting renders as a dropdown. `AvailableMonitors`
+        // impls `RuntimeEnumOptionsSource` with `OPTIONS_KEY = "monitors"`,
+        // matching the field's `options_key`.
+        app.register_runtime_enum_options::<AvailableMonitors>();
         // Boot-time apply. May race bevy_winit's first `create_monitors`
         // pass (see the module doc); harmless, because the Update-scheduled
         // copy below converges on the next frame regardless.
@@ -154,5 +161,45 @@ mod tests {
         assert!(app
             .world()
             .contains_resource::<crate::settings::AvailableMonitors>());
+    }
+
+    /// The half that `settings::panel_user::display`'s
+    /// `monitor_field_options_key_matches_its_options_source` cannot see: that
+    /// the options source is actually *registered* with the `App`, so the
+    /// `monitor` field's declared `options_key` resolves to a real entry in
+    /// 03a's snapshot. This is the same condition
+    /// `settings::runtime_enum::warn_on_unresolved_options_keys` warns about at
+    /// startup in debug builds; asserting it here means CI fails on a broken
+    /// wiring instead of a human having to spot a `warn!` line.
+    ///
+    /// Note it checks the snapshot *entry*, not `options_for`'s slice: with no
+    /// `Monitor` entities in a headless `App` the option list is legitimately
+    /// empty, which is exactly what an unresolved key also looks like. Only the
+    /// key's presence distinguishes the two.
+    #[test]
+    fn the_monitor_fields_options_key_resolves_against_a_registered_source() {
+        use crate::settings::runtime_enum::snapshot;
+        use crate::settings::{SettingKind, SketchSettings};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(DisplayPlugin);
+
+        let Some(def) = crate::settings::DisplaySettings::settings_def()
+            .into_iter()
+            .find(|d| d.field_name == "monitor")
+        else {
+            unreachable!("the derive macro always emits a def for `monitor`");
+        };
+        let SettingKind::RuntimeEnum { options_key } = def.kind else {
+            unreachable!("`monitor` is declared `ty = RuntimeEnum`");
+        };
+
+        let snap = snapshot(app.world());
+        assert!(
+            snap.iter().any(|entry| entry.options_key == options_key),
+            "no registered RuntimeEnumOptionsSource reports `{options_key}`; \
+             the monitor dropdown would render empty"
+        );
     }
 }

@@ -31,6 +31,8 @@ use bevy::window::{MonitorSelection, WindowMode};
 use serde::{Deserialize, Serialize};
 use wc_core_macros::SketchSettings;
 
+use crate::settings::RuntimeEnumOptionsSource;
+
 /// Startup fullscreen, cursor visibility, and monitor selection.
 ///
 /// Applied by `crate::lifecycle::display::apply_display_mode`, which runs
@@ -83,13 +85,18 @@ pub(crate) struct DisplaySettings {
     /// "no preference" and resolves to [`MonitorSelection::Current`] via
     /// [`resolve_monitor_selection`].
     ///
-    /// Renders as a plain text field until Task 4 upgrades it to Plan 03a's
-    /// runtime-enumerated dropdown. The stored value and its resolution
-    /// semantics are identical before and after that upgrade; only the widget
-    /// changes.
+    /// Rendered by Plan 03a's runtime-enum widget as a dropdown populated from
+    /// the [`AvailableMonitors`] source registered under `"monitors"`. A saved
+    /// name that no longer resolves (an unplugged or sleeping monitor) is not
+    /// dropped: 03a's widget shows it, marks it unavailable, and keeps it
+    /// persisted, matching [`resolve_monitor_selection`]'s
+    /// fall-back-without-rewrite behaviour. The stored value (a plain `String`)
+    /// and its resolution semantics are unchanged from the `ty = Text` version;
+    /// only the widget differs.
     #[setting(
         default = String::new(),
-        ty = Text,
+        ty = RuntimeEnum,
+        options_key = "monitors",
         section = "Display",
         category = User,
         label = "Monitor"
@@ -102,14 +109,34 @@ pub(crate) struct DisplaySettings {
 ///
 /// Refreshed by `crate::lifecycle::display::sync_available_monitors`
 /// whenever a `Monitor` ECS component is added or removed (not every frame —
-/// see that system's doc for why). A plain `Resource` newtype here, with **no**
-/// dependency on Plan 03a: Task 4 adds the `impl RuntimeEnumOptionsSource`
-/// (keyed `"monitors"`) and the `register_runtime_enum_options` call that let
-/// Plan 03a's runtime-enumerated widget populate the `monitor` field's
-/// dropdown from it. Keeping the impl out of this task is what keeps Tasks 1-3
-/// buildable before 03a lands.
+/// see that system's doc for why). Registered as Plan 03a's options source for
+/// the `"monitors"` key (see the [`RuntimeEnumOptionsSource`] impl below and
+/// `crate::lifecycle::display::DisplayPlugin::build`), which is what populates
+/// the `monitor` field's dropdown.
+///
+/// An empty list is a normal state, not an error: `bevy_winit` spawns its
+/// `Monitor` entities on the first event-loop iteration, which can land after
+/// `Startup`. 03a omits the key from its snapshot in that case and still
+/// renders the persisted value.
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
 pub(crate) struct AvailableMonitors(pub(crate) Vec<String>);
+
+/// Feeds the live monitor-name list to Plan 03a's runtime-enum settings
+/// widget. The `monitor` field of [`DisplaySettings`] declares
+/// `options_key = "monitors"` (above), and 03a's panel resolves that key
+/// against every registered [`RuntimeEnumOptionsSource`] at render time — so
+/// this key and the field's must stay identical. The
+/// `monitor_field_options_key_matches_its_options_source` test at the footer of
+/// this file pins them together; a debug-build startup check
+/// (`settings::runtime_enum::warn_on_unresolved_options_keys`) catches a drift
+/// at runtime.
+impl RuntimeEnumOptionsSource for AvailableMonitors {
+    const OPTIONS_KEY: &'static str = "monitors";
+
+    fn options(&self) -> &[String] {
+        &self.0
+    }
+}
 
 /// The window mode and cursor visibility implied by a [`DisplaySettings`]
 /// value, computed against a snapshot of live monitors.
@@ -229,6 +256,7 @@ fn default_hide_cursor_for(is_debug_build: bool) -> bool {
 )]
 mod tests {
     use super::*;
+    use crate::settings::{SettingKind, SketchSettings};
 
     fn entity(raw: u32) -> Entity {
         Entity::from_raw_u32(raw).expect("small literal is a valid non-max raw id")
@@ -398,5 +426,34 @@ mod tests {
     #[test]
     fn available_monitors_defaults_empty() {
         assert!(AvailableMonitors::default().0.is_empty());
+    }
+
+    /// The derive macro's `options_key` (on the `monitor` field) and the
+    /// options source's `OPTIONS_KEY` (on [`AvailableMonitors`]) are written a
+    /// few dozen lines apart and tied together by nothing but a string literal;
+    /// 03a resolves an unknown key to an empty option list, so a drift between
+    /// them degrades the dropdown silently rather than failing the build. Pin
+    /// them together. (`crate::lifecycle::display`'s
+    /// `the_monitor_fields_options_key_resolves_against_a_registered_source`
+    /// covers the other half: that the source is actually *registered*.)
+    ///
+    /// `unreachable!` (not `panic!`) on the two structural invariants: the
+    /// derive macro always emits a def for every field, and `monitor` is
+    /// declared `ty = RuntimeEnum`, so neither `else` arm is reachable unless
+    /// the struct definition above changed out from under this test. Bare
+    /// `panic!` is denied workspace-wide; `clippy::unreachable` is a
+    /// `restriction` lint and is not enabled.
+    #[test]
+    fn monitor_field_options_key_matches_its_options_source() {
+        let Some(def) = DisplaySettings::settings_def()
+            .into_iter()
+            .find(|d| d.field_name == "monitor")
+        else {
+            unreachable!("the derive macro always emits a def for `monitor`");
+        };
+        let SettingKind::RuntimeEnum { options_key } = def.kind else {
+            unreachable!("`monitor` is declared `ty = RuntimeEnum`");
+        };
+        assert_eq!(options_key, AvailableMonitors::OPTIONS_KEY);
     }
 }
