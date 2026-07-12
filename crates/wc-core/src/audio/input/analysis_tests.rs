@@ -104,3 +104,103 @@ fn agc_reset_restores_unity_gain() {
     agc.reset();
     assert!((agc.gain() - 1.0).abs() < f32::EPSILON);
 }
+
+// ---------------------------------------------------------------------------
+// AnalysisEngine: time domain (Task 3)
+// ---------------------------------------------------------------------------
+
+/// Generate `len` samples of a sine at `freq` Hz, `amp` amplitude, 48 kHz,
+/// phase-continuous from sample index 0.
+fn sine(freq: f32, amp: f32, len: usize) -> Vec<f32> {
+    (0..len)
+        .map(|n| amp * (core::f32::consts::TAU * freq * (n as f32) / 48_000.0).sin())
+        .collect()
+}
+
+/// Push `samples` into the engine in 800-sample chunks (one 60 Hz frame of
+/// 48 kHz audio), calling `analyze` after each chunk. Returns the last
+/// analysis output.
+fn run_frames(engine: &mut AnalysisEngine, samples: &[f32]) -> crate::audio::input::AudioAnalysis {
+    let mut out = crate::audio::input::AudioAnalysis::neutral();
+    for chunk in samples.chunks(800) {
+        for &s in chunk {
+            engine.push(s);
+        }
+        out = engine.analyze(DT);
+    }
+    out
+}
+
+#[test]
+fn engine_is_inactive_until_a_full_window_arrives() {
+    let mut engine = AnalysisEngine::new(48_000);
+    let out = engine.analyze(DT);
+    assert!(!out.active, "no samples pushed yet");
+    for &s in &sine(440.0, 0.5, FFT_SIZE - 1) {
+        engine.push(s);
+    }
+    assert!(!engine.analyze(DT).active, "one short of a full window");
+    engine.push(0.0);
+    assert!(engine.analyze(DT).active, "a full window has arrived");
+}
+
+#[test]
+fn engine_goes_inactive_after_samples_stop() {
+    let mut engine = AnalysisEngine::new(48_000);
+    run_frames(&mut engine, &sine(440.0, 0.5, 4_800));
+    assert!(engine.analyze(DT).active);
+    // One simulated second with no pushes: liveness times out.
+    let mut out = engine.analyze(DT);
+    for _ in 0..60 {
+        out = engine.analyze(DT);
+    }
+    assert!(!out.active);
+}
+
+#[test]
+fn post_agc_rms_converges_to_target_on_a_steady_sine() {
+    let mut engine = AnalysisEngine::new(48_000);
+    // 30 s of a steady 440 Hz sine at 0.5 amplitude (raw RMS ~0.354).
+    let out = run_frames(&mut engine, &sine(440.0, 0.5, 48_000 * 30));
+    assert!(
+        (out.rms - AGC_TARGET_RMS).abs() < 0.03,
+        "post-AGC rms {} should sit near target {}",
+        out.rms,
+        AGC_TARGET_RMS
+    );
+    assert!(out.peak > out.rms, "peak-hold rides above rms for a sine");
+    assert!(out.peak <= 1.0);
+    assert!(out.active);
+}
+
+#[test]
+fn history_is_circular_and_the_window_reads_the_newest_samples() {
+    let mut engine = AnalysisEngine::new(48_000);
+    // Fill well past HISTORY_LEN with a loud DC value, then exactly one
+    // window of a quiet DC value. The analysis window must see only the
+    // quiet tail, proving the circular wrap points at the newest samples.
+    for _ in 0..(HISTORY_LEN + 100) {
+        engine.push(0.9);
+    }
+    for _ in 0..FFT_SIZE {
+        engine.push(0.25);
+    }
+    engine.analyze(DT);
+    assert!(
+        (engine.last_raw_rms() - 0.25).abs() < 1.0e-3,
+        "window raw RMS {} should reflect only the newest FFT_SIZE samples",
+        engine.last_raw_rms()
+    );
+}
+
+#[test]
+fn engine_reset_returns_to_neutral_and_counts_from_zero() {
+    let mut engine = AnalysisEngine::new(48_000);
+    run_frames(&mut engine, &sine(440.0, 0.5, 9_600));
+    assert!(engine.samples_received() > 0);
+    engine.reset();
+    assert_eq!(engine.samples_received(), 0);
+    let out = engine.analyze(DT);
+    assert!(!out.active);
+    assert!(out.rms.abs() < f32::EPSILON);
+}

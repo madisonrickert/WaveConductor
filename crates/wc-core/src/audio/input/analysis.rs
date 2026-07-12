@@ -99,6 +99,177 @@ fn one_pole_coeff(dt: f32, tau: f32) -> f32 {
     1.0 - (-dt / tau).exp()
 }
 
+// ---------------------------------------------------------------------------
+// AnalysisEngine
+// ---------------------------------------------------------------------------
+
+use super::{AudioAnalysis, AUDIO_BAND_COUNT};
+
+/// FFT / analysis window length in samples. A power of two supported by
+/// `fundsp::fft::real_fft` (microfft-backed). At 48 kHz this is ~21 ms —
+/// ~47 Hz bin resolution, comfortably recomputed once per 60 Hz frame.
+pub const FFT_SIZE: usize = 1024;
+/// `FFT_SIZE` as f32, kept as a literal so no runtime cast is needed.
+/// Invariant: must equal `FFT_SIZE`.
+const FFT_SIZE_F32: f32 = 1024.0;
+/// `FFT_SIZE` as u64, kept as a literal so no runtime cast is needed.
+/// Invariant: must equal `FFT_SIZE`.
+const FFT_SIZE_U64: u64 = 1024;
+/// Circular sample-history length. Holds ~85 ms at 48 kHz — several frames
+/// of headroom over the per-frame drain (800 samples at 60 Hz) so the
+/// analysis window is always fully populated with recent audio.
+pub const HISTORY_LEN: usize = 4096;
+/// Smoothing time constant for the published post-AGC RMS.
+const RMS_SMOOTH_TAU_S: f32 = 0.1;
+/// Decay time constant for the published peak-hold level.
+const PEAK_DECAY_TAU_S: f32 = 0.5;
+/// Seconds without a single new sample before `active` drops to false
+/// (device stall / unplugged-but-not-yet-errored).
+pub const ACTIVE_TIMEOUT_S: f32 = 0.5;
+
+/// Pure, device-free analysis core for the audio-input path.
+///
+/// Owned by `AnalysisState` (a Bevy resource) and fed by
+/// `drain_and_analyze` each `PreUpdate`; equally constructible in a unit
+/// test with synthesized samples. All buffers are allocated in
+/// [`AnalysisEngine::new`]; [`AnalysisEngine::push`] and
+/// [`AnalysisEngine::analyze`] never allocate (hot-path rule).
+pub struct AnalysisEngine {
+    /// Capture sample rate in Hz (fixed per stream; a rebuild constructs a
+    /// fresh engine).
+    sample_rate: u32,
+    /// Circular buffer of the most recent mono samples.
+    history: Vec<f32>,
+    /// Next write index into `history`.
+    write_pos: usize,
+    /// Total samples ever pushed (liveness: a full window must have arrived
+    /// before the outputs mean anything).
+    total_pushed: u64,
+    /// Samples pushed since the last `analyze` call (liveness tracking).
+    pending: usize,
+    /// Seconds since the last frame that delivered at least one sample.
+    seconds_since_sample: f32,
+    /// Scratch the analysis window is copied into. Also the in-place FFT
+    /// buffer from Task 4 onward.
+    fft_scratch: Vec<f32>,
+    /// Automatic gain control (post-AGC signal feeds every feature).
+    agc: Agc,
+    /// One-pole smoothed post-AGC RMS (the published `rms`).
+    smoothed_rms: f32,
+    /// Decaying peak-hold of the post-AGC window peak (the published `peak`).
+    peak: f32,
+    /// Raw (pre-AGC) RMS of the most recent analysis window. Diagnostic.
+    last_raw_rms: f32,
+}
+
+impl AnalysisEngine {
+    /// Allocate an engine for a stream at `sample_rate` Hz. This is the one
+    /// place the analysis path allocates; called at stream build (event
+    /// frequency), never per frame.
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            sample_rate,
+            history: vec![0.0; HISTORY_LEN],
+            write_pos: 0,
+            total_pushed: 0,
+            pending: 0,
+            seconds_since_sample: ACTIVE_TIMEOUT_S,
+            fft_scratch: vec![0.0; FFT_SIZE],
+            agc: Agc::new(),
+            smoothed_rms: 0.0,
+            peak: 0.0,
+            last_raw_rms: 0.0,
+        }
+    }
+
+    /// Append one mono sample to the circular history. Allocation-free.
+    pub fn push(&mut self, sample: f32) {
+        self.history[self.write_pos] = sample;
+        self.write_pos = (self.write_pos + 1) % HISTORY_LEN;
+        self.total_pushed = self.total_pushed.saturating_add(1);
+        self.pending = self.pending.saturating_add(1);
+    }
+
+    /// Analyze the newest window and advance all smoothers by `dt` seconds.
+    /// Returns the full [`AudioAnalysis`] snapshot for this frame.
+    /// Allocation-free.
+    pub fn analyze(&mut self, dt: f32) -> AudioAnalysis {
+        // Liveness: track how long since audio last flowed.
+        if self.pending > 0 {
+            self.seconds_since_sample = 0.0;
+        } else {
+            self.seconds_since_sample += dt;
+        }
+        self.pending = 0;
+
+        // Copy the newest FFT_SIZE samples out of the circular history.
+        self.fill_scratch_raw();
+
+        // RMS + peak over the raw window. sum of squares / N, then sqrt.
+        let mut sum_sq = 0.0_f32;
+        let mut window_peak = 0.0_f32;
+        for &s in &self.fft_scratch {
+            sum_sq += s * s;
+            window_peak = window_peak.max(s.abs());
+        }
+        let raw_rms = (sum_sq / FFT_SIZE_F32).sqrt();
+        self.last_raw_rms = raw_rms;
+
+        // AGC and the smoothed/held level outputs.
+        let gain = self.agc.process(raw_rms, dt);
+        self.smoothed_rms +=
+            ((raw_rms * gain).min(1.0) - self.smoothed_rms) * one_pole_coeff(dt, RMS_SMOOTH_TAU_S);
+        self.peak = ((window_peak * gain).min(1.0)).max(self.peak * (-dt / PEAK_DECAY_TAU_S).exp());
+
+        AudioAnalysis {
+            rms: self.smoothed_rms,
+            gain,
+            bands: [0.0; AUDIO_BAND_COUNT], // spectral bands land in Task 4
+            onset: 0.0,                     // spectral flux lands in Task 5
+            beat_confidence: 0.0,           // beat debounce lands in Task 5
+            peak: self.peak,
+            active: self.is_live(),
+        }
+    }
+
+    /// Discard all state and start from silence, as if freshly constructed.
+    /// Reconstructs via [`AnalysisEngine::new`] — this *does* allocate, which
+    /// is fine at its event frequency (pause/resume transitions only; the
+    /// caller in `drain_and_analyze` guards it to run once per transition).
+    pub fn reset(&mut self) {
+        *self = Self::new(self.sample_rate);
+    }
+
+    /// Total samples ever pushed (test/diagnostic surface).
+    pub fn samples_received(&self) -> u64 {
+        self.total_pushed
+    }
+
+    /// Raw (pre-AGC) RMS of the most recent analysis window
+    /// (test/diagnostic surface).
+    pub fn last_raw_rms(&self) -> f32 {
+        self.last_raw_rms
+    }
+
+    /// Whether a full window has ever arrived and samples flowed recently.
+    fn is_live(&self) -> bool {
+        self.total_pushed >= FFT_SIZE_U64 && self.seconds_since_sample < ACTIVE_TIMEOUT_S
+    }
+
+    /// Copy the newest `FFT_SIZE` samples (ending at `write_pos`) from the
+    /// circular history into `fft_scratch` — at most two `copy_from_slice`
+    /// segments, no allocation.
+    fn fill_scratch_raw(&mut self) {
+        let start = (self.write_pos + HISTORY_LEN - FFT_SIZE) % HISTORY_LEN;
+        let first_len = (HISTORY_LEN - start).min(FFT_SIZE);
+        self.fft_scratch[..first_len].copy_from_slice(&self.history[start..start + first_len]);
+        let rest = FFT_SIZE - first_len;
+        if rest > 0 {
+            self.fft_scratch[first_len..].copy_from_slice(&self.history[..rest]);
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "analysis_tests.rs"]
 mod tests;
