@@ -73,6 +73,22 @@ pub enum SettingKind {
     /// TV, a device unplugged mid-session — stays visible and directly
     /// editable rather than being silently reset. See
     /// `crate::settings::runtime_enum` for the resource-registration side.
+    ///
+    /// ## Consumers must debounce: the value changes per keystroke
+    ///
+    /// The free-text half of the widget writes back on **every keystroke**, as
+    /// `SettingKind::Text` and `SettingKind::FilePath` already do: typing
+    /// `"Living Room TV"` walks the field through `"L"`, `"Li"`, `"Liv"`, …
+    /// Also note a plain `Changed<S>` consumer is useless here — the panel's
+    /// `DerefMut` marks the settings resource changed on every frame it
+    /// renders — so any consumer *must* value-diff, and every value-diffing
+    /// consumer inherits the per-keystroke sequence.
+    ///
+    /// So do not act directly on each observed value change. Marking the field
+    /// `requires_restart` fires one `crate::settings::SketchRestart` per
+    /// keystroke (`registry`'s restart diff is a value diff); a device opener
+    /// would likewise try to open `"L"`, then `"Li"`. Debounce, or commit on
+    /// focus-loss / Enter, and act on the settled value.
     RuntimeEnum {
         /// Matched against
         /// `crate::settings::RuntimeEnumOptionsSource::OPTIONS_KEY` to find

@@ -43,10 +43,28 @@
 //! The field this feeds is still a plain `String` — `SettingKind::RuntimeEnum`
 //! persists exactly like `SettingKind::Text` (a TOML string). Only the
 //! *widget* differs; see `panel_user::widgets::render_runtime_enum`.
+//!
+//! ## The string key is the whole contract, so debug builds check it
+//!
+//! Nothing in the type system ties a field's `options_key` literal to a
+//! source's `OPTIONS_KEY` const — that decoupling is the point (neither side
+//! names the other's type), but it means a typo on either side degrades into
+//! an empty dropdown, which is *visually identical* to correctly-wired
+//! hardware that is simply asleep or unplugged. `warn_on_unresolved_options_keys`
+//! (debug builds only) cross-checks the two registries at startup and warns
+//! rather than letting the author debug their hardware enumeration for a bug
+//! that is a misspelled string.
 
 use std::sync::Arc;
 
 use bevy::prelude::*;
+
+// Only the debug-build cross-check below reads the settings side of the
+// contract; keep the imports off the release build so it stays warning-clean.
+#[cfg(debug_assertions)]
+use super::def::SettingKind;
+#[cfg(debug_assertions)]
+use super::registry::SettingsRegistry;
 
 /// A Bevy `Resource` that supplies the live option list for one or more
 /// `crate::settings::SettingKind::RuntimeEnum` fields.
@@ -79,6 +97,16 @@ pub(crate) struct RuntimeEnumOptionsSnapshotEntry {
     pub(crate) options_key: &'static str,
     /// `RuntimeEnumOptionsSource::options` at snapshot time, ref-counted so
     /// cloning the snapshot list is a refcount bump, not a `Vec` copy.
+    ///
+    /// *Creating* the entry is not free, though: `snapshot_one` builds this
+    /// `Arc` via `impl From<&[String]> for Arc<[String]>`, which allocates and
+    /// **deep-copies every option `String`** — it cannot share the source
+    /// resource's buffer, which the source owns. The refcount-bump economy
+    /// applies only downstream of that one copy. This is why
+    /// `panel_user::fields::render_section_by_key` takes a snapshot only for a
+    /// section that actually declares a `SettingKind::RuntimeEnum` field, and
+    /// why `RuntimeEnumOptionsSource::options` is specified as a cheap field
+    /// read: the copy is per rendered section, per frame.
     pub(crate) options: Arc<[String]>,
 }
 
@@ -184,6 +212,114 @@ pub(crate) fn options_for<'a>(
         .iter()
         .find(|entry| entry.options_key == options_key)
         .map_or(&[], |entry| entry.options.as_ref())
+}
+
+/// Debug-build startup system: cross-check every declared `options_key`
+/// against the registered sources, and warn on anything that cannot resolve.
+///
+/// Registered in `super::SettingsPlugin::build` under `Startup`, which runs
+/// after every plugin's `build` has run — so both sides are fully populated
+/// (`register_sketch_settings` and `register_runtime_enum_options` are both
+/// `App`-build-time calls) and a warning here can never be an ordering
+/// false positive.
+///
+/// Warns; never panics. A missing source is a real, shippable state at
+/// *runtime* (the resource may simply not be inserted yet), and the panel
+/// already degrades gracefully. What it must not be is *silent at startup*:
+/// see the module docs for why an empty dropdown is indistinguishable from
+/// absent hardware.
+#[cfg(debug_assertions)]
+pub(crate) fn warn_on_unresolved_options_keys(
+    settings: Res<'_, SettingsRegistry>,
+    sources: Res<'_, RuntimeEnumOptionsRegistry>,
+) {
+    for warning in options_key_warnings(&settings, &sources) {
+        warn!("{warning}");
+    }
+}
+
+/// The pure core of `warn_on_unresolved_options_keys`, returning one message
+/// per problem found so it can be unit-tested without an `App`.
+///
+/// Two classes of problem, both silent failures at runtime:
+///
+/// 1. **Unresolved key** — a field declares `options_key = "x"` and no
+///    registered source reports `OPTIONS_KEY == "x"`. `options_for` returns an
+///    empty slice, so the dropdown is empty and the persisted value renders as
+///    "(unavailable)".
+/// 2. **Duplicate key** — two sources registered on one key.
+///    `RegisterRuntimeEnumOptionsExt::register_runtime_enum_options` pushes
+///    unconditionally and `options_for` takes the *first* match, so the second
+///    source is silently shadowed and its options never appear.
+///
+/// Allocates freely: this runs once, at startup, in debug builds only.
+#[cfg(debug_assertions)]
+fn options_key_warnings(
+    settings: &SettingsRegistry,
+    sources: &RuntimeEnumOptionsRegistry,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // (2) Duplicate OPTIONS_KEY. Report each entry that is shadowed by an
+    // earlier one, so N registrations on a key yield N-1 warnings.
+    for (idx, entry) in sources.entries.iter().enumerate() {
+        if sources.entries[..idx]
+            .iter()
+            .any(|earlier| earlier.options_key == entry.options_key)
+        {
+            warnings.push(format!(
+                "two `RuntimeEnumOptionsSource`s are registered under `options_key = \"{}\"`. \
+                 `options_for` takes the first match, so this later registration is silently \
+                 shadowed and its options will never appear. Give each source a distinct \
+                 `OPTIONS_KEY`.",
+                entry.options_key,
+            ));
+        }
+    }
+
+    // The keys that *are* available, listed in every warning so the author can
+    // spot a typo without opening a single source file.
+    let registered = if sources.entries.is_empty() {
+        "(none)".to_owned()
+    } else {
+        format!(
+            "\"{}\"",
+            sources
+                .entries
+                .iter()
+                .map(|e| e.options_key)
+                .collect::<Vec<_>>()
+                .join("\", \"")
+        )
+    };
+
+    // (1) Unresolved options_key on a declared field.
+    for registered_settings in &settings.entries {
+        for def in registered_settings.def.iter() {
+            let SettingKind::RuntimeEnum { options_key } = def.kind else {
+                continue;
+            };
+            if sources
+                .entries
+                .iter()
+                .any(|entry| entry.options_key == options_key)
+            {
+                continue;
+            }
+            warnings.push(format!(
+                "settings field `{}.{}` declares `options_key = \"{}\"`, but no \
+                 `RuntimeEnumOptionsSource` is registered under that key. Its dropdown will \
+                 render empty and any persisted value will show as \"(unavailable)\" — \
+                 indistinguishable from hardware that is merely absent. Registered keys: \
+                 [{}]. Fix the `#[setting(options_key = ...)]` literal, or call \
+                 `App::register_runtime_enum_options::<YourSource>()` for a source whose \
+                 `OPTIONS_KEY` matches.",
+                registered_settings.storage_key, def.field_name, options_key, registered,
+            ));
+        }
+    }
+
+    warnings
 }
 
 #[cfg(test)]
@@ -307,6 +443,112 @@ mod tests {
         assert_eq!(
             options_for(&snap, options_key).to_vec(),
             vec!["Built-in Speakers".to_owned(), "HDMI TV".to_owned()]
+        );
+    }
+
+    /// A second source deliberately colliding with `FakeAudioDevices`'
+    /// `OPTIONS_KEY`, to exercise the duplicate-key branch of the debug check.
+    #[derive(Resource, Default)]
+    struct ShadowingAudioDevices(Vec<String>);
+
+    impl RuntimeEnumOptionsSource for ShadowingAudioDevices {
+        const OPTIONS_KEY: &'static str = "audio_output_devices";
+        fn options(&self) -> &[String] {
+            &self.0
+        }
+    }
+
+    /// A `SettingsRegistry` holding just `FixtureAudioSettings`, whose single
+    /// field declares `options_key = "audio_output_devices"`. Built by hand
+    /// rather than via `register_sketch_settings` so the test touches neither
+    /// the type registry nor the on-disk persistence path.
+    #[cfg(debug_assertions)]
+    fn fixture_settings_registry() -> SettingsRegistry {
+        use crate::settings::registry::{
+            diff_requires_restart_fn, is_changed_fn, save_fn, RegisteredSettings,
+        };
+        SettingsRegistry {
+            entries: vec![RegisteredSettings {
+                storage_key: FixtureAudioSettings::STORAGE_KEY,
+                def: Arc::from(FixtureAudioSettings::settings_def()),
+                save_fn: save_fn::<FixtureAudioSettings>,
+                is_changed_fn: is_changed_fn::<FixtureAudioSettings>,
+                diff_requires_restart_fn: diff_requires_restart_fn::<FixtureAudioSettings>,
+            }],
+        }
+    }
+
+    /// The options registry an `App` accumulated from its
+    /// `register_runtime_enum_options` calls — the same path a real consumer
+    /// takes, so the test checks what production actually builds.
+    #[cfg(debug_assertions)]
+    fn options_registry_of(app: &App) -> &RuntimeEnumOptionsRegistry {
+        app.world().resource::<RuntimeEnumOptionsRegistry>()
+    }
+
+    /// The happy path: field key and source key agree, so nothing is reported.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_matching_options_key_produces_no_warning() {
+        let mut app = App::new();
+        app.register_runtime_enum_options::<FakeAudioDevices>();
+        let warnings =
+            options_key_warnings(&fixture_settings_registry(), options_registry_of(&app));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    /// The bug this check exists for: the field says one thing, the source
+    /// says another, and every runtime symptom looks like absent hardware.
+    /// The warning must name the field, its storage key, and the keys that
+    /// *are* registered.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_typod_options_key_is_reported_with_the_registered_keys() {
+        let mut app = App::new();
+        // Only a monitor source registered — the fixture field wants
+        // "audio_output_devices".
+        app.register_runtime_enum_options::<FakeMonitors>();
+        let warnings =
+            options_key_warnings(&fixture_settings_registry(), options_registry_of(&app));
+
+        assert_eq!(warnings.len(), 1, "expected one warning, got {warnings:?}");
+        let msg = &warnings[0];
+        assert!(msg.contains("fixture_audio.output_device"), "{msg}");
+        assert!(msg.contains("audio_output_devices"), "{msg}");
+        assert!(msg.contains("display_monitors"), "{msg}");
+    }
+
+    /// With no sources registered at all, the warning still fires and says so
+    /// explicitly rather than printing an empty list.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn an_options_key_with_no_sources_at_all_is_reported() {
+        let warnings = options_key_warnings(
+            &fixture_settings_registry(),
+            &RuntimeEnumOptionsRegistry::default(),
+        );
+        assert_eq!(warnings.len(), 1, "expected one warning, got {warnings:?}");
+        assert!(warnings[0].contains("(none)"), "{}", warnings[0]);
+    }
+
+    /// Two sources on one key: `options_for` takes the first, so the second is
+    /// silently shadowed. Exactly one warning (the shadowed registration), and
+    /// no unresolved-key warning — the key *does* resolve.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_duplicate_options_key_is_reported_as_shadowed() {
+        let mut app = App::new();
+        app.register_runtime_enum_options::<FakeAudioDevices>();
+        app.register_runtime_enum_options::<ShadowingAudioDevices>();
+        let warnings =
+            options_key_warnings(&fixture_settings_registry(), options_registry_of(&app));
+
+        assert_eq!(warnings.len(), 1, "expected one warning, got {warnings:?}");
+        assert!(warnings[0].contains("shadowed"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("audio_output_devices"),
+            "{}",
+            warnings[0]
         );
     }
 }

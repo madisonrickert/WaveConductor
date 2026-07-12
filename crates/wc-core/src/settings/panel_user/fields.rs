@@ -18,9 +18,11 @@ use egui_phosphor::regular as phosphor;
 
 use super::provider_status::{render_provider_status_row, ProviderStatusLine};
 use super::widgets::render_widget_value;
-use crate::settings::def::{SettingDef, SettingsCategory};
+use crate::settings::def::{SettingDef, SettingKind, SettingsCategory};
 use crate::settings::registry::{reflect_resource_mut, SettingsRegistry};
-use crate::settings::runtime_enum::{self, RuntimeEnumOptionsSnapshotEntry};
+use crate::settings::runtime_enum::{
+    self, RuntimeEnumOptionsSnapshot, RuntimeEnumOptionsSnapshotEntry,
+};
 use crate::ui::OverlayStyle;
 
 /// Look up the type registration matching `storage_key` and render its
@@ -93,7 +95,21 @@ pub(super) fn render_section_by_key(
     // bail below, since that bail is discovered *by* the
     // `reflect_resource_mut` call this snapshot must precede. See
     // `crate::settings::runtime_enum` for the registration side.
-    let runtime_enum_options = runtime_enum::snapshot(world);
+    //
+    // Skipped entirely for a section with no runtime-enum field, which is
+    // every section today: `snapshot` deep-copies each source's option
+    // Strings (see `RuntimeEnumOptionsSnapshotEntry::options`), and this runs
+    // per rendered section, per frame. An empty snapshot is the correct input
+    // for such a section anyway -- `options_for` on it yields an empty slice,
+    // and no widget in the section asks.
+    let runtime_enum_options = if defs
+        .iter()
+        .any(|d| matches!(d.kind, SettingKind::RuntimeEnum { .. }))
+    {
+        runtime_enum::snapshot(world)
+    } else {
+        RuntimeEnumOptionsSnapshot::new()
+    };
 
     // Bevy 0.19 made `ReflectResource` a ZST; resources are now reflected via
     // `ReflectComponent` on their backing entity (see `reflect_resource_mut`).

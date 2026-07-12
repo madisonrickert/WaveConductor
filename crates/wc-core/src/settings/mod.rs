@@ -97,6 +97,14 @@ impl Plugin for SettingsPlugin {
                 )
                     .chain(),
             );
+        // Debug-only wiring check: a `ty = RuntimeEnum` field's `options_key`
+        // literal and its source resource's `OPTIONS_KEY` const are tied by
+        // nothing but the string itself, and a mismatch degrades into an empty
+        // dropdown — visually identical to hardware that is merely asleep. Both
+        // registries are fully populated by the end of plugin `build`, so
+        // `Startup` sees the final picture and can never warn spuriously.
+        #[cfg(debug_assertions)]
+        app.add_systems(Startup, runtime_enum::warn_on_unresolved_options_keys);
         // egui-based UI systems are wired below.
         panel_user::add_systems(app);
         panel_dev::add_systems(app);
