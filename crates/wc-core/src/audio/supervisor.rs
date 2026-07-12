@@ -344,6 +344,17 @@ pub fn synth_graph_reload_action(
 /// an `AudioStream` resource exists: a failed rebuild leaves the old, dead stream
 /// installed, so "a stream is present" is not evidence of anything.
 ///
+/// ## Silencing the command ring for the duration of the outage
+///
+/// Whenever a reconnect is wanted this also **removes** the non-send
+/// `crate::audio::ring::AudioCommandSender`. A dead stream's callback stops
+/// draining the command ring, but the sketches keep pushing per-frame `Set*Param`
+/// commands, so within ~1 s the (64-slot) ring is full and every subsequent push
+/// emits an allocating `warn!` on the render thread — for the rest of the soak, if
+/// the endpoint never comes back. Every consumer of the sender already takes it as
+/// `Option<NonSendMut<…>>` and skips cleanly when it is absent, and
+/// `rebuild_engine` re-installs a fresh one on the first successful rebuild.
+///
 /// ## Step 5: put the synth graph back (Task 5R)
 ///
 /// A successful rebuild raises [`SynthGraphReloadPending`] and immediately tries
@@ -393,6 +404,31 @@ pub fn supervise_audio(world: &mut bevy::prelude::World) {
     // Trigger 1: a live stream died. Trigger 2: no stream ever came up.
     let wants_reconnect = matches!(status, AudioStatus::Reconnecting)
         || (!has_stream && matches!(status, AudioStatus::NotStarted | AudioStatus::Errored));
+
+    if wants_reconnect {
+        // Take the command ring away for the duration of the outage. A dead stream
+        // does not drain it, so it fills within ~1 s of per-frame `Set*Param`
+        // pushes — and from then on *every* push logs an allocating, formatted
+        // `warn!` ("audio command ring full; dropping … param update") on the
+        // render thread, every frame, for as long as the outage lasts. On a kiosk
+        // whose only endpoint was permanently removed the supervisor settles into a
+        // 30 s retry that always fails, so that is ~10^5–10^6 log lines over an
+        // 8-hour soak, on exactly the thread whose steady-state allocation
+        // `AGENTS.md` forbids.
+        //
+        // Removing the resource is the honest fix rather than gating each push
+        // helper on the status: there genuinely *is* nowhere to send a command, and
+        // every consumer of the sender already takes it as `Option<NonSendMut<…>>`
+        // and skips cleanly (that is the headless-test path they were written for).
+        // `rebuild_engine` re-installs a fresh sender on the first successful
+        // rebuild, so a recovered stream resumes receiving param updates with no
+        // further wiring — and the sketch's own `OnEnter`, re-run by the
+        // synth-graph reload below, re-seeds the params it missed.
+        //
+        // Cheap and idempotent: after the first frame of an outage there is nothing
+        // left to remove, and this is a hash lookup that returns `None`.
+        world.remove_non_send::<crate::audio::ring::AudioCommandSender>();
+    }
 
     let action = {
         let mut supervisor = world.resource_mut::<AudioSupervisor>();
@@ -721,6 +757,100 @@ mod tests {
         sup.begin(death);
         assert_eq!(sup.attempts(), 0);
         assert_eq!(sup.poll(death + 1.0), SupervisorAction::Rebuild);
+    }
+
+    /// The command ring's fate during an outage. A dead stream stops draining it,
+    /// but the sketches keep pushing per-frame `Set*Param` commands — so within a
+    /// second the 64-slot ring is full and every further push emits an allocating,
+    /// formatted `warn!` on the render thread. For the rest of the soak, if the
+    /// endpoint never returns.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod command_ring {
+        use bevy::prelude::*;
+
+        use super::*;
+        use crate::audio::command::AudioCommand;
+        use crate::audio::engine::SimulateNoOutputDevice;
+        use crate::audio::ring::{AudioCommandSender, RING_CAPACITY};
+        use crate::audio::state::{AudioState, AudioStatus};
+
+        /// The supervisor with a command ring but no cpal stream. The
+        /// `SimulateNoOutputDevice` seam is defensive: it guarantees that even if a
+        /// backoff deadline somehow elapsed mid-test, no real audio device is opened.
+        fn app_with_a_command_ring() -> App {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.init_resource::<AudioState>();
+            app.init_resource::<AudioSupervisor>();
+            app.init_resource::<SynthGraphReloadPending>();
+            app.insert_resource(SimulateNoOutputDevice);
+            let (producer, _consumer) = rtrb::RingBuffer::<AudioCommand>::new(RING_CAPACITY);
+            app.insert_non_send(AudioCommandSender::new(producer));
+            app.add_systems(Update, supervise_audio);
+            app
+        }
+
+        /// A healthy stream keeps its ring — the sketches must go on sending param
+        /// updates. This is the frame the app spends ~all of its life in, and the
+        /// negative that makes the test below mean something.
+        #[test]
+        fn a_healthy_stream_keeps_its_command_ring() {
+            let mut app = app_with_a_command_ring();
+            app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
+
+            for _ in 0..5 {
+                app.update();
+            }
+
+            assert!(
+                app.world().get_non_send::<AudioCommandSender>().is_some(),
+                "a running stream must keep receiving param updates",
+            );
+            assert!(!app.world().resource::<AudioSupervisor>().is_reconnecting());
+        }
+
+        /// The outage: the sender is taken away, so the sketches' `Option<NonSendMut<…>>`
+        /// param pushes skip instead of hammering a full ring and logging every frame.
+        #[test]
+        fn a_dead_stream_takes_the_command_ring_away_for_the_duration_of_the_outage() {
+            let mut app = app_with_a_command_ring();
+            app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Reconnecting;
+
+            app.update();
+
+            assert!(
+                app.world().get_non_send::<AudioCommandSender>().is_none(),
+                "nothing drains the ring while the stream is dead; stop pushing to it",
+            );
+            assert!(
+                app.world().resource::<AudioSupervisor>().is_reconnecting(),
+                "and the reconnect cycle is armed — the removal is not a substitute \
+                 for recovery, it is what keeps the recovery quiet",
+            );
+
+            // Idempotent: many more frames of outage remove nothing further and
+            // cost a failed lookup each. `rebuild_engine` is the only thing that
+            // puts a sender back, and only on a rebuild that actually succeeded.
+            for _ in 0..20 {
+                app.update();
+            }
+            assert!(app.world().get_non_send::<AudioCommandSender>().is_none());
+        }
+
+        /// A boot that never found a device (`NotStarted`, no stream) is the same
+        /// outage seen from the other end, and must not leave a sender behind either
+        /// — the sketches would push into a ring no callback will ever drain.
+        #[test]
+        fn a_stream_that_never_came_up_takes_the_command_ring_away_too() {
+            let mut app = app_with_a_command_ring();
+            // `NotStarted` + no `AudioStream`: `start_audio_engine` took its `Err`
+            // arm. (It does not install a sender either; this test inserts one to
+            // prove the removal is driven by the *status*, not by luck.)
+            app.update();
+
+            assert!(app.world().get_non_send::<AudioCommandSender>().is_none());
+            assert!(app.world().resource::<AudioSupervisor>().is_reconnecting());
+        }
     }
 
     /// Task 5R's gate. A rebuilt stream plays a `DspHost` with no synth voice, so

@@ -89,8 +89,20 @@ impl AudioStream {
 /// enumeration until an endpoint exists. Latching `Errored` here — which is what
 /// this system used to do — meant a silent installation for the night.
 ///
-/// The app continues to run either way; sketches that don't depend on audio
-/// remain functional.
+/// ## …but only because *every* consumer of the engine resources is optional
+///
+/// The `Err` arm installs **no** `AudioCommandSender`, `AudioMessageReceiver`,
+/// `AudioStream`, or `AudioErrorFlag` — there is no engine, so there is nothing
+/// to install. That is only survivable because every system that touches those
+/// non-send resources takes them as `Option<NonSend…>`: in Bevy 0.19 a missing
+/// `NonSend`/`NonSendMut` is a `SystemParamValidationError` whose severity is
+/// `Panic`, which takes the **whole schedule** down, not just the system. The
+/// two always-on systems ([`super::state::pump_audio_messages`] in `PreUpdate`
+/// and [`super::nav::handle_volume_toggle`] in `Update`) used to take them
+/// unconditionally, so this recoverable boot killed the process on frame 1 —
+/// before the supervisor's first `begin`. Do not "tidy" an `Option` off any of
+/// them; `a_boot_with_no_output_device_survives_and_arms_a_reconnect_cycle`
+/// below is the regression test.
 pub fn start_audio_engine(world: &mut World) {
     // Read (do **not** remove) the encoded sample assets: a later stream rebuild
     // (`rebuild_engine`) has to re-decode them into a fresh `DspHost`, so the
@@ -114,7 +126,7 @@ pub fn start_audio_engine(world: &mut World) {
     let resolution =
         super::device::resolve_output_device(saved_name(saved.as_str()), &host_output_names());
 
-    match build_engine(&assets, &resolution) {
+    match build_engine_for(world, &assets, &resolution) {
         Ok(built) => {
             let device_name = built.device_name.clone();
             // sender and receiver wrap rtrb::Producer/Consumer which are Send
@@ -128,9 +140,14 @@ pub fn start_audio_engine(world: &mut World) {
             world.resource_mut::<AudioState>().sample_rate = built.sample_rate;
             world.resource_mut::<AudioState>().channels = built.channels;
             // The endpoint this stream is actually bound to. The migrate-back
-            // check (`saved_device_reappeared`) compares against it so it never
-            // rebuilds a stream that is already on the saved device.
-            world.resource_mut::<super::device::BoundOutputDevice>().0 = Some(device_name.clone());
+            // check (`saved_device_reappeared`) and the vanished-endpoint check
+            // (`bound_device_disappeared`) both compare against it, so `None` —
+            // a device that cannot report its own name — is the honest value
+            // when we have no name to compare *with*; see `open_output_device`.
+            world
+                .resource_mut::<super::device::BoundOutputDevice>()
+                .0
+                .clone_from(&device_name);
             // Establish the settle baseline for the supervisor's flap defence:
             // the stream came up *now*, so a death within `STREAM_SETTLE_WINDOW`
             // counts as a flap rather than resetting the backoff. `Time<Real>` is
@@ -145,14 +162,17 @@ pub fn start_audio_engine(world: &mut World) {
             tracing::info!(
                 sample_rate = built.sample_rate,
                 channels = built.channels,
-                device = %device_name,
+                device = device_name.as_deref().unwrap_or(UNNAMED_DEVICE),
                 "audio engine started",
             );
         }
         Err(err) => {
             // Recoverable, not terminal — see the doc comment. `Reconnecting` is
             // the state the supervisor drives; it will `begin()` a cycle on the
-            // next frame and retry until an endpoint exists.
+            // next frame and retry until an endpoint exists. Nothing else is
+            // installed: no sender, no receiver, no stream, no error flag. Every
+            // consumer of those resources takes them as `Option<…>` precisely so
+            // this frame is survivable.
             tracing::warn!(
                 ?err,
                 "audio engine failed to start; entering Reconnecting — the supervisor will retry"
@@ -277,7 +297,7 @@ pub(crate) fn rebuild_engine(world: &mut World) -> bool {
     let resolution =
         super::device::resolve_output_device(saved_name(saved.as_str()), &host_output_names());
 
-    let built = match build_engine(&assets, &resolution) {
+    let built = match build_engine_for(world, &assets, &resolution) {
         Ok(built) => built,
         Err(err) => {
             tracing::warn!(?err, "audio stream rebuild failed; will retry on backoff");
@@ -302,12 +322,19 @@ pub(crate) fn rebuild_engine(world: &mut World) -> bool {
     }
 
     let device_name = built.device_name.clone();
+    // Re-installing the sender is what puts the sketches' per-frame param pushes
+    // back on the air: `supervise_audio` **removed** it on entering `Reconnecting`
+    // (a dead stream drains nothing, so every push would hit a full ring and log)
+    // and this is the only place it comes back.
     world.insert_non_send(sender);
     world.insert_non_send(built.receiver);
     // Replaces (and therefore drops, and therefore stops) the dead stream.
     world.insert_non_send(built.stream);
     world.insert_resource(AudioErrorFlag(built.error_flag));
-    world.resource_mut::<super::device::BoundOutputDevice>().0 = Some(device_name.clone());
+    world
+        .resource_mut::<super::device::BoundOutputDevice>()
+        .0
+        .clone_from(&device_name);
     {
         let mut state = world.resource_mut::<AudioState>();
         state.sample_rate = built.sample_rate;
@@ -329,9 +356,20 @@ pub(crate) fn rebuild_engine(world: &mut World) -> bool {
             stream.play();
         }
     }
-    tracing::info!(device = %device_name, in_sketch, "audio stream rebuilt");
+    tracing::info!(
+        device = device_name.as_deref().unwrap_or(UNNAMED_DEVICE),
+        in_sketch,
+        "audio stream rebuilt"
+    );
     true
 }
+
+/// Log placeholder for a device that cannot report its own name. Deliberately
+/// *not* what [`super::device::BoundOutputDevice`] stores in that case: a
+/// placeholder there would never match a real enumerated name, so the
+/// vanished-endpoint check would read it as "my endpoint disappeared" on every
+/// topology change. `None` is the honest binding; this string is for humans.
+const UNNAMED_DEVICE: &str = "<unnamed>";
 
 struct BuiltEngine {
     stream: AudioStream,
@@ -342,10 +380,11 @@ struct BuiltEngine {
     error_flag: Arc<AtomicBool>,
     sample_rate: u32,
     channels: u16,
-    /// Name of the output device this stream is bound to. Recorded into
-    /// [`super::device::BoundOutputDevice`] so the migrate-back check knows the
-    /// live endpoint.
-    device_name: String,
+    /// Name of the output device this stream is bound to, or `None` when the
+    /// device could not report one. Recorded into
+    /// [`super::device::BoundOutputDevice`], which both the migrate-back check
+    /// and the vanished-endpoint check compare against.
+    device_name: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -379,11 +418,11 @@ enum EngineBuildError {
 fn open_output_device(
     host: &cpal::Host,
     resolution: &super::device::DeviceResolution,
-) -> Result<(cpal::Device, String), EngineBuildError> {
+) -> Result<(cpal::Device, Option<String>), EngineBuildError> {
     if let super::device::DeviceResolution::Preferred(name) = resolution {
         if let Ok(mut devices) = host.output_devices() {
             if let Some(device) = devices.find(|d| d.name().is_ok_and(|n| &n == name)) {
-                return Ok((device, name.clone()));
+                return Ok((device, Some(name.clone())));
             }
         }
         tracing::warn!(device = %name, "saved output device not found; using host default");
@@ -391,11 +430,53 @@ fn open_output_device(
     let device = host
         .default_output_device()
         .ok_or(EngineBuildError::NoDefaultDevice)?;
-    // A device that cannot report its own name is still usable; only the
-    // migrate-back bookkeeping cares about the string.
-    let name = device.name().unwrap_or_else(|_| "default".to_owned());
+    // A device that cannot report its own name is still perfectly usable — it is
+    // only the *bookkeeping* that needs a name. `None` rather than a placeholder
+    // string: the topology snapshots that `BoundOutputDevice` is diffed against
+    // are built from `d.name().ok()`, so a nameless device is absent from them by
+    // construction, and any stand-in we invented would look permanently missing.
+    let name = device.name().ok();
     Ok((device, name))
 }
+
+/// [`build_engine`] with the world in scope, so a test can force the failure
+/// path.
+///
+/// ## The seam, and why it is here
+///
+/// `build_engine` reaches straight into `cpal::default_host()`, so on any machine
+/// that *has* an output device — every developer's, and the kiosk — its error path
+/// is unreachable from a test. That error path is the one a kiosk takes when it
+/// powers on before its TV wakes, i.e. one of this branch's two headline
+/// scenarios, and it went untested and process-fatal (see [`start_audio_engine`]).
+/// Rather than mock cpal, this adds the smallest honest seam: a `#[cfg(test)]`
+/// marker resource that makes the *engine build* — and only the engine build —
+/// report `NoDefaultDevice`, exactly as a deviceless host would. It compiles out
+/// of every non-test build, and both build sites (startup and rebuild) go through
+/// here, so a test can hold the app in the "no endpoint yet" state for as many
+/// frames as it likes.
+fn build_engine_for(
+    world: &World,
+    assets: &SampleAssets,
+    resolution: &super::device::DeviceResolution,
+) -> Result<BuiltEngine, EngineBuildError> {
+    #[cfg(test)]
+    if world.contains_resource::<SimulateNoOutputDevice>() {
+        return Err(EngineBuildError::NoDefaultDevice);
+    }
+    // The world is read by the seam above and by nothing else, so outside a test
+    // build this parameter is deliberately inert.
+    #[cfg(not(test))]
+    let _ = world;
+    build_engine(assets, resolution)
+}
+
+/// Test-only seam (see [`build_engine_for`]): while this resource is in the world,
+/// every engine build fails with `NoDefaultDevice`, as on a host that enumerates
+/// no output device at all. Not compiled into the shipped binary.
+#[cfg(test)]
+#[derive(Resource)]
+pub(crate) struct SimulateNoOutputDevice;
 
 fn build_engine(
     assets: &SampleAssets,
@@ -517,4 +598,82 @@ fn build_engine(
         channels,
         device_name,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::ring::{AudioCommandSender, AudioMessageReceiver};
+    use crate::audio::state::AudioStatus;
+    use crate::audio::supervisor::AudioSupervisor;
+    use crate::audio::AudioPlugin;
+
+    /// The scenario the whole reconnect branch exists for, and the one it used to
+    /// die on: **the kiosk powers on before its TV finishes waking**, so the host
+    /// enumerates no output device at all, `start_audio_engine` takes its `Err`
+    /// arm, and no sender / receiver / stream / error-flag is installed.
+    ///
+    /// The very first `app.update()` then reaches `PreUpdate::pump_audio_messages`,
+    /// which used to take a bare `NonSendMut<AudioMessageReceiver>` — a Bevy 0.19
+    /// `SystemParamValidationError` with `Severity::Panic`, which does not skip the
+    /// system but brings the **whole schedule** down:
+    ///
+    /// ```text
+    /// Encountered an error in system `wc_core::audio::state::pump_audio_messages`:
+    /// Parameter `NonSendMut<'_, AudioMessageReceiver>` failed validation:
+    /// Non-send data not found
+    /// ```
+    ///
+    /// The process died on frame 1, before the supervisor's `begin`/`poll`/rebuild
+    /// cycle — all of it correct, all of it well-tested — was ever reached. So this
+    /// asserts the two things that failure destroyed: the app **survives** the
+    /// deviceless boot, and it comes out of it **armed to recover**.
+    ///
+    /// It runs the real `AudioPlugin` (real schedule, real always-on systems, real
+    /// device-watcher thread); only the cpal build is forced to fail, by the
+    /// `SimulateNoOutputDevice` seam. Delete either `Option` in
+    /// `pump_audio_messages` / `handle_volume_toggle` and this test panics.
+    #[test]
+    fn a_boot_with_no_output_device_survives_and_arms_a_reconnect_cycle() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        // `LifecyclePlugin`'s action map reads `ButtonInput<KeyCode>` (InputPlugin)
+        // and `AppState` (StatesPlugin); `handle_volume_toggle` reads its messages.
+        app.add_plugins(bevy::input::InputPlugin);
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.add_plugins(crate::lifecycle::LifecyclePlugin);
+        // Present before `Startup`, so the engine build fails exactly as it does on
+        // a host with no output endpoint.
+        app.insert_resource(SimulateNoOutputDevice);
+        app.add_plugins(AudioPlugin);
+
+        // The frames that used to be unreachable. If any always-on audio system
+        // still takes a missing non-send resource unconditionally, this panics.
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let state = app.world().resource::<AudioState>();
+        assert_eq!(
+            state.status,
+            AudioStatus::Reconnecting,
+            "a deviceless boot is recoverable, not terminal",
+        );
+        assert!(
+            state.last_error.is_some(),
+            "and the reason is recorded for the operator",
+        );
+        assert!(
+            app.world().resource::<AudioSupervisor>().is_reconnecting(),
+            "the supervisor must have armed a cycle — this is what the panic \
+             prevented, and it is the only thing that can ever recover the audio",
+        );
+
+        // The precise shape that made the old signatures fatal: none of the engine
+        // resources exist. Every consumer of them must therefore be `Option`.
+        assert!(app.world().get_non_send::<AudioStream>().is_none());
+        assert!(app.world().get_non_send::<AudioCommandSender>().is_none());
+        assert!(app.world().get_non_send::<AudioMessageReceiver>().is_none());
+        assert!(app.world().get_resource::<AudioErrorFlag>().is_none());
+    }
 }

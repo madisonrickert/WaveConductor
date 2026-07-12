@@ -118,6 +118,9 @@ fn drain_device_topology_is_inert_without_a_watcher() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     // Exactly what `AudioPlugin::build` registers; nothing inserts the receiver.
+    // `AudioState` is among them: the drain now *writes* it, because a bound
+    // endpoint vanishing from a snapshot is a stream death cpal may never report.
+    app.init_resource::<AudioState>();
     app.init_resource::<AvailableAudioDevices>();
     app.init_resource::<BoundOutputDevice>();
     app.init_resource::<AudioSupervisor>();
@@ -129,6 +132,11 @@ fn drain_device_topology_is_inert_without_a_watcher() {
     assert!(
         app.world().resource::<AvailableAudioDevices>().0.is_empty(),
         "no watcher, no snapshots, no device list",
+    );
+    assert_eq!(
+        app.world().resource::<AudioState>().status,
+        AudioStatus::NotStarted,
+        "and no snapshot means no vanished-device verdict either",
     );
 }
 

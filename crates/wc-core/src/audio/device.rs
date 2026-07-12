@@ -111,6 +111,50 @@ pub fn saved_device_reappeared(
     current.iter().any(|d| d == name) && !previous.iter().any(|d| d == name)
 }
 
+/// Whether the endpoint the live stream is bound to has **vanished** from a fresh
+/// topology snapshot while the engine still believes it is running.
+///
+/// ## The second trigger for a stream death, and why one was not enough
+///
+/// The only other way a mid-run outage is noticed is cpal's error callback. But
+/// cpal does not reliably raise a `StreamError` when an HDMI endpoint sleeps: on
+/// several backends the stream becomes a *zombie* — it keeps getting its data
+/// callback and renders into a void. When that happens:
+///
+/// - the status stays `Running` and an `AudioStream` is still present, so
+///   `supervise_audio`'s `wants_reconnect` is false and no cycle ever starts; and
+/// - [`saved_device_reappeared`] short-circuits on `currently_bound == saved`,
+///   because the last successful build bound us to the very device that has since
+///   gone away — so the TV coming back does not migrate us anywhere either.
+///
+/// Both safety nets are disarmed by the same stale binding, and the kiosk is
+/// silent for the night. This is the check that arms them again: the watcher's
+/// snapshot is a genuine second observation of the same fact, not a subordinate
+/// one.
+///
+/// ## What it deliberately does *not* fire on
+///
+/// - **A failed enumeration.** `current` is only ever a snapshot the host actually
+///   answered with; `topology_snapshot_to_publish` drops the "we could not ask"
+///   case before it reaches a caller, so an enumeration error can never be read as
+///   "every endpoint vanished".
+/// - **A stream that is already down** (`running == false`): the error callback
+///   got there first, the status is already `Reconnecting`, and the two triggers
+///   must converge on one cycle rather than starting two.
+/// - **A nameless binding** (`bound == None`): a device that cannot report its own
+///   name is absent from every snapshot by construction (they are built from
+///   `d.name().ok()`), so it would otherwise read as permanently missing. See
+///   `engine::open_output_device`.
+///
+/// Pure, allocation-free, and only called when a snapshot actually arrived.
+#[must_use]
+pub fn bound_device_disappeared(bound: Option<&str>, current: &[String], running: bool) -> bool {
+    let Some(name) = bound else {
+        return false;
+    };
+    running && !current.iter().any(|d| d == name)
+}
+
 /// Live list of output-device names, refreshed by the device-watcher thread.
 /// Read by the audio settings panel (via Plan 03a's runtime-enumerated dropdown,
 /// see the [`RuntimeEnumOptionsSource`] impl below) and by the supervisor's
@@ -566,27 +610,51 @@ fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sen
 }
 
 /// `PreUpdate` system: pull the newest topology snapshot off the watcher channel,
-/// update [`AvailableAudioDevices`], and ask the supervisor for an immediate
-/// rebuild when the saved endpoint has just reappeared.
+/// update [`AvailableAudioDevices`], and act on the two edges it can carry.
+///
+/// ## The two edges
+///
+/// 1. **Our endpoint vanished** ([`bound_device_disappeared`]) — the stream is a
+///    zombie: cpal never raised a `StreamError`, but the device it renders into is
+///    gone. Clear the **binding** and drive
+///    [`crate::audio::state::AudioStatus::Reconnecting`]; the supervisor takes it
+///    from there on its normal 1 s-first backoff. This is a full second trigger
+///    for a stream death, not a subordinate one — see `bound_device_disappeared`
+///    for why one was not enough.
+/// 2. **The operator's saved endpoint reappeared** ([`saved_device_reappeared`]) —
+///    ask the supervisor to bring its next attempt forward rather than waiting out
+///    a backoff that may be as long as 30 s, so the stream migrates back promptly.
+///
+/// They compose: a TV that sleeps and later wakes fires (1) then (2), and if a
+/// snapshot somehow carries both they still converge on **one** reconnect cycle —
+/// (1) only moves a status that is still `Running`, and the supervisor's `begin`
+/// is gated on no cycle already being armed.
+///
+/// The saved **setting** is never touched by either edge. Only
+/// [`BoundOutputDevice`] — what we are currently *bound to* — is cleared, and only
+/// by (1). The operator's choice survives its device being away; that is the whole
+/// premise of remembering it by name.
+///
+/// ## Cost
 ///
 /// Runs on the **main thread** ([`DeviceTopologyReceiver`] is non-send) and every
 /// frame — so it is a hot path. It never enumerates (the blocking enumeration
 /// already happened on the watcher thread) and it never allocates in steady state:
 /// the common case is an empty channel, `DeviceTopologyReceiver::latest` returns
-/// `None`, and the system returns. When a snapshot *has* arrived it only moves an
-/// already-built `Vec<String>` into the resource.
+/// `None`, and the system returns before touching anything else. When a snapshot
+/// *has* arrived it only moves an already-built `Vec<String>` into the resource.
 ///
 /// `saved` is the operator's persisted
 /// [`crate::audio::settings::AudioSettings::output_device`], read (never written)
-/// as a `&str`: the migrate-back edge is "the name the operator chose has just
-/// reappeared". `Option<Res<…>>` degrades cleanly if the settings resource is
+/// as a `&str`. `Option<Res<…>>` degrades cleanly if the settings resource is
 /// somehow absent (a harness that loads `AudioPlugin`'s systems without its
 /// settings registration); in the app it is inserted at plugin build.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn drain_device_topology(
     receiver: Option<bevy::ecs::system::NonSend<'_, DeviceTopologyReceiver>>,
     mut available: ResMut<'_, AvailableAudioDevices>,
-    bound: Res<'_, BoundOutputDevice>,
+    mut bound: ResMut<'_, BoundOutputDevice>,
+    mut state: ResMut<'_, crate::audio::state::AudioState>,
     settings: Option<Res<'_, crate::audio::settings::AudioSettings>>,
     mut supervisor: ResMut<'_, crate::audio::supervisor::AudioSupervisor>,
     time: Res<'_, Time<Real>>,
@@ -600,6 +668,23 @@ pub fn drain_device_topology(
     let Some(incoming) = receiver.latest() else {
         return;
     };
+
+    // Edge 1: the endpoint under the live stream is gone. Checked against the
+    // *incoming* snapshot, before `apply_topology` consumes it.
+    let running = state.status == crate::audio::state::AudioStatus::Running;
+    if bound_device_disappeared(bound.0.as_deref(), &incoming, running) {
+        tracing::warn!(
+            device = bound.0.as_deref().unwrap_or_default(),
+            "the bound output device is no longer enumerated; treating the stream as dead. \
+             Entering Reconnecting — the supervisor will rebuild it (the saved device setting is \
+             untouched)."
+        );
+        // The *binding*, not the setting: we are no longer on that endpoint, and
+        // leaving the stale name here is what disarmed the migrate-back too.
+        bound.0 = None;
+        crate::audio::state::mark_reconnecting_from_device_loss(&mut state);
+    }
+
     // Borrowed, not cloned: this system runs every frame, and the empty string is
     // the "no preference" sentinel `resolve_output_device`/`saved_device_reappeared`
     // already understand.
@@ -607,6 +692,9 @@ pub fn drain_device_topology(
         .as_ref()
         .map(|s| s.output_device.as_str())
         .filter(|name| !name.is_empty());
+    // Edge 2: the saved endpoint came back. `bound` is read *after* edge 1 may have
+    // cleared it, so a device that vanished and returned in the same snapshot gap
+    // is still seen as something to migrate to.
     if apply_topology(&mut available.0, incoming, saved, bound.0.as_deref()) {
         // Bring the next reconnect attempt forward instead of waiting out a
         // backoff that may be as long as 30 s. `Time<Real>` is the monotonic
@@ -818,6 +906,47 @@ mod tests {
         assert!(!saved_device_reappeared(saved, &with, &empty, None));
     }
 
+    /// The zombie-stream case, which is the *only* thing standing between a
+    /// sleeping TV and a silent night when cpal declines to raise a
+    /// `StreamError`: our endpoint is simply not in the list any more.
+    #[test]
+    fn a_bound_device_missing_from_a_running_streams_snapshot_is_a_death() {
+        let with = names(&["Built-in", "LG TV (HDMI)"]);
+        let without = names(&["Built-in"]);
+        let empty: Vec<String> = Vec::new();
+
+        assert!(bound_device_disappeared(
+            Some("LG TV (HDMI)"),
+            &without,
+            true
+        ));
+        // The TV was the kiosk's only endpoint, so its sleeping empties the list.
+        assert!(bound_device_disappeared(Some("LG TV (HDMI)"), &empty, true));
+        // Still there: nothing happened.
+        assert!(!bound_device_disappeared(Some("LG TV (HDMI)"), &with, true));
+    }
+
+    /// The three cases it must **not** fire on, each of which would cost a
+    /// spurious cpal teardown-and-reopen (or a reconnect loop).
+    #[test]
+    fn a_vanished_device_does_not_fire_when_the_stream_is_already_down_or_nameless() {
+        let without = names(&["Built-in"]);
+
+        // Already reconnecting: the error callback got there first. Two triggers,
+        // one cycle.
+        assert!(!bound_device_disappeared(
+            Some("LG TV (HDMI)"),
+            &without,
+            false
+        ));
+        // Nothing is bound (no stream ever came up, or the binding was already
+        // cleared by a previous poll): there is nothing to lose.
+        assert!(!bound_device_disappeared(None, &without, true));
+        // A device that cannot report its own name binds as `None` precisely so it
+        // does not read as permanently missing from snapshots it can never be in.
+        assert!(!bound_device_disappeared(None, &Vec::new(), true));
+    }
+
     /// The watcher, its channel, and the drain system are native-only (cpal
     /// enumeration is), so the pure cores they are built out of are too.
     #[cfg(not(target_arch = "wasm32"))]
@@ -954,6 +1083,111 @@ mod tests {
             assert_eq!(
                 topology_snapshot_to_publish(Some(&last), Some(last.clone())),
                 None,
+            );
+        }
+
+        /// The whole of Fix 2, end to end through the real system: the TV that the
+        /// live stream is bound to stops being enumerated, and cpal says **nothing**
+        /// (no error flag is set anywhere in this test — there is no stream at all).
+        ///
+        /// Before this, `AudioState` sat at `Running` with `bound = "LG TV (HDMI)"`
+        /// forever: `supervise_audio` saw a `Running` status and did nothing, and
+        /// `saved_device_reappeared` short-circuited on `currently_bound == saved`
+        /// when the TV came back, so neither safety net ever armed. Silent for the
+        /// night.
+        #[test]
+        fn a_vanished_bound_device_drives_reconnecting_and_clears_the_binding() {
+            use crate::audio::state::{AudioState, AudioStatus};
+            use crate::audio::supervisor::AudioSupervisor;
+            use bevy::prelude::*;
+
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.init_resource::<AvailableAudioDevices>();
+            app.init_resource::<BoundOutputDevice>();
+            app.init_resource::<AudioState>();
+            app.init_resource::<AudioSupervisor>();
+            app.add_systems(PreUpdate, drain_device_topology);
+
+            // A healthy stream, bound to the TV, which is in the current list.
+            app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
+            app.world_mut().resource_mut::<BoundOutputDevice>().0 = Some("LG TV (HDMI)".to_owned());
+            app.world_mut().resource_mut::<AvailableAudioDevices>().0 =
+                names(&["Built-in", "LG TV (HDMI)"]);
+
+            // Stand in for the watcher thread: the same channel it would send on.
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+            app.insert_non_send(DeviceTopologyReceiver { rx });
+
+            // 2 a.m.: the TV sleeps. cpal raises nothing.
+            assert!(tx.send(names(&["Built-in"])).is_ok());
+            app.update();
+
+            assert_eq!(
+                app.world().resource::<AudioState>().status,
+                AudioStatus::Reconnecting,
+                "the watcher is the only witness to this outage; it must act on it",
+            );
+            assert!(
+                app.world().resource::<BoundOutputDevice>().0.is_none(),
+                "the stale binding is what disarmed the migrate-back; clear it",
+            );
+            assert_eq!(
+                app.world().resource::<AvailableAudioDevices>().0,
+                names(&["Built-in"]),
+                "and the list still lands, for the settings dropdown",
+            );
+
+            // A second snapshot with the device still gone changes nothing: the
+            // status is no longer `Running`, so the trigger does not re-fire.
+            assert!(tx.send(names(&["Built-in", "Headphones"])).is_ok());
+            app.update();
+            assert_eq!(
+                app.world().resource::<AudioState>().status,
+                AudioStatus::Reconnecting,
+            );
+        }
+
+        /// The steady state this must not disturb: the bound device is present in
+        /// every snapshot, so a topology change that only adds or removes *other*
+        /// endpoints leaves a healthy stream completely alone.
+        #[test]
+        fn a_topology_change_that_keeps_the_bound_device_leaves_a_running_stream_alone() {
+            use crate::audio::state::{AudioState, AudioStatus};
+            use crate::audio::supervisor::AudioSupervisor;
+            use bevy::prelude::*;
+
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.init_resource::<AvailableAudioDevices>();
+            app.init_resource::<BoundOutputDevice>();
+            app.init_resource::<AudioState>();
+            app.init_resource::<AudioSupervisor>();
+            app.add_systems(PreUpdate, drain_device_topology);
+
+            app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
+            app.world_mut().resource_mut::<BoundOutputDevice>().0 = Some("LG TV (HDMI)".to_owned());
+
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+            app.insert_non_send(DeviceTopologyReceiver { rx });
+
+            // Someone plugs in headphones. Our endpoint is untouched.
+            assert!(tx
+                .send(names(&["Built-in", "Headphones", "LG TV (HDMI)"]))
+                .is_ok());
+            app.update();
+
+            assert_eq!(
+                app.world().resource::<AudioState>().status,
+                AudioStatus::Running,
+            );
+            assert_eq!(
+                app.world().resource::<BoundOutputDevice>().0.as_deref(),
+                Some("LG TV (HDMI)"),
+            );
+            assert!(
+                !app.world().resource::<AudioSupervisor>().is_reconnecting(),
+                "no cycle armed on a healthy stream",
             );
         }
 
