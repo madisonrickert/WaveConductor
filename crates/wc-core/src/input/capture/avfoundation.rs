@@ -41,7 +41,7 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
-use super::super::worker::IDLE_INFERENCE_HZ;
+use super::IDLE_INFERENCE_HZ;
 use super::{CaptureError, Frame, FrameSource};
 
 /// Single-slot latest-frame handoff: the `AVFoundation` delegate `store`s the
@@ -249,7 +249,9 @@ impl FrameDelegate {
 
 /// macOS `AVFoundation` webcam backend. Holds the running `AVCaptureSession`
 /// and the device handle on the worker thread; the delegate copies frames into
-/// the shared [`LatestFrame`] slot from its dispatch queue.
+/// the shared `LatestFrame` slot from its dispatch queue. (Plain code span:
+/// `LatestFrame` is private, and this item is public now that the capture
+/// module is promoted — a link here would be a public-to-private doc link.)
 ///
 /// `!Send` (it retains `!Send` `AVFoundation` objects), matching the
 /// [`FrameSource`] contract that a source lives entirely on the worker thread.

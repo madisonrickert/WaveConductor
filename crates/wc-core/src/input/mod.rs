@@ -46,6 +46,15 @@
 
 pub mod activation;
 pub mod button;
+/// Shared webcam frame capture: the `FrameSource` trait, the platform
+/// backends (AVFoundation on macOS, nokhwa elsewhere), and the test
+/// `MockFrameSource`. Consumed by the MediaPipe hand provider and by the
+/// body-tracking worker, so it lives beside — not inside — either.
+#[cfg(any(
+    feature = "hand-tracking-mediapipe",
+    feature = "body-tracking-mediapipe"
+))]
+pub mod capture;
 pub mod entity;
 pub mod gesture;
 pub mod hand;
