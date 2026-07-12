@@ -61,12 +61,14 @@ pub(crate) struct DisplaySettings {
 
     /// Whether to hide the OS mouse cursor over the window.
     ///
-    /// Default `true` — kiosk-first, matching `ScreensaverSettings`'s
-    /// `keep_display_awake` precedent (default on; an unattended install has
-    /// no reason to show a cursor). Toggle off for dev sessions where a
-    /// visible cursor is convenient.
+    /// Default `true` in release (kiosk-first: an unattended install has no
+    /// reason to show a cursor), `false` under `debug_assertions` for the same
+    /// reason `start_fullscreen` is gated — the "Hide cursor" toggle lives in a
+    /// *mouse-driven* settings panel, so a dev build that hid the pointer by
+    /// default would leave hand-editing the persisted config as the only way
+    /// back. See [`default_hide_cursor_for`] for the testable branch logic.
     #[setting(
-        default = true,
+        default = default_hide_cursor(),
         ty = Boolean,
         section = "Display",
         category = User,
@@ -107,13 +109,6 @@ pub(crate) struct DisplaySettings {
 /// dropdown from it. Keeping the impl out of this task is what keeps Tasks 1-3
 /// buildable before 03a lands.
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no non-test caller until Task 2 wires this into crate::lifecycle::display"
-    )
-)]
 pub(crate) struct AvailableMonitors(pub(crate) Vec<String>);
 
 /// The window mode and cursor visibility implied by a [`DisplaySettings`]
@@ -123,13 +118,6 @@ pub(crate) struct AvailableMonitors(pub(crate) Vec<String>);
 /// preference for named fields once a type carries more than one
 /// semantically meaningful value — `target.cursor_visible` reads at the call
 /// site; `target.1` does not.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no non-test caller until Task 2 wires this into crate::lifecycle::display"
-    )
-)]
 pub(crate) struct DisplayModeTarget {
     /// The window mode to apply (`Windowed` or `BorderlessFullscreen(_)`).
     pub(crate) mode: WindowMode,
@@ -150,13 +138,6 @@ pub(crate) struct DisplayModeTarget {
 /// collect into a `Vec` first (AGENTS.md's "never allocate in a hot path" —
 /// `resolve_monitor_selection`'s `find` short-circuits on the first match, so
 /// nothing downstream needs the full list materialised).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no non-test caller until Task 2 wires this into crate::lifecycle::display"
-    )
-)]
 pub(crate) fn compute_display_mode<'a>(
     settings: &DisplaySettings,
     live_monitors: impl IntoIterator<Item = (Entity, Option<&'a str>)>,
@@ -223,9 +204,22 @@ fn default_start_fullscreen_for(is_debug_build: bool) -> bool {
 }
 
 /// Serde fallback and `#[setting(default = ...)]` value for `hide_cursor`.
-/// Kiosk-first: the display stays cursor-free by default.
+///
+/// Delegates to the pure, fully unit-tested [`default_hide_cursor_for`], for
+/// the same reason [`default_start_fullscreen`] does: tests always compile
+/// under `debug_assertions`, so a direct `cfg!` here could only ever cover one
+/// branch.
 fn default_hide_cursor() -> bool {
-    true
+    default_hide_cursor_for(cfg!(debug_assertions))
+}
+
+/// Pure branch behind [`default_hide_cursor`]. A release/kiosk build hides the
+/// cursor (nobody is holding a mouse in front of the TV); a dev build must not,
+/// because the only in-app way to turn it back on is the mouse-driven settings
+/// panel — hiding the pointer by default would be the same chicken-and-egg trap
+/// [`default_start_fullscreen_for`] exists to avoid.
+fn default_hide_cursor_for(is_debug_build: bool) -> bool {
+    !is_debug_build
 }
 
 #[cfg(test)]
@@ -250,6 +244,19 @@ mod tests {
     #[test]
     fn start_fullscreen_defaults_to_true_in_release_so_a_kiosk_boots_fullscreen() {
         assert!(default_start_fullscreen_for(false));
+    }
+
+    // --- default_hide_cursor_for ---
+
+    #[test]
+    fn hide_cursor_defaults_to_false_under_debug_assertions_so_the_settings_panel_stays_clickable()
+    {
+        assert!(!default_hide_cursor_for(true));
+    }
+
+    #[test]
+    fn hide_cursor_defaults_to_true_in_release_so_a_kiosk_shows_no_pointer() {
+        assert!(default_hide_cursor_for(false));
     }
 
     // --- resolve_monitor_selection ---
@@ -378,12 +385,13 @@ mod tests {
     #[test]
     fn display_settings_default_matches_the_debug_build_default() {
         // `cargo test` always compiles under debug_assertions, so this
-        // exercises the same branch as `cargo rund`; the release branch is
+        // exercises the same branch as `cargo rund`; the release branches are
         // covered directly by `start_fullscreen_defaults_to_true_in_release...`
-        // above via the parameterised helper.
+        // and `hide_cursor_defaults_to_true_in_release...` above via the
+        // parameterised helpers.
         let settings = DisplaySettings::default();
         assert!(!settings.start_fullscreen);
-        assert!(settings.hide_cursor);
+        assert!(!settings.hide_cursor);
         assert_eq!(settings.monitor, String::new());
     }
 

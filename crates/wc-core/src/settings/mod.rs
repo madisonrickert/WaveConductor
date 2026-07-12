@@ -38,6 +38,12 @@ pub mod trait_def;
 
 mod panel_user;
 
+// `DisplaySettings` / `AvailableMonitors` / `compute_display_mode` are
+// crate-internal (consumed by `crate::lifecycle::display`, not by sketch
+// crates or the binary), hence `pub(crate)` rather than the `pub use` used
+// for the fully public settings types below.
+pub(crate) use panel_user::display::{compute_display_mode, AvailableMonitors, DisplaySettings};
+
 pub use commands::set_setting;
 pub use custom_section::{CustomDockSections, DockSectionFn, RegisterDockSectionExt};
 pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
