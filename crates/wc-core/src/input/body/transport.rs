@@ -16,6 +16,7 @@ use std::time::Duration;
 use bevy::math::Vec3;
 use rtrb::Producer;
 
+use super::pipeline::PoseDiagnostics;
 use super::{
     BodyLandmark, BodyTrackingStatus, EdgePoint, BODY_LANDMARK_COUNT, MASK_SIZE, MAX_EDGE_POINTS,
 };
@@ -104,10 +105,6 @@ pub enum BodyWorkerMsg {
 }
 
 /// Worker-side counters + pipeline diagnostics for one processed frame.
-///
-/// Note: Task 9 adds a `pipeline: PoseDiagnostics` field here once the
-/// pipeline module exists; Task 8 (this module) has no pipeline yet, so the
-/// struct carries only the worker-loop counters for now.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BodyWorkerDiagnostics {
     /// Cumulative camera-frame drops (rate cap / idle throttle), distinct
@@ -124,6 +121,8 @@ pub struct BodyWorkerDiagnostics {
     pub pipeline_errors: u64,
     /// Whether the idle throttle was requested for this frame.
     pub idle_throttled: bool,
+    /// Pipeline-stage metrics for the latest frame.
+    pub pipeline: PoseDiagnostics,
 }
 
 #[cfg(test)]

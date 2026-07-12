@@ -22,6 +22,7 @@ use bytemuck::{Pod, Zeroable};
 pub mod detector;
 pub mod edges;
 pub mod mask;
+pub mod pipeline;
 pub mod roi;
 pub mod transport;
 

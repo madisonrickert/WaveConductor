@@ -143,7 +143,11 @@ mod tests {
         let centre_uv = centre / cellf(MASK_SIZE);
         for p in &out {
             // Unit-length normal…
-            assert!((p.normal.length() - 1.0).abs() < 1e-3, "normal={:?}", p.normal);
+            assert!(
+                (p.normal.length() - 1.0).abs() < 1e-3,
+                "normal={:?}",
+                p.normal
+            );
             // …pointing away from the disc centre (outward).
             let radial = p.pos - centre_uv;
             assert!(
