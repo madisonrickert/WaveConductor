@@ -24,11 +24,12 @@ fn with_temp_dir<R>(f: impl FnOnce() -> R) -> R {
     unsafe {
         std::env::set_var(CONFIG_DIR_ENV, &dir);
     }
-    // Start from a clean settings file so a prior run can't leak state. Asked
-    // for *after* the env override is in place, and via `settings_path()`
-    // rather than a hardcoded name, because the file name is profile-scoped
-    // (`persistence::SETTINGS_FILE_NAME`) — a literal here would silently stop
-    // cleaning anything.
+    // Start from a clean settings file (`<temp dir>/waveconductor/
+    // sketch-settings.toml`) so a prior run can't leak state. Asked for *after*
+    // the env override is in place, so it resolves inside the temp dir, and via
+    // `settings_path()` rather than a hardcoded name so a rename of
+    // `persistence::SETTINGS_FILE_NAME` cannot leave this silently cleaning
+    // nothing.
     let _ = std::fs::remove_file(persistence::settings_path());
     let r = f();
     // SAFETY: same lock.

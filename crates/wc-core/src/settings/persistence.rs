@@ -2,10 +2,10 @@
 //!
 //! ## Native
 //!
-//! A single TOML file at `dirs::config_dir() / "waveconductor" /` [`SETTINGS_FILE_NAME`]
-//! (`sketch-settings.toml` in release, `sketch-settings.dev.toml` under
-//! `debug_assertions` — see that constant for why the two profiles must not
-//! share a file). Each settings struct occupies one top-level table keyed by
+//! A single TOML file at `dirs::config_dir() / "waveconductor" /`
+//! [`SETTINGS_FILE_NAME`], shared by every build profile — a sketch parameter
+//! ear-tuned under `cargo rund` is meant to reach the release build that gets
+//! deployed. Each settings struct occupies one top-level table keyed by
 //! its [`SketchSettings::STORAGE_KEY`]:
 //!
 //! ```toml
@@ -19,7 +19,9 @@
 //!
 //! The override env var [`CONFIG_DIR_ENV`] is consulted first; integration
 //! tests use a `TempDir` and set this var so they never touch the real
-//! XDG/macOS config dir.
+//! XDG/macOS config dir. It is also the sanctioned way to give one deployment
+//! (a kiosk install, a second machine) a config dir of its own without
+//! splitting the file name.
 //!
 //! ## Web
 //!
@@ -35,38 +37,25 @@ use super::trait_def::SketchSettings;
 /// Production code does not set this; tests do, to point at a `TempDir`.
 pub const CONFIG_DIR_ENV: &str = "WAVECONDUCTOR_CONFIG_DIR";
 
-/// File name of the combined settings TOML, **scoped to the build profile**.
+/// File name of the combined settings TOML. **One file for every build
+/// profile.**
 ///
-/// A debug build and a release build must never share a settings file. Several
-/// settings have `cfg!(debug_assertions)`-gated defaults — `DisplaySettings`'s
-/// `start_fullscreen` and `hide_cursor` are `false` under `cargo rund` (so a dev
-/// run does not swallow the window and hide the pointer) and `true` in a release
-/// kiosk build (so the installation boots fullscreen with no cursor). Those gates
-/// only apply to an *absent* table. With one shared file, anything that persists
-/// the table from a debug build — an F11 press, a settings edit, or merely opening
-/// the DISPLAY tab, which marks the resource changed through the reflected
-/// `Mut<C>` borrow and arms autosave — writes the *debug* values, and they then
-/// win forever in the release kiosk on the same machine: it boots windowed with a
-/// hidden cursor, silently.
+/// A debug build and a release build deliberately share it. The settings file is
+/// where the operator's tuning lives — sketch parameters ear-tuned under
+/// `cargo rund`, and the display configuration (monitor, fullscreen, cursor) that
+/// makes the kiosk a kiosk. Scoping the name to `debug_assertions` would isolate
+/// *all* of that, not just the display fields, so a value tuned in a dev run would
+/// never reach the release binary that gets deployed.
 ///
-/// Splitting the file by profile fixes that for every settings struct at once, not
-/// just `DisplaySettings`: a dev run can never poison the kiosk's persisted state,
-/// because it does not write the kiosk's file. Do not "simplify" this back to a
-/// single name.
-///
-/// Pre-release with a single operator, there is deliberately no migration shim: an
-/// existing `sketch-settings.toml` simply stays the release file, and the first dev
-/// run starts from defaults.
+/// No settings default is profile-dependent, so nothing needs the split: a debug
+/// run writing `[display]` writes the same fields the release build reads, which
+/// is a settings file doing its job. A deployment that genuinely wants its own
+/// state sets [`CONFIG_DIR_ENV`] and gets a whole config directory of its own.
 #[cfg(not(target_arch = "wasm32"))]
-pub const SETTINGS_FILE_NAME: &str = if cfg!(debug_assertions) {
-    "sketch-settings.dev.toml"
-} else {
-    "sketch-settings.toml"
-};
+pub const SETTINGS_FILE_NAME: &str = "sketch-settings.toml";
 
 /// Returns the absolute path to the combined settings TOML file
-/// ([`SETTINGS_FILE_NAME`], which differs between the debug and release
-/// profiles).
+/// ([`SETTINGS_FILE_NAME`]).
 ///
 /// Falls back to the current working directory if neither
 /// [`CONFIG_DIR_ENV`] nor [`dirs::config_dir`] yields a path — the only

@@ -40,55 +40,59 @@ use crate::settings::RuntimeEnumOptionsSource;
 /// see that module's doc for why "every frame" is the mechanism that stands
 /// in for a `MonitorAdded` / `MonitorRemoved` message Bevy 0.19 does not have.
 ///
-/// This is the *persisted* configuration. The F11 keybind
-/// (`lifecycle::nav::handle_navigation_actions`) does **not** write it — it
-/// writes the session-only [`FullscreenOverride`] instead, so a stray keypress
-/// at the installation cannot outlive a power cycle. The settings panel's
-/// "Start fullscreen" checkbox does write this field, and does persist: that is
-/// a deliberate operator choice, not a stray keypress.
+/// This is the *persisted* configuration, and it is ordinary: no field's default
+/// depends on the build profile. Standing up the kiosk is a one-time trip through
+/// the settings panel — the operator has to pick `monitor` there regardless, and
+/// while they are in there they tick "Start fullscreen" and "Hide cursor". Those
+/// persist, and the installation boots that way forever after.
+///
+/// The F11 keybind (`lifecycle::nav::handle_navigation_actions`) does **not**
+/// write this — it writes the session-only [`FullscreenOverride`] instead, so a
+/// stray keypress at the installation cannot outlive a power cycle. The settings
+/// panel's "Start fullscreen" checkbox does write this field, and does persist:
+/// that is a deliberate operator choice, not a stray keypress.
 #[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
 #[settings(storage_key = "display")]
 pub(crate) struct DisplaySettings {
     /// Whether the app claims the whole target monitor at startup.
     ///
-    /// Default `true` in release (a kiosk build with no attached keyboard has
-    /// no other way to reach fullscreen), `false` under `debug_assertions` so
-    /// `cargo rund` does not swallow the dev window on every relaunch. See
-    /// [`default_start_fullscreen_for`] for the testable branch logic. (The two
-    /// profiles persist to separate files — see
-    /// `crate::settings::persistence::SETTINGS_FILE_NAME` — so a debug run
-    /// writing `false` here cannot poison the release kiosk's saved value.)
+    /// Defaults to `false` in every build profile: a fresh install boots
+    /// windowed. That is the safe default everywhere — it never traps a
+    /// developer running `cargo rund` in a window they cannot escape, and the
+    /// kiosk operator turns it on once, in the same panel visit where they pick
+    /// the monitor. Once ticked it is persisted like any other setting.
     ///
     /// The persisted intent only. What is actually on screen is
     /// [`FullscreenOverride::effective_fullscreen`], which lets F11 override this
     /// for the session without writing it to disk.
     #[setting(
-        default = default_start_fullscreen(),
+        default = false,
         ty = Boolean,
         section = "Display",
         category = User,
         label = "Start fullscreen"
     )]
-    #[serde(default = "default_start_fullscreen")]
+    #[serde(default)]
     pub start_fullscreen: bool,
 
     /// Whether to hide the OS mouse cursor over the window.
     ///
-    /// Default `true` in release (kiosk-first: an unattended install has no
-    /// reason to show a cursor), `false` under `debug_assertions` for the same
-    /// reason `start_fullscreen` is gated — the "Hide cursor" toggle lives in a
-    /// *mouse-driven* settings panel, so a dev build that hid the pointer by
-    /// default would leave hand-editing the persisted config as the only way
-    /// back. See [`default_hide_cursor_for`] for the testable branch logic.
+    /// Defaults to `false` in every build profile, for the same reason
+    /// `start_fullscreen` does: the "Hide cursor" toggle lives in a
+    /// *mouse-driven* settings panel, so defaulting the pointer away would leave
+    /// hand-editing the persisted config as the only way back. The kiosk operator
+    /// ticks it once and it persists. (An open settings panel also forces the
+    /// cursor back on regardless — see [`compute_display_mode`] — so even a saved
+    /// `true` is never a trap.)
     #[setting(
-        default = default_hide_cursor(),
+        default = false,
         ty = Boolean,
         section = "Display",
         category = User,
         label = "Hide cursor"
     )]
-    #[serde(default = "default_hide_cursor")]
+    #[serde(default)]
     pub hide_cursor: bool,
 
     /// Monitor to target when `start_fullscreen` is true, persisted by
@@ -215,13 +219,13 @@ pub(crate) struct DisplayModeTarget {
 /// means.
 ///
 /// `settings_panel_open` **forces the cursor visible**, regardless of
-/// `hide_cursor`. A release/kiosk build defaults `hide_cursor = true`, and the
-/// only way to turn it back off is the *mouse-driven* settings panel — so with
-/// the pointer hidden the operator would be blind-clicking their way through
-/// the one UI that can undo it. The panel being open is exactly the moment a
-/// pointer is wanted; the cursor disappears again the frame it closes. Passed
-/// in (rather than read from `SettingsPanelVisible` inside the system) so this
-/// stays a pure, unit-testable function.
+/// `hide_cursor`. Once the kiosk operator has ticked "Hide cursor" it is
+/// persisted, and the only way to turn it back off is the *mouse-driven*
+/// settings panel — so with the pointer hidden the operator would be
+/// blind-clicking their way through the one UI that can undo it. The panel being
+/// open is exactly the moment a pointer is wanted; the cursor disappears again
+/// the frame it closes. Passed in (rather than read from `SettingsPanelVisible`
+/// inside the system) so this stays a pure, unit-testable function.
 ///
 /// Takes an iterator rather than a slice so a live `Query` never has to
 /// collect into a `Vec` first (AGENTS.md's "never allocate in a hot path" —
@@ -275,44 +279,6 @@ fn resolve_monitor_selection<'a>(
         })
 }
 
-/// Serde fallback and `#[setting(default = ...)]` value for `start_fullscreen`.
-///
-/// Delegates to the pure, fully unit-tested [`default_start_fullscreen_for`]
-/// so both branches of the `cfg!` are exercised by tests without needing to
-/// recompile under a different profile — `cargo test` / `cargo nextest`
-/// always run under `debug_assertions`, so a direct `cfg!(debug_assertions)`
-/// call in a test would only ever cover one branch.
-fn default_start_fullscreen() -> bool {
-    default_start_fullscreen_for(cfg!(debug_assertions))
-}
-
-/// Pure branch behind [`default_start_fullscreen`]. `cargo rund` (dev) must
-/// not default to fullscreen, or every dev relaunch would swallow the window;
-/// a release/kiosk build must, or a field tester with no keyboard has no way
-/// to find F11.
-fn default_start_fullscreen_for(is_debug_build: bool) -> bool {
-    !is_debug_build
-}
-
-/// Serde fallback and `#[setting(default = ...)]` value for `hide_cursor`.
-///
-/// Delegates to the pure, fully unit-tested [`default_hide_cursor_for`], for
-/// the same reason [`default_start_fullscreen`] does: tests always compile
-/// under `debug_assertions`, so a direct `cfg!` here could only ever cover one
-/// branch.
-fn default_hide_cursor() -> bool {
-    default_hide_cursor_for(cfg!(debug_assertions))
-}
-
-/// Pure branch behind [`default_hide_cursor`]. A release/kiosk build hides the
-/// cursor (nobody is holding a mouse in front of the TV); a dev build must not,
-/// because the only in-app way to turn it back on is the mouse-driven settings
-/// panel — hiding the pointer by default would be the same chicken-and-egg trap
-/// [`default_start_fullscreen_for`] exists to avoid.
-fn default_hide_cursor_for(is_debug_build: bool) -> bool {
-    !is_debug_build
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -324,31 +290,6 @@ mod tests {
 
     fn entity(raw: u32) -> Entity {
         Entity::from_raw_u32(raw).expect("small literal is a valid non-max raw id")
-    }
-
-    // --- default_start_fullscreen_for ---
-
-    #[test]
-    fn start_fullscreen_defaults_to_false_under_debug_assertions_so_cargo_rund_stays_sane() {
-        assert!(!default_start_fullscreen_for(true));
-    }
-
-    #[test]
-    fn start_fullscreen_defaults_to_true_in_release_so_a_kiosk_boots_fullscreen() {
-        assert!(default_start_fullscreen_for(false));
-    }
-
-    // --- default_hide_cursor_for ---
-
-    #[test]
-    fn hide_cursor_defaults_to_false_under_debug_assertions_so_the_settings_panel_stays_clickable()
-    {
-        assert!(!default_hide_cursor_for(true));
-    }
-
-    #[test]
-    fn hide_cursor_defaults_to_true_in_release_so_a_kiosk_shows_no_pointer() {
-        assert!(default_hide_cursor_for(false));
     }
 
     // --- resolve_monitor_selection ---
@@ -558,9 +499,9 @@ mod tests {
 
     #[test]
     fn an_open_settings_panel_forces_the_cursor_visible_even_when_hide_cursor_is_set() {
-        // The release/kiosk default is hide_cursor = true, and the only in-app
-        // way to turn it off is this very panel — which is mouse-driven. Hiding
-        // the pointer while it is open would mean blind-clicking.
+        // A configured kiosk has hide_cursor = true persisted, and the only
+        // in-app way to turn it off is this very panel — which is mouse-driven.
+        // Hiding the pointer while it is open would mean blind-clicking.
         let kiosk = DisplaySettings {
             start_fullscreen: true,
             hide_cursor: true,
@@ -590,17 +531,32 @@ mod tests {
 
     // --- struct plumbing ---
 
+    /// A fresh install boots windowed with a visible cursor and no monitor
+    /// preference, in *every* build profile. Nothing here is `cfg`-gated: the
+    /// kiosk operator turns fullscreen and hide-cursor on once in the settings
+    /// panel, in the same visit where they pick the monitor, and the values
+    /// persist. Windowed-with-a-cursor is the default that can never trap
+    /// anyone.
     #[test]
-    fn display_settings_default_matches_the_debug_build_default() {
-        // `cargo test` always compiles under debug_assertions, so this
-        // exercises the same branch as `cargo rund`; the release branches are
-        // covered directly by `start_fullscreen_defaults_to_true_in_release...`
-        // and `hide_cursor_defaults_to_true_in_release...` above via the
-        // parameterised helpers.
+    fn display_settings_default_is_windowed_with_a_visible_cursor() {
         let settings = DisplaySettings::default();
         assert!(!settings.start_fullscreen);
         assert!(!settings.hide_cursor);
         assert_eq!(settings.monitor, String::new());
+    }
+
+    /// The two routes to a default value must agree: the derive-generated
+    /// `Default` (what "reset to default" in the panel writes, and what
+    /// `persistence::load` returns when the file is absent) and serde's
+    /// `#[serde(default)]` (what fills a *present* settings file that has no
+    /// `[display]` table, or a table missing a field). They are declared
+    /// separately — `#[setting(default = ...)]` versus `#[serde(default)]` — so
+    /// a drift between them would be silent.
+    #[test]
+    fn an_empty_display_table_deserializes_to_exactly_the_derived_default() {
+        let from_absent_fields: DisplaySettings =
+            toml::from_str("").expect("an empty table is valid TOML and every field has a default");
+        assert_eq!(from_absent_fields, DisplaySettings::default());
     }
 
     #[test]
