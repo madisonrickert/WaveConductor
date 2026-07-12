@@ -24,6 +24,7 @@ pub mod edges;
 pub mod mask;
 pub mod pipeline;
 pub mod roi;
+pub mod smoothing;
 pub mod transport;
 
 /// Number of `BlazePose` body landmarks published to consumers.
