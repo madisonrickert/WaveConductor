@@ -120,9 +120,12 @@ pub struct AudioInputPlugin;
 
 impl Plugin for AudioInputPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AudioAnalysis>();
-        // Later tasks extend this: devices registry (Task 7), capture driver
-        // + analysis systems (Tasks 6/8), smoke harness (Task 8).
+        app.init_resource::<AudioAnalysis>()
+            .init_resource::<capture::AudioInputStatus>()
+            .init_resource::<capture::CaptureRuntime>()
+            .add_systems(PreUpdate, analysis::drain_and_analyze);
+        // Task 8 chains capture::drive_capture ahead of the drain.
+        // Later tasks extend this further: devices registry (Task 7).
     }
 }
 

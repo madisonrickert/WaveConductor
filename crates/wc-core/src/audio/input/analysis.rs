@@ -436,6 +436,69 @@ fn band_bins(sample_rate: u32) -> [(usize, usize, f32); AUDIO_BAND_COUNT] {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Bevy surface: resource + drain system
+// ---------------------------------------------------------------------------
+
+use bevy::ecs::system::NonSendMut;
+use bevy::prelude::*;
+
+use super::capture::AudioInputRing;
+use super::AudioCaptureRequest;
+
+/// Bevy resource owning the [`AnalysisEngine`] for the live capture stream.
+///
+/// Inserted by the capture driver at stream build (constructed with the
+/// stream's actual sample rate) and removed at teardown — its presence is
+/// the analysis system's signal that capture is up.
+#[derive(Resource)]
+pub struct AnalysisState(pub AnalysisEngine);
+
+/// `PreUpdate` system: drain the input ring into the engine and publish
+/// `super::AudioAnalysis`.
+///
+/// Runs every frame in every state (sanctioned always-on core plumbing,
+/// like the settings-reload listeners): with no request/ring/engine present
+/// it holds the neutral value behind an equality guard and returns — a few
+/// resource-existence checks per frame, no allocation ever. Scheduled after
+/// `capture::drive_capture` (Task 8 chains them), so a teardown this frame
+/// is observed this frame.
+pub fn drain_and_analyze(
+    time: Res<'_, Time>,
+    request: Option<Res<'_, AudioCaptureRequest>>,
+    ring: Option<NonSendMut<'_, AudioInputRing>>,
+    state: Option<ResMut<'_, AnalysisState>>,
+    mut analysis: ResMut<'_, super::AudioAnalysis>,
+) {
+    let (Some(request), Some(mut ring), Some(mut state)) = (request, ring, state) else {
+        // Inactive or failed: hold neutral. The equality guard keeps Bevy
+        // change detection quiet in the steady no-capture state.
+        if *analysis != super::AudioAnalysis::neutral() {
+            *analysis = super::AudioAnalysis::neutral();
+        }
+        return;
+    };
+    if request.paused {
+        // Paused (Idle/Screensaver): discard anything in flight so resume
+        // starts fresh. The stream itself is paused by the capture driver,
+        // so this loop is empty in steady state.
+        while ring.pop().is_some() {}
+        if *analysis != super::AudioAnalysis::neutral() {
+            // One-shot on the pause transition (guarded by the equality
+            // check): clear the engine so AGC/smoothers do not carry stale
+            // state across the pause. reset() reallocates, which is fine at
+            // transition frequency.
+            state.0.reset();
+            *analysis = super::AudioAnalysis::neutral();
+        }
+        return;
+    }
+    while let Some(sample) = ring.pop() {
+        state.0.push(sample);
+    }
+    *analysis = state.0.analyze(time.delta_secs());
+}
+
 #[cfg(test)]
 #[path = "analysis_tests.rs"]
 mod tests;

@@ -394,3 +394,103 @@ fn beat_confidence_decays_between_beats() {
         later.beat_confidence
     );
 }
+
+// ---------------------------------------------------------------------------
+// drain_and_analyze system (Task 6)
+// ---------------------------------------------------------------------------
+
+// `bevy::prelude::*` is already in scope here via `use super::*;` above,
+// which pulls in `analysis.rs`'s own (private but visible-to-descendants)
+// bevy prelude import — a second explicit import would be unused.
+use crate::audio::input::capture::{AudioInputRing, RING_SAMPLE_CAPACITY};
+use crate::audio::input::AudioCaptureRequest;
+
+/// Headless drain-test app: ring + engine + request wired by hand, only the
+/// drain system registered. NO capture driver and NO real cpal stream — see
+/// the plan's execution notes (a request + driver would open a live mic).
+fn drain_test_app(request: AudioCaptureRequest) -> (App, rtrb::Producer<f32>) {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.init_resource::<crate::audio::input::AudioAnalysis>();
+    app.insert_resource(request);
+    app.insert_resource(AnalysisState(AnalysisEngine::new(48_000)));
+    let (producer, consumer) = rtrb::RingBuffer::<f32>::new(RING_SAMPLE_CAPACITY);
+    app.world_mut()
+        .insert_non_send(AudioInputRing::new(consumer));
+    app.add_systems(PreUpdate, drain_and_analyze);
+    (app, producer)
+}
+
+#[test]
+fn drain_empties_a_completely_full_ring_in_one_frame() {
+    let (mut app, mut producer) = drain_test_app(AudioCaptureRequest {
+        device_name: None,
+        paused: false,
+    });
+    // Buffer pressure: fill the ring to capacity, then overflow it — the
+    // overflow push is refused (dropped by the callback in production),
+    // never a panic or a block.
+    for _ in 0..RING_SAMPLE_CAPACITY {
+        producer.push(0.25).expect("fits within capacity");
+    }
+    assert!(producer.push(0.5).is_err(), "full ring refuses the push");
+    app.update();
+    let received = app.world().resource::<AnalysisState>().0.samples_received();
+    assert_eq!(
+        received,
+        u64::try_from(RING_SAMPLE_CAPACITY).expect("capacity fits u64"),
+        "one frame drains the entire backlog"
+    );
+    assert!(
+        app.world()
+            .resource::<crate::audio::input::AudioAnalysis>()
+            .active
+    );
+    assert_eq!(
+        producer.slots(),
+        RING_SAMPLE_CAPACITY,
+        "ring fully drained: every slot free again"
+    );
+}
+
+#[test]
+fn paused_request_discards_samples_and_holds_neutral() {
+    let (mut app, mut producer) = drain_test_app(AudioCaptureRequest {
+        device_name: None,
+        paused: true,
+    });
+    for _ in 0..4_096 {
+        producer.push(0.5).expect("fits within capacity");
+    }
+    app.update();
+    assert_eq!(
+        *app.world().resource::<crate::audio::input::AudioAnalysis>(),
+        crate::audio::input::AudioAnalysis::neutral()
+    );
+    assert_eq!(
+        producer.slots(),
+        RING_SAMPLE_CAPACITY,
+        "paused drain discards in-flight samples so resume starts fresh"
+    );
+    assert_eq!(
+        app.world().resource::<AnalysisState>().0.samples_received(),
+        0,
+        "discarded samples are never analyzed"
+    );
+}
+
+#[test]
+fn missing_capture_resources_hold_neutral() {
+    // The plugin's steady state outside Radiance: no request, no ring, no
+    // engine. The system must no-op to neutral, never panic.
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.init_resource::<crate::audio::input::AudioAnalysis>();
+    app.add_systems(PreUpdate, drain_and_analyze);
+    app.update();
+    app.update();
+    assert_eq!(
+        *app.world().resource::<crate::audio::input::AudioAnalysis>(),
+        crate::audio::input::AudioAnalysis::neutral()
+    );
+}
