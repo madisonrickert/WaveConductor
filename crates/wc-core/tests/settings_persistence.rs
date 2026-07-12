@@ -217,7 +217,9 @@ fn load_returns_default_when_section_schema_mismatches() {
 }
 
 /// Returns the sibling paths of the settings file whose name begins with
-/// `sketch-settings.toml.corrupt-`. Used to assert a corrupt file was
+/// `<settings file name>.corrupt-` (the file name itself is profile-scoped —
+/// see `persistence::SETTINGS_FILE_NAME` — so it is read off `settings_path()`
+/// rather than written as a literal). Used to assert a corrupt file was
 /// quarantined rather than silently overwritten.
 fn quarantine_files() -> Vec<std::path::PathBuf> {
     use std::fs;

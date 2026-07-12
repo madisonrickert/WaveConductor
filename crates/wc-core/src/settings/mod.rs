@@ -38,11 +38,14 @@ pub mod trait_def;
 
 mod panel_user;
 
-// `DisplaySettings` / `AvailableMonitors` / `compute_display_mode` are
-// crate-internal (consumed by `crate::lifecycle::display`, not by sketch
-// crates or the binary), hence `pub(crate)` rather than the `pub use` used
-// for the fully public settings types below.
-pub(crate) use panel_user::display::{compute_display_mode, AvailableMonitors, DisplaySettings};
+// `DisplaySettings` / `AvailableMonitors` / `FullscreenOverride` /
+// `compute_display_mode` are crate-internal (consumed by
+// `crate::lifecycle::display` and `crate::lifecycle::nav`, not by sketch crates
+// or the binary), hence `pub(crate)` rather than the `pub use` used for the
+// fully public settings types below.
+pub(crate) use panel_user::display::{
+    compute_display_mode, AvailableMonitors, DisplaySettings, FullscreenOverride,
+};
 
 pub use commands::set_setting;
 pub use custom_section::{CustomDockSections, DockSectionFn, RegisterDockSectionExt};

@@ -24,12 +24,16 @@ fn with_temp_dir<R>(f: impl FnOnce() -> R) -> R {
     let _guard = LOCK.lock().expect("env mutex");
     let dir = std::env::temp_dir().join(format!("wc-line-adj-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir temp");
-    let _ = std::fs::remove_file(dir.join("waveconductor").join("sketch-settings.toml"));
     let prev = std::env::var_os(CONFIG_DIR_ENV);
     // SAFETY: serialized by LOCK above.
     unsafe {
         std::env::set_var(CONFIG_DIR_ENV, &dir);
     }
+    // Clean the settings file *after* the env override lands, and via
+    // `settings_path()` rather than a hardcoded name: the file name is
+    // profile-scoped (`persistence::SETTINGS_FILE_NAME`), so a literal here
+    // would quietly clean nothing and let a prior run leak state.
+    let _ = std::fs::remove_file(persistence::settings_path());
     let r = f();
     // SAFETY: same lock.
     unsafe {

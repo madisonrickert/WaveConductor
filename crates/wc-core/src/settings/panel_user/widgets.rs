@@ -336,7 +336,8 @@ fn set_enum_variant(
 /// `ComboBox` — marked "(unavailable)" — and stays selected. A `TextEdit`
 /// alongside the `ComboBox` is the free-text escape hatch for exactly that
 /// case: it lets the operator retype or correct the value directly instead of
-/// waiting on enumeration.
+/// waiting on enumeration. It is rendered **only** in that case — see
+/// [`shows_free_text_escape_hatch`].
 fn render_runtime_enum(
     field: &mut dyn bevy::reflect::PartialReflect,
     storage_key: &'static str,
@@ -366,8 +367,10 @@ fn render_runtime_enum(
                     ui.selectable_value(&mut selected, opt.clone(), opt.as_str());
                 }
             });
-        // Free-text escape hatch, always present.
-        ui.add(egui::TextEdit::singleline(&mut selected).desired_width(120.0));
+        // Free-text escape hatch — only when the dropdown cannot do the job.
+        if shows_free_text_escape_hatch(selection) {
+            ui.add(egui::TextEdit::singleline(&mut selected).desired_width(120.0));
+        }
     });
 
     if selected != *current {
@@ -488,6 +491,33 @@ fn classify_runtime_enum_selection(current: &str, options: &[String]) -> Runtime
         RuntimeEnumSelection::Known
     } else {
         RuntimeEnumSelection::Unavailable
+    }
+}
+
+/// Whether [`render_runtime_enum`] should render its free-text `TextEdit`
+/// alongside the `ComboBox`.
+///
+/// Only when the dropdown cannot express the operator's intent: nothing is
+/// selected yet ([`RuntimeEnumSelection::Empty`]) or the persisted value is not
+/// in the live list ([`RuntimeEnumSelection::Unavailable`] — a monitor that is
+/// asleep, an audio device that is unplugged, a name typed ahead of enumeration).
+/// That is the only case the escape hatch exists to serve.
+///
+/// On a [`RuntimeEnumSelection::Known`] value the box is not merely redundant,
+/// it is actively harmful. The widget writes the field back on **every
+/// keystroke**, and `lifecycle::display::apply_display_mode` re-derives
+/// `Window::mode` from `DisplaySettings::monitor` every frame. So typing `LG TV`
+/// into it walks the value through `"L"`, `"LG"`, … — each an unresolvable name
+/// that falls back to `MonitorSelection::Current` — and the OS window physically
+/// hops to the current monitor and back on the final keystroke. Real
+/// `set_fullscreen` calls, not just component churn.
+///
+/// Pure and UI-free so it is unit-tested directly: whether a `TextEdit` was added
+/// to an `egui::Ui` is not observable headlessly, but this decision is.
+fn shows_free_text_escape_hatch(selection: RuntimeEnumSelection) -> bool {
+    match selection {
+        RuntimeEnumSelection::Empty | RuntimeEnumSelection::Unavailable => true,
+        RuntimeEnumSelection::Known => false,
     }
 }
 
@@ -619,6 +649,32 @@ mod tests {
         assert_eq!(
             classify_runtime_enum_selection("Living Room TV", &[]),
             RuntimeEnumSelection::Unavailable
+        );
+    }
+
+    /// Pins Fix 3: the free-text box appears only where it is needed. A `Known`
+    /// selection must render no `TextEdit` — the per-keystroke write-back plus
+    /// `apply_display_mode`'s every-frame re-derive makes typing into it hop the
+    /// OS window between monitors. An `Unavailable` (or not-yet-set) value still
+    /// gets the escape hatch, which is the case it exists for.
+    ///
+    /// Pinned on the pure decision rather than on the rendered `egui::Ui`:
+    /// whether a `TextEdit` was added is not observable from egui's headless
+    /// output (no widget inventory in `FullOutput`), so testing the render would
+    /// mean asserting nothing.
+    #[test]
+    fn the_free_text_escape_hatch_is_shown_only_when_the_dropdown_cannot_serve() {
+        assert!(
+            !shows_free_text_escape_hatch(RuntimeEnumSelection::Known),
+            "a healthy dropdown selection must not also render a free-text box"
+        );
+        assert!(
+            shows_free_text_escape_hatch(RuntimeEnumSelection::Unavailable),
+            "an unavailable value must stay hand-editable"
+        );
+        assert!(
+            shows_free_text_escape_hatch(RuntimeEnumSelection::Empty),
+            "an unset value must be typeable before the source enumerates"
         );
     }
 

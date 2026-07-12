@@ -2,9 +2,11 @@
 //!
 //! ## Native
 //!
-//! A single TOML file at `dirs::config_dir() / "waveconductor" / "sketch-settings.toml"`.
-//! Each settings struct occupies one top-level table keyed by its
-//! [`SketchSettings::STORAGE_KEY`]:
+//! A single TOML file at `dirs::config_dir() / "waveconductor" /` [`SETTINGS_FILE_NAME`]
+//! (`sketch-settings.toml` in release, `sketch-settings.dev.toml` under
+//! `debug_assertions` — see that constant for why the two profiles must not
+//! share a file). Each settings struct occupies one top-level table keyed by
+//! its [`SketchSettings::STORAGE_KEY`]:
 //!
 //! ```toml
 //! [line]
@@ -33,7 +35,38 @@ use super::trait_def::SketchSettings;
 /// Production code does not set this; tests do, to point at a `TempDir`.
 pub const CONFIG_DIR_ENV: &str = "WAVECONDUCTOR_CONFIG_DIR";
 
-/// Returns the absolute path to the combined settings TOML file.
+/// File name of the combined settings TOML, **scoped to the build profile**.
+///
+/// A debug build and a release build must never share a settings file. Several
+/// settings have `cfg!(debug_assertions)`-gated defaults — `DisplaySettings`'s
+/// `start_fullscreen` and `hide_cursor` are `false` under `cargo rund` (so a dev
+/// run does not swallow the window and hide the pointer) and `true` in a release
+/// kiosk build (so the installation boots fullscreen with no cursor). Those gates
+/// only apply to an *absent* table. With one shared file, anything that persists
+/// the table from a debug build — an F11 press, a settings edit, or merely opening
+/// the DISPLAY tab, which marks the resource changed through the reflected
+/// `Mut<C>` borrow and arms autosave — writes the *debug* values, and they then
+/// win forever in the release kiosk on the same machine: it boots windowed with a
+/// hidden cursor, silently.
+///
+/// Splitting the file by profile fixes that for every settings struct at once, not
+/// just `DisplaySettings`: a dev run can never poison the kiosk's persisted state,
+/// because it does not write the kiosk's file. Do not "simplify" this back to a
+/// single name.
+///
+/// Pre-release with a single operator, there is deliberately no migration shim: an
+/// existing `sketch-settings.toml` simply stays the release file, and the first dev
+/// run starts from defaults.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SETTINGS_FILE_NAME: &str = if cfg!(debug_assertions) {
+    "sketch-settings.dev.toml"
+} else {
+    "sketch-settings.toml"
+};
+
+/// Returns the absolute path to the combined settings TOML file
+/// ([`SETTINGS_FILE_NAME`], which differs between the debug and release
+/// profiles).
 ///
 /// Falls back to the current working directory if neither
 /// [`CONFIG_DIR_ENV`] nor [`dirs::config_dir`] yields a path — the only
@@ -46,7 +79,7 @@ pub fn settings_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("waveconductor").join("sketch-settings.toml")
+    base.join("waveconductor").join(SETTINGS_FILE_NAME)
 }
 
 /// Load the value for a specific settings type. Returns `S::default()` on
@@ -220,7 +253,7 @@ fn load_merge_table(path: &Path) -> toml::Table {
 #[cfg(not(target_arch = "wasm32"))]
 fn temp_write_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().map_or_else(
-        || std::ffi::OsString::from("sketch-settings.toml"),
+        || std::ffi::OsString::from(SETTINGS_FILE_NAME),
         std::ffi::OsStr::to_os_string,
     );
     name.push(format!(".tmp-{}", std::process::id()));

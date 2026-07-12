@@ -39,8 +39,13 @@ use crate::settings::RuntimeEnumOptionsSource;
 /// once at `Startup` and unconditionally every `Update` frame thereafter —
 /// see that module's doc for why "every frame" is the mechanism that stands
 /// in for a `MonitorAdded` / `MonitorRemoved` message Bevy 0.19 does not have.
-/// The F11 keybind (`lifecycle::nav::handle_navigation_actions`) writes only
-/// `start_fullscreen`; it does not touch `Window` directly.
+///
+/// This is the *persisted* configuration. The F11 keybind
+/// (`lifecycle::nav::handle_navigation_actions`) does **not** write it — it
+/// writes the session-only [`FullscreenOverride`] instead, so a stray keypress
+/// at the installation cannot outlive a power cycle. The settings panel's
+/// "Start fullscreen" checkbox does write this field, and does persist: that is
+/// a deliberate operator choice, not a stray keypress.
 #[derive(SketchSettings, Resource, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Resource, Default)]
 #[settings(storage_key = "display")]
@@ -50,7 +55,14 @@ pub(crate) struct DisplaySettings {
     /// Default `true` in release (a kiosk build with no attached keyboard has
     /// no other way to reach fullscreen), `false` under `debug_assertions` so
     /// `cargo rund` does not swallow the dev window on every relaunch. See
-    /// [`default_start_fullscreen_for`] for the testable branch logic.
+    /// [`default_start_fullscreen_for`] for the testable branch logic. (The two
+    /// profiles persist to separate files — see
+    /// `crate::settings::persistence::SETTINGS_FILE_NAME` — so a debug run
+    /// writing `false` here cannot poison the release kiosk's saved value.)
+    ///
+    /// The persisted intent only. What is actually on screen is
+    /// [`FullscreenOverride::effective_fullscreen`], which lets F11 override this
+    /// for the session without writing it to disk.
     #[setting(
         default = default_start_fullscreen(),
         ty = Boolean,
@@ -105,6 +117,44 @@ pub(crate) struct DisplaySettings {
     pub monitor: String,
 }
 
+/// Session-only fullscreen override: what F11 writes instead of
+/// [`DisplaySettings::start_fullscreen`].
+///
+/// `None` (the default) means "no override — use the persisted
+/// `start_fullscreen`". `Some(v)` forces the window mode to `v` for the rest of
+/// this process's life.
+///
+/// **Never persisted.** It is a plain `Resource`, not a `SketchSettings`: it has
+/// no `STORAGE_KEY`, is not registered with the settings registry, is not
+/// `Reflect`, and is `None` at every boot by construction. That is the whole
+/// point. This is a kiosk installation running unattended on a TV: if a
+/// passer-by presses F11, the app drops to a small window on a black screen with
+/// the cursor hidden, and if that flag were persisted the kiosk would still be
+/// broken after a power cycle — recovery would mean SSH-ing in to hand-edit the
+/// config. With the override session-only, unplugging the TV fixes it.
+///
+/// Read by `crate::lifecycle::display::apply_display_mode` (via
+/// [`compute_display_mode`]) and cleared by
+/// `crate::lifecycle::display::clear_fullscreen_override_on_settings_edit` when
+/// the operator changes "Start fullscreen" in the settings panel — an explicit
+/// panel edit is the authoritative choice and must take effect immediately, not
+/// sit behind a stale F11 press.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FullscreenOverride(pub(crate) Option<bool>);
+
+impl FullscreenOverride {
+    /// The fullscreen state actually in effect: the session override if one is
+    /// set, else the persisted [`DisplaySettings::start_fullscreen`].
+    ///
+    /// The single definition of "what is on screen right now", shared by
+    /// [`compute_display_mode`] and the F11 handler — so F11 toggles relative to
+    /// what the operator can actually see, never relative to a persisted value
+    /// that an earlier override has already superseded.
+    pub(crate) fn effective_fullscreen(self, settings: &DisplaySettings) -> bool {
+        self.0.unwrap_or(settings.start_fullscreen)
+    }
+}
+
 /// Monitor names currently reported by the OS.
 ///
 /// Refreshed by `crate::lifecycle::display::sync_available_monitors`
@@ -148,12 +198,15 @@ impl RuntimeEnumOptionsSource for AvailableMonitors {
 pub(crate) struct DisplayModeTarget {
     /// The window mode to apply (`Windowed` or `BorderlessFullscreen(_)`).
     pub(crate) mode: WindowMode,
-    /// Whether the OS cursor should be visible (`!settings.hide_cursor`).
+    /// Whether the OS cursor should be visible: `!settings.hide_cursor`, but
+    /// forced `true` while the settings panel is open (see
+    /// [`compute_display_mode`]).
     pub(crate) cursor_visible: bool,
 }
 
 /// Pure computation of the window mode and cursor visibility implied by
-/// `settings`, given the monitors currently known to the ECS.
+/// `settings`, the session [`FullscreenOverride`], and whether the settings
+/// panel is open, given the monitors currently known to the ECS.
 ///
 /// Shared by `apply_display_mode`'s `Startup` run (booting the kiosk) and its
 /// `Update` run (every frame thereafter), so a settings-panel edit, an F11
@@ -161,15 +214,26 @@ pub(crate) struct DisplayModeTarget {
 /// three code paths that can disagree about what "fullscreen" currently
 /// means.
 ///
+/// `settings_panel_open` **forces the cursor visible**, regardless of
+/// `hide_cursor`. A release/kiosk build defaults `hide_cursor = true`, and the
+/// only way to turn it back off is the *mouse-driven* settings panel — so with
+/// the pointer hidden the operator would be blind-clicking their way through
+/// the one UI that can undo it. The panel being open is exactly the moment a
+/// pointer is wanted; the cursor disappears again the frame it closes. Passed
+/// in (rather than read from `SettingsPanelVisible` inside the system) so this
+/// stays a pure, unit-testable function.
+///
 /// Takes an iterator rather than a slice so a live `Query` never has to
 /// collect into a `Vec` first (AGENTS.md's "never allocate in a hot path" —
 /// `resolve_monitor_selection`'s `find` short-circuits on the first match, so
 /// nothing downstream needs the full list materialised).
 pub(crate) fn compute_display_mode<'a>(
     settings: &DisplaySettings,
+    fullscreen_override: FullscreenOverride,
+    settings_panel_open: bool,
     live_monitors: impl IntoIterator<Item = (Entity, Option<&'a str>)>,
 ) -> DisplayModeTarget {
-    let mode = if settings.start_fullscreen {
+    let mode = if fullscreen_override.effective_fullscreen(settings) {
         WindowMode::BorderlessFullscreen(resolve_monitor_selection(
             &settings.monitor,
             live_monitors,
@@ -179,7 +243,7 @@ pub(crate) fn compute_display_mode<'a>(
     };
     DisplayModeTarget {
         mode,
-        cursor_visible: !settings.hide_cursor,
+        cursor_visible: settings_panel_open || !settings.hide_cursor,
     }
 }
 
@@ -347,6 +411,13 @@ mod tests {
 
     // --- compute_display_mode ---
 
+    /// No session override and no settings panel: the plain configured case
+    /// every pre-existing test below assumed before `FullscreenOverride` and
+    /// the panel-open cursor rule existed.
+    const NO_OVERRIDE: FullscreenOverride = FullscreenOverride(None);
+    const PANEL_CLOSED: bool = false;
+    const PANEL_OPEN: bool = true;
+
     #[test]
     fn windowed_when_start_fullscreen_is_false_regardless_of_monitor() {
         let settings = DisplaySettings {
@@ -355,7 +426,7 @@ mod tests {
             monitor: "LG TV".to_string(),
         };
         let live = [(entity(1), Some("LG TV"))];
-        let target = compute_display_mode(&settings, live);
+        let target = compute_display_mode(&settings, NO_OVERRIDE, PANEL_CLOSED, live);
         assert_eq!(target.mode, WindowMode::Windowed);
     }
 
@@ -366,7 +437,7 @@ mod tests {
             hide_cursor: false,
             monitor: String::new(),
         };
-        let target = compute_display_mode(&settings, []);
+        let target = compute_display_mode(&settings, NO_OVERRIDE, PANEL_CLOSED, []);
         assert_eq!(
             target.mode,
             WindowMode::BorderlessFullscreen(MonitorSelection::Current)
@@ -385,7 +456,7 @@ mod tests {
             (entity(1), Some("Built-in Display")),
             (target_entity, Some("LG TV")),
         ];
-        let target = compute_display_mode(&settings, live);
+        let target = compute_display_mode(&settings, NO_OVERRIDE, PANEL_CLOSED, live);
         assert_eq!(
             target.mode,
             WindowMode::BorderlessFullscreen(MonitorSelection::Entity(target_entity))
@@ -404,8 +475,117 @@ mod tests {
             hide_cursor: false,
             monitor: String::new(),
         };
-        assert!(!compute_display_mode(&hidden, []).cursor_visible);
-        assert!(compute_display_mode(&shown, []).cursor_visible);
+        assert!(!compute_display_mode(&hidden, NO_OVERRIDE, PANEL_CLOSED, []).cursor_visible);
+        assert!(compute_display_mode(&shown, NO_OVERRIDE, PANEL_CLOSED, []).cursor_visible);
+    }
+
+    // --- FullscreenOverride ---
+
+    #[test]
+    fn no_override_defers_to_the_persisted_start_fullscreen() {
+        let windowed = DisplaySettings {
+            start_fullscreen: false,
+            hide_cursor: false,
+            monitor: String::new(),
+        };
+        let fullscreen = DisplaySettings {
+            start_fullscreen: true,
+            ..windowed.clone()
+        };
+        assert!(!FullscreenOverride::default().effective_fullscreen(&windowed));
+        assert!(FullscreenOverride::default().effective_fullscreen(&fullscreen));
+    }
+
+    #[test]
+    fn a_session_override_wins_over_the_persisted_start_fullscreen_in_both_directions() {
+        let kiosk = DisplaySettings {
+            start_fullscreen: true,
+            hide_cursor: true,
+            monitor: String::new(),
+        };
+        let dev = DisplaySettings {
+            start_fullscreen: false,
+            ..kiosk.clone()
+        };
+        assert!(!FullscreenOverride(Some(false)).effective_fullscreen(&kiosk));
+        assert!(FullscreenOverride(Some(true)).effective_fullscreen(&dev));
+    }
+
+    #[test]
+    fn an_override_of_false_windows_a_kiosk_configured_for_fullscreen() {
+        // The F11-at-the-party case, in reverse: the persisted config says
+        // fullscreen, the session override says no. The *override* decides what
+        // is on screen — and, being session-only, is gone after a power cycle.
+        let kiosk = DisplaySettings {
+            start_fullscreen: true,
+            hide_cursor: false,
+            monitor: "LG TV".to_string(),
+        };
+        let live = [(entity(1), Some("LG TV"))];
+        let target =
+            compute_display_mode(&kiosk, FullscreenOverride(Some(false)), PANEL_CLOSED, live);
+        assert_eq!(target.mode, WindowMode::Windowed);
+    }
+
+    #[test]
+    fn an_override_of_true_fullscreens_on_the_saved_monitor() {
+        let target_entity = entity(2);
+        let settings = DisplaySettings {
+            start_fullscreen: false,
+            hide_cursor: false,
+            monitor: "LG TV".to_string(),
+        };
+        let live = [(target_entity, Some("LG TV"))];
+        let target = compute_display_mode(
+            &settings,
+            FullscreenOverride(Some(true)),
+            PANEL_CLOSED,
+            live,
+        );
+        assert_eq!(
+            target.mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Entity(target_entity)),
+            "an override must still honour the saved monitor, not fall back to Current"
+        );
+    }
+
+    #[test]
+    fn fullscreen_override_defaults_to_none_so_every_boot_starts_from_the_persisted_value() {
+        assert_eq!(FullscreenOverride::default(), FullscreenOverride(None));
+    }
+
+    // --- settings-panel cursor rule ---
+
+    #[test]
+    fn an_open_settings_panel_forces_the_cursor_visible_even_when_hide_cursor_is_set() {
+        // The release/kiosk default is hide_cursor = true, and the only in-app
+        // way to turn it off is this very panel — which is mouse-driven. Hiding
+        // the pointer while it is open would mean blind-clicking.
+        let kiosk = DisplaySettings {
+            start_fullscreen: true,
+            hide_cursor: true,
+            monitor: String::new(),
+        };
+        assert!(compute_display_mode(&kiosk, NO_OVERRIDE, PANEL_OPEN, []).cursor_visible);
+        assert!(
+            !compute_display_mode(&kiosk, NO_OVERRIDE, PANEL_CLOSED, []).cursor_visible,
+            "closing the panel must hide the cursor again — the rule is scoped to \
+             the panel, it does not permanently defeat hide_cursor"
+        );
+    }
+
+    #[test]
+    fn an_open_settings_panel_does_not_change_the_window_mode() {
+        let kiosk = DisplaySettings {
+            start_fullscreen: true,
+            hide_cursor: true,
+            monitor: String::new(),
+        };
+        assert_eq!(
+            compute_display_mode(&kiosk, NO_OVERRIDE, PANEL_OPEN, []).mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            "the panel-open rule is about the cursor only"
+        );
     }
 
     // --- struct plumbing ---
