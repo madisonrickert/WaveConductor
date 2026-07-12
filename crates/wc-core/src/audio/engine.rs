@@ -83,6 +83,22 @@ pub fn start_audio_engine(world: &mut World) {
     // resource was never inserted.
     let assets = world.remove_resource::<SampleAssets>().unwrap_or_default();
 
+    // Spawn the device watcher *before* the build, and regardless of whether the
+    // build succeeds. A boot with no output device at all — the kiosk powering on
+    // while its TV is still asleep — is the routine case, not an error, and it is
+    // exactly the case where nothing else will ever notice the endpoint arriving:
+    // there is no stream, so there is no cpal error callback. The watcher is
+    // independent of the stream and must outlive its failure to build.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (watcher, topology_rx) = super::device::spawn_device_watcher();
+        // The watcher's `Drop` stops and joins the thread when the world is torn
+        // down, so it cannot outlive the app.
+        world.insert_resource(watcher);
+        // `mpsc::Receiver` is Send but not Sync — main-thread-only, like the rings.
+        world.insert_non_send(topology_rx);
+    }
+
     match build_engine(&assets) {
         Ok(built) => {
             // sender and receiver wrap rtrb::Producer/Consumer which are Send

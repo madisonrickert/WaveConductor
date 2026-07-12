@@ -18,8 +18,10 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use wc_core::audio::{
     command::{AudioCommand, AudioMessage},
+    device::{drain_device_topology, AvailableAudioDevices, BoundOutputDevice},
     ring::{AudioCommandSender, AudioMessageReceiver, RING_CAPACITY},
     state::{pump_audio_messages, AudioState, AudioStatus},
+    supervisor::AudioSupervisor,
 };
 
 /// Construct a test app with the audio state, the message-pump system, and
@@ -103,6 +105,31 @@ fn muted_applied_message_mirrors_state() {
     app.update();
     let state = app.world().resource::<AudioState>();
     assert!(state.muted);
+}
+
+/// `drain_device_topology` is registered unconditionally in `PreUpdate` — it has
+/// to be, because a device can appear or vanish in any `AppState`. An always-on
+/// system is only safe if **every** parameter it takes resolves in an app that
+/// never started an audio engine (the headless harnesses), so this pins that: the
+/// non-send `DeviceTopologyReceiver` is absent here, and the system must skip,
+/// not fail param validation and bring the schedule down with it.
+#[test]
+fn drain_device_topology_is_inert_without_a_watcher() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    // Exactly what `AudioPlugin::build` registers; nothing inserts the receiver.
+    app.init_resource::<AvailableAudioDevices>();
+    app.init_resource::<BoundOutputDevice>();
+    app.init_resource::<AudioSupervisor>();
+    app.add_systems(PreUpdate, drain_device_topology);
+
+    app.update();
+    app.update();
+
+    assert!(
+        app.world().resource::<AvailableAudioDevices>().0.is_empty(),
+        "no watcher, no snapshots, no device list",
+    );
 }
 
 /// Inject a physical key press via the shared `common::input` helpers, run one

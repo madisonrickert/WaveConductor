@@ -28,13 +28,15 @@
 //! host has no output devices" and "we could not ask the host" are opposite
 //! facts to the differ — see its docs. It is only ever called from (a) the
 //! one-shot startup path and event-driven rebuilds on the **main thread**, and
-//! (b) the device-watcher OS thread added in Task 4 — never the audio callback
-//! and never a per-frame render system. On WASAPI, cpal initialises COM
+//! (b) the device-watcher OS thread ([`spawn_device_watcher`]) — never the audio
+//! callback and never a per-frame render system. On WASAPI, cpal initialises COM
 //! per-thread internally (`com::com_initialized()` runs at the top of every
 //! device operation), so calling this from a freshly spawned watcher thread is
 //! sound without any manual `CoInitializeEx`.
 
 use bevy::prelude::Resource;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::prelude::{Real, Res, ResMut, Time};
 
 /// The chosen output device after matching a saved name against the live list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,9 +146,10 @@ pub struct BoundOutputDevice(pub Option<String>);
 /// [`saved_device_reappeared`] compares a previous snapshot against a current
 /// one, so folding a failed enumeration into an empty list would read as "every
 /// endpoint vanished" — and the next successful poll would then look like a
-/// **rising edge**, provoking a spurious stream rebuild. Task 4's watcher must
-/// therefore treat `None` as "don't diff; keep the previous snapshot" and simply
-/// skip the tick. [`resolve_output_device`], by contrast, is right to treat an
+/// **rising edge**, provoking a spurious stream rebuild. The watcher therefore
+/// treats `None` as "don't diff; keep the previous snapshot" and skips the tick —
+/// see `topology_snapshot_to_publish`, where that rule lives and is tested.
+/// [`resolve_output_device`], by contrast, is right to treat an
 /// empty list as "nothing available -> fall back to the default (and keep the
 /// saved name)": at build time we must pick *something*, and there is nothing to
 /// pick.
@@ -175,6 +178,269 @@ pub fn enumerate_output_names(host: &cpal::Host) -> Option<Vec<String>> {
             tracing::warn!(?err, "cpal output_devices enumeration failed");
             None
         }
+    }
+}
+
+/// Apply an incoming topology snapshot to the live list and report whether the
+/// saved endpoint just reappeared (so the caller should trigger a migrate-back).
+///
+/// Pure: `available` is the previous list on the way in, `incoming` is the fresh
+/// snapshot. Compares them with [`saved_device_reappeared`] *before* overwriting,
+/// then moves `incoming` into `available` (no clone). The list is replaced even
+/// when no migrate is warranted — the settings dropdown reads it, so a device
+/// merely *going away* still has to land.
+///
+/// Runs at the watcher's cadence (only when a snapshot actually arrived), never
+/// per frame; see [`drain_device_topology`].
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub(crate) fn apply_topology(
+    available: &mut Vec<String>,
+    incoming: Vec<String>,
+    saved: Option<&str>,
+    bound: Option<&str>,
+) -> bool {
+    let migrate = saved_device_reappeared(saved, available, &incoming, bound);
+    *available = incoming;
+    migrate
+}
+
+/// The ~2 s cadence at which the watcher re-enumerates output devices.
+#[cfg(not(target_arch = "wasm32"))]
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Granularity at which the watcher wakes to check its stop flag, so app
+/// shutdown joins the thread promptly instead of waiting out a full interval.
+#[cfg(not(target_arch = "wasm32"))]
+const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Decide what one watcher poll should publish, given the previous snapshot and
+/// the result of [`enumerate_output_names`].
+///
+/// This is the whole decision the watcher thread makes, extracted so it is
+/// testable without a device, a thread, or a two-second sleep. The thread around
+/// it is a dumb loop.
+///
+/// - `polled == None` — the host enumeration **errored**; we learned nothing.
+///   The tick is skipped: no diff, no publish, and the caller keeps its previous
+///   snapshot. Folding this into "the list is now empty" would make the next
+///   *successful* poll look like a rising edge and provoke a spurious rebuild.
+/// - `polled == Some(list)` equal to `last` — steady state (the overwhelmingly
+///   common case). Nothing to publish, so the channel stays quiet.
+/// - `polled == Some(list)` differing from `last` (including the very first poll,
+///   where `last` is `None`) — a real topology change. Return it; the caller
+///   publishes it and adopts it as the new `last`.
+///
+/// `Some(vec![])` is a legitimate answer, not an error: when the only endpoint is
+/// a sleeping HDMI TV the host genuinely enumerates nothing. Equality is exact,
+/// which is sound precisely because [`enumerate_output_names`] sorts — a host that
+/// re-orders its list between polls is not a topology change.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub(crate) fn topology_snapshot_to_publish(
+    last: Option<&[String]>,
+    polled: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let current = polled?;
+    if last == Some(current.as_slice()) {
+        return None;
+    }
+    Some(current)
+}
+
+/// Owns the device-watcher OS thread. Dropping it signals the thread to stop and
+/// joins it, so the app exits cleanly and the thread can never outlive the
+/// process. A Bevy `Resource`; Bevy drops it on app teardown.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub struct DeviceWatcher {
+    /// Set to `true` to ask the thread to exit at its next 100 ms tick.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Join handle, taken on `Drop`. `None` when the thread could not be spawned
+    /// at all (see [`spawn_device_watcher`]).
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DeviceWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            // A failed join means the watcher panicked. Log it and carry on:
+            // this runs during teardown, and a watcher panic must degrade audio
+            // recovery, never take the app down with it.
+            if handle.join().is_err() {
+                tracing::warn!("device-watcher thread panicked before join");
+            }
+        }
+    }
+}
+
+/// Consumer end of the watcher → main-thread topology channel.
+///
+/// `mpsc::Receiver` is `Send` but not `Sync`, so — like the audio rings — it is
+/// installed as a **non-send** resource and only ever read on the main thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct DeviceTopologyReceiver {
+    /// Receives a fresh name snapshot only when the list actually changed.
+    rx: std::sync::mpsc::Receiver<Vec<String>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DeviceTopologyReceiver {
+    /// Collapse everything the watcher has queued since the last frame to the
+    /// newest snapshot, or `None` if nothing arrived.
+    ///
+    /// Allocation-free in steady state: `try_recv` on an empty channel yields
+    /// `Err` immediately and this returns `None` without touching the heap. A
+    /// disconnected channel (the watcher exited, or panicked) is indistinguishable
+    /// from an empty one here, and deliberately so — it is a normal end-of-life
+    /// state, not something to log once per frame.
+    fn latest(&self) -> Option<Vec<String>> {
+        let mut newest = None;
+        while let Ok(snapshot) = self.rx.try_recv() {
+            newest = Some(snapshot);
+        }
+        newest
+    }
+}
+
+/// Spawn the device-watcher thread. Returns the owning [`DeviceWatcher`] resource
+/// and the [`DeviceTopologyReceiver`] the main thread drains.
+///
+/// ## What runs on the thread
+///
+/// The thread builds its **own** `cpal::Host` in-thread (hosts are not moved
+/// across threads; on WASAPI cpal initialises COM per-thread internally), then
+/// loops: enumerate, publish *only if the list changed*, and sleep
+/// `WATCH_INTERVAL` in `WATCH_TICK` increments, checking the stop flag at each
+/// increment. Enumeration can block — which is precisely why it is here and not
+/// on the audio callback or the render thread.
+///
+/// ## Steady-state cost
+///
+/// It re-uses one `last` buffer across the whole session. The only allocations per
+/// poll are the ones cpal's API forces (the `Vec<String>` of names it hands back),
+/// and the only *extra* one — the clone handed to the channel — happens on a real
+/// topology change, not on a poll. In steady state the channel is silent and the
+/// main thread's drain does nothing.
+///
+/// ## Lifetime
+///
+/// The thread cannot outlive the app: `DeviceWatcher`'s `Drop` sets the stop flag
+/// and joins (≤ ~100 ms). It also exits on its own if the receiver is dropped —
+/// `send` failing means the main thread is gone, so it returns rather than
+/// spinning. If it panics, the app is unaffected: the channel simply disconnects,
+/// the drain sees nothing, and audio degrades to "no early migrate-back" while the
+/// supervisor's backoff still recovers the stream.
+///
+/// On spawn failure it returns a shell with no thread. The app still runs; it just
+/// cannot see topology changes, and recovery falls back to the supervisor's timed
+/// retries.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn spawn_device_watcher() -> (DeviceWatcher, DeviceTopologyReceiver) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+
+    let spawned = std::thread::Builder::new()
+        .name("wc-audio-device-watcher".to_owned())
+        .spawn(move || {
+            let host = cpal::default_host();
+            // Reused across the session; the first poll (`last == None`) always
+            // publishes, so the dropdown and the resolver see a list without
+            // waiting out an interval.
+            let mut last: Option<Vec<String>> = None;
+
+            while !stop_thread.load(Ordering::Relaxed) {
+                if let Some(current) =
+                    topology_snapshot_to_publish(last.as_deref(), enumerate_output_names(&host))
+                {
+                    // The one clone: the channel takes ownership, and we keep a
+                    // copy to diff the next poll against. Only on a real change.
+                    if tx.send(current.clone()).is_err() {
+                        return; // main side dropped the receiver — we are done
+                    }
+                    last = Some(current);
+                }
+
+                // Sleep the interval in short increments so a stop request is
+                // honoured within ~one tick rather than ~one interval.
+                let mut waited = std::time::Duration::ZERO;
+                while waited < WATCH_INTERVAL {
+                    if stop_thread.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(WATCH_TICK);
+                    waited += WATCH_TICK;
+                }
+            }
+        });
+
+    match spawned {
+        Ok(handle) => (
+            DeviceWatcher {
+                stop,
+                handle: Some(handle),
+            },
+            DeviceTopologyReceiver { rx },
+        ),
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "failed to spawn device-watcher thread; topology changes will go unnoticed"
+            );
+            (
+                DeviceWatcher { stop, handle: None },
+                DeviceTopologyReceiver { rx },
+            )
+        }
+    }
+}
+
+/// `PreUpdate` system: pull the newest topology snapshot off the watcher channel,
+/// update [`AvailableAudioDevices`], and ask the supervisor for an immediate
+/// rebuild when the saved endpoint has just reappeared.
+///
+/// Runs on the **main thread** ([`DeviceTopologyReceiver`] is non-send) and every
+/// frame — so it is a hot path. It never enumerates (the blocking enumeration
+/// already happened on the watcher thread) and it never allocates in steady state:
+/// the common case is an empty channel, `DeviceTopologyReceiver::latest` returns
+/// `None`, and the system returns. When a snapshot *has* arrived it only moves an
+/// already-built `Vec<String>` into the resource.
+///
+/// `saved` is `None` in this recovery-only stage — Task 6 wires the persisted
+/// `AudioSettings::output_device` in — so migrate-back is inert until a device can
+/// actually be chosen. Until then the list is still kept fresh (Task 7's dropdown
+/// reads it) and recovery-to-the-default is the behaviour.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn drain_device_topology(
+    receiver: Option<bevy::ecs::system::NonSend<'_, DeviceTopologyReceiver>>,
+    mut available: ResMut<'_, AvailableAudioDevices>,
+    bound: Res<'_, BoundOutputDevice>,
+    mut supervisor: ResMut<'_, crate::audio::supervisor::AudioSupervisor>,
+    time: Res<'_, Time<Real>>,
+) {
+    // Absent until `start_audio_engine` has spawned the watcher — and, in the
+    // headless test harnesses, forever. `Option` (not a bare `NonSend`) is what
+    // makes this always-on system safe to register unconditionally.
+    let Some(receiver) = receiver else {
+        return;
+    };
+    let Some(incoming) = receiver.latest() else {
+        return;
+    };
+    // Task 6 replaces this `None` with the persisted device name.
+    let saved: Option<&str> = None;
+    if apply_topology(&mut available.0, incoming, saved, bound.0.as_deref()) {
+        // Bring the next reconnect attempt forward instead of waiting out a
+        // backoff that may be as long as 30 s. `Time<Real>` is the monotonic
+        // clock the supervisor's contract requires.
+        supervisor.request_now(time.elapsed_secs_f64());
     }
 }
 
@@ -379,5 +645,163 @@ mod tests {
         assert!(saved_device_reappeared(saved, &empty, &with, None));
         // And the reverse (everything vanished) is not.
         assert!(!saved_device_reappeared(saved, &with, &empty, None));
+    }
+
+    /// The watcher, its channel, and the drain system are native-only (cpal
+    /// enumeration is), so the pure cores they are built out of are too.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod topology {
+        use super::*;
+
+        #[test]
+        fn apply_topology_updates_the_list_and_flags_reappearance() {
+            let mut available = names(&["Built-in"]);
+            // The saved HDMI TV reappears while we are on the fallback.
+            let migrate = apply_topology(
+                &mut available,
+                names(&["Built-in", "LG TV (HDMI)"]),
+                Some("LG TV (HDMI)"),
+                Some("Built-in"),
+            );
+            assert!(migrate, "saved endpoint reappeared -> migrate back");
+            assert_eq!(available, names(&["Built-in", "LG TV (HDMI)"]));
+        }
+
+        #[test]
+        fn apply_topology_no_migrate_when_nothing_relevant_changed() {
+            let mut available = names(&["Built-in", "LG TV (HDMI)"]);
+            // Same list, already bound to the saved device: no migrate.
+            let migrate = apply_topology(
+                &mut available,
+                names(&["Built-in", "LG TV (HDMI)"]),
+                Some("LG TV (HDMI)"),
+                Some("LG TV (HDMI)"),
+            );
+            assert!(!migrate);
+        }
+
+        /// The list still has to be replaced when there is nothing to migrate to —
+        /// the settings dropdown reads `AvailableAudioDevices`, so a snapshot whose
+        /// only change is "the headphones went away" must still land, even though it
+        /// is not a migrate-back edge.
+        #[test]
+        fn apply_topology_swaps_the_list_even_when_no_migrate_is_warranted() {
+            let mut available = names(&["Built-in", "Headphones"]);
+            let migrate =
+                apply_topology(&mut available, names(&["Built-in"]), None, Some("Built-in"));
+            assert!(!migrate);
+            assert_eq!(available, names(&["Built-in"]));
+        }
+
+        /// The recovery-only stage (Tasks 4–5) passes `saved: None` because the
+        /// persisted setting is not wired in until Task 6. Migrate-back is therefore
+        /// inert, but the drain must still be harmless: no edge, no thrash, list
+        /// updated.
+        #[test]
+        fn apply_topology_with_no_saved_name_never_migrates() {
+            let mut available = names(&["Built-in"]);
+            let migrate = apply_topology(
+                &mut available,
+                names(&["Built-in", "LG TV (HDMI)"]),
+                None,
+                Some("Built-in"),
+            );
+            assert!(!migrate);
+            assert_eq!(available, names(&["Built-in", "LG TV (HDMI)"]));
+        }
+
+        /// The watcher only sends on a real change, but a duplicate snapshot must be
+        /// idempotent anyway (two drains of the same list, or a re-send after a
+        /// reconnect): the second application sees the device already in `previous`,
+        /// so it is not a rising edge and the stream is not rebuilt twice.
+        #[test]
+        fn applying_the_same_snapshot_twice_fires_at_most_one_migrate() {
+            let mut available = names(&["Built-in"]);
+            let saved = Some("LG TV (HDMI)");
+            let bound = Some("Built-in");
+            let with = names(&["Built-in", "LG TV (HDMI)"]);
+
+            assert!(apply_topology(&mut available, with.clone(), saved, bound));
+            assert!(!apply_topology(&mut available, with, saved, bound));
+        }
+
+        /// The first poll of the session has no previous snapshot, so it always
+        /// publishes — otherwise the dropdown would be empty until something changed.
+        #[test]
+        fn the_first_poll_always_publishes() {
+            let first = names(&["Built-in"]);
+            assert_eq!(
+                topology_snapshot_to_publish(None, Some(first.clone())),
+                Some(first),
+            );
+            // Even when the host genuinely has nothing: `Some(vec![])` is an answer.
+            assert_eq!(
+                topology_snapshot_to_publish(None, Some(Vec::new())),
+                Some(Vec::new()),
+            );
+        }
+
+        /// Steady state: the same list, poll after poll, for hours. Nothing is
+        /// published, so the channel stays silent and the main thread does no work.
+        #[test]
+        fn an_unchanged_list_publishes_nothing() {
+            let last = names(&["Built-in", "LG TV (HDMI)"]);
+            assert_eq!(
+                topology_snapshot_to_publish(Some(&last), Some(last.clone())),
+                None,
+            );
+        }
+
+        /// A real change — the TV woke up — is published.
+        #[test]
+        fn a_changed_list_is_published() {
+            let last = names(&["Built-in"]);
+            let with = names(&["Built-in", "LG TV (HDMI)"]);
+            assert_eq!(
+                topology_snapshot_to_publish(Some(&last), Some(with.clone())),
+                Some(with),
+            );
+            // And so is the reverse: the TV sleeping empties the list, which the
+            // dropdown must reflect.
+            let gone: Vec<String> = Vec::new();
+            assert_eq!(
+                topology_snapshot_to_publish(Some(&last), Some(gone.clone())),
+                Some(gone),
+            );
+        }
+
+        /// The defect this function exists to prevent. A *failed* enumeration
+        /// (`None`) is not "every endpoint vanished". If it were folded into an empty
+        /// list, the next successful poll would read as a rising edge and rebuild the
+        /// stream for no reason — every time the host hiccups, forever.
+        #[test]
+        fn a_failed_enumeration_skips_the_tick_and_keeps_the_previous_snapshot() {
+            let last = names(&["Built-in", "LG TV (HDMI)"]);
+            assert_eq!(topology_snapshot_to_publish(Some(&last), None), None);
+            // The caller therefore still holds `last`, so the next successful poll of
+            // the same list is (correctly) not a change either.
+            assert_eq!(
+                topology_snapshot_to_publish(Some(&last), Some(last.clone())),
+                None,
+            );
+        }
+
+        /// The watcher's diff is exact equality, which is only safe because
+        /// [`enumerate_output_names`] sorts. Two orderings of the same membership must
+        /// never reach the differ; if they did, the kiosk would republish (and, with a
+        /// saved name, rebuild) every 2 s forever. This pins the sort as the load-
+        /// bearing property it is.
+        #[test]
+        fn the_snapshot_is_canonical_so_a_reorder_cannot_reach_the_differ() {
+            let mut host_order = names(&["LG TV (HDMI)", "Built-in", "Headphones"]);
+            let mut other_order = names(&["Headphones", "LG TV (HDMI)", "Built-in"]);
+            // What `enumerate_output_names` does to whatever order the host reports.
+            host_order.sort_unstable();
+            other_order.sort_unstable();
+            assert_eq!(
+                topology_snapshot_to_publish(Some(&host_order), Some(other_order)),
+                None,
+            );
+        }
     }
 }

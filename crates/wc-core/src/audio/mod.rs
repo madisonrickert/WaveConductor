@@ -81,6 +81,18 @@ use crate::lifecycle::state::AppState;
 ///
 /// The cpal stream is paused while `AppState::Home` is active and resumed when
 /// transitioning into any sketch state.
+///
+/// ## The third thread
+///
+/// Besides the main thread and cpal's audio thread, `Startup` also spawns the
+/// **device-watcher** OS thread ([`device::spawn_device_watcher`]). cpal's device
+/// enumeration can block (WASAPI especially), so it may sit on neither of the
+/// other two. The watcher polls output-device topology every ~2 s and sends a
+/// name snapshot — only when the list actually changed — down an `mpsc` channel;
+/// [`device::drain_device_topology`] (`PreUpdate`, main thread) moves the newest
+/// one into `AvailableAudioDevices` and asks [`supervisor::AudioSupervisor`] for
+/// an immediate reconnect when the saved endpoint reappears. It is the thing that
+/// notices the TV came back.
 pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
@@ -90,6 +102,14 @@ impl Plugin for AudioPlugin {
             // the engine has started; status will be `NotStarted` until the
             // Startup system runs.
             .init_resource::<AudioState>()
+            // Reconnect bookkeeping and the device picture the supervisor and
+            // the settings panel read. Registered here (not by whichever system
+            // happens to touch them first) so every system that takes them as a
+            // `Res`/`ResMut` — including the always-on `drain_device_topology`
+            // below — can rely on them existing from app build.
+            .init_resource::<device::AvailableAudioDevices>()
+            .init_resource::<device::BoundOutputDevice>()
+            .init_resource::<supervisor::AudioSupervisor>()
             .add_systems(Startup, engine::start_audio_engine)
             .add_systems(PreUpdate, state::pump_audio_messages)
             // The egui keyboard-capture gate lives in the `emit_action_input`
@@ -102,6 +122,22 @@ impl Plugin for AudioPlugin {
             // system's primary role is runtime Home re-entry (not startup).
             .add_systems(OnEnter(AppState::Home), pause_audio_on_home)
             .add_systems(OnExit(AppState::Home), resume_audio_on_sketch);
+
+        // Device topology drain (native only — cpal enumeration is). This is one
+        // of the sanctioned always-on systems: an endpoint can appear or vanish
+        // in *any* `AppState`, including Idle and the attract screensaver (a TV
+        // waking up is exactly that case), so it cannot be gated on a sketch
+        // being active. It costs an empty-channel `try_recv` per frame and
+        // returns; see `device::drain_device_topology`.
+        //
+        // Ordered after the message pump so a stream death observed this frame
+        // has already moved `AudioState` into `Reconnecting` before a reappearing
+        // device asks the supervisor to retry immediately.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            PreUpdate,
+            device::drain_device_topology.after(state::pump_audio_messages),
+        );
     }
 }
 
