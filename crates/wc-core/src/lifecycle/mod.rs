@@ -6,7 +6,7 @@
 //!
 //! 1. User presses a key bound by [`actions::WaveConductorAction`].
 //! 2. `action_map::emit_action_input` reads `ButtonInput<KeyCode>` and emits `ActionInput` messages.
-//! 3. [`nav::handle_navigation_actions`] reads those `ActionInput` messages and
+//! 3. `nav::handle_navigation_actions` reads those `ActionInput` messages and
 //!    transitions [`state::AppState`] via `NextState<AppState>`.
 //! 4. Any interaction (mouse, keyboard, future hand-tracking) resets
 //!    [`idle::InteractionTimer`].
@@ -18,6 +18,7 @@
 
 pub mod action_map;
 pub mod actions;
+pub mod display;
 pub mod idle;
 pub mod nav;
 pub mod reload;
@@ -116,5 +117,12 @@ impl Plugin for LifecyclePlugin {
         // `in_screensaver` run-condition, the `ScreensaverSettings` resource,
         // the instruction overlay, and the per-tier present-rate throttle.
         app.add_plugins(screensaver::ScreensaverPlugin);
+
+        // Startup fullscreen, cursor visibility, and monitor selection (Plan
+        // 03, alpha.5). Applies DisplaySettings at boot and re-asserts it
+        // every frame — see crate::lifecycle::display's module doc for why
+        // "every frame" replaces the MonitorAdded/MonitorRemoved message
+        // Bevy 0.19 does not have.
+        app.add_plugins(display::DisplayPlugin);
     }
 }

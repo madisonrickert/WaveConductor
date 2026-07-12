@@ -2,9 +2,11 @@
 //!
 //! ## Native
 //!
-//! A single TOML file at `dirs::config_dir() / "waveconductor" / "sketch-settings.toml"`.
-//! Each settings struct occupies one top-level table keyed by its
-//! [`SketchSettings::STORAGE_KEY`]:
+//! A single TOML file at `dirs::config_dir() / "waveconductor" /`
+//! [`SETTINGS_FILE_NAME`], shared by every build profile — a sketch parameter
+//! ear-tuned under `cargo rund` is meant to reach the release build that gets
+//! deployed. Each settings struct occupies one top-level table keyed by
+//! its [`SketchSettings::STORAGE_KEY`]:
 //!
 //! ```toml
 //! [line]
@@ -17,7 +19,9 @@
 //!
 //! The override env var [`CONFIG_DIR_ENV`] is consulted first; integration
 //! tests use a `TempDir` and set this var so they never touch the real
-//! XDG/macOS config dir.
+//! XDG/macOS config dir. It is also the sanctioned way to give one deployment
+//! (a kiosk install, a second machine) a config dir of its own without
+//! splitting the file name.
 //!
 //! ## Web
 //!
@@ -33,7 +37,25 @@ use super::trait_def::SketchSettings;
 /// Production code does not set this; tests do, to point at a `TempDir`.
 pub const CONFIG_DIR_ENV: &str = "WAVECONDUCTOR_CONFIG_DIR";
 
-/// Returns the absolute path to the combined settings TOML file.
+/// File name of the combined settings TOML. **One file for every build
+/// profile.**
+///
+/// A debug build and a release build deliberately share it. The settings file is
+/// where the operator's tuning lives — sketch parameters ear-tuned under
+/// `cargo rund`, and the display configuration (monitor, fullscreen, cursor) that
+/// makes the kiosk a kiosk. Scoping the name to `debug_assertions` would isolate
+/// *all* of that, not just the display fields, so a value tuned in a dev run would
+/// never reach the release binary that gets deployed.
+///
+/// No settings default is profile-dependent, so nothing needs the split: a debug
+/// run writing `[display]` writes the same fields the release build reads, which
+/// is a settings file doing its job. A deployment that genuinely wants its own
+/// state sets [`CONFIG_DIR_ENV`] and gets a whole config directory of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SETTINGS_FILE_NAME: &str = "sketch-settings.toml";
+
+/// Returns the absolute path to the combined settings TOML file
+/// ([`SETTINGS_FILE_NAME`]).
 ///
 /// Falls back to the current working directory if neither
 /// [`CONFIG_DIR_ENV`] nor [`dirs::config_dir`] yields a path — the only
@@ -46,7 +68,7 @@ pub fn settings_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("waveconductor").join("sketch-settings.toml")
+    base.join("waveconductor").join(SETTINGS_FILE_NAME)
 }
 
 /// Load the value for a specific settings type. Returns `S::default()` on
@@ -220,7 +242,7 @@ fn load_merge_table(path: &Path) -> toml::Table {
 #[cfg(not(target_arch = "wasm32"))]
 fn temp_write_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().map_or_else(
-        || std::ffi::OsString::from("sketch-settings.toml"),
+        || std::ffi::OsString::from(SETTINGS_FILE_NAME),
         std::ffi::OsStr::to_os_string,
     );
     name.push(format!(".tmp-{}", std::process::id()));
