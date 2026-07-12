@@ -23,6 +23,7 @@ pub mod detector;
 pub mod edges;
 pub mod mask;
 pub mod roi;
+pub mod transport;
 
 /// Number of `BlazePose` body landmarks published to consumers.
 pub const BODY_LANDMARK_COUNT: usize = 33;
