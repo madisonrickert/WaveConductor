@@ -65,7 +65,14 @@ impl AudioStream {
 }
 
 /// Startup system. Builds the cpal stream, starts it, then immediately pauses
-/// it. Installs all engine resources.
+/// it; installs all engine resources; and spawns the **device-watcher OS thread**
+/// ([`super::device::spawn_device_watcher`]), whose `DeviceWatcher` +
+/// `DeviceTopologyReceiver` are the third and fourth resources this installs.
+///
+/// The watcher spawn is **unconditional** — see the comment at the spawn site.
+/// That is the load-bearing property: a kiosk that boots while its TV is asleep
+/// has no output device, therefore no stream, therefore no cpal error callback,
+/// so the watcher is the only thing that can ever notice the TV arriving.
 ///
 /// The stream starts paused so the home screen is always silent at launch,
 /// regardless of `OnEnter(AppState::Home)` scheduling order. The
@@ -95,22 +102,6 @@ pub fn start_audio_engine(world: &mut World) {
         .get_resource::<SampleAssets>()
         .cloned()
         .unwrap_or_default();
-
-    // Spawn the device watcher *before* the build, and regardless of whether the
-    // build succeeds. A boot with no output device at all — the kiosk powering on
-    // while its TV is still asleep — is the routine case, not an error, and it is
-    // exactly the case where nothing else will ever notice the endpoint arriving:
-    // there is no stream, so there is no cpal error callback. The watcher is
-    // independent of the stream and must outlive its failure to build.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let (watcher, topology_rx) = super::device::spawn_device_watcher();
-        // The watcher's `Drop` stops and joins the thread when the world is torn
-        // down, so it cannot outlive the app.
-        world.insert_resource(watcher);
-        // `mpsc::Receiver` is Send but not Sync — main-thread-only, like the rings.
-        world.insert_non_send(topology_rx);
-    }
 
     // Recovery-only stage: no persisted device name yet (Task 6 wires it in), so
     // resolve to the system default. The enumeration is a one-shot main-thread
@@ -164,6 +155,25 @@ pub fn start_audio_engine(world: &mut World) {
             state.status = super::state::AudioStatus::Reconnecting;
             state.last_error = Some(err.to_string());
         }
+    }
+
+    // Spawn the device watcher **unconditionally** — after the build, and
+    // regardless of whether it succeeded. The unconditional part is what matters:
+    // a boot with no output device at all (the kiosk powering on while its TV is
+    // still asleep) is the routine case, not an error, and it is exactly the case
+    // where nothing else will ever notice the endpoint arriving, because with no
+    // stream there is no cpal error callback. The watcher is independent of the
+    // stream and must outlive its failure to build. Spawning it *before* the build
+    // bought nothing (it would merely enumerate concurrently with the main
+    // thread's own `default_output_device()`), so it runs after.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (watcher, topology_rx) = super::device::spawn_device_watcher();
+        // The watcher's `Drop` stops and joins the thread when the world is torn
+        // down, so it cannot outlive the app.
+        world.insert_resource(watcher);
+        // `mpsc::Receiver` is Send but not Sync — main-thread-only, like the rings.
+        world.insert_non_send(topology_rx);
     }
 }
 

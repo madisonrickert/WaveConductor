@@ -154,24 +154,31 @@ pub struct BoundOutputDevice(pub Option<String>);
 /// saved name)": at build time we must pick *something*, and there is nothing to
 /// pick.
 ///
-/// The result is **sorted** and *not* de-duplicated. Sorting makes the snapshot
-/// canonical, so a host that re-orders its enumeration between polls does not
-/// look like a topology change to the watcher, and the settings dropdown has a
-/// stable order. De-duplicating would silently hide one of two identically-named
-/// endpoints from that dropdown, so duplicates are kept as reported.
+/// The result is **sorted** and *not* de-duplicated (see
+/// `canonical_output_names`, which is where that happens and where it is
+/// tested). Sorting makes the snapshot canonical, so a host that re-orders its
+/// enumeration between polls does not look like a topology change to the watcher,
+/// and the settings dropdown has a stable order. De-duplicating would silently
+/// hide one of two identically-named endpoints from that dropdown, so duplicates
+/// are kept as reported.
 ///
 /// Allocates a `Vec<String>` (cpal returns owned names); this is forced by
 /// cpal's API and is acceptable because it runs at most every ~2 s on a
 /// background thread, never on the audio callback or a per-frame render system.
+///
+/// ## This logs on every failure — do not call it on a schedule
+///
+/// The `warn!` below is written for the **one-shot** caller (the main-thread
+/// startup/rebuild path), where a failure is worth a line. A caller that polls —
+/// i.e. the device watcher, every ~2 s — would turn a persistently failing host
+/// (a restarted Windows `audiosrv`, a wedged macOS `coreaudiod`) into ~1,800
+/// formatted, allocating log lines an hour. Such callers use
+/// `try_enumerate_output_names` and log the *edges* themselves; see
+/// [`spawn_device_watcher`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn enumerate_output_names(host: &cpal::Host) -> Option<Vec<String>> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    match host.output_devices() {
-        Ok(devices) => {
-            let mut names: Vec<String> = devices.filter_map(|d| d.name().ok()).collect();
-            names.sort_unstable();
-            Some(names)
-        }
+    match try_enumerate_output_names(host) {
+        Ok(names) => Some(names),
         Err(err) => {
             // Not "every device disappeared" — "we could not ask". The caller
             // must keep its previous snapshot rather than diff against this.
@@ -179,6 +186,46 @@ pub fn enumerate_output_names(host: &cpal::Host) -> Option<Vec<String>> {
             None
         }
     }
+}
+
+/// [`enumerate_output_names`] without the logging: the host's answer, or the
+/// host's error, handed back verbatim.
+///
+/// Exists for the one caller that runs on a schedule (the device-watcher thread),
+/// which must decide for itself *when* a failure is worth a line — it logs the
+/// transition into and out of failure, not every poll. Everything else should use
+/// [`enumerate_output_names`], which logs the failure once and folds it to `None`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn try_enumerate_output_names(
+    host: &cpal::Host,
+) -> Result<Vec<String>, cpal::DevicesError> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let devices = host.output_devices()?;
+    Ok(canonical_output_names(
+        devices.filter_map(|d| d.name().ok()),
+    ))
+}
+
+/// Collect device names into the **canonical** (sorted, not de-duplicated) form
+/// the topology differ compares by exact equality.
+///
+/// The sort is load-bearing, not cosmetic: `topology_snapshot_to_publish`
+/// compares snapshots with `==`, so without it a host that re-orders its
+/// enumeration between polls (some do, on every call) would read as a topology
+/// change every 2 s forever — republishing, and with a saved name, rebuilding the
+/// stream. Extracted from [`enumerate_output_names`] precisely so that property
+/// can be pinned by a test on a machine with no audio host at all (CI has none):
+/// see `canonicalisation_sorts_whatever_order_the_host_reports`.
+///
+/// Duplicates are **kept** as reported: two identically-named endpoints (two of
+/// the same TV) are two endpoints, and hiding one from the settings dropdown
+/// would be a lie.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+fn canonical_output_names(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.collect();
+    names.sort_unstable();
+    names
 }
 
 /// Apply an incoming topology snapshot to the live list and report whether the
@@ -263,12 +310,24 @@ pub struct DeviceWatcher {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for DeviceWatcher {
+    /// Signal the thread to stop and join it.
+    ///
+    /// The stop flag is observed at each 100 ms sleep tick, so the join normally
+    /// costs ≤ ~100 ms — **plus any enumeration already in flight**. The flag is
+    /// *not* checked inside `host.output_devices()`, which is the one call
+    /// documented as blocking (WASAPI, especially against an endpoint that is
+    /// being torn down at the same moment), so a quit that lands mid-poll waits
+    /// that call out. Nothing can be done about that from this side short of
+    /// detaching the thread, which would trade a bounded shutdown stall for an
+    /// unbounded one.
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             // A failed join means the watcher panicked. Log it and carry on:
             // this runs during teardown, and a watcher panic must degrade audio
-            // recovery, never take the app down with it.
+            // recovery, never take the app down with it. The panic itself was
+            // already logged at the time it happened (see `spawn_device_watcher`),
+            // which is hours earlier than this line on a soak.
             if handle.join().is_err() {
                 tracing::warn!("device-watcher thread panicked before join");
             }
@@ -325,14 +384,28 @@ impl DeviceTopologyReceiver {
 /// topology change, not on a poll. In steady state the channel is silent and the
 /// main thread's drain does nothing.
 ///
+/// ## A failing host is logged on the edges, not on every poll
+///
+/// A host whose enumeration errors *persistently* (a restarted Windows
+/// `audiosrv`, a wedged macOS `coreaudiod`) fails every poll for as long as it is
+/// broken. Logging each one would emit ~1,800 formatted, allocating lines an hour
+/// — ~14,000 over an 8-hour soak — from the one thread whose entire premise is
+/// being cheap in steady state. So the loop calls `try_enumerate_output_names`
+/// (which does not log) and keeps a single `failing: bool`: it warns **once** when
+/// enumeration starts failing and logs **once** when it recovers. The failure stays
+/// discoverable; it just stops being a flood.
+///
 /// ## Lifetime
 ///
 /// The thread cannot outlive the app: `DeviceWatcher`'s `Drop` sets the stop flag
-/// and joins (≤ ~100 ms). It also exits on its own if the receiver is dropped —
-/// `send` failing means the main thread is gone, so it returns rather than
-/// spinning. If it panics, the app is unaffected: the channel simply disconnects,
-/// the drain sees nothing, and audio degrades to "no early migrate-back" while the
-/// supervisor's backoff still recovers the stream.
+/// and joins (see its docs for the shutdown-latency caveat). It also exits on its
+/// own if the receiver is dropped — `send` failing means the main thread is gone,
+/// so it returns rather than spinning. If it panics, the app is unaffected: the
+/// channel simply disconnects, the drain sees nothing, and audio degrades to "no
+/// early migrate-back" while the supervisor's backoff still recovers the stream.
+/// The panic is caught and logged **at the moment it happens** rather than only
+/// surfacing as a failed join at app exit: on a soak, a watcher that dies in hour 1
+/// is otherwise silently gone for the remaining seven.
 ///
 /// On spawn failure it returns a shell with no thread. The app still runs; it just
 /// cannot see topology changes, and recovery falls back to the supervisor's timed
@@ -340,7 +413,7 @@ impl DeviceTopologyReceiver {
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn spawn_device_watcher() -> (DeviceWatcher, DeviceTopologyReceiver) {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -350,34 +423,24 @@ pub fn spawn_device_watcher() -> (DeviceWatcher, DeviceTopologyReceiver) {
     let spawned = std::thread::Builder::new()
         .name("wc-audio-device-watcher".to_owned())
         .spawn(move || {
-            let host = cpal::default_host();
-            // Reused across the session; the first poll (`last == None`) always
-            // publishes, so the dropdown and the resolver see a list without
-            // waiting out an interval.
-            let mut last: Option<Vec<String>> = None;
-
-            while !stop_thread.load(Ordering::Relaxed) {
-                if let Some(current) =
-                    topology_snapshot_to_publish(last.as_deref(), enumerate_output_names(&host))
-                {
-                    // The one clone: the channel takes ownership, and we keep a
-                    // copy to diff the next poll against. Only on a real change.
-                    if tx.send(current.clone()).is_err() {
-                        return; // main side dropped the receiver — we are done
-                    }
-                    last = Some(current);
-                }
-
-                // Sleep the interval in short increments so a stop request is
-                // honoured within ~one tick rather than ~one interval.
-                let mut waited = std::time::Duration::ZERO;
-                while waited < WATCH_INTERVAL {
-                    if stop_thread.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(WATCH_TICK);
-                    waited += WATCH_TICK;
-                }
+            // Catch a panic here so it is reported *when it happens*. Without
+            // this, the only trace of a watcher that died at hour 1 of a soak is
+            // the failed join in `DeviceWatcher::drop`, hours later at app exit.
+            // `AssertUnwindSafe` is sound because nothing observable is shared:
+            // the loop owns its `host` and `last`, and the channel's other end
+            // only ever sees whole snapshots that were already sent.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                watch_devices(&stop_thread, &tx);
+            }));
+            if result.is_err() {
+                // Degraded, not fatal: audio still works and the supervisor's
+                // backoff still recovers the stream — only the early
+                // migrate-back is gone. Say so, rather than leaving the operator
+                // to infer it from silence.
+                tracing::error!(
+                    "device-watcher thread panicked; topology changes will go unnoticed for the \
+                     rest of this session (audio recovery falls back to the supervisor's backoff)"
+                );
             }
         });
 
@@ -398,6 +461,75 @@ pub fn spawn_device_watcher() -> (DeviceWatcher, DeviceTopologyReceiver) {
                 DeviceWatcher { stop, handle: None },
                 DeviceTopologyReceiver { rx },
             )
+        }
+    }
+}
+
+/// The watcher thread's body: build a host, then poll → publish-if-changed →
+/// sleep until asked to stop (or until the main thread drops the receiver).
+///
+/// Split out of [`spawn_device_watcher`] so the `catch_unwind` there wraps one
+/// named thing rather than a closure the size of the whole loop.
+///
+/// Enumeration failures are logged on the **edges** only (see the `failing` flag
+/// below and the function's caller docs): a persistently broken host must not turn
+/// a 2 s poll into a log flood for the length of a soak.
+#[cfg(not(target_arch = "wasm32"))]
+fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sender<Vec<String>>) {
+    use std::sync::atomic::Ordering;
+
+    let host = cpal::default_host();
+    // Reused across the session; the first poll (`last == None`) always
+    // publishes, so the dropdown and the resolver see a list without
+    // waiting out an interval.
+    let mut last: Option<Vec<String>> = None;
+    // Whether the *previous* poll's enumeration failed. The one piece of state
+    // that turns a per-poll warning into a per-outage one.
+    let mut failing = false;
+
+    while !stop.load(Ordering::Relaxed) {
+        let polled = match try_enumerate_output_names(&host) {
+            Ok(names) => {
+                if failing {
+                    tracing::info!("cpal output-device enumeration recovered");
+                    failing = false;
+                }
+                Some(names)
+            }
+            Err(err) => {
+                if !failing {
+                    tracing::warn!(
+                        ?err,
+                        "cpal output-device enumeration is failing; the device watcher will keep \
+                         polling every 2 s and log once when it recovers"
+                    );
+                    failing = true;
+                }
+                // "We could not ask" — not "every device disappeared". The
+                // differ must keep the previous snapshot; see
+                // `topology_snapshot_to_publish`.
+                None
+            }
+        };
+
+        if let Some(current) = topology_snapshot_to_publish(last.as_deref(), polled) {
+            // The one clone: the channel takes ownership, and we keep a copy to
+            // diff the next poll against. Only on a real change.
+            if tx.send(current.clone()).is_err() {
+                return; // main side dropped the receiver — we are done
+            }
+            last = Some(current);
+        }
+
+        // Sleep the interval in short increments so a stop request is honoured
+        // within ~one tick rather than ~one interval.
+        let mut waited = std::time::Duration::ZERO;
+        while waited < WATCH_INTERVAL {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(WATCH_TICK);
+            waited += WATCH_TICK;
         }
     }
 }
@@ -786,22 +918,47 @@ mod tests {
             );
         }
 
-        /// The watcher's diff is exact equality, which is only safe because
-        /// [`enumerate_output_names`] sorts. Two orderings of the same membership must
-        /// never reach the differ; if they did, the kiosk would republish (and, with a
-        /// saved name, rebuild) every 2 s forever. This pins the sort as the load-
-        /// bearing property it is.
+        /// The sort itself, pinned where it actually lives.
+        ///
+        /// CI has no cpal host, so [`enumerate_output_names`] cannot be called
+        /// here — which is exactly why the sort was lifted out of it into
+        /// [`canonical_output_names`], whose input is a plain iterator of names.
+        /// Delete the `sort_unstable` there and this test fails, which is what the
+        /// old version of this test only *claimed* to do: it sorted its own inputs
+        /// before handing them to the differ, so it passed with the production sort
+        /// removed.
         #[test]
-        fn the_snapshot_is_canonical_so_a_reorder_cannot_reach_the_differ() {
-            let mut host_order = names(&["LG TV (HDMI)", "Built-in", "Headphones"]);
-            let mut other_order = names(&["Headphones", "LG TV (HDMI)", "Built-in"]);
-            // What `enumerate_output_names` does to whatever order the host reports.
-            host_order.sort_unstable();
-            other_order.sort_unstable();
+        fn canonicalisation_sorts_whatever_order_the_host_reports() {
+            let reported = names(&["LG TV (HDMI)", "Built-in", "Headphones"]);
             assert_eq!(
-                topology_snapshot_to_publish(Some(&host_order), Some(other_order)),
-                None,
+                canonical_output_names(reported.into_iter()),
+                names(&["Built-in", "Headphones", "LG TV (HDMI)"]),
             );
+            // Duplicates survive: two identical TVs are two endpoints, and the
+            // settings dropdown must not hide one of them.
+            let dupes = names(&["LG TV (HDMI)", "Built-in", "LG TV (HDMI)"]);
+            assert_eq!(
+                canonical_output_names(dupes.into_iter()),
+                names(&["Built-in", "LG TV (HDMI)", "LG TV (HDMI)"]),
+            );
+        }
+
+        /// …and the reason the sort matters: the watcher's diff is exact equality,
+        /// so two orderings of the same membership must be *canonicalised into the
+        /// same snapshot* before they reach the differ. If they were not, the kiosk
+        /// would republish (and, with a saved name, rebuild) every 2 s forever.
+        ///
+        /// The canonicalisation here is the production one — the same call
+        /// `try_enumerate_output_names` makes — not a hand-sort in the test.
+        #[test]
+        fn two_host_orderings_canonicalise_to_the_same_snapshot_and_do_not_reach_the_differ() {
+            let one = canonical_output_names(
+                names(&["LG TV (HDMI)", "Built-in", "Headphones"]).into_iter(),
+            );
+            let other = canonical_output_names(
+                names(&["Headphones", "LG TV (HDMI)", "Built-in"]).into_iter(),
+            );
+            assert_eq!(topology_snapshot_to_publish(Some(&one), Some(other)), None);
         }
     }
 }
