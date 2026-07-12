@@ -57,6 +57,7 @@ use crate::ui::auto_fade::UiOpacity;
 use crate::ui::buttons::SettingsPanelVisible;
 use crate::ui::{backdrop_blur_frame, hairline, FrameOptions, OverlayStyle};
 
+pub(super) mod display;
 mod dock;
 mod fields;
 mod provider_status;
