@@ -25,6 +25,7 @@ pub mod mask;
 pub mod pipeline;
 pub mod roi;
 pub mod smoothing;
+pub mod systems;
 pub mod transport;
 pub mod worker;
 
@@ -255,16 +256,40 @@ impl Default for BodyTrackingConfig {
     }
 }
 
-/// Wires body tracking into the Bevy [`App`]. Resource shell in this task;
-/// Task 12 adds the startup + `PreUpdate` systems and the full data-flow doc.
+/// Wires body tracking into the Bevy [`App`].
 pub struct BodyTrackingPlugin;
 
 impl Plugin for BodyTrackingPlugin {
+    /// Data flow:
+    ///
+    /// ```text
+    /// BodyTrackingRequest (sketch inserts/removes; idle_throttle mirrors SketchActivity)
+    ///   └─ systems::sync_body_tracking   — spawns/stops the worker, mirrors the throttle
+    /// worker thread (systems-spawned):
+    ///   camera FrameSource → PosePipeline (detector → ROI → landmarks/mask/edges)
+    ///     → rtrb result ring (BodyWorkerMsg; mask via the recycled payload pool)
+    ///   └─ systems::poll_body_worker     — drains the ring, One-Euro smooths,
+    ///        writes BodyTrackingState + MaskTexture bytes + SilhouetteEdges,
+    ///        recycles payloads, marks InteractionTimer on person-bearing frames
+    /// ```
+    ///
+    /// Both `PreUpdate` systems run under `InputSystems` (like the hand
+    /// subsystem) and are internally gated on the request/runtime: with no
+    /// request they are two early-outs per frame — the sanctioned always-on
+    /// listener shape (they must observe a request inserted from any state).
     fn build(&self, app: &mut App) {
         app.init_resource::<BodyTrackingState>()
             .init_resource::<BodyTrackingDiagnostics>()
             .init_resource::<SilhouetteEdges>()
-            .init_resource::<BodyTrackingConfig>();
+            .init_resource::<BodyTrackingConfig>()
+            .init_resource::<systems::BodyTrackingWorker>()
+            .add_systems(Startup, systems::init_mask_texture)
+            .add_systems(
+                PreUpdate,
+                (systems::sync_body_tracking, systems::poll_body_worker)
+                    .chain()
+                    .in_set(bevy::input::InputSystems),
+            );
     }
 }
 
