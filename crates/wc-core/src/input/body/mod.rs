@@ -26,6 +26,7 @@ pub mod pipeline;
 pub mod roi;
 pub mod smoothing;
 pub mod transport;
+pub mod worker;
 
 /// Number of `BlazePose` body landmarks published to consumers.
 pub const BODY_LANDMARK_COUNT: usize = 33;
