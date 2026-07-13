@@ -15,6 +15,7 @@
 //!    screensaver phantom, and debug/capture drivers. `build` below stays the
 //!    single source of truth for wiring order.
 
+pub mod compute;
 pub mod settings;
 
 use bevy::prelude::*;
