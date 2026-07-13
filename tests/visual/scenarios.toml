@@ -257,3 +257,38 @@ dt = 0.016666667
 
 [scenarios.flame-screensaver.debug]
 FORCE_SCREENSAVER = "1"
+
+# ── Radiance — active, driven by the deterministic synthetic dancer ─────────
+# Radiance, active, driven by the deterministic synthetic dancer (no mic, no
+# camera — the toggle suppresses both activation requests). Frames sample the
+# dancer's limb-swing cycle and two synthetic beats.
+#
+# BASELINES: see tests/visual/CLAUDE.md for whether they are committed for
+# this scenario (canary-gated capture; C15).
+[scenarios.radiance-synthetic]
+sketch = "radiance"
+provider = "off"
+config = "clean"
+frames = [60, 120, 240, 480]
+dt = 0.016666667
+
+[scenarios.radiance-synthetic.debug]
+FORCE_RADIANCE_SYNTHETIC_BODY = "1"
+
+# ── Radiance attract mode: the phantom performer + ember overrides ──────────
+# The synthetic-body toggle is set ONLY to suppress the hardware requests (the
+# dancer itself is gated to Active and stays inert here); the phantom owns
+# the mask during the screensaver.
+#
+# BASELINES: see tests/visual/CLAUDE.md for whether they are committed for
+# this scenario (canary-gated capture; C15).
+[scenarios.radiance-screensaver]
+sketch = "radiance"
+provider = "off"
+config = "clean"
+frames = [120, 360, 720, 1200]
+dt = 0.016666667
+
+[scenarios.radiance-screensaver.debug]
+FORCE_RADIANCE_SYNTHETIC_BODY = "1"
+FORCE_SCREENSAVER = "1"

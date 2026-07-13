@@ -80,6 +80,8 @@ Scenarios defined today:
 | `cymatics-synthetic` | `cymatics` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
 | `cymatics-interacting` | `cymatics` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_CYMATICS_INTERACTION = "1"` |
 | `cymatics-screensaver` | `cymatics` | `mock` | `clean` | `[180, 360, 600, 1200]` | `FORCE_SCREENSAVER = "1"` |
+| `radiance-synthetic` | `radiance` | `off` | `clean` | `[60, 120, 240, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"` |
+| `radiance-screensaver` | `radiance` | `off` | `clean` | `[120, 360, 720, 1200]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"`, `FORCE_SCREENSAVER = "1"` |
 
 The `line-screensaver` scenario drives Line's attract mode: the "Wandering
 Pulses" choreography
@@ -108,6 +110,16 @@ into a knot, (c) pulses read as a gentle local bow/wave near the walker, not a
 collapse toward it, (d) whites stay bright white (not dim grey), and (e)
 stirred-up particles pick up a subtle cool tint (velocity color, attract-only),
 while calm regions keep the warm-white personality.
+
+Radiance review guidance (`radiance-synthetic`): (a) a dark glassy humanoid
+silhouette with a thin bright rim, mirrored, centered, limbs visibly swinging
+across frames; (b) particles emanate outward from the silhouette edge — never
+from empty space — rising with a flame-like drift; (c) frames after a
+synthetic beat (frame 120 lands just after one) show an outward burst;
+(d) `delta_prev` stays well above ~5 (continuous motion). For
+`radiance-screensaver`: a slower, thinner ember-toned aura around a gently
+drifting phantom; whites/hot tones read ember-orange, and the field is
+visibly sparser than the active scenario.
 
 Schema:
 
