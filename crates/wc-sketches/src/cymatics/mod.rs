@@ -421,6 +421,28 @@ fn cymatics_idle_veto(world: &World) -> bool {
 /// tests read this constant rather than duplicating it.
 const WARM_START_RAMP_TIME: f32 = 900.0;
 
+/// Phase clock (seconds) at which `warm_start_state` samples
+/// `screensaver::wander_centers` to place the two wave sources.
+///
+/// **Not `0.0`, and the reason is compositional.** `wander_centers` traces
+/// each centre on `0.5 + 0.3 * sin/cos(omega * t)`, and at `t == 0.0` the
+/// cosine terms are at their maximum: both centres land at the top of their
+/// Y range (`c1 = (0.50, 0.80)`, `c2 = (0.80, 0.75)`), stacked against one
+/// edge and only `0.30` apart. Rendered, the two blobs are clipped by the
+/// frame edge and two thirds of the field sits empty.
+///
+/// At this phase the same pure function yields `c1 ~= (0.72, 0.70)` and
+/// `c2 ~= (0.30, 0.43)`: `0.50` apart (a 1.7x wider spread), both comfortably
+/// inside the field, and spread diagonally so the interference band between
+/// them crosses the middle of the screen. Verified by rendering it -- see
+/// `WARM_START_RAMP_TIME`'s note on how these two constants were judged.
+///
+/// The exact value is not load-bearing: any phase that keeps both centres
+/// away from the edges and well separated will do. It is a constant rather
+/// than a literal so the two seeded centres and the tests that pin their
+/// separation cannot drift apart.
+const WARM_START_WANDER_PHASE: f32 = 224.0;
+
 /// Compute the [`CymaticsState`] a fresh `OnEnter(AppState::Cymatics)` should
 /// seed, in place of [`CymaticsState::default()`]'s all-zero, overlapping
 /// resting state.
@@ -463,7 +485,7 @@ const WARM_START_RAMP_TIME: f32 = 900.0;
 /// relationship [`CymaticsState::default()`] already had to it.
 fn warm_start_state(settings: &CymaticsSettings) -> CymaticsState {
     let speeds = screensaver::LissajousSpeeds::from_settings(settings);
-    let (center, center2) = screensaver::wander_centers(0.0, &speeds);
+    let (center, center2) = screensaver::wander_centers(WARM_START_WANDER_PHASE, &speeds);
     CymaticsState {
         center,
         center2,
@@ -1114,6 +1136,122 @@ mod tests {
             "center and center2 must be visibly separated, not overlapping at (0.5, 0.5) each \
              like CymaticsState::default() (distance was {})",
             state.center.distance(state.center2)
+        );
+    }
+
+    /// The seeded centres must sit **away from the frame edge**, not merely
+    /// inside the unit square.
+    ///
+    /// This is the assertion with teeth, and it is why `warm_start_state`
+    /// samples the wander at [`WARM_START_WANDER_PHASE`] rather than at
+    /// `0.0`. At `0.0` the wander's cosine terms are at their maximum, so both
+    /// centres pin to the top of their Y range — `(0.50, 0.80)` and
+    /// `(0.80, 0.75)`. Both are legal points inside the unit square, so
+    /// `warm_start_centers_are_distinct_and_in_unit_square` above passes
+    /// happily; but rendered, the two blobs are clipped by the frame edge and
+    /// most of the field is empty. Reverting the phase to `0.0` fails *this*
+    /// test, which is the point of it.
+    #[test]
+    fn warm_start_centers_are_clear_of_the_frame_edge_and_widely_separated() {
+        let settings = CymaticsSettings::default();
+        let state = warm_start_state(&settings);
+
+        // 0.25..=0.75 — comfortably off every edge, so a blob of the seeded
+        // radius is fully on screen rather than half-cropped.
+        for (label, c) in [("center", state.center), ("center2", state.center2)] {
+            assert!(
+                (0.25..=0.75).contains(&c.x) && (0.25..=0.75).contains(&c.y),
+                "{label} must sit clear of the frame edge (0.25..=0.75 in both axes), got {c:?} \
+                 -- a centre pinned to the edge renders as a clipped blob"
+            );
+        }
+
+        // The t=0 seed separated the centres by only ~0.30. Rendering both
+        // showed the wider spread reads as two distinct sources rather than
+        // one lopsided smear, so hold the line above the old value.
+        let separation = state.center.distance(state.center2);
+        assert!(
+            separation > 0.4,
+            "the two wave sources must be widely separated so the interference band \
+             crosses the middle of the field (separation was {separation})"
+        );
+    }
+
+    /// Seeding `active_radius` from `attract_radius` (well above the resting
+    /// floor) means [`cymatics_idle_veto`] returns `true` on the very first
+    /// frame of every entry — the sketch declares itself "busy" immediately.
+    ///
+    /// That is only safe because two numbers happen to be in the right order,
+    /// and **nothing else in the tree pins their relationship**:
+    ///
+    /// - the non-interacting branch of `systems::interaction::step_centers`
+    ///   decays the radius geometrically toward `min_radius` at
+    ///   `decay_factor` (0.005/frame), which from the seeded `attract_radius`
+    ///   (1.0) drops below the veto threshold after ~898 frames, i.e. **~15 s**;
+    /// - `ScreensaverSettings::attract_mode_timeout_secs` is **60 s**.
+    ///
+    /// 15 < 60, so by the time the idle timer fires the veto has long since
+    /// cleared and the attract screensaver arrives on schedule. If someone
+    /// later raises `attract_radius`, drops `decay_factor`, or shortens the
+    /// attract timeout far enough to invert that, an untouched kiosk would
+    /// **veto its own screensaver forever** — a visitor-facing regression that
+    /// no other test would catch, because every other test here asserts on the
+    /// seeded state alone and never steps it. This one steps it.
+    #[test]
+    fn the_warm_started_radius_clears_the_idle_veto_well_before_attract_is_due() {
+        use crate::cymatics::systems::interaction::{step_centers, CenterInput, CenterTuning};
+
+        let settings = CymaticsSettings::default();
+        let mut state = warm_start_state(&settings);
+        let tuning = CenterTuning::from_settings(&settings);
+
+        // The veto's own threshold, mirroring the expression `cymatics_idle_veto` uses.
+        let veto_threshold = MINIMUM_ACTIVE_RADIUS + 1e-2;
+        assert!(
+            state.active_radius > veto_threshold,
+            "precondition: the warm start seeds a radius that DOES veto idle \
+             (got {}, threshold {veto_threshold})",
+            state.active_radius
+        );
+
+        // Nobody touches the installation: no mouse, no hands.
+        let idle = CenterInput {
+            mouse_pressed: false,
+            mouse_uv: Vec2::splat(0.5),
+            c1_held: false,
+            c1_uv: Vec2::splat(0.5),
+            c2_held: false,
+            c2_uv: Vec2::splat(0.5),
+        };
+
+        let mut frames_until_clear = None;
+        for frame in 1..=3_600_u32 {
+            step_centers(&mut state, idle, tuning);
+            if state.active_radius <= veto_threshold {
+                frames_until_clear = Some(frame);
+                break;
+            }
+        }
+
+        assert!(
+            frames_until_clear.is_some(),
+            "an untouched Cymatics field never decayed below the idle veto in a full minute \
+             of frames — the attract screensaver would never arrive (radius stuck at {})",
+            state.active_radius
+        );
+        let frames = frames_until_clear.unwrap_or(u32::MAX);
+
+        // Read the real attract timeout rather than hardcoding 60.
+        let attract_due_secs =
+            wc_core::lifecycle::screensaver::settings::ScreensaverSettings::default()
+                .attract_mode_timeout_secs;
+        let clear_secs = f64::from(frames) / 60.0;
+
+        assert!(
+            clear_secs < f64::from(attract_due_secs),
+            "the seeded radius must clear the idle veto BEFORE attract is due, or an \
+             untouched kiosk vetoes its own screensaver forever. Cleared at {clear_secs:.1}s \
+             (frame {frames}); attract is due at {attract_due_secs}s."
         );
     }
 
