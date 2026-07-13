@@ -333,18 +333,27 @@ fn run_worker_loop(
                             idle_throttled,
                         );
                         push_msg(&mut producer, BodyWorkerMsg::Diagnostics(diag), &mut drops);
-                        push_msg(
+                        // The frame carries a pooled payload; a ring-full drop
+                        // must hand it back to `spare` (which `spare.take()`
+                        // above just emptied) so the pool — PAYLOAD_POOL_SIZE
+                        // boxes, seeded once — is not permanently depleted. A
+                        // ~1s main-thread stall would otherwise destroy every
+                        // pooled payload and kill mask updates for the rest of
+                        // the session (see `push_frame`).
+                        if let Some(reclaimed) = push_frame(
                             &mut producer,
-                            BodyWorkerMsg::Frame(BodyFrame {
+                            BodyFrame {
                                 present: result.present,
                                 confidence: result.confidence,
                                 landmarks: result.landmarks,
                                 world_landmarks: result.world_landmarks,
                                 timestamp: now,
                                 payload,
-                            }),
+                            },
                             &mut drops,
-                        );
+                        ) {
+                            spare = Some(reclaimed);
+                        }
                     }
                     Err(e) => {
                         // Count + forward (rare path; the spare payload is
@@ -426,6 +435,32 @@ fn worker_diag(
 fn push_msg(producer: &mut Producer<BodyWorkerMsg>, msg: BodyWorkerMsg, drops: &mut DropCounters) {
     if producer.push(msg).is_err() {
         drops.ring_full = drops.ring_full.saturating_add(1);
+    }
+}
+
+/// Push a [`BodyWorkerMsg::Frame`]; on ring-full backpressure, reclaim its
+/// pooled payload (if any) and return it so the caller can restore it to the
+/// worker's `spare` slot. rtrb hands the rejected value back through
+/// [`rtrb::PushError::Full`]; without reclaiming it, each dropped frame would
+/// destroy a pooled `Box<BodyFramePayload>` (pool of
+/// [`super::transport::PAYLOAD_POOL_SIZE`], seeded once), so a burst of drops —
+/// e.g. a ~1s main-thread stall filling the ring — would permanently starve
+/// mask updates. Counts the drop as backpressure; never blocks.
+fn push_frame(
+    producer: &mut Producer<BodyWorkerMsg>,
+    frame: BodyFrame,
+    drops: &mut DropCounters,
+) -> Option<Box<BodyFramePayload>> {
+    match producer.push(BodyWorkerMsg::Frame(frame)) {
+        Ok(()) => None,
+        Err(rtrb::PushError::Full(msg)) => {
+            drops.ring_full = drops.ring_full.saturating_add(1);
+            match msg {
+                BodyWorkerMsg::Frame(mut f) => f.payload.take(),
+                // Unreachable: we only ever hand this function a Frame.
+                _ => None,
+            }
+        }
     }
 }
 
@@ -714,6 +749,74 @@ mod tests {
             t.statuses
         );
         assert!(t.errors >= 1, "the error string must cross the ring");
+    }
+
+    #[test]
+    fn ring_full_frame_drop_reclaims_pooled_payload() {
+        // Regression: a dropped Frame must NOT destroy its pooled payload.
+        // rtrb returns the rejected value on backpressure; `push_frame` hands
+        // the pooled `Box<BodyFramePayload>` back so the pool (seeded once)
+        // survives a full ring. Pointer identity proves it's the same buffer.
+        use super::super::transport::{BodyFrame, BodyFramePayload, BodyWorkerMsg};
+        use super::super::{BodyLandmark, BodyTrackingStatus, BODY_LANDMARK_COUNT};
+        use bevy::math::Vec3;
+
+        // A one-slot ring, pre-filled, so the next push is guaranteed full.
+        let (mut producer, _consumer) = rtrb::RingBuffer::<BodyWorkerMsg>::new(1);
+        producer
+            .push(BodyWorkerMsg::Status(BodyTrackingStatus::Streaming))
+            .expect("first push fills the sole slot");
+
+        let payload = Box::new(BodyFramePayload::new());
+        let payload_ptr = payload.mask.as_ptr();
+        let mut drops = DropCounters::default();
+        let reclaimed = push_frame(
+            &mut producer,
+            BodyFrame {
+                present: true,
+                confidence: 1.0,
+                landmarks: [BodyLandmark::default(); BODY_LANDMARK_COUNT],
+                world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
+                timestamp: std::time::Duration::ZERO,
+                payload: Some(payload),
+            },
+            &mut drops,
+        );
+
+        let reclaimed = reclaimed.expect("ring-full Frame drop must hand its payload back");
+        assert_eq!(
+            reclaimed.mask.as_ptr(),
+            payload_ptr,
+            "the reclaimed payload must be the very buffer the dropped frame held"
+        );
+        assert_eq!(drops.ring_full, 1, "the drop is counted as ring backpressure");
+        assert_eq!(drops.camera, 0, "a backpressure drop is not a camera drop");
+    }
+
+    #[test]
+    fn successful_frame_push_keeps_payload_in_flight() {
+        // The mirror of the reclaim test: a push that fits must NOT return the
+        // payload to the caller (it now rides the ring toward the consumer).
+        use super::super::transport::{BodyFrame, BodyFramePayload, BodyWorkerMsg};
+        use super::super::{BodyLandmark, BODY_LANDMARK_COUNT};
+        use bevy::math::Vec3;
+
+        let (mut producer, _consumer) = rtrb::RingBuffer::<BodyWorkerMsg>::new(2);
+        let mut drops = DropCounters::default();
+        let reclaimed = push_frame(
+            &mut producer,
+            BodyFrame {
+                present: true,
+                confidence: 1.0,
+                landmarks: [BodyLandmark::default(); BODY_LANDMARK_COUNT],
+                world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
+                timestamp: std::time::Duration::ZERO,
+                payload: Some(Box::new(BodyFramePayload::new())),
+            },
+            &mut drops,
+        );
+        assert!(reclaimed.is_none(), "a fitting push keeps the payload in flight");
+        assert_eq!(drops.ring_full, 0, "no backpressure when the ring has room");
     }
 
     #[test]
