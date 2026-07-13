@@ -107,6 +107,14 @@ fn radiance_test_app() -> App {
     app.add_plugins(Material2dPlugin::<RadianceSilhouetteMaterial>::default());
     app.add_plugins(RadianceComputePlugin);
 
+    // `systems::debug::draw_edge_debug` (Task 13) always registers (it
+    // early-outs on the `edge_debug` Dev bool internally, not via a
+    // feature/run_if gate) and its `Gizmos` system param needs
+    // `GizmoConfigStore`, which production gets from `DefaultPlugins`
+    // (bevy's `bevy_gizmos_render` feature). Headless harnesses don't add
+    // `DefaultPlugins`, so add the resource-owning half explicitly.
+    app.add_plugins(bevy::gizmos::GizmoPlugin);
+
     app.add_plugins(RadiancePlugin);
 
     app

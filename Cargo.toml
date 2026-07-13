@@ -55,6 +55,12 @@ bevy = { version = "0.19", default-features = false, features = [
     # `BoneWireframeMaterial` (LineList wireframe bones — Metal-safe, unlike
     # `WireframePlugin`, which needs the unsupported `POLYGON_MODE_LINE`).
     "bevy_pbr",
+    # `bevy_gizmos_render` (implies `bevy_gizmos`) registers `GizmoPlugin` +
+    # `GizmoRenderPlugin` on `DefaultPlugins`, giving debug-only overlays a
+    # `Gizmos` system param that actually draws (2D, via its
+    # `bevy_sprite_render` integration — already enabled above). Radiance's
+    # `edge_debug` Dev toggle (Task C13) is the first consumer.
+    "bevy_gizmos_render",
     # `bevy_log` provides `bevy::log::LogPlugin`, which `waveconductor`'s
     # `main.rs` disables to install its own `tracing-subscriber`. This feature
     # was previously enabled transitively by `bevy_console`'s default-featured

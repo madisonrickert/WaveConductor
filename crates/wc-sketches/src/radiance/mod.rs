@@ -23,8 +23,13 @@
 //! screensaver, `screensaver::RadianceScreensaverPlugin` takes over the mask
 //! and edge writes with a synthetic phantom performer and bakes a
 //! fade-scaled ember frame through the same `bake_radiance_sim` baker the
-//! live writer uses (Task 12); the debug/capture drivers arrive in Plan C
-//! Task 13.
+//! live writer uses (Task 12). `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY`
+//! (Task 13, debug builds) drives the same mask/edge/body/audio surfaces
+//! from the deterministic synthetic dancer instead, and `spawn`'s
+//! `insert_tracking_requests` skips the mic/camera activation requests
+//! entirely under that toggle so a capture run never opens hardware; the
+//! edge-point gizmo overlay and the egui inference readout are always-on
+//! dev overlays, self-gated on `RadianceSettings`'s Dev bools.
 //!
 //! Everything above except camera arbitration (`systems::arbitration`, which
 //! consumes only the unconditional `wc_core::input::provider`) is gated
@@ -197,6 +202,32 @@ impl Plugin for RadiancePlugin {
         // `wc_core::input::body` via `screensaver`.
         #[cfg(feature = "body-tracking-mediapipe")]
         app.add_plugins(screensaver::RadianceScreensaverPlugin);
+
+        // Dev overlays: edge gizmos (settings-gated internally) + readouts
+        // (self-gated egui pass system, flame's overlay idiom). Gated:
+        // both consume `wc_core::input::body` via `systems::debug`.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            Update,
+            systems::debug::draw_edge_debug
+                .run_if(wc_core::sketch::sketch_active(AppState::Radiance)),
+        );
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            systems::debug::radiance_inference_readout,
+        );
+
+        // Capture dancer: debug builds, only under the synthetic-body toggle,
+        // ordered before the live baker so its resources win this frame.
+        #[cfg(all(feature = "body-tracking-mediapipe", debug_assertions))]
+        app.add_systems(
+            Update,
+            systems::debug::drive_synthetic_body
+                .before(systems::sim_params::update_radiance_sim)
+                .run_if(wc_core::sketch::sketch_active(AppState::Radiance))
+                .run_if(systems::debug::synthetic_body_forced),
+        );
     }
 }
 

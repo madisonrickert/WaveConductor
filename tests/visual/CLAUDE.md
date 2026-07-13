@@ -158,6 +158,7 @@ the scenario's `[debug]` table or `--debug KEY=VAL` (the launcher re-prefixes
 | `WC_DEBUG_FORCE_SCREENSAVER` | Drive `SketchActivity::Screensaver` at startup so a capture lands in attract mode without waiting out the idle timer (presence = on; value ignored). |
 | `WC_DEBUG_FORCE_TIER=<cool\|warm\|hot>` | Pin the screensaver's thermal tier so each tier can be captured deterministically. Unparseable value -> live `ThermalState`. |
 | `WC_DEBUG_FORCE_CYMATICS_INTERACTION` | Force the Cymatics primary centre to be held at UV `(0.5, 0.5)` every frame so `active_radius` grows deterministically without hardware or a real mouse press. Used by the `cymatics-interacting` scenario. Presence = on. |
+| `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY` | Drive Radiance from the deterministic synthetic dancer (mask/edges/landmarks/audio) and suppress the mic + camera activation requests. Used by both radiance capture scenarios. Presence = on. |
 
 Flag toggles (`DISABLE_*`) are true whenever their var is present, regardless of
 value — `=1` and `=` both activate them. `FORCE_G` and `SOLID_PARTICLES` are

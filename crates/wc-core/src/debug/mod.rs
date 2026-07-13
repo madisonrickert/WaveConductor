@@ -75,6 +75,12 @@ pub struct DebugToggles {
     /// Flame camera pose — zoomed in, panned off-center — so captures
     /// regression-guard the target-aware view matrix. Presence = on.
     pub force_flame_camera_pose: bool,
+    /// `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY`: drive Radiance from the
+    /// deterministic synthetic dancer (mask + edges + landmarks + audio)
+    /// instead of the mic/camera pipelines, and suppress the
+    /// `AudioCaptureRequest`/`BodyTrackingRequest` inserts so a capture run
+    /// never opens hardware. Presence = on.
+    pub force_radiance_synthetic_body: bool,
 }
 
 impl DebugToggles {
@@ -107,6 +113,7 @@ impl DebugToggles {
             force_cymatics_interaction: present("WC_DEBUG_FORCE_CYMATICS_INTERACTION"),
             force_flame_warp: present("WC_DEBUG_FORCE_FLAME_WARP"),
             force_flame_camera_pose: present("WC_DEBUG_FORCE_FLAME_CAMERA_POSE"),
+            force_radiance_synthetic_body: present("WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY"),
         }
     }
 
@@ -249,6 +256,7 @@ mod tests {
         assert!(!t.force_cymatics_interaction);
         assert!(!t.force_flame_warp);
         assert!(!t.force_flame_camera_pose);
+        assert!(!t.force_radiance_synthetic_body);
     }
 
     #[test]
@@ -266,6 +274,17 @@ mod tests {
         )];
         let t = DebugToggles::from_env_vars(&vars);
         assert!(t.force_flame_camera_pose);
+    }
+
+    #[test]
+    fn radiance_synthetic_body_flag_parses_by_presence() {
+        let vars = vec![(
+            "WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY".to_string(),
+            String::new(),
+        )];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.force_radiance_synthetic_body);
+        assert!(!DebugToggles::from_env_vars(&[]).force_radiance_synthetic_body);
     }
 
     #[test]

@@ -178,18 +178,25 @@ pub fn spawn_radiance(
 /// `OnEnter(AppState::Radiance)` (chained after `spawn_radiance`): start the
 /// mic capture + body tracking via the Plan A/B activation contracts.
 ///
-/// Deviation from the task brief: the brief's sample also early-returns
-/// under a `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY` toggle on
-/// `wc_core::debug::DebugToggles`, but that field does not exist yet — it is
-/// Plan C Task 13's scope (adding the env var, the `DebugToggles` field, and
-/// its exhaustive test-literal/serializer updates). Wiring a synthetic-body
-/// skip here would either invent the field (duplicating Task 13's work) or
-/// silently no-op, so this system always inserts both requests; Task 13
-/// adds the early-out when it lands.
+/// Under `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY` (debug builds only) this
+/// early-returns without inserting either request: the capture dancer
+/// (`systems::debug::drive_synthetic_body`) writes `BodyTrackingState`/
+/// `AudioAnalysis` directly every frame, so a capture run under this toggle
+/// must never open the mic or the camera. `activity::pause_tracking_requests`/
+/// `resume_tracking_requests` already treat both requests as optional for
+/// exactly this reason.
 pub fn insert_tracking_requests(
     settings: Res<'_, RadianceSettings>,
     mut commands: Commands<'_, '_>,
+    // Optional debug toggles (present only when a `WC_DEBUG_*` var is set, and
+    // only in debug builds). Placed last so the release signature is unchanged.
+    #[cfg(debug_assertions)] toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
 ) {
+    #[cfg(debug_assertions)]
+    if toggles.is_some_and(|t| t.force_radiance_synthetic_body) {
+        return;
+    }
+
     let device = settings.audio_input_device.trim();
     commands.insert_resource(AudioCaptureRequest {
         device_name: if device.is_empty() {
@@ -340,5 +347,41 @@ mod tests {
         assert!((req.mask_ema - 0.42).abs() < f32::EPSILON);
         assert!((req.one_euro_min_cutoff - 2.5).abs() < f32::EPSILON);
         assert!((req.one_euro_beta - 0.11).abs() < f32::EPSILON);
+    }
+
+    /// `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY` suppresses BOTH activation
+    /// requests — a capture run under the toggle must never open the mic or
+    /// the camera. The synthetic dancer writes the tracking/analysis
+    /// resources directly instead (Task 13).
+    #[test]
+    #[cfg(debug_assertions)]
+    fn synthetic_body_toggle_suppresses_both_requests() {
+        let mut app = test_app();
+        app.insert_resource(wc_core::debug::DebugToggles {
+            force_g: None,
+            disable_smear: false,
+            disable_explode: false,
+            disable_bloom: false,
+            disable_bone_composite: false,
+            disable_bone_camera: false,
+            solid_particles: None,
+            force_screensaver: false,
+            force_tier: None,
+            force_cymatics_interaction: false,
+            force_flame_warp: false,
+            force_flame_camera_pose: false,
+            force_radiance_synthetic_body: true,
+        });
+        app.world_mut()
+            .run_system_once(insert_tracking_requests)
+            .expect("requests (early-out)");
+        assert!(
+            app.world().get_resource::<AudioCaptureRequest>().is_none(),
+            "toggle must suppress the mic request"
+        );
+        assert!(
+            app.world().get_resource::<BodyTrackingRequest>().is_none(),
+            "toggle must suppress the camera/body request"
+        );
     }
 }
