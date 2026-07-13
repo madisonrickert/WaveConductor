@@ -49,6 +49,15 @@ impl Plugin for SketchesPlugin {
         // entry, so it costs nothing on other sketches.
         app.add_plugins(crate::flame::compute::pipeline::FlameComputePlugin);
 
+        // Radiance edge-respawn compute node, registered once (a Plugin
+        // singleton). Inert until the Radiance sketch inserts
+        // RadianceSimParams on entry. Feature-gated: it consumes
+        // wc_core::input::body (see radiance::compute::mod's cfg on
+        // `pipeline`/`edge_upload`), which is absent from the default
+        // feature set the doc gate builds.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_plugins(crate::radiance::compute::pipeline::RadianceComputePlugin);
+
         // Flame additive billboard render material, registered once (a `Plugin`
         // singleton; adding it twice would panic at startup). The mesh + material
         // entity is spawned on Flame entry (`spawn_flame`); registering here keeps
