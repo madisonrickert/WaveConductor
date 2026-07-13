@@ -137,11 +137,28 @@ exercised by unit tests against pure decision functions.
 Blocked on §1 (thermal has to work on the deployment hardware before an eight-hour run tells you
 anything about thermals).
 
-`AGENTS.md` requires an 8-hour soak before any release tag. It is currently a manual procedure —
-`cargo xtask soak-test` is planned but **does not exist**; do not cite it as if it does.
+`AGENTS.md` requires an 8-hour soak before any release tag. **`cargo xtask soak-test` now exists**
+— it was built while this branch was waiting, so the soak is one command rather than a vigil:
 
-- [ ] Representative load: hand tracking + audio active, sketch cycling
-- [ ] Watch RSS, GPU memory, FPS for drift or a thermal stall
+```powershell
+cargo build -p waveconductor
+cargo xtask soak-test --duration 8h --report-json      # --duration 2m first, to prove the harness
+```
+
+It samples RSS, FPS, thermal tier and the app's own uptime, cycles sketches, and writes a
+self-describing artifact under `target/soak/`. It exits nonzero on FAIL. A short run deliberately
+says REVIEW REQUIRED rather than PASS — it validates the harness, not the build.
+
+**Read what it cannot see, and do not treat a PASS as more than it is.** It does not sample GPU
+memory. A leak that only begins late in the run fits away to nothing. A sustained leak under about
+5 MiB/hour is below its floor. And it measures a *debug* binary, so the absolute numbers are not
+release numbers.
+
+Run it with the window **foregrounded** and display/system sleep **disabled**, or an occluded
+window reads as FPS decay and you get a false FAIL.
+
+- [ ] A 2-minute run first, to prove the harness works on this box
+- [ ] The real 8-hour run, under representative load
 - [ ] Capture the thermal log — **thermal threshold tuning is gated on a real soak log from this
       hardware**, and cannot be done on the Mac at all
 
