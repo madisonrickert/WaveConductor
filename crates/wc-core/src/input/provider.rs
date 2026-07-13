@@ -114,6 +114,25 @@ pub trait HandTrackingProvider: Send + Sync + 'static {
         None
     }
 
+    /// The execution-provider preference this provider's *running* sessions were
+    /// built with — the request whose result [`Self::backend_label`] reports.
+    ///
+    /// Deliberately the provider's own copy rather than the live
+    /// [`crate::settings::HandTrackingSettings::backend`] dropdown value: that
+    /// setting is `requires_restart`, so between an operator edit and the next
+    /// provider rebuild the two disagree. Reading the dropdown would make a
+    /// still-running `Auto` session that degraded to the CPU look *expected* the
+    /// moment someone flicked the dropdown to `ForceCpu` — silencing exactly the
+    /// degradation the panel's amber row exists to show.
+    ///
+    /// `Copy` and lock-free for the same reason as [`Self::backend_label`]: the
+    /// settings panel reads it every frame it is open.
+    ///
+    /// Default returns `None`; only providers that run inference override.
+    fn backend_request(&self) -> Option<crate::settings::HandTrackingBackend> {
+        None
+    }
+
     /// Downcast helper for systems that need to call typed methods on a
     /// concrete provider type (e.g., `apply_leap_background_setting`).
     ///
@@ -121,6 +140,23 @@ pub trait HandTrackingProvider: Send + Sync + 'static {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
+}
+
+/// Whether this build's target has a GPU execution provider for hand-tracking
+/// inference at all: `CoreML` on macOS, `DirectML` on Windows, nothing anywhere
+/// else (Linux, and the wasm build).
+///
+/// The always-compiled counterpart of `MediaPipe`'s
+/// `inference_ort::platform_accelerator_label`, which lives behind the
+/// `hand-tracking-mediapipe` feature gate and so is not nameable from the settings
+/// panel. A test in that module pins the two `cfg` predicates together.
+///
+/// This is the difference between an *expected* CPU session and a *degraded* one:
+/// on a host with no GPU EP, `"ort/CPU"` is the only outcome there ever was, and
+/// flagging it would cry wolf on every Linux dev machine.
+#[must_use]
+pub const fn platform_has_gpu_execution_provider() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 /// Resource holding all currently-installed [`HandTrackingProvider`]s.
@@ -250,6 +286,20 @@ impl ProviderRegistry {
     #[must_use]
     pub fn primary_backend_label(&self) -> Option<&'static str> {
         self.primary_slot()?.inner.backend_label()
+    }
+
+    /// Execution-provider preference the primary provider's running sessions were
+    /// built with (see [`HandTrackingProvider::backend_request`]). `None` under the
+    /// same conditions as [`Self::primary_backend_label`].
+    ///
+    /// Paired with that label, this is what lets the settings panel tell a
+    /// *degraded* CPU session (an accelerator was asked for and lost) from an
+    /// *expected* one (`ForceCpu`, or a host with no GPU EP at all).
+    ///
+    /// Allocation- and lock-free (a `Copy` fieldless enum).
+    #[must_use]
+    pub fn primary_backend_request(&self) -> Option<crate::settings::HandTrackingBackend> {
+        self.primary_slot()?.inner.backend_request()
     }
 
     /// ID of the primary provider, for the dev panel label.

@@ -728,6 +728,20 @@ impl HandTrackingProvider for MediaPipeProvider {
         (self.backend_label != BACKEND_NOT_STARTED).then_some(self.backend_label)
     }
 
+    /// The EP preference the *running* sessions were built with — the request
+    /// whose outcome `backend_label` above reports. `None` before `start`, in
+    /// lockstep with that label, so the panel never pairs a request with a
+    /// nonexistent result.
+    ///
+    /// This is the provider's own `MediaPipeConfig::backend`, seeded from the
+    /// settings dropdown when the provider was last built, not the live dropdown
+    /// value — see the trait method's doc for why the difference matters.
+    ///
+    /// A plain field read: no lock, no allocation.
+    fn backend_request(&self) -> Option<crate::settings::HandTrackingBackend> {
+        (self.backend_label != BACKEND_NOT_STARTED).then_some(self.config.backend)
+    }
+
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }

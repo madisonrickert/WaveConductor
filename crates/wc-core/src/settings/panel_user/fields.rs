@@ -273,7 +273,8 @@ fn render_user_fields_via_reflect(
 ///   models and opens the camera (~1-2 s with no tracking), a red note when the
 ///   provider failed. No row while healthy.
 /// - Under "Inference backend": the EP the sessions actually registered on, amber
-///   when one model degraded to the CPU. This one *does* show while healthy — a
+///   when one — or both — of the models degraded to the CPU despite an accelerator
+///   having been asked for and available. This one *does* show while healthy — a
 ///   kiosk quietly running palm detection on the CPU for an eight-hour soak is
 ///   otherwise indistinguishable from one on the GPU, since tracking is `Active`
 ///   either way and the provider row above stays silent.
@@ -298,7 +299,7 @@ fn render_hand_tracking_status_row(
         }
         (BACKEND_FIELD_NAME, _, Some(backend)) => {
             ui.label("");
-            render_backend_status_row(ui, backend, style);
+            render_backend_status_row(ui, backend, status.degradation, style);
             end_status_row(ui);
         }
         _ => {}

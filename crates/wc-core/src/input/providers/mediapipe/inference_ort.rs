@@ -1146,6 +1146,28 @@ mod tests {
         );
     }
 
+    /// The settings panel's degraded-backend verdict
+    /// (`settings::panel_user::provider_status::backend_degradation`) is compiled
+    /// on every target, including builds without this feature, so it cannot name
+    /// these constants: it matches the CPU label as a literal and asks
+    /// `input::provider::platform_has_gpu_execution_provider()` whether this host
+    /// ever had an accelerator to lose. Both of those are restatements of things
+    /// defined here, so pin them — if they drift, a kiosk with *both* models on the
+    /// CPU stops showing the amber row and looks perfectly healthy again.
+    #[test]
+    fn the_labels_the_settings_panel_matches_on_still_hold() {
+        assert_eq!(
+            BACKEND_CPU, "ort/CPU",
+            "the panel matches this label as a literal"
+        );
+        assert_eq!(
+            platform_accelerator_label() != BACKEND_CPU,
+            crate::input::provider::platform_has_gpu_execution_provider(),
+            "the panel's platform-accelerator predicate must agree with this \
+             module's per-target EP choice"
+        );
+    }
+
     #[test]
     fn ep_plan_maps_each_backend_preference() {
         // Auto: try the accelerator, allow a CPU rebuild if commit fails.
