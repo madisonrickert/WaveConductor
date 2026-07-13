@@ -3,8 +3,10 @@
 //!
 //! ## Data flow (wired so far)
 //!
-//! 1. `OnEnter(AppState::Cymatics)` runs `init_cymatics_state` (insert the
-//!    CPU-side [`CymaticsState`] defaults) then `spawn_cymatics` (read
+//! 1. `OnEnter(AppState::Cymatics)` runs `init_cymatics_state` (insert a
+//!    warm-started [`CymaticsState`] — see `warm_start_state`'s doc — so the
+//!    field shows two distinct blobs immediately instead of a blank one) then
+//!    `spawn_cymatics` (read
 //!    [`settings::CymaticsSettings`] → derive the sim resolution from the window
 //!    aspect → allocate the two ping-pong textures
 //!    ([`compute::create_cymatics_textures`]) → spawn the fullscreen quad
@@ -400,9 +402,88 @@ fn cymatics_idle_veto(world: &World) -> bool {
         .is_some_and(|s| s.active_radius > MINIMUM_ACTIVE_RADIUS + 1e-2)
 }
 
-/// `OnEnter(AppState::Cymatics)` — insert the resting [`CymaticsState`].
-fn init_cymatics_state(mut commands: Commands<'_, '_>) {
-    commands.insert_resource(CymaticsState::default());
+/// Alive-bloom ramp-clock seed for `warm_start_state`'s `ramp_time` field
+/// (see [`RAMP_TIME_CAP`] and the shader's `(iter.time - 500.0) / 500.0` ramp,
+/// `assets/shaders/cymatics/simulate.wgsl`). Below `500.0` that ramp term
+/// is negative and the alive mask clamps to `0.0` everywhere, regardless of
+/// `active_radius` or how far apart the two centres are — the third,
+/// independent cause of the blank field.
+///
+/// Chosen by reviewing rendered frames — `cargo xtask capture
+/// cymatics-synthetic`, whose PNGs the operating agent inspects directly — not
+/// derived from the shader formula on paper: there are no GPU tests in CI, so
+/// only a look at the captured field can judge whether the seeded state reads
+/// as "already blooming" versus an ugly instantaneous snap. `900.0` is the
+/// shipped value: `min(0.8, (900.0 - 500.0) / 500.0) == 0.8`, i.e. the ramp
+/// term is already fully saturated, matching how the field looks after about 15
+/// seconds of normal play at the default cadence (900 phase units). If a later
+/// capture review changes this value, update it here and nowhere else — the
+/// tests read this constant rather than duplicating it.
+const WARM_START_RAMP_TIME: f32 = 900.0;
+
+/// Compute the [`CymaticsState`] a fresh `OnEnter(AppState::Cymatics)` should
+/// seed, in place of [`CymaticsState::default()`]'s all-zero, overlapping
+/// resting state.
+///
+/// Fixes three independent causes of the field's blank "blue screen of death"
+/// look, which the field tester reported happening every time he cycled
+/// through the picker into Cymatics — not just once at app boot:
+///
+/// 1. **`center` == `center2`**: both default to `(0.5, 0.5)`, so a bloomed
+///    mask shows one blob, not the two the tester asked for. Seeded from
+///    [`screensaver::wander_centers`] at `elapsed = 0.0`, which is already pure
+///    and unit-tested and returns two separated points ((0.5, 0.8) and
+///    approximately (0.80, 0.75)).
+/// 2. **`active_radius` at its resting floor**: [`MINIMUM_ACTIVE_RADIUS`] =
+///    `0.1` is, per `CymaticsSettings::attract_radius`'s own doc, "a nearly
+///    invisible mask." Seeded to `settings.attract_radius` — the same live
+///    Dev knob the screensaver's attract driver already treats as its calm-
+///    pond target — so this warm start needs no tunable constant of its own
+///    for this field. (If an operator has dragged `attract_radius` all the
+///    way down to its own `0.1` floor, the seeded radius equals
+///    [`MINIMUM_ACTIVE_RADIUS`] exactly rather than exceeding it; that operator
+///    has already opted into a near-invisible mask everywhere else the
+///    setting applies, so a matching warm start is consistent, not a
+///    regression.)
+/// 3. **`ramp_time` below the shader's bloom-ramp foot**: see
+///    `WARM_START_RAMP_TIME`.
+///
+/// Pure: identical `settings` in always produces an identical [`CymaticsState`]
+/// out — no `Time`, no RNG, no mutable global state is read — which is what
+/// makes repeated `OnEnter(AppState::Cymatics)` cycles (the field tester's
+/// exact repro: cycling through the picker four times in under a minute)
+/// seed identically every time rather than drifting.
+///
+/// `num_cycles`, `slow_down`, `simulation_time`, and `center_speed` are left
+/// at their [`CymaticsState::default()`] resting values: none of the three
+/// causes above implicates them, and `simulation_time` in particular must
+/// stay owned solely by [`update_cymatics_sim_params`] (see the module's design
+/// note on the single-owner invariant). This function only chooses the
+/// *starting* value that system reads on its first frame — exactly the
+/// relationship [`CymaticsState::default()`] already had to it.
+fn warm_start_state(settings: &CymaticsSettings) -> CymaticsState {
+    let speeds = screensaver::LissajousSpeeds::from_settings(settings);
+    let (center, center2) = screensaver::wander_centers(0.0, &speeds);
+    CymaticsState {
+        center,
+        center2,
+        active_radius: settings.attract_radius,
+        ramp_time: WARM_START_RAMP_TIME,
+        ..CymaticsState::default()
+    }
+}
+
+/// `OnEnter(AppState::Cymatics)` — insert a warm-started [`CymaticsState`]
+/// (see `warm_start_state`) instead of [`CymaticsState::default()`]'s
+/// all-zero, overlapping-centres resting state.
+///
+/// Every entry into Cymatics — not just the app's first boot — allocates a
+/// fresh ping-pong texture pair and re-inserts this resource (`spawn_cymatics`
+/// runs immediately after, chained in the same `OnEnter`), so the old
+/// [`CymaticsState::default()`] seed reproduced the field tester's "blue screen
+/// of death" on every navigation into the sketch, not once at boot.
+fn init_cymatics_state(mut commands: Commands<'_, '_>, settings: Res<'_, CymaticsSettings>) {
+    commands.insert_resource(warm_start_state(&settings));
 }
 
 /// `OnEnter(AppState::Cymatics)` — allocate the two ping-pong textures, spawn
