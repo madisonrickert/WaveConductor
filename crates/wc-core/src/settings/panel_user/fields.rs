@@ -16,7 +16,10 @@ use bevy::reflect::ReflectMut;
 use bevy_egui::egui;
 use egui_phosphor::regular as phosphor;
 
-use super::provider_status::{render_provider_status_row, ProviderStatusLine};
+use super::provider_status::{
+    render_backend_status_row, render_provider_status_row, HandTrackingStatus, ProviderStatusLine,
+    BACKEND_FIELD_NAME,
+};
 use super::widgets::render_widget_value;
 use crate::settings::def::{SettingDef, SettingKind, SettingsCategory};
 use crate::settings::registry::{reflect_resource_mut, SettingsRegistry};
@@ -30,14 +33,14 @@ use crate::ui::OverlayStyle;
 /// settings type whose `STORAGE_KEY` matches; uses reflection to
 /// read/write fields without static type knowledge.
 ///
-/// `provider_status` is the pre-snapshotted hand-tracking provider state,
-/// threaded through to the status row under the "Tracking provider"
-/// dropdown (see [`super::provider_status::render_provider_status_row`]).
+/// `hand_tracking_status` is the pre-snapshotted hand-tracking state, threaded
+/// through to the two read-only rows under the "Tracking provider" and
+/// "Inference backend" dropdowns (see [`super::provider_status`]).
 pub(super) fn render_section_by_key(
     world: &mut World,
     ui: &mut egui::Ui,
     storage_key: &'static str,
-    provider_status: Option<ProviderStatusLine>,
+    hand_tracking_status: HandTrackingStatus,
     #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
     #[cfg(feature = "templates")] template_dirty: &mut bool,
     advanced: bool,
@@ -122,7 +125,7 @@ pub(super) fn render_section_by_key(
         &mut *reflect_mut,
         defs.as_ref(),
         storage_key,
-        provider_status,
+        hand_tracking_status,
         &runtime_enum_options,
         #[cfg(feature = "templates")]
         template_rows,
@@ -161,13 +164,13 @@ pub(super) fn render_section_by_key(
 /// colliding `ComboBox`es share popup open/close state).
 #[expect(
     clippy::too_many_arguments,
-    reason = "the settings render chain threads the provider-status snapshot, the runtime-enum options snapshot, and (when the `templates` feature is on) the template rows + dirty flag through this fn; bundling them into a struct is a larger refactor out of scope here"
+    reason = "the settings render chain threads the hand-tracking status snapshot, the runtime-enum options snapshot, and (when the `templates` feature is on) the template rows + dirty flag through this fn; bundling them into a struct is a larger refactor out of scope here"
 )]
 fn render_user_fields_via_reflect(
     reflect: &mut dyn Reflect,
     defs: &[SettingDef],
     storage_key: &'static str,
-    provider_status: Option<ProviderStatusLine>,
+    hand_tracking_status: HandTrackingStatus,
     runtime_enum_options: &[RuntimeEnumOptionsSnapshotEntry],
     #[cfg(feature = "templates")] template_rows: &[crate::templates::view::TemplateRow],
     #[cfg(feature = "templates")] template_dirty: &mut bool,
@@ -251,26 +254,63 @@ fn render_user_fields_via_reflect(
                     render_reset_cell(ui, field, default_field, modified, style);
                     ui.end_row();
 
-                    // Status row directly under the "Tracking provider"
-                    // dropdown: the MediaPipe backend loads its models and
-                    // opens the camera asynchronously (~1-2 s with no
-                    // tracking), so show a spinner while it starts and a red
-                    // note when it failed. No row while healthy.
-                    if storage_key == ProviderStatusLine::STORAGE_KEY
-                        && def.field_name == ProviderStatusLine::FIELD_NAME
-                    {
-                        if let Some(line) = provider_status {
-                            ui.label(""); // column 1: keep the grid aligned
-                            render_provider_status_row(ui, line, style);
-                            // Column 3 spacer — allocate, not `add_space` (which
-                            // panics inside a Grid).
-                            ui.allocate_exact_size(egui::vec2(18.0, 0.0), egui::Sense::hover());
-                            ui.end_row();
-                        }
-                    }
+                    render_hand_tracking_status_row(
+                        ui,
+                        storage_key,
+                        def,
+                        hand_tracking_status,
+                        style,
+                    );
                 }
             });
     }
+}
+
+/// Emit the read-only Hand Tracking status row that belongs directly under the
+/// field just rendered, if any (see [`super::provider_status`]).
+///
+/// - Under "Tracking provider": a spinner while the `MediaPipe` backend loads its
+///   models and opens the camera (~1-2 s with no tracking), a red note when the
+///   provider failed. No row while healthy.
+/// - Under "Inference backend": the EP the sessions actually registered on, amber
+///   when one model degraded to the CPU. This one *does* show while healthy — a
+///   kiosk quietly running palm detection on the CPU for an eight-hour soak is
+///   otherwise indistinguishable from one on the GPU, since tracking is `Active`
+///   either way and the provider row above stays silent.
+///
+/// Called from inside the section's `egui::Grid`, so it owns the whole row: the
+/// empty label cell, the widget cell, the column-3 spacer, and `end_row`.
+fn render_hand_tracking_status_row(
+    ui: &mut egui::Ui,
+    storage_key: &'static str,
+    def: &SettingDef,
+    status: HandTrackingStatus,
+    style: &OverlayStyle,
+) {
+    if storage_key != ProviderStatusLine::STORAGE_KEY {
+        return;
+    }
+    match (def.field_name, status.provider, status.backend) {
+        (ProviderStatusLine::FIELD_NAME, Some(line), _) => {
+            ui.label(""); // column 1: keep the grid aligned
+            render_provider_status_row(ui, line, style);
+            end_status_row(ui);
+        }
+        (BACKEND_FIELD_NAME, _, Some(backend)) => {
+            ui.label("");
+            render_backend_status_row(ui, backend, style);
+            end_status_row(ui);
+        }
+        _ => {}
+    }
+}
+
+/// Close a status row: the column-3 spacer plus `end_row`. The spacer is an
+/// `allocate_exact_size`, not `add_space` — the latter panics inside an
+/// `egui::Grid` (see [`render_reset_cell`]).
+fn end_status_row(ui: &mut egui::Ui) {
+    ui.allocate_exact_size(egui::vec2(18.0, 0.0), egui::Sense::hover());
+    ui.end_row();
 }
 
 /// Whether a field's current value differs from its struct default.

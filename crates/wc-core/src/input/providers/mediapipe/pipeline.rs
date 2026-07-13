@@ -1425,7 +1425,10 @@ mod tests {
             .join("../../assets/models/hand")
             .join(name);
         let bytes = std::fs::read(path).expect("read model");
-        Box::new(OrtInference::load(&bytes).expect("load model"))
+        Box::new(
+            OrtInference::load(&bytes, crate::settings::HandTrackingBackend::Auto, name)
+                .expect("load model"),
+        )
     }
 
     fn real_pipeline() -> Pipeline {

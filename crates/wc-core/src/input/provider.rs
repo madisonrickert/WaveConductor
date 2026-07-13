@@ -96,6 +96,24 @@ pub trait HandTrackingProvider: Send + Sync + 'static {
     /// `poll()` (or `start()` for static fields like SDK version).
     fn diagnostics(&self) -> crate::input::state::ProviderDiagnostics;
 
+    /// The inference backend this provider is *actually* running on, if the
+    /// concept applies to it and it has started (e.g. `MediaPipe`'s
+    /// `"ort/CoreML"`, `"ort/CPU"`, or the degraded mixed `"ort/CoreML+CPU"`).
+    /// `None` on providers with no inference stage (Leap, mock) and before the
+    /// provider's sessions exist.
+    ///
+    /// A `&'static str` by design, not a `String`: this is read by the settings
+    /// panel every frame it is open (see
+    /// `settings::panel_user::provider_status`), so it must cost a pointer copy —
+    /// no allocation, no lock. `diagnostics()` carries the same value as a
+    /// `Backend` metric, but only as a by-clone snapshot of the whole diagnostics
+    /// struct.
+    ///
+    /// Default returns `None`; only providers that run inference override.
+    fn backend_label(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Downcast helper for systems that need to call typed methods on a
     /// concrete provider type (e.g., `apply_leap_background_setting`).
     ///
@@ -188,10 +206,10 @@ impl ProviderRegistry {
         self.providers.iter().find(|p| p.id == id)
     }
 
-    /// Status of the primary provider (or, if none, the first simulator).
-    /// What the status LED reads.
-    #[must_use]
-    pub fn primary_status(&self) -> crate::input::state::ProviderStatus {
+    /// The slot every `primary_*` accessor below reports on: the primary
+    /// provider, or — when none is registered — the first simulator, so a
+    /// simulator-only registry still has something to show.
+    fn primary_slot(&self) -> Option<&RegisteredProvider> {
         self.providers
             .iter()
             .find(|p| p.role == ProviderRole::Primary)
@@ -200,6 +218,13 @@ impl ProviderRegistry {
                     .iter()
                     .find(|p| p.role == ProviderRole::Simulator)
             })
+    }
+
+    /// Status of the primary provider (or, if none, the first simulator).
+    /// What the status LED reads.
+    #[must_use]
+    pub fn primary_status(&self) -> crate::input::state::ProviderStatus {
+        self.primary_slot()
             .map_or_else(crate::input::state::ProviderStatus::default, |p| {
                 p.inner.status()
             })
@@ -208,31 +233,29 @@ impl ProviderRegistry {
     /// Diagnostics of the primary provider, for the dev panel.
     #[must_use]
     pub fn primary_diagnostics(&self) -> crate::input::state::ProviderDiagnostics {
-        self.providers
-            .iter()
-            .find(|p| p.role == ProviderRole::Primary)
-            .or_else(|| {
-                self.providers
-                    .iter()
-                    .find(|p| p.role == ProviderRole::Simulator)
-            })
+        self.primary_slot()
             .map_or_else(crate::input::state::ProviderDiagnostics::default, |p| {
                 p.inner.diagnostics()
             })
     }
 
+    /// Inference backend the primary provider is actually running on (see
+    /// [`HandTrackingProvider::backend_label`]), for the settings panel's
+    /// "Running:" row under the inference-backend dropdown. `None` when no
+    /// provider is registered, or when the primary one runs no inference (Leap,
+    /// mock) or has not started its sessions yet.
+    ///
+    /// Allocation- and lock-free (a `&'static str` copy), so the panel may read
+    /// it on every frame it is open.
+    #[must_use]
+    pub fn primary_backend_label(&self) -> Option<&'static str> {
+        self.primary_slot()?.inner.backend_label()
+    }
+
     /// ID of the primary provider, for the dev panel label.
     #[must_use]
     pub fn primary_id(&self) -> Option<ProviderId> {
-        self.providers
-            .iter()
-            .find(|p| p.role == ProviderRole::Primary)
-            .or_else(|| {
-                self.providers
-                    .iter()
-                    .find(|p| p.role == ProviderRole::Simulator)
-            })
-            .map(|p| p.id)
+        self.primary_slot().map(|p| p.id)
     }
 }
 
