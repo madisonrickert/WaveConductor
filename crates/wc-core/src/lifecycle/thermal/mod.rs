@@ -46,6 +46,8 @@ pub mod sensor;
 
 mod platform;
 
+mod wmi_zone;
+
 use std::time::Duration;
 
 use bevy::prelude::*;
