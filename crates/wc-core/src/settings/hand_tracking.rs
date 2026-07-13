@@ -100,12 +100,21 @@ pub struct HandTrackingSettings {
     /// entirely). Applied when the provider is next (re)built — see
     /// [`HandTrackingBackend`]. Exposed as a `User` knob so a field tester can
     /// A/B GPU vs CPU inference without a new build.
+    ///
+    /// `requires_restart`: unlike `provider`, this is read only while a
+    /// `MediaPipe` session is being constructed (`register_mediapipe` seeds
+    /// `MediaPipeConfig::backend` from it), not on a live per-frame path. A raw
+    /// edit takes effect on the next provider (re)build — a relaunch, or
+    /// toggling the "Tracking provider" dropdown off and back — never on the
+    /// value change alone. The flag draws the panel's amber restart badge so
+    /// the operator isn't left wondering why flipping it did nothing yet.
     #[setting(
         default = HandTrackingBackend::Auto,
         ty = Enum,
         category = User,
         section = "Hand Tracking",
-        label = "Inference backend"
+        label = "Inference backend",
+        requires_restart
     )]
     #[serde(default)]
     pub backend: HandTrackingBackend,
@@ -299,5 +308,27 @@ mod tests {
             let back: HandTrackingSettings = toml::from_str(&text).expect("parse back");
             assert_eq!(back.backend, choice);
         }
+    }
+
+    /// `backend` is read only when a `MediaPipe` session is next constructed
+    /// (see `register_mediapipe` in the binary crate), never on a live
+    /// per-frame path — so it must carry `requires_restart`. Otherwise the
+    /// panel shows no amber badge and an operator flipping the dropdown has no
+    /// indication the change is not yet in effect.
+    #[test]
+    fn backend_is_marked_requires_restart() {
+        use crate::settings::SketchSettings;
+
+        let Some(def) = HandTrackingSettings::settings_def()
+            .into_iter()
+            .find(|d| d.field_name == "backend")
+        else {
+            unreachable!("the derive macro always emits a def for `backend`");
+        };
+        assert!(
+            def.requires_restart,
+            "backend only takes effect on the next provider (re)build; \
+             the panel must show the restart badge"
+        );
     }
 }

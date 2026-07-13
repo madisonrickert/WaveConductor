@@ -513,6 +513,7 @@ fn register_mediapipe(
         depth_calibration_k: settings.depth_calibration_k,
         smoothing_min_cutoff: settings.smoothing_min_cutoff,
         smoothing_beta: settings.smoothing_beta,
+        backend: settings.backend,
         ..MediaPipeConfig::default()
     };
 
