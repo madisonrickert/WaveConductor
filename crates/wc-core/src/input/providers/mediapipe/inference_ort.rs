@@ -28,7 +28,7 @@
 
 use std::fmt::Display;
 #[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 use ort::ep::coreml::ComputeUnits;
@@ -82,6 +82,15 @@ impl OrtInference {
     /// CPU-only session and returns [`BACKEND_CPU`], so one broken EP never costs
     /// all hand tracking. `model_name` names the failing model in the warning.
     ///
+    /// On macOS an accelerated commit failure is *first* treated as a poisoned
+    /// on-disk `CoreML` artifact cache: the model's own cache directory is purged
+    /// and the accelerated commit retried exactly once
+    /// ([`commit_accelerated_recovering_cache`]) before any CPU degradation. The
+    /// cache key is a pure function of the model bytes, so without that purge a
+    /// corrupt entry fails identically on every launch — an unattended kiosk would
+    /// run hand tracking on the CPU *forever* off one bad write. One purge turns
+    /// that into one slow launch.
+    ///
     /// [`HandTrackingBackend::ForceGpu`] is the strict counterpart, and it is
     /// strict about *both* ways an accelerator can go missing: a commit failure
     /// surfaces as an error, and so does a GPU EP that never registered at all
@@ -107,7 +116,13 @@ impl OrtInference {
                 model_name,
                 platform_accelerator_label(),
                 plan.allow_cpu_fallback,
-                || commit_accelerated(model_bytes, plan.allow_cpu_fallback),
+                || {
+                    commit_accelerated_recovering_cache(
+                        model_name,
+                        model_bytes,
+                        plan.allow_cpu_fallback,
+                    )
+                },
                 || commit_cpu(model_bytes),
             )?
         } else {
@@ -274,14 +289,12 @@ fn base_builder() -> Result<SessionBuilder, InferenceError> {
         .map_err(load_err)
 }
 
-/// Build the platform-accelerated session and commit it, returning the committed
-/// session and the registered backend label.
+/// Build the platform-accelerated `SessionBuilder` (EP registered, session
+/// options applied), returning it with the backend label that registered.
 ///
 /// On Windows this also applies the `DirectML` session options
 /// (`configure_accelerator_session`); on Linux [`register_accelerator`] is a
-/// no-op and the label is [`BACKEND_CPU`]. `commit_from_memory` consumes the
-/// builder, which is why the CPU fallback in [`OrtInference::load`] rebuilds a
-/// fresh one rather than reusing this.
+/// no-op and the label is [`BACKEND_CPU`].
 ///
 /// `allow_cpu_fallback` is the plan's fallback flag, and it also decides what an
 /// EP that *fails to register* means: with a fallback allowed (`Auto`) a soft
@@ -289,10 +302,19 @@ fn base_builder() -> Result<SessionBuilder, InferenceError> {
 /// unaccelerated; with it forbidden ([`HandTrackingBackend::ForceGpu`]) the
 /// missing accelerator is an error rather than a silently unaccelerated session
 /// reported as a success (see [`accelerator_missing_under_force`]).
-fn commit_accelerated(
+///
+/// Split from the commit so that **every** commit attempt starts from a *fresh*
+/// builder: the first one, the post-cache-purge retry in
+/// [`commit_accelerated_recovering_cache`], and the CPU rebuild in
+/// [`OrtInference::load`]. That is not cosmetic — the purge deletes the very
+/// directory this builder's `CoreML` EP was registered against, so the retry must
+/// re-register the EP against the freshly re-created cache dir rather than reuse a
+/// builder holding the stale one (and `ort` guarantees nothing about a builder
+/// whose commit has already failed).
+fn accelerated_builder(
     model_bytes: &[u8],
     allow_cpu_fallback: bool,
-) -> Result<(Session, &'static str), InferenceError> {
+) -> Result<(SessionBuilder, &'static str), InferenceError> {
     let mut builder = base_builder()?;
     #[cfg(target_os = "windows")]
     {
@@ -311,15 +333,134 @@ fn commit_accelerated(
             platform_accelerator_label()
         )));
     }
+    Ok((builder, label))
+}
+
+/// Build the platform-accelerated session and commit it, returning the committed
+/// session and the registered backend label.
+fn commit_accelerated(
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+) -> Result<(Session, &'static str), InferenceError> {
+    let (mut builder, label) = accelerated_builder(model_bytes, allow_cpu_fallback)?;
     let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
     Ok((session, label))
+}
+
+/// [`commit_accelerated`], with one macOS-only recovery step in front of the CPU
+/// degradation: treat a commit failure as a **poisoned `CoreML` artifact cache**,
+/// purge that one model's cache directory, and retry the accelerated commit
+/// exactly once.
+///
+/// Why this exists: [`coreml_cache_dir`] keys the compiled-artifact cache by a
+/// hash of the model bytes, so a corrupt entry produces the *same* commit failure
+/// on every launch, forever (empirically: a garbled `.mlmodelc` fails session
+/// creation with `Failed to create MLModel … Unable to load model`). Under
+/// [`HandTrackingBackend::Auto`] the EP fallback would then dutifully degrade that
+/// model to the CPU on every launch, and an unattended kiosk would run hand
+/// tracking unaccelerated for the rest of its life with one startup `warn!` as the
+/// only evidence. A poisoned cache is not hypothetical here — a *stale* one was the
+/// root cause of the historical `output_features has no value` crash (see
+/// `docs/runbooks/onnx-coreml-model-surgery.md`).
+///
+/// **Exactly one retry.** A retry *loop* against a genuinely broken EP would delete
+/// and recompile the `CoreML` artifact on every launch forever; one retry
+/// distinguishes "cache was poisoned, we recovered" from "the GPU EP is broken on
+/// this box" and then lets the caller degrade.
+///
+/// The build-time failure that [`accelerated_builder`] raises (`ForceGpu` with no
+/// accelerator registered) is deliberately **not** cache-recovered: no commit ran,
+/// so no cache is implicated and there is nothing to purge.
+///
+/// Non-macOS targets have no EP artifact cache in this code, so this is a
+/// transparent pass-through to [`commit_accelerated`].
+fn commit_accelerated_recovering_cache(
+    model_name: &str,
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+) -> Result<(Session, &'static str), InferenceError> {
+    let (mut builder, label) = accelerated_builder(model_bytes, allow_cpu_fallback)?;
+    match builder.commit_from_memory(model_bytes).map_err(load_err) {
+        Ok(session) => Ok((session, label)),
+        Err(first_err) => {
+            retry_after_cache_purge(model_name, model_bytes, allow_cpu_fallback, first_err)
+        }
+    }
+}
+
+/// Purge this model's `CoreML` artifact cache and retry the accelerated commit
+/// once; on a second failure (or when there was no purgeable cache to blame)
+/// return the error so [`load_with_ep_fallback`] can degrade to the CPU EP.
+///
+/// The three `warn!` lines here are the operator's whole diagnosis: they name the
+/// model and the exact cache directory, say that it was purged, and say whether
+/// the retry then *recovered the accelerator* or *failed again* — which is the
+/// difference between "one bad cache write, self-healed" and "the GPU EP is
+/// genuinely broken on this host, investigate the driver/OS".
+#[cfg(target_os = "macos")]
+fn retry_after_cache_purge(
+    model_name: &str,
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+    first_err: InferenceError,
+) -> Result<(Session, &'static str), InferenceError> {
+    let Some(dir) = purge_model_cache(model_bytes) else {
+        // Nothing was purged — no cache directory (caching unavailable), or the
+        // computed path failed the guard. Either way a poisoned cache cannot be
+        // the explanation, so do not retry: degrade (or, under ForceGpu, fail).
+        return Err(first_err);
+    };
+    tracing::warn!(
+        model = model_name,
+        cache_dir = %dir.display(),
+        err = %first_err,
+        "CoreML accelerated commit failed; purged this model's compiled-artifact cache \
+         directory and retrying the accelerated commit once (a corrupt cache entry would \
+         otherwise fail identically on every launch, degrading this model to the CPU forever)"
+    );
+    match commit_accelerated(model_bytes, allow_cpu_fallback) {
+        Ok(loaded) => {
+            tracing::warn!(
+                model = model_name,
+                cache_dir = %dir.display(),
+                "CoreML cache was poisoned; the purge + recompile RECOVERED the accelerated \
+                 session — this launch is slower (the artifact recompiled), later launches are not"
+            );
+            Ok(loaded)
+        }
+        Err(retry_err) => {
+            tracing::warn!(
+                model = model_name,
+                cache_dir = %dir.display(),
+                err = %retry_err,
+                "CoreML accelerated commit failed AGAIN on a freshly purged cache — the GPU \
+                 execution provider is broken on this host, not merely cache-poisoned; this \
+                 model degrades to the CPU execution provider (unless pinned to ForceGpu, \
+                 which fails loudly instead)"
+            );
+            Err(retry_err)
+        }
+    }
+}
+
+/// No on-disk EP artifact cache on this target: a commit failure is the final
+/// word, and the caller degrades to the CPU EP exactly as before.
+#[cfg(not(target_os = "macos"))]
+fn retry_after_cache_purge(
+    _model_name: &str,
+    _model_bytes: &[u8],
+    _allow_cpu_fallback: bool,
+    first_err: InferenceError,
+) -> Result<(Session, &'static str), InferenceError> {
+    Err(first_err)
 }
 
 /// Build a CPU-only session (no GPU EP registered) and commit it.
 ///
 /// Used both for [`HandTrackingBackend::ForceCpu`] and as the fallback when an
-/// accelerated commit fails. Starts from a fresh [`base_builder`] because the
-/// accelerated builder was consumed by its failed commit.
+/// accelerated commit fails. Starts from a fresh [`base_builder`]: the failed
+/// accelerated builder still has the GPU EP registered on it, so rebuilding — not
+/// reusing — is what makes this session genuinely CPU-only.
 fn commit_cpu(model_bytes: &[u8]) -> Result<(Session, &'static str), InferenceError> {
     let session = base_builder()?
         .commit_from_memory(model_bytes)
@@ -445,37 +586,125 @@ fn model_cache_key(model_bytes: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[cfg(all(target_os = "macos", test))]
+thread_local! {
+    /// Test-only override of the `CoreML` cache root ([`coreml_cache_root`]).
+    ///
+    /// The on-disk cache is off by default under `cfg(test)` (see
+    /// [`coreml_cache_root`]); the poisoned-cache recovery regression needs it on,
+    /// so it points this at its own temp directory — never the real user cache.
+    ///
+    /// Deliberately **thread-local**, not a process global: under a plain
+    /// `cargo test` (one process, tests on threads) a global would switch the
+    /// cache on for every *other* concurrently-running test too, resurrecting
+    /// exactly the parallel cache-population race [`coreml_cache_root`] documents.
+    /// A thread-local is scoped to the one test that opted in, under either runner.
+    static CACHE_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Root directory holding every model's `CoreML` artifact cache:
+/// `<user cache>/waveconductor/coreml-cache`. Each model gets exactly one
+/// directory *directly* beneath it, named by [`model_cache_key`].
+///
+/// This is the single source of truth for that root. [`coreml_cache_dir`] (which
+/// creates a model's directory) and [`purge_model_cache`] (which deletes it) both
+/// derive from here, so the delete can never be aimed at a path the create never
+/// produced — see [`is_purgeable_model_cache_dir`].
+///
+/// `None` under `cfg(test)` unless a test overrides it: the unit tests load the
+/// same model from many parallel `nextest` processes, and ONNX Runtime's `CoreML`
+/// EP is not safe against two of them populating the shared cache directory at
+/// once (the loser of the move-into-place race fails with "an item with the same
+/// name already exists"). A test loads each model once, so the cache buys nothing,
+/// and skipping it also keeps tests out of the real user cache dir. Production
+/// keeps the cache for fast startup, where each model is loaded exactly once.
+#[cfg(target_os = "macos")]
+fn coreml_cache_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    let root = CACHE_ROOT_OVERRIDE.with(|root| root.borrow().clone());
+    #[cfg(not(test))]
+    let root = Some(
+        dirs::cache_dir()?
+            .join("waveconductor")
+            .join("coreml-cache"),
+    );
+    root
+}
+
 /// Resolve the on-disk `CoreML` model-cache directory for a specific model
-/// (`<cache>/waveconductor/coreml-cache/<model-key>`), creating it if absent.
+/// (`<coreml-cache-root>/<model-key>`), creating it if absent.
 ///
 /// The per-model `<model-key>` ([`model_cache_key`]) is what makes reusing the
 /// cache across model revisions safe — see that function for why a directory
 /// shared between models corrupts after a model change.
 ///
-/// Disabled under `cfg(test)`: the unit tests load the same model from many
-/// parallel processes, and ONNX Runtime's `CoreML` EP is not safe against two of
-/// them populating the shared cache directory at once (the loser of the
-/// move-into-place race fails with "an item with the same name already exists").
-/// A test loads each model once, so the cache buys nothing, and skipping it also
-/// keeps tests from writing into the real user cache dir. Production (non-test)
-/// keeps the cache for fast startup, where each model is loaded exactly once.
-///
-/// Returns `None` when caching is disabled, no cache dir is available, or it
-/// cannot be created; the caller then loads without a cache (recompiling the
-/// Core ML artifact each run) rather than failing.
+/// Returns `None` when caching is disabled ([`coreml_cache_root`]), no cache dir
+/// is available, or it cannot be created; the caller then loads without a cache
+/// (recompiling the Core ML artifact each run) rather than failing.
 #[cfg(target_os = "macos")]
 fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
-    if cfg!(test) {
-        return None;
-    }
-    let dir = dirs::cache_dir()?
-        .join("waveconductor")
-        .join("coreml-cache")
-        .join(model_cache_key(model_bytes));
+    let dir = coreml_cache_root()?.join(model_cache_key(model_bytes));
     match std::fs::create_dir_all(&dir) {
         Ok(()) => Some(dir),
         Err(e) => {
             tracing::warn!("CoreML cache dir {} unavailable: {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// Whether `dir` is safe to hand to `remove_dir_all` as one model's `CoreML`
+/// artifact cache. **The guard on a recursive delete under the user's cache
+/// directory** — a bug here removes something it shouldn't, so it is a separate,
+/// directly-tested predicate rather than an inline condition.
+///
+/// All three conditions must hold:
+///
+/// 1. `dir`'s parent is *exactly* `root` — one component below the cache root, so
+///    neither the root itself nor anything deeper or outside it can be passed.
+/// 2. `dir` has a real final component. `Path::file_name` is `None` for a path
+///    ending in `..` or `/`, which is what stops a lexical `root/..` (whose
+///    `parent()` *is* `root`) from qualifying.
+/// 3. `dir` is a real directory *and not a symlink*: `symlink_metadata` does not
+///    follow links, so a symlink planted in the cache root can never redirect the
+///    delete at its target.
+///
+/// A path failing any of these is not deleted; the caller logs and degrades.
+#[cfg(target_os = "macos")]
+fn is_purgeable_model_cache_dir(dir: &Path, root: &Path) -> bool {
+    dir.parent() == Some(root)
+        && dir.file_name().is_some()
+        && std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+/// Delete one model's `CoreML` artifact cache directory, returning the purged
+/// path (`None` if nothing was purged).
+///
+/// The path is derived from [`coreml_cache_dir`] — *the same function that
+/// created it* — never re-assembled by hand, and is then re-checked against
+/// [`is_purgeable_model_cache_dir`] before the recursive delete. A path that fails
+/// the guard is logged and left alone.
+#[cfg(target_os = "macos")]
+fn purge_model_cache(model_bytes: &[u8]) -> Option<PathBuf> {
+    let root = coreml_cache_root()?;
+    let dir = coreml_cache_dir(model_bytes)?;
+    if !is_purgeable_model_cache_dir(&dir, &root) {
+        tracing::warn!(
+            "refusing to purge CoreML cache path {} — it is not a directory sitting directly \
+             under the cache root {}; leaving it alone and degrading this model instead",
+            dir.display(),
+            root.display()
+        );
+        return None;
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            tracing::warn!(
+                "could not purge CoreML cache dir {}: {e}; degrading this model instead",
+                dir.display()
+            );
             None
         }
     }
@@ -564,6 +793,130 @@ mod tests {
             v1,
             model_cache_key(b"palm-model-rev-1"),
             "the same model bytes must map to the same cache key"
+        );
+    }
+
+    /// Point this thread's `CoreML` artifact cache at `root` for the rest of the
+    /// test (thread-local — see [`CACHE_ROOT_OVERRIDE`]).
+    #[cfg(target_os = "macos")]
+    fn use_cache_root(root: &Path) {
+        CACHE_ROOT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(root.to_path_buf()));
+    }
+
+    /// Overwrite every regular file under `dir` with garbage, keeping the tree
+    /// shape — the shape a half-written / truncated cache entry leaves behind.
+    /// Returns how many files were poisoned.
+    #[cfg(target_os = "macos")]
+    fn poison_every_file(dir: &Path) -> usize {
+        let mut poisoned = 0;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            for entry in std::fs::read_dir(&next).expect("read cache dir") {
+                let path = entry.expect("cache dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    std::fs::write(&path, b"POISONED").expect("poison cache file");
+                    poisoned += 1;
+                }
+            }
+        }
+        poisoned
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_purge_guard_only_accepts_a_model_dir_directly_under_the_cache_root() {
+        // This predicate gates a `remove_dir_all` under the user's cache
+        // directory, so every way of aiming it somewhere else must be refused.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path().join("coreml-cache");
+        let model = root.join("0123456789abcdef");
+        let victim = tmp.path().join("precious"); // OUTSIDE the cache root
+        std::fs::create_dir_all(model.join("0_dynamic_nn")).expect("model cache tree");
+        std::fs::create_dir_all(&victim).expect("victim dir");
+        std::fs::write(root.join("stray_file"), b"x").expect("stray file");
+        std::os::unix::fs::symlink(&victim, root.join("evil_link")).expect("symlink");
+
+        assert!(
+            is_purgeable_model_cache_dir(&model, &root),
+            "the real per-model cache dir is exactly what may be purged"
+        );
+        for (path, why) in [
+            (root.clone(), "the cache root itself must never be deleted"),
+            (
+                model.join("0_dynamic_nn"),
+                "a path deeper than one component below the root",
+            ),
+            (
+                root.join(".."),
+                "a lexical `..` escape — its parent() IS the root, so only the \
+                 file_name check refuses it",
+            ),
+            (victim.clone(), "a path outside the cache root entirely"),
+            (root.join("stray_file"), "a file, not a directory"),
+            (
+                root.join("evil_link"),
+                "a symlink — the delete must never follow it to its target",
+            ),
+            (root.join("never_created"), "a path that does not exist"),
+        ] {
+            assert!(
+                !is_purgeable_model_cache_dir(&path, &root),
+                "{}: {why}",
+                path.display()
+            );
+        }
+        // The symlink's target survived the guard being asked about it.
+        assert!(victim.is_dir(), "the guard must not touch anything");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_poisoned_coreml_cache_is_purged_and_the_accelerated_commit_recovers() {
+        // The hole this closes: the CoreML cache key is a pure function of the
+        // model bytes, so a corrupt entry fails the accelerated commit
+        // IDENTICALLY on every launch (empirically: "Failed to create MLModel …
+        // Unable to load model"). Under Auto the EP fallback would then degrade
+        // this model to the CPU on every launch, forever — an unattended kiosk
+        // running hand tracking unaccelerated for its whole life off one bad
+        // write. The purge + single retry must recover the accelerator instead.
+        //
+        // Uses a temp cache root (thread-local override), never the user's.
+        let tmp = tempfile::tempdir().expect("temp cache root");
+        use_cache_root(tmp.path());
+        let bytes = model_bytes("palm_detection.onnx");
+
+        // Cold load: compiles the CoreML artifact and populates the cache.
+        let cold = OrtInference::load(&bytes, HandTrackingBackend::Auto, "palm_detection.onnx")
+            .expect("cold load");
+        assert_eq!(
+            cold.backend(),
+            BACKEND_COREML,
+            "premise: the cold load must reach CoreML, or this test proves nothing"
+        );
+        drop(cold);
+
+        let dir = coreml_cache_dir(&bytes).expect("the cache dir the cold load wrote");
+        let poisoned = poison_every_file(&dir);
+        assert!(
+            poisoned > 0,
+            "the CoreML EP wrote no cache artifacts to {} — nothing to poison, so this \
+             test would pass vacuously",
+            dir.display()
+        );
+
+        // Warm load over the poisoned cache: the accelerated commit fails, the
+        // cache dir is purged, and the retry recompiles and lands on CoreML.
+        // Without the purge this would return BACKEND_CPU — every launch.
+        let recovered =
+            OrtInference::load(&bytes, HandTrackingBackend::Auto, "palm_detection.onnx")
+                .expect("load over a poisoned cache");
+        assert_eq!(
+            recovered.backend(),
+            BACKEND_COREML,
+            "a poisoned CoreML cache must be purged and the accelerated commit retried — \
+             degrading to the CPU here is the permanent-silent-CPU kiosk failure"
         );
     }
 
