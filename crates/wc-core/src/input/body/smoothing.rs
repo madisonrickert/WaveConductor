@@ -7,7 +7,7 @@
 //!
 //! Velocities: the pinned `BodyTrackingState.velocities` are the finite
 //! differences of the *smoothed* screen positions, additionally EMA'd
-//! ([`VELOCITY_EMA_ALPHA`]) so Plan C's limb impulses don't flutter with
+//! (`VELOCITY_EMA_ALPHA`) so Plan C's limb impulses don't flutter with
 //! residual landmark noise.
 //!
 //! Filter banks are fixed arrays sized [`BODY_LANDMARK_COUNT`]; `clear()`
