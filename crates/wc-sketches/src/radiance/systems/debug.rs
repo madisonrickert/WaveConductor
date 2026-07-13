@@ -137,10 +137,16 @@ pub fn draw_edge_debug(
 /// audio readouts. Body frame rate is derived from `timestamp` deltas via
 /// `Local`s — everything shown is computable from the pinned contract
 /// surface alone.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system — each parameter is a distinct ECS resource read \
+              by one egui window; splitting it would split the readout"
+)]
 pub fn radiance_inference_readout(
     app_state: Res<'_, State<AppState>>,
     settings: Res<'_, RadianceSettings>,
     body: Option<Res<'_, BodyTrackingState>>,
+    body_diag: Option<Res<'_, wc_core::input::body::BodyTrackingDiagnostics>>,
     audio: Option<Res<'_, wc_core::audio::input::AudioAnalysis>>,
     edges: Option<Res<'_, SilhouetteEdges>>,
     mut last_ts: Local<'_, f64>,
@@ -183,6 +189,23 @@ pub fn radiance_inference_readout(
                 None => {
                     ui.label("body: (no tracking resource)");
                 }
+            }
+            // Worker timing split (same thermal diagnostic the hand provider
+            // surfaces): a slow camera/decode reads differently from slow
+            // inference on hardware.
+            if let Some(d) = body_diag.as_ref() {
+                ui.label(format!("worker: {} [{}]", d.status.label(), d.backend));
+                ui.label(format!(
+                    "timings: cap+dec {:.1}ms pre {:.1}ms det {:.1}ms lm {:.1}ms",
+                    d.capture_decode.as_secs_f32() * 1000.0,
+                    d.pipeline.preprocess.as_secs_f32() * 1000.0,
+                    d.pipeline.detector.as_secs_f32() * 1000.0,
+                    d.pipeline.landmark.as_secs_f32() * 1000.0,
+                ));
+                ui.label(format!(
+                    "drops: rate {} ring {} errors {}",
+                    d.dropped_frames, d.ring_full_drops, d.pipeline_errors
+                ));
             }
             ui.label(format!(
                 "edges: {}",

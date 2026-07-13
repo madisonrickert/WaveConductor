@@ -245,6 +245,8 @@ pub fn poll_body_worker(
                 diagnostics.ring_full_drops = d.ring_full_drops;
                 diagnostics.pipeline_errors = d.pipeline_errors;
                 diagnostics.idle_throttled = d.idle_throttled;
+                diagnostics.capture_decode = d.capture_decode;
+                diagnostics.pipeline = d.pipeline;
             }
             BodyWorkerMsg::Error(e) => diagnostics.last_error = Some(e),
             BodyWorkerMsg::CameraFormat(f) => diagnostics.camera_format = Some(f),
@@ -514,6 +516,14 @@ mod tests {
 
         let diagnostics = world.resource::<BodyTrackingDiagnostics>();
         assert_eq!(diagnostics.backend, "mock/backend");
+        // The worker's per-frame timing split must survive the poll copy
+        // (thermal diagnostic parity with the hand provider): the pipeline
+        // snapshot reflects the person-bearing frame just processed.
+        assert!(
+            diagnostics.pipeline.present,
+            "per-stage pipeline diagnostics were not copied from the worker"
+        );
+        assert!(diagnostics.pipeline.confidence > 0.8);
 
         // Presence marked the interaction timer (design decision 1).
         let timer = world.resource::<InteractionTimer>();

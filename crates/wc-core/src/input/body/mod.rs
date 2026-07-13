@@ -224,6 +224,13 @@ pub struct BodyTrackingDiagnostics {
     pub pipeline_errors: u64,
     /// Whether the idle detector-only throttle is currently requested.
     pub idle_throttled: bool,
+    /// Wall time acquiring + decoding the last processed frame. Separates a
+    /// slow camera/decode from slow inference on hardware — the same
+    /// thermal-diagnosis split the hand provider surfaces in its dev panel.
+    pub capture_decode: Duration,
+    /// Per-stage pipeline metrics (total/preprocess/detector/landmark) for
+    /// the latest processed frame.
+    pub pipeline: pipeline::PoseDiagnostics,
 }
 
 impl Default for BodyTrackingDiagnostics {
@@ -238,6 +245,8 @@ impl Default for BodyTrackingDiagnostics {
             ring_full_drops: 0,
             pipeline_errors: 0,
             idle_throttled: false,
+            capture_decode: Duration::ZERO,
+            pipeline: pipeline::PoseDiagnostics::default(),
         }
     }
 }
