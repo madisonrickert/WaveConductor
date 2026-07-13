@@ -240,6 +240,13 @@ tag.
 - [ ] **Non-black field**: confirm the wave field is visible (dark-blue ground, concentric
   ripple from the centre). A black screen indicates `rgba32float` write-only storage is unsupported
   or the compute pipeline failed to compile — check the log for a `PipelineCache` error.
+- [ ] **Warm start on every entry, not just first boot** (Plan 07,
+  `docs/superpowers/plans/2026-07-09-alpha5-07-cymatics-warm-start.md`): from Home, navigate into
+  Cymatics, back to Home, then into Cymatics again, several times in a row (the field tester's
+  exact repro was four navigations in under a minute). Confirm two distinct orange blobs are
+  visible immediately on every entry — no blank or near-black frame while the field "warms up."
+  A blank frame on the *second or later* entry (but not the first) means `warm_start_state`
+  regressed to `CymaticsState::default()`'s all-zero seed.
 - [ ] **Non-frozen field** (odd-N continuity fix): in Dev settings (flip ADVANCED), set
   `iterations = 1`. Confirm the field still propagates continuously. Repeat with `iterations = 3`.
   A frozen field at odd N means the C6 blit fix is not applied.
