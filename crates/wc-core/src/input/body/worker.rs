@@ -1023,3 +1023,97 @@ mod tests {
         assert!(t.errors >= 1, "pipeline error not surfaced");
     }
 }
+
+/// Contract tests against the VENDORED pose models (Task 13). These require
+/// assets/models/pose to be populated — they are ordered after the model
+/// acquisition task and fail loudly (like the hand-model tests) if the
+/// assets are missing.
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is appropriate in test code")]
+mod model_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::input::onnx::ort::OrtInference;
+    use crate::input::onnx::{ModelInference, Tensor};
+
+    fn model_bytes(name: &str) -> Vec<u8> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/models/pose")
+            .join(name);
+        std::fs::read(path).expect("read vendored pose model (run Task 13 first)")
+    }
+
+    #[test]
+    fn pose_detector_emits_2254_anchor_tensors() {
+        let mut model =
+            OrtInference::load(&model_bytes(POSE_DETECTION_MODEL)).expect("load detector");
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
+            .expect("detector forward pass");
+        let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
+        assert!(
+            shapes.contains(&[1, 2254, 12].as_slice()),
+            "shapes={shapes:?}"
+        );
+        assert!(
+            shapes.contains(&[1, 2254, 1].as_slice()),
+            "shapes={shapes:?}"
+        );
+    }
+
+    #[test]
+    fn pose_landmark_emits_landmarks_confidence_mask_and_world() {
+        let mut model =
+            OrtInference::load(&model_bytes(POSE_LANDMARK_MODEL)).expect("load landmark");
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 256, 256, 3]), &mut out)
+            .expect("landmark forward pass");
+        let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
+        for want in [
+            [1_usize, 195].as_slice(),
+            [1, 1].as_slice(),
+            [1, 256, 256, 1].as_slice(),
+            [1, 117].as_slice(),
+        ] {
+            assert!(shapes.contains(&want), "missing {want:?} in {shapes:?}");
+        }
+    }
+
+    #[test]
+    fn pose_confidence_is_a_probability_from_the_graph() {
+        // Premise lock (design decision 6): the pose-presence scalar is
+        // consumed RAW. An all-zeros input contains no person, so a baked-in
+        // sigmoid must read in [0, 1] and low; raw logits would violate the
+        // range loudly here before the pipeline silently misreads them.
+        let mut model =
+            OrtInference::load(&model_bytes(POSE_LANDMARK_MODEL)).expect("load landmark");
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 256, 256, 3]), &mut out)
+            .expect("landmark forward pass");
+        let conf = out
+            .iter()
+            .find(|t| t.shape == [1, 1])
+            .and_then(|t| t.data.first().copied())
+            .expect("confidence scalar");
+        assert!(
+            (0.0..=1.0).contains(&conf),
+            "confidence {conf} outside [0, 1] — head is not pre-activated; \
+             the pipeline must sigmoid it (update pick_pose_landmark_outputs)"
+        );
+        assert!(conf < 0.5, "empty input should read low, got {conf}");
+    }
+
+    #[test]
+    fn load_pose_pipeline_reports_a_known_backend() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/pose");
+        let (_pipeline, backend) = load_pose_pipeline(&dir).expect("pipeline builds");
+        #[cfg(target_os = "macos")]
+        assert_eq!(backend, "ort/CoreML", "CoreML must register on macOS");
+        #[cfg(not(target_os = "macos"))]
+        assert!(!backend.is_empty());
+    }
+}
