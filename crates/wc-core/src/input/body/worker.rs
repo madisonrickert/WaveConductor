@@ -50,9 +50,22 @@ pub const POSE_LANDMARK_MODEL: &str = "pose_landmark_full.onnx";
 /// can't busy-spin a core (mainly guards mock sources).
 const IDLE_POLL: Duration = Duration::from_millis(2);
 
+/// Cooldown between camera-open attempts after a failure. Mirrors the audio
+/// capture path's `RETRY_COOLDOWN_S`: a webcam momentarily held by another
+/// process — or a kiosk camera still enumerating shortly after boot — should
+/// be reacquired within a couple of seconds rather than permanently killing
+/// the worker.
+const OPEN_RETRY_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// Poll granularity while waiting out the open-retry cooldown, so the stop
+/// flag is observed within this bound during shutdown (prompt join).
+const RETRY_STOP_POLL: Duration = Duration::from_millis(50);
+
 /// Creates the frame source on the worker thread (deferred so `!Send` camera
 /// backends are built where they are used; the factory itself is `Send`).
-pub type SourceFactory = Box<dyn FnOnce() -> Result<Box<dyn FrameSource>, CaptureError> + Send>;
+/// `FnMut` — not `FnOnce` — so the open-retry loop can reattempt after a
+/// transient camera-open failure (see `open_source_with_retry`).
+pub type SourceFactory = Box<dyn FnMut() -> Result<Box<dyn FrameSource>, CaptureError> + Send>;
 
 /// Builds the pose pipeline (model files + ort sessions) on the worker
 /// thread, returning it with the combined inference backend label. The
@@ -171,16 +184,24 @@ pub fn spawn_body_worker(
                 }
             };
             pipeline.set_live_tuning_source(Arc::clone(&tuning));
-            // Build the source on this thread (!Send backends are fine).
-            let source = match make_source() {
-                Ok(source) => source,
-                Err(e) => {
-                    tracing::error!("body worker: camera open failed: {e}");
-                    let _ = producer.push(BodyWorkerMsg::Error(e.to_string()));
-                    let _ =
-                        producer.push(BodyWorkerMsg::Status(BodyTrackingStatus::CameraUnavailable));
-                    return;
-                }
+            // Build the source on this thread (!Send backends are fine). Camera
+            // open is retried on a fixed cooldown so a webcam momentarily held
+            // by another process — or a kiosk camera still enumerating at boot
+            // — does not permanently kill the worker; the audio capture path
+            // reacquires a mic the same way. The stop flag is checked between
+            // attempts so shutdown still joins promptly. (Pipeline build stays
+            // one-shot above: a CoreML recompile is expensive to retry, and a
+            // model-load failure signals a missing/corrupt vendored model — a
+            // deploy error, not a transient condition.)
+            let mut make_source = make_source;
+            let Some(source) = open_source_with_retry(
+                &mut make_source,
+                &stop_thread,
+                &mut producer,
+                OPEN_RETRY_COOLDOWN,
+            ) else {
+                // Stop fired during an open-retry cooldown: exit quietly.
+                return;
             };
             run_worker_loop(
                 &stop_thread,
@@ -207,6 +228,58 @@ pub fn spawn_body_worker(
     };
 
     WorkerHandle { stop, join }
+}
+
+/// Open the camera source, retrying on failure with a fixed cooldown until it
+/// succeeds or `stop` is set. Mirrors the audio capture path's 2 s reacquire
+/// (`audio::input::capture::RETRY_COOLDOWN_S`). Between attempts it surfaces
+/// the error string and a `CameraUnavailable` status — a status that persists
+/// across the cooldown is the "still retrying" signal to the main thread.
+/// Returns `None` only when `stop` fires first, so shutdown joins promptly.
+fn open_source_with_retry(
+    make_source: &mut SourceFactory,
+    stop: &AtomicBool,
+    producer: &mut Producer<BodyWorkerMsg>,
+    cooldown: Duration,
+) -> Option<Box<dyn FrameSource>> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        match make_source() {
+            Ok(source) => return Some(source),
+            Err(e) => {
+                tracing::warn!(
+                    "body worker: camera open failed, retrying in {}s: {e}",
+                    cooldown.as_secs()
+                );
+                let _ = producer.push(BodyWorkerMsg::Error(e.to_string()));
+                let _ = producer.push(BodyWorkerMsg::Status(BodyTrackingStatus::CameraUnavailable));
+                // A stop during the cooldown short-circuits the wait.
+                if !sleep_unless_stopped(stop, cooldown) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Sleep up to `dur`, waking early and returning `false` the moment `stop` is
+/// observed, so a worker parked in its open-retry cooldown still joins within
+/// [`RETRY_STOP_POLL`] on shutdown. Returns `true` if the full duration
+/// elapsed without a stop.
+fn sleep_unless_stopped(stop: &AtomicBool, dur: Duration) -> bool {
+    let deadline = Instant::now() + dur;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        std::thread::sleep(RETRY_STOP_POLL.min(deadline - now));
+    }
 }
 
 /// Cumulative drop counters, split by cause (camera rate-cap drops vs ring
@@ -752,6 +825,101 @@ mod tests {
     }
 
     #[test]
+    fn open_source_retries_until_success() {
+        // A camera that fails its first two open attempts then succeeds must
+        // not kill the worker: the retry loop reattempts on the cooldown and
+        // surfaces a CameraUnavailable status per failure (the "still trying"
+        // signal), then hands back the source.
+        use super::super::transport::BodyWorkerMsg;
+        use std::sync::atomic::AtomicU32;
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = Arc::clone(&attempts);
+        let mut factory: SourceFactory = Box::new(move || {
+            let n = a.fetch_add(1, Ordering::Relaxed);
+            if n < 2 {
+                Err(CaptureError::NoCamera("not yet".into()))
+            } else {
+                let mut f = crate::input::capture::Frame::default();
+                f.fit_to(64, 48);
+                let src: Box<dyn FrameSource> = Box::new(MockFrameSource::looping(vec![f]));
+                Ok(src)
+            }
+        });
+        let stop = AtomicBool::new(false);
+        let (mut producer, mut consumer) = rtrb::RingBuffer::<BodyWorkerMsg>::new(64);
+        let source =
+            open_source_with_retry(&mut factory, &stop, &mut producer, Duration::from_millis(5));
+        assert!(source.is_some(), "retry must eventually open the camera");
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            3,
+            "two failures then one success"
+        );
+        let mut unavailable = 0;
+        while let Ok(msg) = consumer.pop() {
+            if matches!(
+                msg,
+                BodyWorkerMsg::Status(BodyTrackingStatus::CameraUnavailable)
+            ) {
+                unavailable += 1;
+            }
+        }
+        assert_eq!(
+            unavailable, 2,
+            "one CameraUnavailable status per failed open"
+        );
+    }
+
+    #[test]
+    fn stop_short_circuits_open_retry_cooldown() {
+        // With stop already set, the retry loop must return without sleeping
+        // the (deliberately long) cooldown — the mechanism that keeps shutdown
+        // prompt while a worker is parked waiting to reacquire a camera.
+        use super::super::transport::BodyWorkerMsg;
+
+        let mut factory: SourceFactory = Box::new(|| Err(CaptureError::NoCamera("nope".into())));
+        let stop = AtomicBool::new(true);
+        let (mut producer, _consumer) = rtrb::RingBuffer::<BodyWorkerMsg>::new(8);
+        let start = Instant::now();
+        let source =
+            open_source_with_retry(&mut factory, &stop, &mut producer, Duration::from_mins(1));
+        assert!(source.is_none(), "a set stop flag must abandon the open");
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "stop must short-circuit the cooldown, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn stop_during_camera_open_retry_joins_promptly() {
+        // End-to-end: a camera that never opens leaves the worker parked in the
+        // real OPEN_RETRY_COOLDOWN; stopping it must still join within a small
+        // multiple of RETRY_STOP_POLL, not after the full 2 s cooldown.
+        let (tuning, _recycle_tx, _result_rx, result_tx, recycle_rx) = harness(false);
+        let failing_source: SourceFactory =
+            Box::new(|| Err(CaptureError::NoCamera("no camera".into())));
+        let mut handle = spawn_body_worker(
+            failing_source,
+            person_pipeline_factory(),
+            30,
+            tuning,
+            result_tx,
+            recycle_rx,
+        );
+        // Let it build the (mock) pipeline and reach the open-retry cooldown.
+        std::thread::sleep(Duration::from_millis(80));
+        let start = Instant::now();
+        handle.stop();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "stop during the open-retry cooldown must join promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
     fn ring_full_frame_drop_reclaims_pooled_payload() {
         // Regression: a dropped Frame must NOT destroy its pooled payload.
         // rtrb returns the rejected value on backpressure; `push_frame` hands
@@ -789,7 +957,10 @@ mod tests {
             payload_ptr,
             "the reclaimed payload must be the very buffer the dropped frame held"
         );
-        assert_eq!(drops.ring_full, 1, "the drop is counted as ring backpressure");
+        assert_eq!(
+            drops.ring_full, 1,
+            "the drop is counted as ring backpressure"
+        );
         assert_eq!(drops.camera, 0, "a backpressure drop is not a camera drop");
     }
 
@@ -815,7 +986,10 @@ mod tests {
             },
             &mut drops,
         );
-        assert!(reclaimed.is_none(), "a fitting push keeps the payload in flight");
+        assert!(
+            reclaimed.is_none(),
+            "a fitting push keeps the payload in flight"
+        );
         assert_eq!(drops.ring_full, 0, "no backpressure when the ring has room");
     }
 

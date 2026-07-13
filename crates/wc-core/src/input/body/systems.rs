@@ -322,10 +322,21 @@ fn start_worker(
     let _ = worker; // only the test slots read it here
     let camera_index = config.camera_index;
     let make_source: SourceFactory = match injected_source {
-        Some(src) => Box::new(move || {
-            let boxed: Box<dyn FrameSource> = src;
-            Ok(boxed)
-        }),
+        // The injected source can only be handed out once; the retry loop
+        // never re-asks after a successful open, and a second call (should one
+        // ever happen) degrades to a clean error rather than double-taking.
+        Some(src) => {
+            let mut slot = Some(src);
+            Box::new(move || match slot.take() {
+                // `Box<dyn FrameSource + Send>` unsizes to `Box<dyn FrameSource>`
+                // via the let-binding's target type (no `as`, which is denied).
+                Some(src) => {
+                    let boxed: Box<dyn FrameSource> = src;
+                    Ok(boxed)
+                }
+                None => Err(CaptureError::NoCamera("injected source consumed".into())),
+            })
+        }
         None => Box::new(move || open_camera_source(camera_index)),
     };
 
