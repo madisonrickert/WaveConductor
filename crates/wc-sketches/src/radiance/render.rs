@@ -1,5 +1,7 @@
 //! Radiance materials: the additive aura billboards ([`RadianceMaterial`])
-//! and (Task 8) the silhouette fill quad + the per-frame driver.
+//! and the silhouette fill quad (`RadianceSilhouetteMaterial`) + the
+//! per-frame driver (`drive_radiance_materials`) that packs settings/state
+//! into both every frame.
 //!
 //! ## Additive blend
 //!
@@ -8,6 +10,23 @@
 //! additive `(One, One)` — flame's recipe, per-material-pipeline so it never
 //! leaks into the other sketches' blends. Gradient stops are linear HDR (may
 //! exceed 1.0) so cores clear the tonemapper's white knee and bloom.
+//!
+//! ## Silhouette fill
+//!
+//! `RadianceSilhouetteMaterial` stays ordinary `AlphaMode2d::Blend` (no
+//! `specialize` override): the fill occludes via normal alpha, and only its
+//! rim rides HDR magnitude into bloom. It is drawn under the particles
+//! (spawned at z 0.0 vs the billboards' z 1.0 — Task 9).
+//!
+//! The material, `particle_material_params`, and `drive_radiance_materials`
+//! are gated behind `body-tracking-mediapipe`: they consume
+//! `radiance::systems::sim_params::RadianceState`, which lives in a module
+//! wc-core gates behind the same feature (camera-independent, CI-testable
+//! headless). The `cargo doc` gate builds default features only, so this
+//! surface must be absent there (plain code spans here, not intra-doc
+//! links, per the house rule) — see `Cargo.toml`'s `body-tracking-mediapipe`
+//! forwarding feature, and `radiance::systems::mod`/`radiance::compute::mod`
+//! for the identical precedent.
 
 use bevy::asset::Asset;
 use bevy::mesh::MeshVertexBufferLayoutRef;
@@ -91,5 +110,179 @@ impl Material2d for RadianceMaterial {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "body-tracking-mediapipe")]
+use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
+
+#[cfg(feature = "body-tracking-mediapipe")]
+use crate::radiance::settings::{RadiancePalette, RadianceSettings};
+#[cfg(feature = "body-tracking-mediapipe")]
+use crate::radiance::systems::sim_params::RadianceState;
+#[cfg(feature = "body-tracking-mediapipe")]
+use crate::radiance::systems::spawn::RadianceRoot;
+
+/// The window-filling silhouette material sampling the person mask.
+///
+/// Drawn under the particles (spawned at z 0.0 vs the billboards' z 1.0) via
+/// ordinary alpha blending; only the rim is HDR-emissive.
+#[cfg(feature = "body-tracking-mediapipe")]
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+pub struct RadianceSilhouetteMaterial {
+    /// The shared 256² `R8Unorm` person mask (Plan B writes it in place;
+    /// Bevy re-uploads on mutation).
+    #[texture(0)]
+    #[sampler(1)]
+    pub mask: Handle<Image>,
+    /// x = fill intensity, y = rim glow, z = mask threshold, w = mirror.
+    #[uniform(2)]
+    pub fill_params: Vec4,
+    /// x = elapsed seconds, y = shimmer amount, z = raw-mask debug, w = 0.
+    #[uniform(3)]
+    pub effect_params: Vec4,
+    /// Deep glassy base color (linear).
+    #[uniform(4)]
+    pub fill_color: Vec4,
+    /// Emissive rim color (linear HDR).
+    #[uniform(5)]
+    pub rim_color: Vec4,
+}
+
+#[cfg(feature = "body-tracking-mediapipe")]
+impl Material2d for RadianceSilhouetteMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/radiance/silhouette.wgsl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+}
+
+/// The deep indigo glass base fill (linear). A constant, not a setting: the
+/// palette drives the rim; the body stays a dark glassy anchor.
+#[cfg(feature = "body-tracking-mediapipe")]
+#[must_use]
+pub fn silhouette_fill_color() -> Vec4 {
+    Vec4::new(0.05, 0.03, 0.10, 1.0)
+}
+
+/// Pack the particle-material params + palette stops for one frame,
+/// ember-blended by the screensaver fade envelope. Pure for testability.
+///
+/// Returns `(params_a, [color_a, color_b, color_c])`.
+#[cfg(feature = "body-tracking-mediapipe")]
+#[must_use]
+pub fn particle_material_params(
+    state: &RadianceState,
+    palette: RadiancePalette,
+    fade_alpha: f32,
+) -> (Vec4, [Vec4; 3]) {
+    let a = fade_alpha.clamp(0.0, 1.0);
+    // Attract mode dims toward the ember: intensity eases to 70%.
+    let intensity = state.intensity * (1.0 - a * 0.3);
+    let params_a = Vec4::new(intensity, QUAD_HALF_PX, state.palette_shift, state.sparkle);
+    let user = palette.stops();
+    let ember = RadiancePalette::Ember.stops();
+    let colors = [
+        user[0].lerp(ember[0], a),
+        user[1].lerp(ember[1], a),
+        user[2].lerp(ember[2], a),
+    ];
+    (params_a, colors)
+}
+
+/// `Update` (gated `in_state(AppState::Radiance)` — runs through Idle and
+/// the screensaver like flame's material driver, so the ember blend and the
+/// held last-frame envelopes keep rendering): pack settings + state into
+/// both materials every frame. The per-frame cost is a small uniform
+/// re-prepare, the same class as flame's eight-uniform driver.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub fn drive_radiance_materials(
+    time: Res<'_, Time>,
+    settings: Res<'_, RadianceSettings>,
+    state: Res<'_, RadianceState>,
+    fade: Res<'_, ScreensaverFade>,
+    particle_roots: Query<
+        '_,
+        '_,
+        &bevy::sprite_render::MeshMaterial2d<RadianceMaterial>,
+        With<RadianceRoot>,
+    >,
+    silhouette_roots: Query<
+        '_,
+        '_,
+        &bevy::sprite_render::MeshMaterial2d<RadianceSilhouetteMaterial>,
+        With<RadianceRoot>,
+    >,
+    mut particle_materials: ResMut<'_, Assets<RadianceMaterial>>,
+    mut silhouette_materials: ResMut<'_, Assets<RadianceSilhouetteMaterial>>,
+) {
+    let (params_a, colors) = particle_material_params(&state, settings.palette, fade.alpha());
+    let params_b = Vec4::new(time.elapsed_secs(), 0.0, 0.0, 0.0);
+    for handle in &particle_roots {
+        if let Some(mut material) = particle_materials.get_mut(&handle.0) {
+            material.params_a = params_a;
+            material.color_a = colors[0];
+            material.color_b = colors[1];
+            material.color_c = colors[2];
+            material.params_b = params_b;
+        }
+    }
+    // Rim takes the palette's hottest stop (ember-blended like the
+    // particles); the debug lane routes the raw-mask overlay.
+    let rim = colors[2];
+    let fill_params = Vec4::new(
+        settings.silhouette_fill,
+        settings.rim_glow,
+        settings.mask_threshold,
+        f32::from(u8::from(settings.mirror)),
+    );
+    let effect_params = Vec4::new(
+        time.elapsed_secs(),
+        state.sparkle,
+        f32::from(u8::from(settings.mask_debug_overlay)),
+        0.0,
+    );
+    for handle in &silhouette_roots {
+        if let Some(mut material) = silhouette_materials.get_mut(&handle.0) {
+            material.fill_params = fill_params;
+            material.effect_params = effect_params;
+            material.fill_color = silhouette_fill_color();
+            material.rim_color = rim;
+        }
+    }
+}
+
+#[cfg(all(test, feature = "body-tracking-mediapipe"))]
+mod tests {
+    use super::*;
+
+    /// Fade 0 (Active) uses the user palette verbatim; fade 1 lands on the
+    /// ember stops with intensity eased to 70%.
+    #[test]
+    fn particle_params_blend_to_ember_on_fade() {
+        let state = RadianceState {
+            onset_env: 0.0,
+            intensity: 1.0,
+            sparkle: 0.4,
+            palette_shift: 0.25,
+        };
+        let (pa0, c0) = particle_material_params(&state, RadiancePalette::Prism, 0.0);
+        assert!((pa0.x - 1.0).abs() < 1e-6);
+        assert!((pa0.z - 0.25).abs() < 1e-6);
+        assert_eq!(c0, RadiancePalette::Prism.stops());
+        let (pa1, c1) = particle_material_params(&state, RadiancePalette::Prism, 1.0);
+        assert!((pa1.x - 0.7).abs() < 1e-6, "ember intensity ease");
+        assert_eq!(c1, RadiancePalette::Ember.stops());
+    }
+
+    /// The quad half-size lane is the shared constant.
+    #[test]
+    fn particle_params_carry_quad_half() {
+        let state = RadianceState::default();
+        let (pa, _) = particle_material_params(&state, RadiancePalette::Ocean, 0.0);
+        assert!((pa.y - QUAD_HALF_PX).abs() < f32::EPSILON);
     }
 }

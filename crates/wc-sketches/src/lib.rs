@@ -74,6 +74,17 @@ impl Plugin for SketchesPlugin {
         // singleton; the mesh + material entity spawns on Radiance entry).
         app.add_plugins(Material2dPlugin::<crate::radiance::render::RadianceMaterial>::default());
 
+        // Radiance silhouette fill material, registered once (Plugin
+        // singleton; the quad spawns on Radiance entry, Task 9).
+        // Feature-gated: it samples the body-tracking mask and its driver
+        // reads RadianceState, both behind `body-tracking-mediapipe` (see
+        // `radiance::render`'s module doc), absent from the default feature
+        // set the doc gate builds.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_plugins(Material2dPlugin::<
+            crate::radiance::render::RadianceSilhouetteMaterial,
+        >::default());
+
         // Shared hand-mesh overlay infra, registered once (like the particle
         // plugins above) so each sketch's `HandMeshPlugin` can be added without
         // re-registering the material or composite node. `MaterialPlugin` and
