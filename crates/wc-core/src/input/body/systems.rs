@@ -81,6 +81,22 @@ pub struct BodyTrackingWorker {
     pub(crate) injected_pipeline: Mutex<Option<super::worker::PipelineFactory>>,
 }
 
+impl BodyTrackingWorker {
+    /// Request the worker cycle its track to the next detected person on its
+    /// next processed frame. Cheap and lock-free from the caller's view: it
+    /// takes the main-thread-only runtime lock (never contended) and bumps the
+    /// shared [`BodyLiveTuning`] cycle counter the worker polls. A no-op when no
+    /// worker is running (no request active). Takes `&self` so a sketch system
+    /// can drive it from a plain `Res<BodyTrackingWorker>`.
+    pub fn request_person_cycle(&self) {
+        if let Ok(runtime) = self.runtime.lock() {
+            if let Some(rt) = runtime.as_ref() {
+                rt.tuning.request_cycle();
+            }
+        }
+    }
+}
+
 /// Startup: create the reused `R8Unorm` mask image and publish
 /// [`MaskTexture`]. Skipped (with a log line) in bare harnesses without
 /// image assets; `poll_body_worker` tolerates the absence.
@@ -592,6 +608,40 @@ mod tests {
             (beta - 12.0).abs() < 1e-6,
             "one_euro_beta did not reach BodySmoother: {beta}"
         );
+    }
+
+    #[test]
+    fn request_person_cycle_bumps_the_worker_cycle_counter() {
+        // The main-side accessor forwards a person-cycle request to the
+        // worker's shared tuning counter (a counter, not a bool, so repeated
+        // presses each register).
+        let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
+        app.insert_resource(BodyTrackingRequest {
+            idle_throttle: false,
+            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
+            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
+            one_euro_beta: DEFAULT_BETA,
+        });
+        app.update(); // sync_body_tracking starts the worker
+
+        let cycle_count = |app: &App| {
+            let worker = app.world().resource::<BodyTrackingWorker>();
+            let runtime = worker.runtime.lock().expect("runtime lock");
+            runtime
+                .as_ref()
+                .expect("worker started")
+                .tuning
+                .cycle_request()
+        };
+        assert_eq!(cycle_count(&app), 0, "starts at zero");
+
+        app.world()
+            .resource::<BodyTrackingWorker>()
+            .request_person_cycle();
+        app.world()
+            .resource::<BodyTrackingWorker>()
+            .request_person_cycle();
+        assert_eq!(cycle_count(&app), 2, "two presses register as two");
     }
 
     #[test]

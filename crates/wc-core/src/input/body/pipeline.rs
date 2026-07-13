@@ -212,6 +212,11 @@ pub struct BodyLiveTuning {
     idle_throttle: AtomicBool,
     /// [`PoseConfig::mask_ema_alpha`] as `f32` bits.
     mask_ema_alpha: AtomicU32,
+    /// Person-cycle request counter. The main side increments it (a counter,
+    /// not a bool, so rapid hotkey presses are never coalesced away); the
+    /// worker compares it against its last-seen value and forces a detector
+    /// pass + track switch to the next dancer when it differs.
+    cycle_request: AtomicU32,
 }
 
 impl BodyLiveTuning {
@@ -221,6 +226,7 @@ impl BodyLiveTuning {
         Self {
             idle_throttle: AtomicBool::new(false),
             mask_ema_alpha: AtomicU32::new(mask_ema_alpha.to_bits()),
+            cycle_request: AtomicU32::new(0),
         }
     }
 
@@ -246,6 +252,19 @@ impl BodyLiveTuning {
     pub fn mask_ema_alpha(&self) -> f32 {
         f32::from_bits(self.mask_ema_alpha.load(Ordering::Relaxed))
     }
+
+    /// Request a person cycle on the worker's next processed frame (bumps the
+    /// lock-free counter; safe to call on every hotkey press).
+    pub fn request_cycle(&self) {
+        self.cycle_request.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The current person-cycle request counter. The worker compares this
+    /// against its last-seen value to detect a pending cycle.
+    #[must_use]
+    pub fn cycle_request(&self) -> u32 {
+        self.cycle_request.load(Ordering::Relaxed)
+    }
 }
 
 /// Why the detector ran or was skipped for the latest processed frame.
@@ -260,6 +279,9 @@ pub enum DetectorRunReason {
     IdleProbe,
     /// The frame was invalid; no model stage ran.
     InvalidFrame,
+    /// A pending person-cycle request forced a detector pass while tracking to
+    /// switch the primary dancer.
+    Cycle,
 }
 
 impl DetectorRunReason {
@@ -271,6 +293,7 @@ impl DetectorRunReason {
             Self::Tracking => "tracking",
             Self::IdleProbe => "idle_probe",
             Self::InvalidFrame => "invalid_frame",
+            Self::Cycle => "cycle",
         }
     }
 }
@@ -292,6 +315,11 @@ pub struct PoseDiagnostics {
     pub present: bool,
     /// The frame's confidence (detector score or landmark presence).
     pub confidence: f32,
+    /// Number of weighted-NMS person candidates from the MOST RECENT detector
+    /// pass. Only refreshes when the detector actually runs (cold start, idle
+    /// probe, or a person-cycle request) — it is stale (carried) on the
+    /// detector-skipping tracking frames in between.
+    pub people_detected: u8,
 }
 
 /// The published outcome of one processed frame.
@@ -361,6 +389,12 @@ pub struct PosePipeline {
     /// [`MAX_PERSON_CANDIDATES`]), refilled each detector pass; never allocates
     /// after construction.
     person_clusters: Vec<PersonDetection>,
+    /// Last person-cycle request counter the worker acted on (compared against
+    /// [`BodyLiveTuning::cycle_request`] each frame to detect a fresh press).
+    last_cycle_seen: u32,
+    /// Candidate count from the most recent detector pass, surfaced through
+    /// [`PoseDiagnostics::people_detected`]. Stale on tracking frames.
+    people_detected: u8,
 }
 
 impl PosePipeline {
@@ -397,6 +431,8 @@ impl PosePipeline {
             landmark_outputs: Vec::new(),
             detections: Vec::new(),
             person_clusters: Vec::with_capacity(MAX_PERSON_CANDIDATES),
+            last_cycle_seen: 0,
+            people_detected: 0,
         }
     }
 
@@ -441,6 +477,8 @@ impl PosePipeline {
             self.tracked = None;
             diag.detector_reason = DetectorRunReason::InvalidFrame;
             self.fade_mask_into(blend_ratio, payload.as_deref_mut());
+            // No detector ran; carry the most-recent candidate count.
+            diag.people_detected = self.people_detected;
             diag.total = frame_start.elapsed();
             self.last_diagnostics = diag;
             return Ok(PoseResult::absent());
@@ -474,6 +512,7 @@ impl PosePipeline {
             self.fade_mask_into(blend_ratio, payload.as_deref_mut());
             diag.present = present;
             diag.confidence = confidence;
+            diag.people_detected = self.people_detected;
             diag.total = frame_start.elapsed();
             self.last_diagnostics = diag;
             return Ok(PoseResult {
@@ -483,25 +522,15 @@ impl PosePipeline {
             });
         }
 
-        // Detect-then-track: run the detector only without a carried track.
-        // A fresh track (no carried ROI) means the aux filter must cold-start
-        // so a new person does not inherit stale filter state.
-        let fresh_track = self.tracked.is_none();
-        let roi = if let Some(roi) = self.tracked {
-            diag.detector_reason = DetectorRunReason::Tracking;
-            Some(roi)
-        } else {
-            diag.detector_reason = DetectorRunReason::ColdStart;
-            let stage = Instant::now();
-            let detected = self.detect_clusters(&square);
-            diag.detector = stage.elapsed();
-            if let Err(e) = detected {
+        // Detect-then-track: resolve this frame's ROI (carried track, cold-start
+        // detect + stickiness, or a forced person-cycle detect). On detector
+        // error restore the scratch buffer before propagating.
+        let (roi, fresh_track) = match self.resolve_track_roi(&square, now, &mut diag) {
+            Ok(v) => v,
+            Err(e) => {
                 self.square_buf = square;
                 return Err(e);
             }
-            // Primary-dancer selection over the weighted-NMS candidates, with
-            // stickiness across a brief occlusion.
-            self.select_sticky(now).map(|d| roi_from_detection(&d))
         };
         let Some(roi) = roi else {
             // Nobody in frame: fade the mask, stay quiet.
@@ -574,7 +603,70 @@ impl PosePipeline {
             MAX_PERSON_CANDIDATES,
             &mut self.person_clusters,
         );
+        self.people_detected = u8::try_from(self.person_clusters.len()).unwrap_or(u8::MAX);
         Ok(())
+    }
+
+    /// Resolve this frame's crop ROI and whether it is a fresh track (which
+    /// cold-starts the aux One-Euro filter). One of three paths, recorded in
+    /// `diag.detector_reason`:
+    /// - **Cycle:** a pending person-cycle request while tracking forces a
+    ///   detector pass and re-seeds the track to the next dancer (or a no-op
+    ///   when ≤ 1 candidate). A switch is a fresh track; the mask blend is left
+    ///   to cross-fade (not reset).
+    /// - **Tracking:** a carried ROI supplies the crop; the detector is skipped.
+    /// - **Cold start:** no carried track → detect + stickiness selection.
+    ///
+    /// Also consumes the cycle-request counter (once per press) and publishes
+    /// the candidate count into `diag.people_detected`. Returns
+    /// `(roi, fresh_track)`; `roi` is `None` when nobody is in frame.
+    fn resolve_track_roi(
+        &mut self,
+        square: &RgbImage,
+        now: Duration,
+        diag: &mut PoseDiagnostics,
+    ) -> Result<(Option<RoiRect>, bool), InferenceError> {
+        let cycle_now = self.live_tuning.as_ref().map(|t| t.cycle_request());
+        let cycle_pending = cycle_now.is_some_and(|c| c != self.last_cycle_seen);
+
+        let mut fresh_track = self.tracked.is_none();
+        let roi = if let (true, Some(current)) = (cycle_pending, self.tracked) {
+            // Forced re-detect to cycle the primary dancer to the next person.
+            diag.detector_reason = DetectorRunReason::Cycle;
+            let stage = Instant::now();
+            self.detect_clusters(square)?;
+            diag.detector = stage.elapsed();
+            match self.cycle_select(current) {
+                Some(next) => {
+                    // Switched: cold-start the aux filter on the new person. The
+                    // mask temporal blend is left to cross-fade naturally
+                    // (deliberately NOT hard-reset — the morph is the desired
+                    // look); the main-side BodySmoother likewise morphs.
+                    fresh_track = true;
+                    Some(roi_from_detection(&next))
+                }
+                // 0/1 candidates → keep the current track (a no-op cycle).
+                None => Some(current),
+            }
+        } else if let Some(roi) = self.tracked {
+            diag.detector_reason = DetectorRunReason::Tracking;
+            Some(roi)
+        } else {
+            diag.detector_reason = DetectorRunReason::ColdStart;
+            let stage = Instant::now();
+            self.detect_clusters(square)?;
+            diag.detector = stage.elapsed();
+            // Primary-dancer selection over the weighted-NMS candidates, with
+            // stickiness across a brief occlusion.
+            self.select_sticky(now).map(|d| roi_from_detection(&d))
+        };
+        // Consume the cycle request whether or not a switch happened, so it
+        // fires exactly once per press.
+        if let Some(c) = cycle_now {
+            self.last_cycle_seen = c;
+        }
+        diag.people_detected = self.people_detected;
+        Ok((roi, fresh_track))
     }
 
     /// Pick the primary-dancer cluster from the latest detector pass.
@@ -612,6 +704,37 @@ impl PosePipeline {
             }
         }
         best
+    }
+
+    /// Cycle the primary dancer to the NEXT candidate in left-to-right order
+    /// (person-cycle hotkey; our addition, no upstream analog).
+    ///
+    /// Sorts the candidates by ROI-centre x, finds the one nearest the
+    /// `current` ROI ("us"), and returns the next candidate cyclically.
+    /// Returns `None` when there are ≤ 1 candidates (one person in frame → keep
+    /// the current track, a no-op). Sorts the reused candidate buffer in place
+    /// (`sort_unstable_by`, no allocation).
+    fn cycle_select(&mut self, current: RoiRect) -> Option<PersonDetection> {
+        if self.person_clusters.len() <= 1 {
+            return None;
+        }
+        self.person_clusters.sort_unstable_by(|a, b| {
+            roi_from_detection(a)
+                .cx
+                .total_cmp(&roi_from_detection(b).cx)
+        });
+        let mut cur = 0;
+        let mut best = f32::INFINITY;
+        for (i, d) in self.person_clusters.iter().enumerate() {
+            let c = roi_from_detection(d);
+            let dist2 = (c.cx - current.cx).powi(2) + (c.cy - current.cy).powi(2);
+            if dist2 < best {
+                best = dist2;
+                cur = i;
+            }
+        }
+        let next = (cur + 1) % self.person_clusters.len();
+        self.person_clusters.get(next).copied()
     }
 
     /// Landmark/mask stage for one ROI. `Ok(None)` = presence below
@@ -1584,6 +1707,86 @@ mod tests {
             (c.cx - PERSON_B_CENTER).abs() < 1e-3,
             "stale last_roi must fall back to B, got cx={}",
             c.cx
+        );
+    }
+
+    #[test]
+    fn person_cycle_switches_between_two_dancers_and_back() {
+        let tuning = Arc::new(BodyLiveTuning::new(0.35));
+        let mut p = PosePipeline::new(
+            // Person A the higher scorer, so cold start tracks A first.
+            Box::new(StaticInference {
+                outputs: two_person_detector_outputs(4.0, 2.0),
+            }),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig::default(),
+        );
+        p.set_live_tuning_source(Arc::clone(&tuning));
+        let frame = solid_frame();
+
+        // Frame 1: cold start tracks the higher scorer, person A.
+        p.process(&frame, Duration::from_millis(0), false, None)
+            .expect("f1");
+        let t1 = p.tracked.expect("tracking A");
+        assert!(
+            (t1.cx - PERSON_A_CENTER).abs() < 0.02,
+            "should track A, cx={}",
+            t1.cx
+        );
+
+        // Cycle → the next dancer (left-to-right) is person B.
+        tuning.request_cycle();
+        p.process(&frame, Duration::from_millis(16), false, None)
+            .expect("f2");
+        assert_eq!(p.diagnostics().detector_reason, DetectorRunReason::Cycle);
+        assert_eq!(p.diagnostics().people_detected, 2, "both people surfaced");
+        let t2 = p.tracked.expect("tracking B");
+        assert!(
+            (t2.cx - PERSON_B_CENTER).abs() < 0.02,
+            "should cycle to B, cx={}",
+            t2.cx
+        );
+
+        // Cycle again → back to person A (cyclic order).
+        tuning.request_cycle();
+        p.process(&frame, Duration::from_millis(32), false, None)
+            .expect("f3");
+        let t3 = p.tracked.expect("tracking A again");
+        assert!(
+            (t3.cx - PERSON_A_CENTER).abs() < 0.02,
+            "should cycle back to A, cx={}",
+            t3.cx
+        );
+    }
+
+    #[test]
+    fn single_person_cycle_is_a_no_op() {
+        let tuning = Arc::new(BodyLiveTuning::new(0.35));
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: hot_person_detector_outputs(), // ONE person
+            }),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig::default(),
+        );
+        p.set_live_tuning_source(Arc::clone(&tuning));
+        let frame = solid_frame();
+        p.process(&frame, Duration::from_millis(0), false, None)
+            .expect("f1");
+        let before = p.tracked.expect("tracking");
+
+        tuning.request_cycle();
+        p.process(&frame, Duration::from_millis(16), false, None)
+            .expect("f2");
+        let after = p.tracked.expect("still tracking");
+        // One person in frame → cycling keeps the same dancer (no teleport).
+        assert!(
+            (after.cx - before.cx).abs() < 0.02 && (after.cy - before.cy).abs() < 0.02,
+            "single-person cycle must not switch: before={before:?} after={after:?}"
         );
     }
 

@@ -1,5 +1,7 @@
 //! Radiance dev/debug drivers: the synthetic capture dancer (debug builds),
-//! the edge-point gizmo overlay, and the inference readout.
+//! the edge-point gizmo overlay, the inference readout, and the person-cycle
+//! hotkey (an operator control for the hardware session — pairs with the
+//! readout's people-detected count).
 //!
 //! The egui readout is registered in `EguiPrimaryContextPass` and self-gates
 //! (flame's ui.rs idiom); the gizmo overlay runs `sketch_active` and
@@ -133,6 +135,24 @@ pub fn draw_edge_debug(
     }
 }
 
+/// `Update` (`sketch_active(Radiance)`): the person-cycle hotkey.
+/// `KeyCode::KeyN` ("next person") asks the body worker to cycle its track to
+/// the next detected dancer on its next processed frame. Scoped to the active
+/// Radiance sketch (not the screensaver) by its run condition; a no-op when no
+/// worker is running or only one person is in frame. Reads
+/// `ButtonInput<KeyCode>` directly (a sketch-local control, not a global
+/// `ActionMap` navigation action) — mirroring Line's direct mouse reads.
+pub fn cycle_person_hotkey(
+    keys: Res<'_, ButtonInput<KeyCode>>,
+    worker: Option<Res<'_, wc_core::input::body::systems::BodyTrackingWorker>>,
+) {
+    if keys.just_pressed(KeyCode::KeyN) {
+        if let Some(worker) = worker {
+            worker.request_person_cycle();
+        }
+    }
+}
+
 /// `EguiPrimaryContextPass` (self-gated on state + the Dev bool): tracking +
 /// audio readouts. Body frame rate is derived from `timestamp` deltas via
 /// `Local`s — everything shown is computable from the pinned contract
@@ -206,6 +226,12 @@ pub fn radiance_inference_readout(
                     "drops: rate {} ring {} errors {}",
                     d.dropped_frames, d.ring_full_drops, d.pipeline_errors
                 ));
+                // Candidate people from the most recent detector pass (stale on
+                // tracking frames), plus the person-cycle hotkey hint.
+                ui.label(format!(
+                    "people@detect: {}  [N] next person",
+                    d.pipeline.people_detected
+                ));
             }
             ui.label(format!(
                 "edges: {}",
@@ -267,6 +293,29 @@ mod tests {
             .run_system_once(synthetic_body_forced)
             .expect("runs with the toggle set");
         assert!(on, "force_radiance_synthetic_body -> forced on");
+    }
+
+    /// The person-cycle hotkey reads keyboard + worker and forwards a cycle
+    /// request. With no worker running `request_person_cycle` is a harmless
+    /// no-op; the system must still run cleanly (wiring smoke test). The
+    /// cycle switching itself is covered at the pipeline level, and the
+    /// accessor→tuning forwarding at the wc-core systems level.
+    #[test]
+    fn cycle_person_hotkey_runs_with_key_down_and_no_worker() {
+        let mut world = World::new();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyN);
+        world.insert_resource(keys);
+        world.insert_resource(wc_core::input::body::systems::BodyTrackingWorker::default());
+        world
+            .run_system_once(cycle_person_hotkey)
+            .expect("hotkey runs with N down");
+
+        // No key pressed → also a clean no-op.
+        world.resource_mut::<ButtonInput<KeyCode>>().clear();
+        world
+            .run_system_once(cycle_person_hotkey)
+            .expect("hotkey runs with no key");
     }
 
     /// The dancer writes a real mask + fresh edge list (mirrors

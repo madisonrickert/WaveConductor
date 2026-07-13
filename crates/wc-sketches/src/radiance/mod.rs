@@ -212,6 +212,14 @@ impl Plugin for RadiancePlugin {
             systems::debug::draw_edge_debug
                 .run_if(wc_core::sketch::sketch_active(AppState::Radiance)),
         );
+        // Person-cycle hotkey (KeyN): cycle the tracked dancer. Active only
+        // while the Radiance sketch is running (not the screensaver).
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            Update,
+            systems::debug::cycle_person_hotkey
+                .run_if(wc_core::sketch::sketch_active(AppState::Radiance)),
+        );
         #[cfg(feature = "body-tracking-mediapipe")]
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,

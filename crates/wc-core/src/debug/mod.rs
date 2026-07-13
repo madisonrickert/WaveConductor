@@ -297,10 +297,7 @@ mod tests {
 
     #[test]
     fn disable_heatmap_refine_flag_parses_by_presence() {
-        let vars = vec![(
-            "WC_DEBUG_DISABLE_HEATMAP_REFINE".to_string(),
-            String::new(),
-        )];
+        let vars = vec![("WC_DEBUG_DISABLE_HEATMAP_REFINE".to_string(), String::new())];
         let t = DebugToggles::from_env_vars(&vars);
         assert!(t.disable_heatmap_refine);
         assert!(!DebugToggles::from_env_vars(&[]).disable_heatmap_refine);
