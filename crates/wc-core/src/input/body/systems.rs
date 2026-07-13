@@ -288,8 +288,9 @@ pub fn poll_body_worker(
 }
 
 /// Build the rings, seed the payload pool, and spawn the worker. Reads the
-/// three Dev-panel tuning fields off `request` (Plan C Task 14): the mask EMA
-/// factor seeds the shared live-tuning cell the worker polls each frame, and
+/// three Dev-panel tuning fields off `request` (Plan C Task 14): the mask
+/// combine-with-previous ratio seeds the shared live-tuning cell the worker
+/// polls each frame, and
 /// the One-Euro min-cutoff/beta seed the main-thread smoother constructed
 /// below. Because these fields are `requires_restart` (Plan C Task 2),
 /// `sync_body_tracking` only reaches this function on a fresh request insert
@@ -559,7 +560,7 @@ mod tests {
     #[test]
     fn worker_start_reads_tuning_fields_from_the_request() {
         // Plan C Task 14: the three Dev-panel tuning fields on the request
-        // must reach the worker's live-tuning cell (mask EMA) and the
+        // must reach the worker's live-tuning cell (mask combine ratio) and the
         // main-thread smoother (One-Euro min-cutoff/beta) at worker start,
         // not just sit on the struct unread.
         let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());

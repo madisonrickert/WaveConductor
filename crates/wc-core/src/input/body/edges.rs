@@ -1,4 +1,4 @@
-//! Silhouette edge extraction: scan the EMA-smoothed mask for
+//! Silhouette edge extraction: scan the temporally-blended mask for
 //! [`EDGE_THRESHOLD`] crossings between neighbouring texels and emit up to
 //! [`MAX_EDGE_POINTS`] `(position, outward normal)` pairs.
 //!

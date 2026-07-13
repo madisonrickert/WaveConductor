@@ -235,12 +235,15 @@ pub struct RadianceSettings {
     #[serde(default = "default_mask_threshold")]
     pub mask_threshold: f32,
 
-    /// Worker-side temporal EMA factor on the segmentation mask (higher =
-    /// steadier, laggier). Routed through the body-tracking request on
+    /// Worker-side mask temporal-blend strength: `MediaPipe`'s
+    /// uncertainty-weighted `combine_with_previous_ratio` (higher = more of the
+    /// previous frame mixed into boundary pixels = steadier, laggier
+    /// silhouette). Field name kept `mask_ema` for continuity; it is a combine
+    /// ratio, not an EMA alpha. Routed through the body-tracking request on
     /// restart (Task 14). Default must match
-    /// `wc_core::input::body::mask::DEFAULT_MASK_EMA_ALPHA` (`0.35`).
+    /// `wc_core::input::body::mask::DEFAULT_MASK_EMA_ALPHA` (`0.7`).
     #[setting(
-        default = 0.35_f32,
+        default = 0.7_f32,
         min = 0.0_f32,
         max = 0.98_f32,
         step = 0.02_f32,
@@ -422,7 +425,7 @@ fn default_mask_threshold() -> f32 {
     0.5
 }
 fn default_mask_ema() -> f32 {
-    0.35
+    0.7
 }
 fn default_one_euro_min_cutoff() -> f32 {
     0.05

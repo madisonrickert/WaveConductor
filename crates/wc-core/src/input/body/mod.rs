@@ -71,8 +71,11 @@ pub struct BodyTrackingRequest {
     /// throttle included) so a person walking up still re-activates the
     /// sketch. Driven by Plan C from `SketchActivity`.
     pub idle_throttle: bool,
-    /// Worker-side temporal EMA factor on the segmentation mask (0 = raw,
-    /// higher = steadier/laggier). Read at worker (re)start
+    /// Worker-side mask temporal-blend strength — `MediaPipe`'s
+    /// uncertainty-weighted `combine_with_previous_ratio` (0 = raw new frame,
+    /// higher = more previous frame blended into boundary pixels =
+    /// steadier/laggier). Field name kept `mask_ema` for continuity; it is a
+    /// combine ratio, not an EMA alpha. Read at worker (re)start
     /// (`systems::start_worker` seeds [`pipeline::BodyLiveTuning`] from this
     /// field); Radiance's Dev knob routes here via its `requires_restart`
     /// reload.
@@ -131,7 +134,8 @@ impl Default for BodyTrackingState {
     }
 }
 
-/// Handle to the reused 256×256 `R8Unorm` person-mask image (EMA-smoothed).
+/// Handle to the reused 256×256 `R8Unorm` person-mask image
+/// (temporally-blended).
 /// Mask bytes are written in place each body frame; Bevy re-uploads on
 /// mutation. Inserted at startup when `Assets<Image>` exists (i.e. in any app
 /// with the asset plugin; absent in bare headless harnesses).
@@ -150,8 +154,8 @@ pub struct EdgePoint {
     pub normal: Vec2,
 }
 
-/// CPU edge list extracted on the worker where the EMA-smoothed mask crosses
-/// 0.5. Refilled in place (`clear()`, never realloc — capacity is
+/// CPU edge list extracted on the worker where the temporally-blended mask
+/// crosses 0.5. Refilled in place (`clear()`, never realloc — capacity is
 /// [`MAX_EDGE_POINTS`] by construction).
 #[derive(Resource)]
 pub struct SilhouetteEdges {
