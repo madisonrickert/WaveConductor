@@ -27,7 +27,12 @@ fn manifest_distinguishes_registered_vs_unregistered_sketches() {
         manifest.get(AppState::Line).is_some(),
         "Line should be registered"
     );
-    for state in [AppState::Dots, AppState::Cymatics, AppState::Waves] {
+    for state in [
+        AppState::Dots,
+        AppState::Cymatics,
+        AppState::Radiance,
+        AppState::Waves,
+    ] {
         assert!(
             manifest.get(state).is_none(),
             "{state:?} should be unregistered (placeholder)"
@@ -36,13 +41,14 @@ fn manifest_distinguishes_registered_vs_unregistered_sketches() {
 }
 
 /// Iterating `SKETCH_ORDER` and partitioning by manifest presence yields
-/// exactly 1 active entry and 3 placeholder entries when only `Line` is
+/// exactly 1 active entry and 4 placeholder entries when only `Line` is
 /// registered.
 ///
-/// `SKETCH_ORDER` has 4 entries (`Line`, `Flame`, `Dots`, `Cymatics`) —
-/// `Waves` is a de-routed seam, not part of the cycle (`AUDIT.md` T5).
+/// `SKETCH_ORDER` has 5 entries (`Line`, `Flame`, `Dots`, `Cymatics`,
+/// `Radiance`) — `Waves` is a de-routed seam, not part of the cycle
+/// (`AUDIT.md` T5).
 #[test]
-fn sketch_order_iteration_yields_one_active_three_placeholder_when_only_line_registered() {
+fn sketch_order_iteration_yields_one_active_four_placeholder_when_only_line_registered() {
     let mut app = App::new();
     app.register_sketch_manifest(SketchManifestEntry {
         state: AppState::Line,
@@ -55,7 +61,7 @@ fn sketch_order_iteration_yields_one_active_three_placeholder_when_only_line_reg
         .iter()
         .partition(|s| manifest.get(**s).is_some());
     assert_eq!(active.len(), 1);
-    assert_eq!(placeholder.len(), 3);
+    assert_eq!(placeholder.len(), 4);
     assert_eq!(active[0], &AppState::Line);
 }
 
@@ -82,11 +88,12 @@ fn sketch_order_entries_are_all_known_implemented_sketches() {
     /// Mirrors the manifest entries each real sketch plugin registers.
     /// Update alongside `crates/wc-sketches/src/*/mod.rs` when a new sketch
     /// plugin starts (or stops) calling `register_sketch_manifest`.
-    const KNOWN_IMPLEMENTED_SKETCHES: [AppState; 4] = [
+    const KNOWN_IMPLEMENTED_SKETCHES: [AppState; 5] = [
         AppState::Line,
         AppState::Flame,
         AppState::Dots,
         AppState::Cymatics,
+        AppState::Radiance,
     ];
 
     let mut app = App::new();

@@ -17,6 +17,7 @@ pub enum AppState {
     Flame,
     Dots,
     Cymatics,
+    Radiance,
     Waves,
 }
 
@@ -30,11 +31,18 @@ impl AppState {
     /// for a future sketch, but it has no implemented plugin or registered
     /// [`crate::sketch::SketchManifest`] entry yet, so cycling into it would
     /// land on a black screen. `Flame` re-entered the cycle in the
-    /// 2026-07-02 flame port. Once a real plugin exists for `Waves`, add it
+    /// 2026-07-02 flame port; `Radiance` entered it in the 2026-07-12
+    /// Radiance plan. Once a real plugin exists for `Waves`, add it
     /// back here (the `sketch_order_entries_are_all_known_implemented_sketches`
     /// test in `tests/ui_picker.rs` guards against re-adding a placeholder by
     /// mistake).
-    pub const SKETCH_ORDER: [Self; 4] = [Self::Line, Self::Flame, Self::Dots, Self::Cymatics];
+    pub const SKETCH_ORDER: [Self; 5] = [
+        Self::Line,
+        Self::Flame,
+        Self::Dots,
+        Self::Cymatics,
+        Self::Radiance,
+    ];
 
     /// Whether this state represents an active sketch (i.e. not `Home`).
     #[must_use]
@@ -60,6 +68,7 @@ impl AppState {
             "flame" => Some(Self::Flame),
             "dots" => Some(Self::Dots),
             "cymatics" => Some(Self::Cymatics),
+            "radiance" => Some(Self::Radiance),
             _ => None,
         }
     }
@@ -85,10 +94,11 @@ impl AppState {
     #[must_use]
     pub fn next_sketch(self) -> Self {
         match self {
-            Self::Home | Self::Cymatics | Self::Waves => Self::Line,
+            Self::Home | Self::Radiance | Self::Waves => Self::Line,
             Self::Line => Self::Flame,
             Self::Flame => Self::Dots,
             Self::Dots => Self::Cymatics,
+            Self::Cymatics => Self::Radiance,
         }
     }
 
@@ -101,10 +111,11 @@ impl AppState {
     #[must_use]
     pub fn prev_sketch(self) -> Self {
         match self {
-            Self::Home | Self::Line | Self::Waves => Self::Cymatics,
+            Self::Home | Self::Line | Self::Waves => Self::Radiance,
             Self::Flame => Self::Line,
             Self::Dots => Self::Flame,
             Self::Cymatics => Self::Dots,
+            Self::Radiance => Self::Cymatics,
         }
     }
 }
@@ -114,7 +125,7 @@ impl AppState {
 /// `Home`); the sub-state is gated to the sketch variants by Bevy.
 #[derive(SubStates, Default, Clone, Eq, PartialEq, Hash, Debug)]
 #[source(AppState = AppState::Line | AppState::Flame | AppState::Dots
-                  | AppState::Cymatics | AppState::Waves)]
+                  | AppState::Cymatics | AppState::Radiance | AppState::Waves)]
 #[allow(missing_docs, reason = "variant names are self-documenting")]
 pub enum SketchActivity {
     #[default]
@@ -130,29 +141,31 @@ mod tests {
     #[test]
     fn next_sketch_wraps() {
         assert_eq!(AppState::Line.next_sketch(), AppState::Flame);
-        assert_eq!(AppState::Cymatics.next_sketch(), AppState::Line);
+        assert_eq!(AppState::Cymatics.next_sketch(), AppState::Radiance);
+        assert_eq!(AppState::Radiance.next_sketch(), AppState::Line);
     }
 
     #[test]
     fn prev_sketch_wraps() {
         assert_eq!(AppState::Flame.prev_sketch(), AppState::Line);
-        assert_eq!(AppState::Line.prev_sketch(), AppState::Cymatics);
+        assert_eq!(AppState::Line.prev_sketch(), AppState::Radiance);
+        assert_eq!(AppState::Radiance.prev_sketch(), AppState::Cymatics);
     }
 
     #[test]
     fn home_navigation_returns_to_endpoints() {
         assert_eq!(AppState::Home.next_sketch(), AppState::Line);
-        assert_eq!(AppState::Home.prev_sketch(), AppState::Cymatics);
+        assert_eq!(AppState::Home.prev_sketch(), AppState::Radiance);
     }
 
-    /// Waves stays a de-routed seam (2026-07 audit T5); Flame re-entered the
-    /// cycle in the 2026-07-02 flame port.
+    /// Waves stays a de-routed seam (2026-07 audit T5); Radiance entered the
+    /// cycle in the 2026-07-12 Radiance plan.
     #[test]
     fn waves_arms_are_present_but_unreachable_from_the_cycle() {
-        assert!(AppState::SKETCH_ORDER.contains(&AppState::Flame));
+        assert!(AppState::SKETCH_ORDER.contains(&AppState::Radiance));
         assert!(!AppState::SKETCH_ORDER.contains(&AppState::Waves));
         assert_eq!(AppState::Waves.next_sketch(), AppState::Line);
-        assert_eq!(AppState::Waves.prev_sketch(), AppState::Cymatics);
+        assert_eq!(AppState::Waves.prev_sketch(), AppState::Radiance);
     }
 
     #[test]
@@ -169,6 +182,7 @@ mod tests {
         assert_eq!(AppState::from_name("  DOTS  "), Some(AppState::Dots));
         assert_eq!(AppState::from_name("Cymatics"), Some(AppState::Cymatics));
         assert_eq!(AppState::from_name("Flame"), Some(AppState::Flame));
+        assert_eq!(AppState::from_name("Radiance"), Some(AppState::Radiance));
         // Home, unknown names, and the reserved-but-unimplemented Waves seam
         // (AUDIT.md T5) all yield None — the caller (the binary's
         // WAVECONDUCTOR_START_SKETCH handling) warns and falls back to Home.
