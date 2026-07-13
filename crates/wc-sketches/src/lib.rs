@@ -10,6 +10,7 @@ pub mod flame;
 pub mod hand_mesh;
 pub mod line;
 pub mod particles;
+pub mod radiance;
 
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
@@ -87,5 +88,10 @@ impl Plugin for SketchesPlugin {
         // compute node + `Material2dPlugin::<CymaticsMaterial>` are registered
         // above; `CymaticsPlugin` adds the per-sketch lifecycle exactly once.
         app.add_plugins(cymatics::CymaticsPlugin);
+
+        // Radiance lifecycle (settings, tile; sim/render/attract arrive in
+        // later Plan C tasks — compute + material plugins are registered
+        // above once they exist).
+        app.add_plugins(radiance::RadiancePlugin);
     }
 }
