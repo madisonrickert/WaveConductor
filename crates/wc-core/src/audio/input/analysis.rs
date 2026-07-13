@@ -139,6 +139,22 @@ pub const BAND_EDGES_HZ: [f32; AUDIO_BAND_COUNT + 1] = [
 /// coherent gain). Kept as a literal to avoid a runtime cast.
 /// Invariant: must equal `4.0 / FFT_SIZE`.
 const SPECTRUM_NORM: f32 = 0.003_906_25;
+
+// Compile-time ties: FFT_SIZE_F32, FFT_SIZE_U64 and SPECTRUM_NORM are
+// hand-written literals only to dodge a runtime cast, so pin them to FFT_SIZE.
+// FFT_SIZE == 1024 is the anchor; each derived literal is checked against the
+// same 1024 value, so a change to FFT_SIZE that forgets one of them fails the
+// build here rather than silently corrupting analysis. (Written against the
+// literal, not `FFT_SIZE as _`, because `as_conversions` is denied
+// workspace-wide and no const `From<usize>` exists for u64/f32; floats compare
+// by bit pattern to sidestep `clippy::float_cmp`.)
+const _: () = assert!(
+    FFT_SIZE == 1024,
+    "FFT_SIZE changed: update FFT_SIZE_F32, FFT_SIZE_U64 and SPECTRUM_NORM"
+);
+const _: () = assert!(FFT_SIZE_U64 == 1024);
+const _: () = assert!(FFT_SIZE_F32.to_bits() == 1024.0_f32.to_bits());
+const _: () = assert!(SPECTRUM_NORM.to_bits() == (4.0_f32 / 1024.0_f32).to_bits());
 /// Band smoothing when a band is rising (fast, so hits read as hits).
 const BAND_RISE_TAU_S: f32 = 0.04;
 /// Band smoothing when a band is falling (slower, for visual stability).

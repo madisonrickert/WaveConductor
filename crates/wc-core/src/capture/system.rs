@@ -392,7 +392,7 @@ mod tests {
             force_cymatics_interaction: false,
             force_flame_warp: false,
             force_flame_camera_pose: true,
-            force_radiance_synthetic_body: false,
+            force_radiance_synthetic_body: true,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");
@@ -401,6 +401,10 @@ mod tests {
         assert!(json.contains("\"force_g\":8000"), "{json}");
         assert!(json.contains("\"disable_smear\":true"), "{json}");
         assert!(json.contains("\"force_flame_camera_pose\":true"), "{json}");
+        assert!(
+            json.contains("\"force_radiance_synthetic_body\":true"),
+            "{json}"
+        );
         // Off toggles must not appear.
         assert!(!json.contains("disable_bloom"), "{json}");
         assert!(!json.contains("force_flame_warp"), "{json}");

@@ -197,6 +197,11 @@ pub fn bake_radiance_sim(
 
     out.dt = dt;
     out.time = elapsed;
+    // Monotonic per-bake counter salting the kernel's respawn hash. Wraps
+    // freely (the hash tolerates it) and, unlike the old `u32(time * 60.0)`
+    // salt, never aliases when `elapsed` is pinned or two bakes fall in the
+    // same 1/60 s bucket.
+    out.frame = out.frame.wrapping_add(1);
     out.emission_prob =
         (settings.emission_rate * drive.emission_mul * EMISSION_BASE_HZ * dt).clamp(0.0, 1.0);
     out.edge_count = edge_count.min(MAX_EDGE_POINTS) as u32;
@@ -522,6 +527,31 @@ mod tests {
             out.edge_count,
             u32::try_from(MAX_EDGE_POINTS).expect("fits")
         );
+    }
+
+    /// The per-bake frame counter advances every call (it salts the kernel's
+    /// respawn hash), even when `elapsed` is pinned — the exact case the old
+    /// `u32(time * 60.0)` salt aliased on.
+    #[test]
+    fn frame_counter_increments_each_bake_even_with_pinned_time() {
+        let settings = RadianceSettings::default();
+        let mut state = RadianceState::default();
+        let mut out = RadianceSimParamsGpu::default();
+        assert_eq!(out.frame, 0, "zeroed default");
+        for expected in 1..=5 {
+            bake_radiance_sim(
+                &settings,
+                &neutral_audio(),
+                None,
+                100,
+                Vec2::new(1920.0, 1080.0),
+                1.0 / 60.0,
+                7.0, // pinned elapsed: the old time-based salt would not advance
+                &mut state,
+                &mut out,
+            );
+            assert_eq!(out.frame, expected, "frame must advance per bake");
+        }
     }
 
     /// The freeze hook zeroes emission and burst, nothing else.

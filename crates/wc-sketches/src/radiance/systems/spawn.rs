@@ -329,8 +329,10 @@ mod tests {
     }
 
     /// The body request carries the three Dev tuning fields straight from
-    /// settings (unwired past the struct until Task 14 plumbs them into the
-    /// worker; see `wc_core::input::body::systems::start_worker`'s comment).
+    /// settings. They are live end to end:
+    /// `wc_core::input::body::systems::start_worker` seeds the worker's
+    /// `BodyLiveTuning` from `mask_ema` and the `BodySmoother` from
+    /// `one_euro_min_cutoff` / `one_euro_beta` on start.
     #[test]
     fn request_carries_tuning_fields_from_settings() {
         let mut app = test_app();

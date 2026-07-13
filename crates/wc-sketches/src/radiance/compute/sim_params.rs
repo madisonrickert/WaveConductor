@@ -128,13 +128,15 @@ pub struct RadianceSimParamsGpu {
     /// Live impulse slots (`impulses[0..impulse_count]`), capped at
     /// [`MAX_IMPULSES`].
     pub impulse_count: u32,
-    /// Padding: keeps the scalar header at 80 bytes (16-multiple) so the
-    /// `impulses` array stays aligned.
-    #[allow(
-        clippy::pub_underscore_fields,
-        reason = "GPU struct layout padding must be pub for bytemuck"
-    )]
-    pub _pad0: f32,
+    /// Monotonic frame counter, CPU-incremented (`wrapping_add`) once per bake.
+    /// Salts the kernel's per-frame respawn hash so a losing dead particle
+    /// re-rolls fresh every frame. Replaces the shader's old
+    /// `u32(time * 60.0)` derivation, which aliased whenever two bakes landed
+    /// in the same 1/60 s virtual-time bucket (or when `time` was pinned, e.g.
+    /// the screensaver clock). Also keeps the scalar header at 80 bytes
+    /// (16-multiple) so the `impulses` array stays aligned — it repurposes the
+    /// former `_pad0` filler slot at offset 76.
+    pub frame: u32,
     /// Impulse slots; entries past `impulse_count` are zero-gain and ignored.
     pub impulses: [RadianceImpulse; MAX_IMPULSES],
 }
@@ -226,7 +228,7 @@ mod tests {
             std::mem::offset_of!(RadianceSimParamsGpu, impulse_count),
             72
         );
-        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, _pad0), 76);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, frame), 76);
         assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, impulses), 80);
     }
 

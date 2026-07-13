@@ -67,7 +67,7 @@ struct SimParams {
     mirror: u32,
     uv_to_world: vec2<f32>,
     impulse_count: u32,
-    _pad0: f32,
+    frame: u32,
     impulses: array<Impulse, MAX_IMPULSES>,
 };
 
@@ -172,9 +172,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (params.edge_count == 0u) {
             return; // no silhouette this frame; stay dead, write nothing
         }
-        // Salt the roll with the frame index so a losing particle re-rolls
-        // fresh every frame (emission_prob is already rate*dt baked).
-        let frame = u32(params.time * 60.0);
+        // Salt the roll with the CPU frame counter so a losing particle
+        // re-rolls fresh every frame (emission_prob is already rate*dt baked).
+        // params.frame is incremented once per bake, so it never aliases the
+        // way the old u32(time * 60.0) did when time was pinned or two bakes
+        // shared a 1/60 s bucket.
+        let frame = params.frame;
         if (rand01(hash2(idx, frame)) >= params.emission_prob) {
             return;
         }
