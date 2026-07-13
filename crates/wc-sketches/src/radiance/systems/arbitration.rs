@@ -5,7 +5,10 @@
 //! camera — so Plan B's body worker can open the same device. The provider
 //! stays *registered* (its `NotStarted` status is the honest dev-panel
 //! signal that it is suspended). Leap is untouched; Radiance never reads
-//! hand data.
+//! hand data. Any [`PendingHandCameraRestore`] left armed from a previous
+//! exit is cancelled first, so re-entering within the restore window can't
+//! let a stale restore fire `start()` against the webcam the body worker now
+//! owns.
 //!
 //! `OnExit`: restart is *deferred* ~0.75 s via [`PendingHandCameraRestore`]
 //! so the body worker (torn down by the request removal, observed by Plan
@@ -38,11 +41,16 @@ pub struct PendingHandCameraRestore {
 pub const RESTORE_DELAY: Duration = Duration::from_millis(750);
 
 /// `OnEnter(AppState::Radiance)`: stop a registered `MediaPipe` hand provider
-/// (releasing the webcam) and remember to restore it.
+/// (releasing the webcam), cancel any restore left armed from a prior exit,
+/// and remember to restore it on this exit.
 pub fn suspend_mediapipe_hand_camera(
     registry: Option<ResMut<'_, ProviderRegistry>>,
     mut commands: Commands<'_, '_>,
 ) {
+    // Re-entering Radiance within the ~750ms restore window (see
+    // `RESTORE_DELAY`) must not let a stale restore fire later and call
+    // `start()` against the webcam while the body worker owns it again.
+    commands.remove_resource::<PendingHandCameraRestore>();
     let Some(mut registry) = registry else {
         return; // headless / hand tracking not installed
     };
@@ -197,6 +205,58 @@ mod tests {
             .expect("due poll");
         assert_eq!(starts.load(Ordering::SeqCst), base_starts + 1);
         assert!(world.get_resource::<PendingHandCameraRestore>().is_none());
+    }
+
+    /// Re-entering Radiance while a restore is still armed from a prior exit
+    /// (suspend → exit-schedule → suspend again, all inside the 750ms
+    /// window) cancels the pending restore, so it can't later fire
+    /// `start()` against the webcam the body worker now owns.
+    #[test]
+    fn reentry_within_restore_window_cancels_the_pending_restore() {
+        use bevy::ecs::system::RunSystemOnce;
+        let (registry, starts, stops) = registry_with(ProviderId::MediaPipe);
+        // register() auto-starts once; ignore that baseline.
+        let base_starts = starts.load(Ordering::SeqCst);
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(Time::<()>::default());
+
+        // Enter Radiance: suspend.
+        world
+            .run_system_once(suspend_mediapipe_hand_camera)
+            .expect("suspend");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+
+        // Exit Radiance: arm the deferred restore.
+        world
+            .run_system_once(schedule_hand_camera_restore)
+            .expect("schedule");
+        assert!(world.get_resource::<PendingHandCameraRestore>().is_some());
+
+        // Re-enter Radiance within the restore window: suspend again.
+        world
+            .run_system_once(suspend_mediapipe_hand_camera)
+            .expect("re-suspend");
+        assert_eq!(stops.load(Ordering::SeqCst), 2, "provider stopped again");
+        assert!(
+            world.get_resource::<PendingHandCameraRestore>().is_none(),
+            "re-entry must cancel the pending restore"
+        );
+
+        // Advance well past the original deadline: the cancelled restore
+        // must not fire, and polling it must not panic.
+        let mut time = Time::<()>::default();
+        time.advance_by(RESTORE_DELAY + Duration::from_millis(10));
+        world.insert_resource(time);
+        world
+            .run_system_once(resume_hand_camera_when_due)
+            .expect("poll after cancel");
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            base_starts,
+            "no restart from the cancelled restore"
+        );
     }
 
     /// A non-`MediaPipe` registry (Leap) is untouched: no suspend marker, no
