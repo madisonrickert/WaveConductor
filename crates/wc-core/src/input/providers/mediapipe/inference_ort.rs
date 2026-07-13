@@ -5,8 +5,19 @@
 //! models run off the CPU: `CoreML` on macOS (GPU/Neural Engine; measured ~164 ms
 //! CPU-only down to well under the 33 ms/frame budget at 30 Hz) and `DirectML` on
 //! Windows (vendor-neutral DX12, covering AMD/Intel integrated GPUs). Other targets
-//! (Linux) run on ONNX Runtime's CPU EP. ONNX Runtime falls back to CPU for any op
-//! the EP cannot place, so load never fails closed on an unsupported operator.
+//! (Linux) run on ONNX Runtime's CPU EP. ONNX Runtime partitions the graph and
+//! places any op the EP cannot support back on the CPU — but that is *per-op
+//! placement* fallback, not a safety net against an EP that fails at *commit*: a
+//! GPU EP can register cleanly and then throw while fusing the graph (observed as
+//! `DirectML` `DmlGraphFusionHelper` `0x80004005` on some AMD drivers), aborting
+//! the whole load. `load` therefore retries on a fresh CPU-only session when the
+//! accelerated commit fails, so a broken GPU EP degrades one model to CPU instead
+//! of losing hand tracking entirely (see `load_with_ep_fallback`).
+//!
+//! (Plain code span, not an intra-doc link: `mod inference_ort;` in the parent
+//! carries an outer doc comment, so rustdoc resolves this module's merged doc
+//! fragments in the *parent's* scope, where a private item of this module is not
+//! nameable. The links inside `load`'s own doc resolve normally.)
 //!
 //! `ort` ships the C++ ONNX Runtime as a prebuilt native binary downloaded at build
 //! time (`download-binaries` feature). The binary is subject to the
@@ -15,6 +26,7 @@
 //! The same vendored `.onnx` models used throughout the pipeline work without
 //! conversion; only the backend changes.
 
+use std::fmt::Display;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
@@ -31,6 +43,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 use super::inference::{HandInference, InferenceError, Tensor};
+use crate::settings::HandTrackingBackend;
 
 /// Backend label when the session runs on ONNX Runtime's CPU execution provider
 /// (no GPU EP for this target, or the EP failed to register and fell back).
@@ -58,44 +71,40 @@ pub struct OrtInference {
 }
 
 impl OrtInference {
-    /// Load an ONNX model from its bytes, registering the platform GPU execution
-    /// provider (see [`register_accelerator`]). ONNX Runtime falls back to CPU for
-    /// any op the EP cannot place, so load never fails closed.
+    /// Load an ONNX model from its bytes, resolving its execution provider from
+    /// `backend` (see [`ep_plan`]) and registering the platform GPU EP (see
+    /// [`register_accelerator`]) when the plan calls for it.
+    ///
+    /// The EP is a *placement* preference, not a guarantee: ONNX Runtime moves
+    /// individual unsupported ops to the CPU, but a GPU EP can still fail while
+    /// fusing the graph at commit. On such a failure — unless the caller forced
+    /// the GPU with [`HandTrackingBackend::ForceGpu`] — `load` rebuilds a fresh
+    /// CPU-only session and returns [`BACKEND_CPU`], so one broken EP never costs
+    /// all hand tracking. `model_name` names the failing model in the warning.
     ///
     /// The session's CPU thread pool is capped to two intra-op threads with
-    /// spin-waiting disabled: two sessions (palm + landmark) each own a pool, and
-    /// ONNX Runtime's default spin-wait kept whole cores busy between frames at
-    /// our `<= 30 Hz` cadence even when most of the graph was on the GPU. This is
-    /// independent of EP/model format and is the main idle-CPU fix.
+    /// spin-waiting disabled (see [`base_builder`]).
     ///
     /// # Errors
-    /// Returns [`InferenceError::Load`] if the session cannot be built or the
-    /// model has no input.
-    pub fn load(model_bytes: &[u8]) -> Result<Self, InferenceError> {
-        // Two sessions (palm + landmark) each own a CPU thread pool; capping
-        // intra-op threads and disabling spin-waiting stops idle inference from
-        // burning whole cores between frames at our cadence.
-        let mut builder = Session::builder()
-            .map_err(load_err)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(load_err)?
-            .with_intra_threads(2)
-            .map_err(load_err)?
-            .with_intra_op_spinning(false)
-            .map_err(load_err)?;
-        #[cfg(target_os = "windows")]
-        {
-            builder = configure_accelerator_session(builder)?;
-        }
-
-        // Register the platform GPU execution provider on the builder. `Ok`
-        // registration means the EP attached to the session options, NOT that
-        // every node runs on it — the graph is partitioned at commit and any
-        // unsupported op still falls to the CPU. The returned label reflects
-        // registration success, not whole-graph placement (see [`Self::backend`]).
-        let backend = register_accelerator(&mut builder, model_bytes);
-
-        let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
+    /// Returns [`InferenceError::Load`] if the session cannot be built or
+    /// committed (and, under [`HandTrackingBackend::ForceGpu`], if the GPU EP
+    /// fails at commit), or if the model has no input.
+    pub fn load(
+        model_bytes: &[u8],
+        backend: HandTrackingBackend,
+        model_name: &str,
+    ) -> Result<Self, InferenceError> {
+        let plan = ep_plan(backend);
+        let (session, backend_label) = if plan.try_accelerated {
+            load_with_ep_fallback(
+                model_name,
+                plan.allow_cpu_fallback,
+                || commit_accelerated(model_bytes),
+                || commit_cpu(model_bytes),
+            )?
+        } else {
+            commit_cpu(model_bytes)?
+        };
 
         let input_name = session
             .inputs()
@@ -112,7 +121,7 @@ impl OrtInference {
             session,
             input_name,
             output_names,
-            backend,
+            backend: backend_label,
             input_shape: Vec::new(),
         })
     }
@@ -129,6 +138,124 @@ impl OrtInference {
     pub fn backend(&self) -> &'static str {
         self.backend
     }
+}
+
+/// How a [`HandTrackingBackend`] preference resolves into the two independent
+/// load-time decisions: whether to attempt the platform GPU EP at all, and
+/// whether a commit failure on that EP may rebuild on the CPU.
+///
+/// Split out as a plain data value so the mapping is unit-testable with no GPU EP
+/// present (there are none in CI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EpPlan {
+    /// Attempt the platform GPU EP (`false` only for
+    /// [`HandTrackingBackend::ForceCpu`], which builds CPU-only from the start).
+    try_accelerated: bool,
+    /// On an accelerated commit failure, rebuild on the CPU EP (`false` for
+    /// [`HandTrackingBackend::ForceGpu`], which surfaces the error instead).
+    allow_cpu_fallback: bool,
+}
+
+/// Resolve a backend preference into an [`EpPlan`].
+fn ep_plan(backend: HandTrackingBackend) -> EpPlan {
+    match backend {
+        HandTrackingBackend::Auto => EpPlan {
+            try_accelerated: true,
+            allow_cpu_fallback: true,
+        },
+        HandTrackingBackend::ForceGpu => EpPlan {
+            try_accelerated: true,
+            allow_cpu_fallback: false,
+        },
+        HandTrackingBackend::ForceCpu => EpPlan {
+            try_accelerated: false,
+            allow_cpu_fallback: false,
+        },
+    }
+}
+
+/// Try an accelerated session build+commit, and on error optionally rebuild on
+/// the CPU EP, returning the committed session and the backend label that
+/// actually took (the accelerated label on success, whatever `build_cpu` returns
+/// on the fallback path).
+///
+/// Generic over the session type `S` and error `E: Display` so the retry decision
+/// is unit-testable without any GPU EP: a test passes closures returning `Ok`/`Err`
+/// to drive every branch. `E: Display` is used only to render the failing EP's
+/// error — which carries the exact failing node — into the warning, so the field
+/// tester's "upload the log" workflow captures the diagnostic.
+fn load_with_ep_fallback<S, E: Display>(
+    model_name: &str,
+    allow_cpu_fallback: bool,
+    try_accelerated: impl FnOnce() -> Result<(S, &'static str), E>,
+    build_cpu: impl FnOnce() -> Result<(S, &'static str), E>,
+) -> Result<(S, &'static str), E> {
+    match try_accelerated() {
+        Ok(loaded) => Ok(loaded),
+        Err(err) if allow_cpu_fallback => {
+            tracing::warn!(
+                model = model_name,
+                %err,
+                "accelerated execution provider failed to commit the graph; \
+                 rebuilding this model on the CPU execution provider"
+            );
+            build_cpu()
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Build a `SessionBuilder` with the CPU-thread-pool options shared by every
+/// execution provider.
+///
+/// Two sessions (palm + landmark) each own a pool; capping intra-op threads and
+/// disabling spin-waiting stops idle inference from burning whole cores between
+/// frames at our `<= 30 Hz` cadence. This is independent of EP/model format, so
+/// both the accelerated and CPU-only builders start from it.
+fn base_builder() -> Result<SessionBuilder, InferenceError> {
+    Session::builder()
+        .map_err(load_err)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(load_err)?
+        .with_intra_threads(2)
+        .map_err(load_err)?
+        .with_intra_op_spinning(false)
+        .map_err(load_err)
+}
+
+/// Build the platform-accelerated session and commit it, returning the committed
+/// session and the registered backend label.
+///
+/// On Windows this also applies the `DirectML` session options
+/// (`configure_accelerator_session`); on Linux [`register_accelerator`] is a
+/// no-op and the label is [`BACKEND_CPU`]. `commit_from_memory` consumes the
+/// builder, which is why the CPU fallback in [`OrtInference::load`] rebuilds a
+/// fresh one rather than reusing this.
+fn commit_accelerated(model_bytes: &[u8]) -> Result<(Session, &'static str), InferenceError> {
+    let mut builder = base_builder()?;
+    #[cfg(target_os = "windows")]
+    {
+        builder = configure_accelerator_session(builder)?;
+    }
+    // `Ok` registration means the EP attached to the session options, NOT that
+    // every node runs on it — the graph is partitioned at commit and any
+    // unsupported op still falls to the CPU. The label reflects registration, not
+    // whole-graph placement (see [`OrtInference::backend`]).
+    let label = register_accelerator(&mut builder, model_bytes);
+    let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
+    Ok((session, label))
+}
+
+/// Build a CPU-only session (no GPU EP registered) and commit it.
+///
+/// Used both for [`HandTrackingBackend::ForceCpu`] and as the fallback when an
+/// accelerated commit fails. Starts from a fresh [`base_builder`] because the
+/// accelerated builder was consumed by its failed commit.
+fn commit_cpu(model_bytes: &[u8]) -> Result<(Session, &'static str), InferenceError> {
+    let session = base_builder()?
+        .commit_from_memory(model_bytes)
+        .map_err(load_err)?;
+    Ok((session, BACKEND_CPU))
 }
 
 /// Map an `ort` error to a model-load failure. Generic over the recovery
@@ -371,6 +498,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ep_plan_maps_each_backend_preference() {
+        // Auto: try the accelerator, allow a CPU rebuild if commit fails.
+        assert_eq!(
+            ep_plan(HandTrackingBackend::Auto),
+            EpPlan {
+                try_accelerated: true,
+                allow_cpu_fallback: true
+            }
+        );
+        // ForceGpu: try the accelerator, but never fall back (loud failure).
+        assert_eq!(
+            ep_plan(HandTrackingBackend::ForceGpu),
+            EpPlan {
+                try_accelerated: true,
+                allow_cpu_fallback: false
+            }
+        );
+        // ForceCpu: never register a GPU EP at all.
+        assert_eq!(
+            ep_plan(HandTrackingBackend::ForceCpu),
+            EpPlan {
+                try_accelerated: false,
+                allow_cpu_fallback: false
+            }
+        );
+    }
+
+    #[test]
+    fn ep_fallback_keeps_the_accelerated_result_on_success() {
+        // On a successful accelerated commit the (session, label) pair is returned
+        // unchanged and the CPU builder is never invoked. The GPU EP path is
+        // unreachable in CI (no GPU tests), so the decision logic is exercised
+        // with plain stand-in values instead of a real Session.
+        let mut cpu_built = false;
+        let (session, label) = load_with_ep_fallback::<u32, String>(
+            "palm_detection.onnx",
+            true,
+            || Ok((42, BACKEND_DIRECTML)),
+            || {
+                cpu_built = true;
+                Ok((0, BACKEND_CPU))
+            },
+        )
+        .expect("accelerated commit succeeds");
+        assert_eq!(session, 42);
+        assert_eq!(label, BACKEND_DIRECTML);
+        assert!(
+            !cpu_built,
+            "CPU builder must not run when the accelerated path commits"
+        );
+    }
+
+    #[test]
+    fn ep_fallback_rebuilds_on_cpu_when_the_accelerated_commit_fails() {
+        // This is the regression for the shipped bug: a DirectML fusion crash at
+        // commit must degrade to the CPU EP, not abort the whole load.
+        let (session, label) = load_with_ep_fallback::<u32, String>(
+            "palm_detection.onnx",
+            true,
+            || Err("80004005: DmlGraphFusionHelper".to_owned()),
+            || Ok((7, BACKEND_CPU)),
+        )
+        .expect("cpu rebuild succeeds");
+        assert_eq!(session, 7);
+        assert_eq!(label, BACKEND_CPU);
+    }
+
+    #[test]
+    fn ep_fallback_propagates_the_error_when_cpu_fallback_is_disallowed() {
+        // ForceGpu semantics: a commit failure must surface as an error, and the
+        // CPU builder must not run.
+        let mut cpu_built = false;
+        let result = load_with_ep_fallback::<u32, String>(
+            "palm_detection.onnx",
+            false,
+            || Err("commit failed".to_owned()),
+            || {
+                cpu_built = true;
+                Ok((0, BACKEND_CPU))
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            !cpu_built,
+            "no CPU rebuild is attempted when fallback is disallowed"
+        );
+    }
+
     fn model_bytes(name: &str) -> Vec<u8> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/models/hand")
@@ -383,7 +599,12 @@ mod tests {
         // The backend label must be observable and one of the two known states,
         // so a silent CPU fallback (the 240% CPU symptom) is never hidden behind
         // an empty or bogus string in diagnostics.
-        let model = OrtInference::load(&model_bytes("palm_detection.onnx")).expect("load via ort");
+        let model = OrtInference::load(
+            &model_bytes("palm_detection.onnx"),
+            HandTrackingBackend::Auto,
+            "palm_detection.onnx",
+        )
+        .expect("load via ort");
         let backend = model.backend();
         // The label must be observable and one of the known states, so a silent
         // CPU fallback (the 240% CPU symptom) is never hidden behind a bogus string
@@ -410,8 +631,12 @@ mod tests {
         // The graph-surgeried palm detector: input [1,192,192,3] → raw
         // [1,2016,18] boxes + [1,2016,1] scores (anchor decode + NMS are done
         // in Rust, not in the graph). Proves ort loads and runs it in-crate.
-        let mut model =
-            OrtInference::load(&model_bytes("palm_detection.onnx")).expect("load via ort");
+        let mut model = OrtInference::load(
+            &model_bytes("palm_detection.onnx"),
+            HandTrackingBackend::Auto,
+            "palm_detection.onnx",
+        )
+        .expect("load via ort");
         let mut out = Vec::new();
         model
             .run(&Tensor::zeros(vec![1, 192, 192, 3]), &mut out)
@@ -433,8 +658,12 @@ mod tests {
         // declared index order: two [1,63] landmark tensors and two [1,1]
         // scalars. On a host without CoreML, ort falls back to CPU — still
         // exercising load + run + the declared-order shape extraction.
-        let mut model =
-            OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
         let mut out = Vec::new();
         model
             .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
@@ -465,8 +694,12 @@ mod tests {
         // empty frame says nothing about handedness either way). It is covered
         // at the mock level by the pipeline test
         // `handedness_probability_below_half_reads_left`.
-        let mut model =
-            OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
         let mut out = Vec::new();
         model
             .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
@@ -491,8 +724,12 @@ mod tests {
     fn ort_run_rejects_wrong_input_shape() {
         // ONNX Runtime should return an error (not panic) when the input tensor
         // has a shape that disagrees with the model's declared input.
-        let mut model =
-            OrtInference::load(&model_bytes("hand_landmark.onnx")).expect("load via ort");
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
         // Landmark model expects [1,224,224,3]; supply a palm-sized input instead.
         let mut out = Vec::new();
         let err = model

@@ -110,6 +110,11 @@ pub struct MediaPipeConfig {
     /// Resolved at runtime via [`crate::platform::assets::asset_root`] so the
     /// path is correct in dev, release, and macOS `.app` bundle deployments.
     pub model_dir: PathBuf,
+    /// Which execution provider the ONNX sessions should use. Seeded from
+    /// [`crate::settings::HandTrackingBackend`] at registry build; applies on
+    /// the next `start`. `Auto` (the default) tries the platform GPU EP with a
+    /// CPU commit-time fallback.
+    pub backend: crate::settings::HandTrackingBackend,
 }
 
 impl Default for MediaPipeConfig {
@@ -124,6 +129,7 @@ impl Default for MediaPipeConfig {
             smoothing_min_cutoff: DEFAULT_MIN_CUTOFF,
             smoothing_beta: DEFAULT_BETA,
             model_dir: crate::platform::assets::asset_root().join("models/hand"),
+            backend: crate::settings::HandTrackingBackend::Auto,
         }
     }
 }
@@ -273,8 +279,9 @@ impl MediaPipeProvider {
     /// for diagnostics.
     fn build_pipeline(&self) -> Result<(Pipeline, &'static str), HandTrackingError> {
         let dir = &self.config.model_dir;
-        let (palm, palm_backend) = load_model(dir, "palm_detection.onnx")?;
-        let (landmark, landmark_backend) = load_model(dir, "hand_landmark.onnx")?;
+        let (palm, palm_backend) = load_model(dir, "palm_detection.onnx", self.config.backend)?;
+        let (landmark, landmark_backend) =
+            load_model(dir, "hand_landmark.onnx", self.config.backend)?;
         let backend = combined_backend(palm_backend, landmark_backend);
         let cfg = PipelineConfig {
             mirror: self.config.mirror,
@@ -491,18 +498,27 @@ fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Capture
 fn load_model(
     dir: &Path,
     name: &str,
+    backend: crate::settings::HandTrackingBackend,
 ) -> Result<(Box<dyn HandInference>, &'static str), HandTrackingError> {
     let path = dir.join(name);
     let bytes = std::fs::read(&path).map_err(|e| {
         HandTrackingError::Misconfigured(format!("read model {}: {e}", path.display()))
     })?;
-    let model = inference_ort::OrtInference::load(&bytes)
+    let model = inference_ort::OrtInference::load(&bytes, backend, name)
         .map_err(|e| HandTrackingError::Misconfigured(e.to_string()))?;
     // Read the backend before boxing — it lives on the concrete type, not the
     // `HandInference` trait object.
-    let backend = model.backend();
+    let backend_label = model.backend();
+    // Log the effective per-model backend at startup so the field tester's
+    // "upload the log" workflow shows which model landed on GPU vs CPU (a commit
+    // fallback affects one model, not both). Startup-only; not a hot path.
+    tracing::info!(
+        model = name,
+        backend = backend_label,
+        "loaded MediaPipe hand model"
+    );
     let boxed: Box<dyn HandInference> = Box::new(model);
-    Ok((boxed, backend))
+    Ok((boxed, backend_label))
 }
 
 /// Combine the palm and landmark backend labels into one diagnostics string.
