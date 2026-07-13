@@ -19,8 +19,12 @@
 //! emission (the freeze idiom); `OnExit` tears everything down and schedules
 //! the deferred hand-camera restore. Settings register with the shared
 //! panel/persistence system; the `RenderProfile` applier drives the main
-//! camera's tonemapping/bloom while Radiance is active. The screensaver
-//! phantom and debug/capture drivers arrive in Plan C Tasks 12–13.
+//! camera's tonemapping/bloom while Radiance is active. During the
+//! screensaver, `screensaver::RadianceScreensaverPlugin` takes over the mask
+//! and edge writes with a synthetic phantom performer and bakes a
+//! fade-scaled ember frame through the same `bake_radiance_sim` baker the
+//! live writer uses (Task 12); the debug/capture drivers arrive in Plan C
+//! Task 13.
 //!
 //! Everything above except camera arbitration (`systems::arbitration`, which
 //! consumes only the unconditional `wc_core::input::provider`) is gated
@@ -44,6 +48,12 @@ pub mod settings;
 #[cfg(feature = "body-tracking-mediapipe")]
 pub mod synthetic;
 pub mod systems;
+// Attract-mode phantom performer: consumes `wc_core::input::body`
+// (`MaskTexture`/`SilhouetteEdges`) plus `synthetic` and `systems::sim_params`
+// above, both of which are already gated behind this feature. Same
+// `cargo doc` default-features-only rationale as `synthetic`/`systems::spawn`.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod screensaver;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
@@ -181,6 +191,12 @@ impl Plugin for RadiancePlugin {
             wc_core::sketch::apply_render_profile::<settings::RadianceSettings>
                 .run_if(in_state(AppState::Radiance)),
         );
+
+        // Attract performer: phantom silhouette + ember sim writer, both
+        // gated in_screensaver (zero systems otherwise). Gated: consumes
+        // `wc_core::input::body` via `screensaver`.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_plugins(screensaver::RadianceScreensaverPlugin);
     }
 }
 
