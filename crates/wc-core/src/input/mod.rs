@@ -45,11 +45,32 @@
 //!   the resources / messages above.
 
 pub mod activation;
+/// Webcam body tracking (BlazePose person detector + landmark/segmentation
+/// worker), consumed by the Radiance sketch.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod body;
 pub mod button;
+/// Shared webcam frame capture: the `FrameSource` trait, the platform
+/// backends (AVFoundation on macOS, nokhwa elsewhere), and the test
+/// `MockFrameSource`. Consumed by the MediaPipe hand provider and by the
+/// body-tracking worker, so it lives beside — not inside — either.
+#[cfg(any(
+    feature = "hand-tracking-mediapipe",
+    feature = "body-tracking-mediapipe"
+))]
+pub mod capture;
 pub mod entity;
 pub mod gesture;
 pub mod hand;
 pub mod idle_pause;
+/// Shared ONNX inference (tensor types + the ort backend with its CoreML
+/// per-model cache), consumed by the MediaPipe hand provider and the
+/// body-tracking pipeline.
+#[cfg(any(
+    feature = "hand-tracking-mediapipe",
+    feature = "body-tracking-mediapipe"
+))]
+pub mod onnx;
 pub mod pointer;
 pub mod projection;
 pub mod provider;

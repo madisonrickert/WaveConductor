@@ -41,6 +41,26 @@ hand-tracking-mediapipe-camera = [
     "dep:objc2-core-media",
     "dep:dispatch2",
 ]
+# In-process MediaPipe BlazePose body tracking (the Radiance sketch's tracker).
+# Shares the ort/image inference stack and the promoted input/capture +
+# input/onnx modules with the hand provider, but is feature-independent of it:
+# either modality builds alone. bytemuck provides the Pod derive for the
+# EdgePoint storage-buffer layout (already in the workspace graph via
+# wc-sketches). CI-testable headless against vendored models.
+body-tracking-mediapipe = ["dep:ort", "dep:image", "dep:bytemuck"]
+# Adds the production webcam FrameSource for body tracking — the same shared
+# capture backends (AVFoundation on macOS, nokhwa elsewhere) the hand
+# provider's -camera feature enables.
+body-tracking-camera = [
+    "body-tracking-mediapipe",
+    "dep:nokhwa",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-video",
+    "dep:objc2-core-media",
+    "dep:dispatch2",
+]
 # Enables real OS temperature sensing for the screensaver's `ThermalState`
 # signal. On Linux this is a ZERO-DEPENDENCY `std::fs` reader of the kernel
 # `hwmon`/`thermal_zone` sysfs interface (see `lifecycle::thermal::platform::
@@ -86,6 +106,7 @@ serde.workspace = true
 toml.workspace = true
 dirs.workspace = true
 blake3 = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }

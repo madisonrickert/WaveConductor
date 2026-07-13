@@ -1,12 +1,19 @@
-//! Webcam frame capture behind a [`FrameSource`] trait.
+//! Webcam frame capture behind a [`FrameSource`](crate::input::capture::FrameSource) trait.
 //!
 //! Abstracting capture lets the pipeline and tests run without a physical
-//! camera: tests inject a [`MockFrameSource`], while the production backend is
+//! camera: tests inject a [`MockFrameSource`](crate::input::capture::MockFrameSource),
+//! while the production backend is
 //! selected per platform — `AvfFrameSource` on macOS (`AVFoundation` via
 //! `objc2`), `NokhwaFrameSource` on Linux and Windows (`nokhwa`). Both backends
-//! are gated on the `hand-tracking-mediapipe-camera` feature. Frames are written into a
-//! caller-owned, reused [`Frame`] buffer so the worker performs no per-frame
-//! heap allocation after warm-up.
+//! are gated on the camera features (`hand-tracking-mediapipe-camera` or
+//! `body-tracking-camera`). Frames are written into a caller-owned, reused
+//! [`Frame`](crate::input::capture::Frame) buffer so the worker performs no
+//! per-frame heap allocation after warm-up.
+//!
+//! (The links above are fully qualified because the MediaPipe hand provider
+//! aliases this module via a private `use crate::input::capture;` —
+//! `--document-private-items` re-resolves this module doc at that re-export
+//! site, where bare item names are out of scope.)
 
 use thiserror::Error;
 
@@ -20,6 +27,24 @@ pub enum CaptureError {
     #[error("frame read failed: {0}")]
     Read(String),
 }
+
+/// Inference/capture cap (Hz) applied while a tracking worker's idle throttle
+/// is set, i.e. the sketch is in `Idle`/`Screensaver` with no audience present.
+/// Shared by every camera-consuming modality (`MediaPipe` hands, `BlazePose` body)
+/// so their hardware capture throttles and wake-latency budgets agree.
+///
+/// Wake-latency contract: 4 Hz means a worst-case wake of one throttle period
+/// (250 ms) plus one full pipeline run (tens of ms) ≈ **300 ms** before the
+/// first hand-bearing (or person-bearing) frame resets the idle timer and
+/// flips the app back to `Active`/full rate. Against the 30 s idle threshold
+/// that entry latency is imperceptible, while the sustained load drop is the
+/// bulk of the multi-hour idle thermal win.
+///
+/// On backends that honor [`FrameSource::set_capture_throttle`] (macOS
+/// `AVFoundation`), the *camera* drops to this same rate while idle, so the
+/// freshest frame is at most one period (250 ms) old when processed. No added
+/// wake latency; the sensor/ISP simply do less work.
+pub const IDLE_INFERENCE_HZ: u32 = 4;
 
 /// A single captured frame: tightly-packed RGB8, row-major, top-left origin.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -197,14 +222,38 @@ impl FrameSource for MockFrameSource {
 }
 
 /// Production webcam backend, selected per platform.
-#[cfg(all(feature = "hand-tracking-mediapipe-camera", not(target_os = "macos")))]
+#[cfg(all(
+    any(
+        feature = "hand-tracking-mediapipe-camera",
+        feature = "body-tracking-camera"
+    ),
+    not(target_os = "macos")
+))]
 mod nokhwa;
 
-#[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
+#[cfg(all(
+    any(
+        feature = "hand-tracking-mediapipe-camera",
+        feature = "body-tracking-camera"
+    ),
+    target_os = "macos"
+))]
 mod avfoundation;
-#[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
+#[cfg(all(
+    any(
+        feature = "hand-tracking-mediapipe-camera",
+        feature = "body-tracking-camera"
+    ),
+    target_os = "macos"
+))]
 pub use avfoundation::AvfFrameSource;
-#[cfg(all(feature = "hand-tracking-mediapipe-camera", not(target_os = "macos")))]
+#[cfg(all(
+    any(
+        feature = "hand-tracking-mediapipe-camera",
+        feature = "body-tracking-camera"
+    ),
+    not(target_os = "macos")
+))]
 pub use nokhwa::NokhwaFrameSource;
 
 #[cfg(test)]

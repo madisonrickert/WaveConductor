@@ -18,7 +18,7 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-default = ["hand-tracking-gestures", "hand-tracking-mediapipe"]
+default = ["hand-tracking-gestures", "hand-tracking-mediapipe", "body-tracking-mediapipe"]
 # Propagates to wc-core and wc-sketches; always on for the waveconductor binary.
 # Declared here so that examples (e.g. leap_smoke) can gate on this feature name
 # without triggering `unexpected_cfg` warnings.
@@ -38,6 +38,10 @@ hand-tracking-mediapipe = [
     "wc-core/hand-tracking-mediapipe-camera",
     "wc-sketches/hand-tracking-gestures",
 ]
+# In-process MediaPipe BlazePose body tracking (Radiance's tracker; pulls the
+# camera backends). Inert until a sketch requests it, so shipping it in the
+# default set costs nothing at runtime.
+body-tracking-mediapipe = ["wc-core/body-tracking-camera"]
 
 [dependencies]
 bevy = { workspace = true }

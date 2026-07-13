@@ -7649,6 +7649,7 @@ dependencies = [
  "bevy_egui",
  "bitflags 2.11.1",
  "blake3",
+ "bytemuck",
  "cpal",
  "dirs",
  "dispatch2",

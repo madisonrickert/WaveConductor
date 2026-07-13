@@ -46,12 +46,16 @@ use crate::input::state::{
 };
 
 mod anchors;
-mod capture;
+// The capture module was promoted to `crate::input::capture` (shared with the
+// body-tracking worker). This alias keeps every `self::capture::…` /
+// `super::capture::…` path in this provider compiling unchanged.
+use crate::input::capture;
 mod coords;
-mod inference;
-/// ONNX Runtime (`ort`) inference backend; the sole concrete [`inference::HandInference`]
-/// implementation used by this pipeline.
-mod inference_ort;
+// The inference module was promoted to `crate::input::onnx` (shared with the
+// body pipeline). These aliases keep every `super::inference::…` /
+// `super::inference_ort::…` path in this provider compiling unchanged.
+use crate::input::onnx as inference;
+use crate::input::onnx::ort as inference_ort;
 mod landmark;
 mod palm;
 mod pipeline;

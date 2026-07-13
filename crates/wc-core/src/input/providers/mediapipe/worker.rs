@@ -129,24 +129,11 @@ impl Drop for WorkerHandle {
     }
 }
 
-/// Inference cap (Hz) applied while [`MediaPipeLiveTuning::idle_throttle`] is
-/// set, i.e. the sketch is in `Idle`/`Screensaver` with no audience present.
-///
-/// Wake-latency contract: 4 Hz means a worst-case wake of one throttle period
-/// (250 ms) plus one full pipeline run (tens of ms) ≈ **300 ms** before the
-/// first hand-bearing frame reaches `lifecycle::idle::reset_on_interaction`
-/// (which wakes only on hand-*bearing* frames — empty frames never reset the
-/// idle timer) and flips the app back to `Active`/full rate. Against the 30 s
-/// idle threshold that entry latency is imperceptible, while the sustained
-/// load drop (30 Hz → 4 Hz of capture-decode + palm inference) is the bulk of
-/// the multi-hour idle thermal win.
-///
-/// On backends that honor [`FrameSource::set_capture_throttle`] (macOS
-/// `AVFoundation`), the *camera* drops to this same rate while idle, so the
-/// freshest frame is at most one period (250 ms) old when processed — the
-/// identical staleness bound the inference cap already imposes. No added wake
-/// latency; the sensor/ISP simply do less work.
-pub const IDLE_INFERENCE_HZ: u32 = 4;
+/// Idle inference cap, shared with the capture layer (and the body-tracking
+/// worker) — see the constant's wake-latency contract in `input::capture`.
+/// Re-exported here so this worker's tests and docs keep their historical
+/// `worker::IDLE_INFERENCE_HZ` path.
+pub use crate::input::capture::IDLE_INFERENCE_HZ;
 
 /// Spawn the worker thread. It runs until [`WorkerHandle::stop`] (or the handle
 /// drops), capturing + processing frames at up to `max_hz` and pushing results
