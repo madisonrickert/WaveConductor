@@ -32,7 +32,11 @@ pub struct RadianceParticle {
     /// Deterministic per-respawn hash in `0..=1`: the render shader's gradient
     /// coordinate and sparkle phase.
     pub seed: f32,
-    /// Padding to a 16-byte multiple for WGSL storage rules.
+    /// Padding to round the struct up to a multiple of its own 8-byte
+    /// alignment (the `vec2<f32>` members set that alignment) — the WGSL
+    /// array-stride rule for `array<Particle>` in the storage address space.
+    /// Unlike the uniform address space, storage arrays don't additionally
+    /// require a 16-byte-multiple stride.
     #[allow(
         clippy::pub_underscore_fields,
         reason = "GPU struct layout padding must be pub for bytemuck"
