@@ -34,6 +34,39 @@ pub enum HandProviderChoice {
     Off,
 }
 
+/// How the `MediaPipe` inference sessions should choose an execution provider —
+/// the operator's override for the GPU-vs-CPU decision, so a box whose GPU EP
+/// crashes at graph fusion can be pinned to CPU (or forced back onto the GPU for
+/// diagnosis) without a rebuild.
+///
+/// Variant identifiers double as the persisted strings *and* the dropdown labels
+/// (see `wc_core_macros`: serde serializes unit variants as their name, and the
+/// panel has no per-variant label mapping), so they are chosen to read in a
+/// dropdown.
+///
+/// Applied at provider (re)start: `MediaPipeConfig::backend` is seeded from this
+/// on registry build, and each ONNX model resolves its provider from it in
+/// `OrtInference::load`. Changing it takes effect when the provider is next
+/// rebuilt (relaunch, or a toggle of the "Tracking provider" dropdown) — there is
+/// no live per-frame re-tune, because the choice is only read while a session is
+/// being constructed.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HandTrackingBackend {
+    /// Attempt the platform GPU EP (`CoreML` / `DirectML`); if it fails at commit,
+    /// warn and rebuild that model on the CPU EP. The safety net — the default.
+    #[default]
+    Auto,
+    /// Attempt the platform GPU EP and do **not** fall back: a commit failure is
+    /// surfaced as a load error. Disables the safety net deliberately, so a
+    /// broken EP is loud rather than silently degraded — a diagnosis lever, not a
+    /// deployment default.
+    ForceGpu,
+    /// Never register a GPU EP; build a CPU-only session from the start. The
+    /// fastest way to confirm CPU tracking works, and the operator's lever when a
+    /// GPU EP is flaky.
+    ForceCpu,
+}
+
 /// Hand-tracking-wide settings (not per-sketch).
 ///
 /// `provider` selects the tracking backend (see [`HandProviderChoice`]).
@@ -60,6 +93,22 @@ pub struct HandTrackingSettings {
     )]
     #[serde(default)]
     pub provider: HandProviderChoice,
+
+    /// Which execution provider the `MediaPipe` ONNX sessions should use
+    /// (`Auto` tries the platform GPU EP and falls back to CPU on a commit
+    /// failure; `ForceGpu` disables that fallback; `ForceCpu` skips the GPU EP
+    /// entirely). Applied when the provider is next (re)built — see
+    /// [`HandTrackingBackend`]. Exposed as a `User` knob so a field tester can
+    /// A/B GPU vs CPU inference without a new build.
+    #[setting(
+        default = HandTrackingBackend::Auto,
+        ty = Enum,
+        category = User,
+        section = "Hand Tracking",
+        label = "Inference backend"
+    )]
+    #[serde(default)]
+    pub backend: HandTrackingBackend,
 
     /// Whether the Leap provider should request the `BackgroundFrames` policy
     /// at start. When `true`, tracking frames keep arriving even when the
@@ -208,6 +257,47 @@ mod tests {
             let text = toml::to_string(&settings).expect("serialize");
             let back: HandTrackingSettings = toml::from_str(&text).expect("parse back");
             assert_eq!(back.provider, choice);
+        }
+    }
+
+    /// The inference backend preference defaults to `Auto` when a settings file
+    /// saved before the field existed is loaded — never erroring, never landing
+    /// on a forced mode the operator did not choose.
+    #[test]
+    fn backend_defaults_to_auto_when_absent_from_saved_settings() {
+        let parsed: HandTrackingSettings =
+            toml::from_str("leap_background = true").expect("pre-backend settings file loads");
+        assert_eq!(parsed.backend, HandTrackingBackend::Auto);
+    }
+
+    /// The persisted representation is the bare variant name, matching the
+    /// dropdown's reflection write-back, so persistence and the panel can never
+    /// disagree about an identifier.
+    #[test]
+    fn backend_persists_as_the_variant_name() {
+        let settings = HandTrackingSettings {
+            backend: HandTrackingBackend::ForceCpu,
+            ..HandTrackingSettings::default()
+        };
+        let text = toml::to_string(&settings).expect("settings serialize");
+        assert!(text.contains("backend = \"ForceCpu\""), "got: {text}");
+    }
+
+    /// Round-trip every variant through the persisted form.
+    #[test]
+    fn backend_choice_round_trips_through_toml() {
+        for choice in [
+            HandTrackingBackend::Auto,
+            HandTrackingBackend::ForceGpu,
+            HandTrackingBackend::ForceCpu,
+        ] {
+            let settings = HandTrackingSettings {
+                backend: choice,
+                ..HandTrackingSettings::default()
+            };
+            let text = toml::to_string(&settings).expect("serialize");
+            let back: HandTrackingSettings = toml::from_str(&text).expect("parse back");
+            assert_eq!(back.backend, choice);
         }
     }
 }

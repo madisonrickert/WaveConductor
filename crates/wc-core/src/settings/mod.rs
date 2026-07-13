@@ -51,7 +51,7 @@ pub use commands::set_setting;
 pub use custom_section::{CustomDockSections, DockSectionFn, RegisterDockSectionExt};
 pub use def::{enum_variant_names, NumberRange, SettingDef, SettingKind, SettingsCategory};
 pub use event::SketchRestart;
-pub use hand_tracking::{HandProviderChoice, HandTrackingSettings};
+pub use hand_tracking::{HandProviderChoice, HandTrackingBackend, HandTrackingSettings};
 pub use input_capture::{EguiKeyboardCaptured, EguiPointerCaptured};
 pub use panel_dev::DevPanelVisible;
 pub use registry::{RegisterSketchSettingsExt, SettingsRegistry};
