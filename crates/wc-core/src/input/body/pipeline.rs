@@ -31,8 +31,8 @@ use bevy::math::{Vec2, Vec3};
 use image::RgbImage;
 
 use super::detector::{
-    best_person, decode_pose_detections_into, generate_pose_anchors, sigmoid, Anchor,
-    PersonDetection, DETECTOR_INPUT, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN,
+    decode_pose_detections_into, generate_pose_anchors, sigmoid, weighted_nms_into, Anchor,
+    PersonDetection, DETECTOR_INPUT, MAX_PERSON_CANDIDATES, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN,
 };
 use super::edges::extract_edges;
 use super::mask::{MaskProcessor, DEFAULT_MASK_EMA_ALPHA};
@@ -69,6 +69,19 @@ const HEATMAP_MIN_CONFIDENCE: f32 = 0.5;
 /// `IoU` threshold for blending detections around the argmax seed
 /// (`MediaPipe`'s `min_suppression_threshold: 0.3`).
 const PERSON_BLEND_IOU: f32 = 0.3;
+
+/// Primary-dancer stickiness window (our addition — no upstream analog). A
+/// `last_roi` older than this is stale, and cluster selection falls back to the
+/// highest-scoring person. Kiosk rationale: bridge a brief occlusion (someone
+/// walks in front of the tracked dancer) without dropping them, but re-acquire
+/// the strongest person once they have truly left the frame.
+const STICKINESS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Max ROI-centre distance (square-norm units) between `last_roi` and a
+/// candidate cluster for stickiness to keep that cluster. Beyond this the
+/// nearest candidate is too far to plausibly be the same person, so selection
+/// falls back to score. Compared squared against the squared distance.
+const STICKINESS_MAX_DIST: f32 = 0.25;
 
 /// Aux-landmark One-Euro min cutoff (Hz). `MediaPipe` smooths the aux
 /// alignment rows *much harder* than the main landmarks so the tracking crop
@@ -318,6 +331,13 @@ pub struct PosePipeline {
     /// falls below threshold, the ROI leaves the content, the frame is
     /// unusable, or an idle probe runs.
     tracked: Option<RoiRect>,
+    /// Primary-dancer memory that SURVIVES track loss (unlike `tracked`, which
+    /// is wiped the moment the track drops): the last known person ROI plus
+    /// when it was seen. [`Self::select_sticky`] uses it to re-acquire the same
+    /// dancer after a brief occlusion. Only ever reset by building a fresh
+    /// pipeline (worker (re)start / request removal — the whole pipeline is
+    /// dropped); [`STICKINESS_TIMEOUT`] ages it out otherwise.
+    last_roi: Option<(RoiRect, Duration)>,
     /// Optional live tuning shared with the provider systems.
     live_tuning: Option<Arc<BodyLiveTuning>>,
     /// Heavy One-Euro filter on the aux alignment rows, applied before the
@@ -337,6 +357,10 @@ pub struct PosePipeline {
     detector_outputs: Vec<Tensor>,
     landmark_outputs: Vec<Tensor>,
     detections: Vec<PersonDetection>,
+    /// Reused weighted-NMS person-cluster candidates (≤
+    /// [`MAX_PERSON_CANDIDATES`]), refilled each detector pass; never allocates
+    /// after construction.
+    person_clusters: Vec<PersonDetection>,
 }
 
 impl PosePipeline {
@@ -353,6 +377,7 @@ impl PosePipeline {
             anchors: generate_pose_anchors(),
             config,
             tracked: None,
+            last_roi: None,
             live_tuning: None,
             aux_filter: AuxRoiFilter::new(),
             mask: MaskProcessor::new(),
@@ -371,6 +396,7 @@ impl PosePipeline {
             detector_outputs: Vec::new(),
             landmark_outputs: Vec::new(),
             detections: Vec::new(),
+            person_clusters: Vec::with_capacity(MAX_PERSON_CANDIDATES),
         }
     }
 
@@ -437,11 +463,14 @@ impl PosePipeline {
             self.tracked = None;
             diag.detector_reason = DetectorRunReason::IdleProbe;
             let stage = Instant::now();
-            let det = self.detect(&square);
+            let detected = self.detect_clusters(&square);
             diag.detector = stage.elapsed();
             self.square_buf = square;
-            let det = det?;
-            let (present, confidence) = det.as_ref().map_or((false, 0.0), |d| (true, d.score));
+            detected?;
+            let (present, confidence) = self
+                .person_clusters
+                .first()
+                .map_or((false, 0.0), |d| (true, d.score));
             self.fade_mask_into(blend_ratio, payload.as_deref_mut());
             diag.present = present;
             diag.confidence = confidence;
@@ -464,15 +493,15 @@ impl PosePipeline {
         } else {
             diag.detector_reason = DetectorRunReason::ColdStart;
             let stage = Instant::now();
-            let det = self.detect(&square);
+            let detected = self.detect_clusters(&square);
             diag.detector = stage.elapsed();
-            match det {
-                Ok(d) => d.map(|d| roi_from_detection(&d)),
-                Err(e) => {
-                    self.square_buf = square;
-                    return Err(e);
-                }
+            if let Err(e) = detected {
+                self.square_buf = square;
+                return Err(e);
             }
+            // Primary-dancer selection over the weighted-NMS candidates, with
+            // stickiness across a brief occlusion.
+            self.select_sticky(now).map(|d| roi_from_detection(&d))
         };
         let Some(roi) = roi else {
             // Nobody in frame: fade the mask, stay quiet.
@@ -500,6 +529,9 @@ impl PosePipeline {
         let result = if let Some(tracked) = outcome {
             // Carry the aux-row ROI only while it stays plausible.
             self.tracked = roi_trackable(&tracked.next_roi, content).then_some(tracked.next_roi);
+            // Refresh the primary-dancer memory every tracked frame (survives a
+            // later track loss so stickiness can re-acquire the same person).
+            self.last_roi = Some((tracked.next_roi, now));
             tracked.result
         } else {
             // Presence collapsed: drop the track and fade the mask.
@@ -514,8 +546,11 @@ impl PosePipeline {
         Ok(result)
     }
 
-    /// Detector stage: resize → NHWC tensor → run → decode → best person.
-    fn detect(&mut self, square: &RgbImage) -> Result<Option<PersonDetection>, InferenceError> {
+    /// Detector stage: resize → NHWC tensor → run → decode → weighted NMS,
+    /// leaving the bounded person-cluster candidates in `self.person_clusters`
+    /// (descending score, `out[0]` = top person). Allocation-free (all buffers
+    /// reused). Caller selects the primary dancer from the candidates.
+    fn detect_clusters(&mut self, square: &RgbImage) -> Result<(), InferenceError> {
         resize_into(
             square,
             DETECTOR_INPUT,
@@ -533,7 +568,50 @@ impl PosePipeline {
             self.config.detector_score_threshold,
             &mut self.detections,
         );
-        Ok(best_person(&self.detections, PERSON_BLEND_IOU))
+        weighted_nms_into(
+            &mut self.detections,
+            PERSON_BLEND_IOU,
+            MAX_PERSON_CANDIDATES,
+            &mut self.person_clusters,
+        );
+        Ok(())
+    }
+
+    /// Pick the primary-dancer cluster from the latest detector pass.
+    ///
+    /// Stickiness (our addition — no upstream analog): when a recent
+    /// [`Self::last_roi`] exists (fresher than [`STICKINESS_TIMEOUT`]) and the
+    /// nearest cluster is within [`STICKINESS_MAX_DIST`] of it, keep tracking
+    /// THAT person across a brief occlusion instead of jumping to whoever now
+    /// scores highest. Otherwise fall back to the top cluster (highest blended
+    /// score). `None` when no one is in frame.
+    fn select_sticky(&self, now: Duration) -> Option<PersonDetection> {
+        if let Some((last, ts)) = self.last_roi {
+            if now.saturating_sub(ts) <= STICKINESS_TIMEOUT {
+                if let Some((det, dist2)) = self.nearest_cluster(last.cx, last.cy) {
+                    if dist2 <= STICKINESS_MAX_DIST * STICKINESS_MAX_DIST {
+                        return Some(det);
+                    }
+                }
+            }
+        }
+        // Candidates are descending by score, so the first is the top person.
+        self.person_clusters.first().copied()
+    }
+
+    /// The candidate cluster whose ROI centre is nearest `(cx, cy)`, paired
+    /// with its squared distance. `None` when there are no candidates. At most
+    /// [`MAX_PERSON_CANDIDATES`] clusters, so the scan is cheap.
+    fn nearest_cluster(&self, cx: f32, cy: f32) -> Option<(PersonDetection, f32)> {
+        let mut best: Option<(PersonDetection, f32)> = None;
+        for d in &self.person_clusters {
+            let c = roi_from_detection(d);
+            let dist2 = (c.cx - cx).powi(2) + (c.cy - cy).powi(2);
+            if best.is_none_or(|(_, b)| dist2 < b) {
+                best = Some((*d, dist2));
+            }
+        }
+        best
     }
 
     /// Landmark/mask stage for one ROI. `Ok(None)` = presence below
@@ -984,6 +1062,45 @@ pub(crate) mod fixtures {
         ]
     }
 
+    /// Anchor for a second person at stride-8 grid cell (4, 4): image
+    /// position ≈ (4.5/28, 4.5/28) ≈ (0.161, 0.161), well clear of
+    /// [`HOT_ANCHOR`]'s ≈ (0.518, 0.518) so the two never blend into one
+    /// weighted-NMS cluster.
+    pub(crate) const PERSON_B_ANCHOR: usize = (4 * 28 + 4) * 2;
+
+    /// Image-space centre (both axes) of the person at [`HOT_ANCHOR`] / the
+    /// second person at [`PERSON_B_ANCHOR`]. Keypoint 0 sits at the anchor
+    /// centre, so these are the ROI centres selection compares.
+    pub(crate) const PERSON_A_CENTER: f32 = 14.5 / 28.0;
+    /// See [`PERSON_A_CENTER`].
+    pub(crate) const PERSON_B_CENTER: f32 = 4.5 / 28.0;
+
+    /// Detector outputs with TWO confident people: person A at [`HOT_ANCHOR`]
+    /// and person B at [`PERSON_B_ANCHOR`], each a 0.3² box with a scale point
+    /// 0.15 above (upright ROI). `raw_score_a`/`raw_score_b` are raw logits
+    /// (pre-sigmoid) so a caller can make either the higher scorer.
+    pub(crate) fn two_person_detector_outputs(raw_score_a: f32, raw_score_b: f32) -> Vec<Tensor> {
+        let mut boxes = vec![0.0_f32; POSE_ANCHOR_COUNT * POSE_REGRESSION_LEN];
+        let mut scores = vec![-100.0_f32; POSE_ANCHOR_COUNT];
+        for (anchor, raw) in [(HOT_ANCHOR, raw_score_a), (PERSON_B_ANCHOR, raw_score_b)] {
+            let base = anchor * POSE_REGRESSION_LEN;
+            boxes[base + 2] = 224.0 * 0.3; // w
+            boxes[base + 3] = 224.0 * 0.3; // h
+            boxes[base + 7] = -224.0 * 0.15; // kp1 y offset: 0.15 up
+            scores[anchor] = raw;
+        }
+        vec![
+            Tensor {
+                data: boxes,
+                shape: vec![1, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN],
+            },
+            Tensor {
+                data: scores,
+                shape: vec![1, POSE_ANCHOR_COUNT, 1],
+            },
+        ]
+    }
+
     /// Detector outputs with every score pinned far below threshold.
     pub(crate) fn empty_detector_outputs() -> Vec<Tensor> {
         vec![
@@ -1392,6 +1509,82 @@ mod tests {
         let out0 = decode_world_landmarks(&world, &roi0);
         assert!((out0[0].x - 0.1).abs() < 1e-6, "x0={}", out0[0].x);
         assert!((out0[0].y + 0.2).abs() < 1e-6, "y0={}", out0[0].y);
+    }
+
+    /// Populate `person_clusters` from a two-person detector fixture by running
+    /// the detector stage over a solid frame. Returns the pipeline so the test
+    /// can drive `select_sticky` against known cluster centres.
+    fn two_person_pipeline(raw_score_a: f32, raw_score_b: f32) -> PosePipeline {
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: two_person_detector_outputs(raw_score_a, raw_score_b),
+            }),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig::default(),
+        );
+        let frame = solid_frame();
+        let mut square = image::RgbImage::default();
+        square_pad_into(&frame, &mut square);
+        p.detect_clusters(&square).expect("detector runs");
+        p
+    }
+
+    #[test]
+    fn stickiness_keeps_the_nearer_dancer_over_a_higher_scorer() {
+        // Two people, B the higher scorer, so the top candidate is B.
+        let mut p = two_person_pipeline(2.0, 4.0);
+        assert_eq!(p.person_clusters.len(), 2, "two separated people");
+        let top = roi_from_detection(&p.person_clusters[0]);
+        assert!(
+            (top.cx - PERSON_B_CENTER).abs() < 1e-3,
+            "top candidate should be B, cx={}",
+            top.cx
+        );
+        // A fresh last_roi sitting on person A must keep A across the frame,
+        // even though B now scores higher (kiosk occlusion must not teleport).
+        let now = Duration::from_secs(5);
+        p.last_roi = Some((
+            RoiRect {
+                cx: PERSON_A_CENTER,
+                cy: PERSON_A_CENTER,
+                size: 0.4,
+                rotation: 0.0,
+            },
+            now,
+        ));
+        let sel = p.select_sticky(now).expect("someone in frame");
+        let c = roi_from_detection(&sel);
+        assert!(
+            (c.cx - PERSON_A_CENTER).abs() < 1e-3,
+            "stickiness must keep A, got cx={}",
+            c.cx
+        );
+    }
+
+    #[test]
+    fn stale_last_roi_falls_back_to_highest_score() {
+        let mut p = two_person_pipeline(2.0, 4.0);
+        // last_roi on A but 3 s old (> STICKINESS_TIMEOUT) → selection falls
+        // back to the highest scorer, person B.
+        let now = Duration::from_secs(5);
+        p.last_roi = Some((
+            RoiRect {
+                cx: PERSON_A_CENTER,
+                cy: PERSON_A_CENTER,
+                size: 0.4,
+                rotation: 0.0,
+            },
+            Duration::from_secs(2),
+        ));
+        let sel = p.select_sticky(now).expect("someone in frame");
+        let c = roi_from_detection(&sel);
+        assert!(
+            (c.cx - PERSON_B_CENTER).abs() < 1e-3,
+            "stale last_roi must fall back to B, got cx={}",
+            c.cx
+        );
     }
 
     /// Write a single heatmap cell `(row, col)` for landmark channel `lm`.

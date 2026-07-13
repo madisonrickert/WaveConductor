@@ -12,16 +12,23 @@
 //! `[1, 2254, 12]` boxes and `[1, 2254, 1]` scores outputs. Decode scales are
 //! all 224; raw scores are clipped to ±100 then sigmoided.
 //!
-//! Radiance tracks ONE primary dancer, so instead of full weighted NMS this
-//! module selects the argmax-score detection and score-blends every detection
-//! overlapping it (`IoU` ≥ threshold) — the first output of `MediaPipe`'s
-//! WEIGHTED NMS, which is all `SplitDetectionVectorCalculator {0..1}` keeps
-//! upstream. Multi-person is deliberately out of scope (spec non-goal).
+//! Radiance tracks ONE primary dancer at a time, but a kiosk stage often holds
+//! several people, so [`weighted_nms_into`] runs full `MediaPipe` weighted NMS
+//! and emits ALL clusters (bounded to [`MAX_PERSON_CANDIDATES`]) rather than
+//! only the argmax. Each cluster is one candidate person: the argmax-score
+//! seed, score-blended with every detection overlapping it (`IoU` ≥ threshold).
+//! The pipeline then applies primary-dancer stickiness / the person-cycle
+//! hotkey over that bounded candidate list; publishing still tracks one person.
 
 use bevy::math::Vec2;
 
 /// Number of SSD anchors for the 224×224 pose detector (see module docs).
 pub const POSE_ANCHOR_COUNT: usize = 2254;
+
+/// Maximum weighted-NMS person clusters [`weighted_nms_into`] emits per frame.
+/// A kiosk stage rarely needs more, and the fixed bound keeps the candidate
+/// buffer allocation-free and the stickiness/cycle scans cheap.
+pub const MAX_PERSON_CANDIDATES: usize = 4;
 
 /// Keypoints per detection: 0 = mid-hip (ROI centre), 1 = full-body
 /// circumscribing-circle point (ROI scale/rotation), 2 = mid-shoulder,
@@ -122,7 +129,7 @@ impl Rect {
 }
 
 /// A decoded person detection in normalized image coordinates.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PersonDetection {
     /// Sigmoid confidence in `[0, 1]`.
     pub score: f32,
@@ -197,53 +204,84 @@ pub fn decode_pose_detections_into(
     }
 }
 
-/// Select the single primary person: the argmax-score detection, score-blended
-/// with every detection whose `IoU` against it is ≥ `iou_threshold`
-/// (`MediaPipe`'s weighted-NMS blend restricted to the top cluster — see
-/// module docs). Allocation-free. Returns `None` when `dets` is empty.
-#[must_use]
-pub fn best_person(dets: &[PersonDetection], iou_threshold: f32) -> Option<PersonDetection> {
-    let seed = dets.iter().max_by(|a, b| a.score.total_cmp(&b.score))?;
-    let mut total = 0.0_f32;
-    let mut bbox = Rect {
-        xmin: 0.0,
-        ymin: 0.0,
-        xmax: 0.0,
-        ymax: 0.0,
-    };
-    let mut keypoints = [Vec2::ZERO; POSE_KEYPOINTS];
-    for d in dets {
-        if seed.bbox.iou(&d.bbox) < iou_threshold {
+/// Full `MediaPipe` weighted NMS, emitting up to `max_candidates` person
+/// clusters into `out` (cleared then refilled — reuse one buffer to stay
+/// allocation-free). Each cluster is the argmax-score seed among the
+/// not-yet-consumed detections, score-blended with every detection whose `IoU`
+/// against the seed is ≥ `iou_threshold`; those detections are then removed
+/// from the pool and the next seed is taken. Clusters come out in descending
+/// seed-score order (so `out[0]` is the top person).
+///
+/// `dets` is consumed in place: consumed detections have their score marked
+/// with a negative sentinel. The caller's decode buffer is rebuilt every frame,
+/// so the mutation is harmless; taking `&mut` avoids a per-frame "used" mask
+/// allocation (AGENTS.md hot-path rule).
+pub fn weighted_nms_into(
+    dets: &mut [PersonDetection],
+    iou_threshold: f32,
+    max_candidates: usize,
+    out: &mut Vec<PersonDetection>,
+) {
+    out.clear();
+    while out.len() < max_candidates {
+        // Argmax over the detections not yet consumed (score >= 0).
+        let mut seed_idx: Option<usize> = None;
+        let mut seed_score = f32::NEG_INFINITY;
+        for (i, d) in dets.iter().enumerate() {
+            if d.score >= 0.0 && d.score > seed_score {
+                seed_score = d.score;
+                seed_idx = Some(i);
+            }
+        }
+        let Some(seed_idx) = seed_idx else {
+            break; // pool exhausted
+        };
+        let seed = dets[seed_idx];
+        // Blend the seed with every overlapping detection; consume each.
+        let mut total = 0.0_f32;
+        let mut bbox = Rect {
+            xmin: 0.0,
+            ymin: 0.0,
+            xmax: 0.0,
+            ymax: 0.0,
+        };
+        let mut keypoints = [Vec2::ZERO; POSE_KEYPOINTS];
+        for d in dets.iter_mut() {
+            if d.score < 0.0 || seed.bbox.iou(&d.bbox) < iou_threshold {
+                continue;
+            }
+            let w = d.score;
+            total += w;
+            bbox.xmin += d.bbox.xmin * w;
+            bbox.ymin += d.bbox.ymin * w;
+            bbox.xmax += d.bbox.xmax * w;
+            bbox.ymax += d.bbox.ymax * w;
+            for (acc, kp) in keypoints.iter_mut().zip(d.keypoints.iter()) {
+                *acc += *kp * w;
+            }
+            d.score = -1.0; // consumed
+        }
+        if total <= 0.0 {
+            // Degenerate scores: emit the seed verbatim (weighted mean is
+            // undefined). The seed is already marked consumed above.
+            out.push(seed);
             continue;
         }
-        // Weighted accumulate; normalized by `total` below.
-        total += d.score;
-        bbox.xmin += d.bbox.xmin * d.score;
-        bbox.ymin += d.bbox.ymin * d.score;
-        bbox.xmax += d.bbox.xmax * d.score;
-        bbox.ymax += d.bbox.ymax * d.score;
-        for (acc, kp) in keypoints.iter_mut().zip(d.keypoints.iter()) {
-            *acc += *kp * d.score;
+        let inv = 1.0 / total;
+        bbox.xmin *= inv;
+        bbox.ymin *= inv;
+        bbox.xmax *= inv;
+        bbox.ymax *= inv;
+        for kp in &mut keypoints {
+            *kp *= inv;
         }
+        out.push(PersonDetection {
+            // The seed is the cluster maximum by construction.
+            score: seed.score,
+            bbox,
+            keypoints,
+        });
     }
-    if total <= 0.0 {
-        // Degenerate scores: fall back to the seed verbatim.
-        return Some(seed.clone());
-    }
-    let inv = 1.0 / total;
-    bbox.xmin *= inv;
-    bbox.ymin *= inv;
-    bbox.xmax *= inv;
-    bbox.ymax *= inv;
-    for kp in &mut keypoints {
-        *kp *= inv;
-    }
-    Some(PersonDetection {
-        // The seed is the cluster maximum by construction.
-        score: seed.score,
-        bbox,
-        keypoints,
-    })
 }
 
 /// Lossless `u32` → `f32` for grid sizes/indices here (all ≤ 224).
@@ -353,27 +391,58 @@ mod tests {
     }
 
     #[test]
-    fn best_person_blends_the_top_cluster_and_ignores_far_detections() {
-        let dets = vec![
-            det(0.7, 5.0, 5.0, 1.0),   // a second person, far away — excluded
+    fn weighted_nms_blends_the_top_cluster_and_separates_a_far_person() {
+        let mut dets = vec![
+            det(0.7, 5.0, 5.0, 1.0),   // a second person, far away — own cluster
             det(0.9, 0.0, 0.0, 1.0),   // seed (argmax)
             det(0.8, 0.05, 0.05, 1.0), // overlaps the seed — blended in
         ];
-        let best = best_person(&dets, 0.3).expect("a detection above zero");
-        // Carries the seed's (maximal) score; the centre blends toward the
-        // overlapping detection but never toward the far one.
-        assert!((best.score - 0.9).abs() < 1e-6);
+        let mut out = Vec::new();
+        weighted_nms_into(&mut dets, 0.3, MAX_PERSON_CANDIDATES, &mut out);
+        // Two clusters: the blended top person, then the far one.
+        assert_eq!(out.len(), 2, "{out:?}");
+        let top = &out[0];
+        assert!((top.score - 0.9).abs() < 1e-6);
         assert!(
-            best.bbox.xmin > 0.0 && best.bbox.xmin < 0.05,
+            top.bbox.xmin > 0.0 && top.bbox.xmin < 0.05,
             "{:?}",
-            best.bbox
+            top.bbox
         );
-        assert!(best.keypoints[0].x < 0.05);
+        assert!(top.keypoints[0].x < 0.05);
+        // The far person is a separate cluster carrying its own score.
+        assert!((out[1].score - 0.7).abs() < 1e-6);
+        assert!(out[1].keypoints[0].x > 4.0, "{:?}", out[1]);
     }
 
     #[test]
-    fn best_person_of_empty_is_none() {
-        assert!(best_person(&[], 0.3).is_none());
+    fn weighted_nms_is_bounded_and_descending() {
+        // Five well-separated people, cap 4 → the four highest scorers, in
+        // descending score order.
+        let mut dets = vec![
+            det(0.5, 0.0, 0.0, 0.1),
+            det(0.9, 1.0, 0.0, 0.1),
+            det(0.6, 2.0, 0.0, 0.1),
+            det(0.8, 3.0, 0.0, 0.1),
+            det(0.7, 4.0, 0.0, 0.1),
+        ];
+        let mut out = Vec::new();
+        weighted_nms_into(&mut dets, 0.3, MAX_PERSON_CANDIDATES, &mut out);
+        assert_eq!(out.len(), MAX_PERSON_CANDIDATES);
+        let scores: Vec<f32> = out.iter().map(|d| d.score).collect();
+        assert!(
+            scores.windows(2).all(|w| w[0] >= w[1]),
+            "not descending: {scores:?}"
+        );
+        assert!((scores[0] - 0.9).abs() < 1e-6);
+        // The 0.5 detection is dropped by the cap.
+        assert!(scores.iter().all(|&s| (s - 0.5).abs() > 1e-6), "{scores:?}");
+    }
+
+    #[test]
+    fn weighted_nms_of_empty_emits_nothing() {
+        let mut out = vec![det(1.0, 0.0, 0.0, 1.0)]; // pre-filled to prove clear
+        weighted_nms_into(&mut [], 0.3, MAX_PERSON_CANDIDATES, &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]
