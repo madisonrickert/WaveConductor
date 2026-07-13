@@ -641,6 +641,19 @@ impl HandTrackingProvider for MediaPipeProvider {
             self.target_hands = hands;
             self.target_ts = timestamp;
         }
+        // A model can demote itself to the CPU EP mid-session when its accelerator
+        // fails inference persistently (`inference_ort::OrtInference::run`), so the
+        // backend label is refreshed from the worker's live per-stage labels rather
+        // than left at whatever `start` latched. Without this the dev panel's
+        // "Backend" row and the settings panel's amber degraded-backend row would
+        // keep showing "ort/CoreML" for a session that has been on the CPU since
+        // hour three — the exact laundering this whole line of work exists to
+        // prevent. Two pointer comparisons; no lock, no allocation.
+        if let Some(diag) = new_diagnostics {
+            if let (Some(palm), Some(landmark)) = (diag.palm_backend, diag.landmark_backend) {
+                self.backend_label = combined_backend(palm, landmark);
+            }
+        }
         if new_diagnostics.is_some() || new_error.is_some() || new_camera_format.is_some() {
             if let Ok(mut d) = self.diagnostics.lock() {
                 if let Some(err) = new_error {
@@ -693,11 +706,16 @@ impl HandTrackingProvider for MediaPipeProvider {
             .unwrap_or_default()
     }
 
-    /// The EP the sessions actually registered on, latched by `start` from
-    /// `build_pipeline` — including the degraded mixed labels (`ort/CoreML+CPU`,
-    /// `ort/DirectML+CPU`) a per-model commit fallback produces. `None` before
-    /// `start`, so the settings panel shows no "Running:" row rather than the
-    /// internal `BACKEND_NOT_STARTED` sentinel.
+    /// The EP the sessions are actually running on — including the degraded mixed
+    /// labels (`ort/CoreML+CPU`, `ort/DirectML+CPU`) that a per-model fallback
+    /// produces. `None` before `start`, so the settings panel shows no "Running:"
+    /// row rather than the internal `BACKEND_NOT_STARTED` sentinel.
+    ///
+    /// Seeded by `start` from `build_pipeline` (the commit-time fallback) and then
+    /// **kept current by `poll`** from the worker's live per-stage labels, because a
+    /// model can also demote itself to the CPU EP mid-session when its accelerator
+    /// fails inference persistently. A degradation at hour three of a soak must not
+    /// keep reporting the label hour zero latched.
     ///
     /// (Plain code spans, not intra-doc links: those consts and
     /// `Self::build_pipeline` are private to this module, and this is a public
@@ -708,6 +726,20 @@ impl HandTrackingProvider for MediaPipeProvider {
     /// settings panel reads this every frame it is open).
     fn backend_label(&self) -> Option<&'static str> {
         (self.backend_label != BACKEND_NOT_STARTED).then_some(self.backend_label)
+    }
+
+    /// The EP preference the *running* sessions were built with — the request
+    /// whose outcome `backend_label` above reports. `None` before `start`, in
+    /// lockstep with that label, so the panel never pairs a request with a
+    /// nonexistent result.
+    ///
+    /// This is the provider's own `MediaPipeConfig::backend`, seeded from the
+    /// settings dropdown when the provider was last built, not the live dropdown
+    /// value — see the trait method's doc for why the difference matters.
+    ///
+    /// A plain field read: no lock, no allocation.
+    fn backend_request(&self) -> Option<crate::settings::HandTrackingBackend> {
+        (self.backend_label != BACKEND_NOT_STARTED).then_some(self.config.backend)
     }
 
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {

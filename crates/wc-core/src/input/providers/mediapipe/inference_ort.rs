@@ -28,7 +28,7 @@
 
 use std::fmt::Display;
 #[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 use ort::ep::coreml::ComputeUnits;
@@ -68,7 +68,50 @@ pub struct OrtInference {
     /// fixed per model, so refilling this in place each frame (rather than
     /// `collect`ing a fresh `Vec`) keeps `run` off the per-frame allocator.
     input_shape: Vec<i64>,
+    /// This model's file name, for the demotion warning (`load` takes it as a
+    /// borrow; a mid-session failure needs it long after `load` returned).
+    model_name: String,
+    /// The operator's EP preference, needed at *run* time because only
+    /// [`HandTrackingBackend::Auto`] may demote — see [`should_demote_to_cpu`].
+    backend_pref: HandTrackingBackend,
+    /// The model bytes, retained **only** while a CPU demotion is still possible
+    /// (`Auto` + currently accelerated), so [`Self::demote_to_cpu`] can re-commit
+    /// the graph. ~4 MB per model; `None` — and the memory returned — for
+    /// `ForceCpu`/`ForceGpu`, for a session already on the CPU EP, and immediately
+    /// after a demotion is attempted, none of which can ever rebuild.
+    model_bytes: Option<Vec<u8>>,
+    /// Consecutive failed [`HandInference::run`] calls. Reset to 0 by any success;
+    /// the demotion trigger at
+    /// [`INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES`]. A `u32` increment on the
+    /// failure path and a store on the success path — the healthy hot path stays
+    /// allocation-free.
+    consecutive_run_failures: u32,
+    /// Whether the one-shot CPU demotion has been *used up* — set at load when
+    /// there was never anywhere to fall back to, and set before the rebuild is
+    /// attempted so that a rebuild which itself fails can never be retried.
+    /// This is the anti-flapping latch: see [`Self::demote_to_cpu`].
+    cpu_fallback_used: bool,
 }
+
+/// Consecutive failed inference runs before an `Auto` model demotes itself to the
+/// CPU execution provider ([`should_demote_to_cpu`]).
+///
+/// **Why 10.** The trigger has to sit above every transient and below any outage a
+/// human would notice, and inference runs at the worker's rate cap:
+///
+/// - *Above transients.* A single failed forward pass — a momentary GPU/ANE
+///   resource hiccup, a frame that raced a display re-enumeration — must never tear
+///   down and re-commit an ONNX graph. One is noise; ten in a row is not: a healthy
+///   EP does not fail ten consecutive frames and then recover.
+/// - *Below a human-visible outage.* At the 30 Hz inference cap, 10 consecutive
+///   failures is ≈0.33 s of dead hand tracking before recovery starts. Even under
+///   the 4 Hz idle throttle (`worker::IDLE_INFERENCE_HZ`, nobody watching) it is
+///   2.5 s — and the alternative, today's behaviour, is *eight hours* of dead
+///   tracking while the provider reports healthy.
+///
+/// The exact value is not delicate; anything in ~5–30 satisfies both. 10 is the
+/// round number in the middle.
+const INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES: u32 = 10;
 
 impl OrtInference {
     /// Load an ONNX model from its bytes, resolving its execution provider from
@@ -81,6 +124,15 @@ impl OrtInference {
     /// the GPU with [`HandTrackingBackend::ForceGpu`] — `load` rebuilds a fresh
     /// CPU-only session and returns [`BACKEND_CPU`], so one broken EP never costs
     /// all hand tracking. `model_name` names the failing model in the warning.
+    ///
+    /// On macOS an accelerated commit failure is *first* treated as a poisoned
+    /// on-disk `CoreML` artifact cache: the model's own cache directory is purged
+    /// and the accelerated commit retried exactly once
+    /// ([`commit_accelerated_recovering_cache`]) before any CPU degradation. The
+    /// cache key is a pure function of the model bytes, so without that purge a
+    /// corrupt entry fails identically on every launch — an unattended kiosk would
+    /// run hand tracking on the CPU *forever* off one bad write. One purge turns
+    /// that into one slow launch.
     ///
     /// [`HandTrackingBackend::ForceGpu`] is the strict counterpart, and it is
     /// strict about *both* ways an accelerator can go missing: a commit failure
@@ -107,30 +159,34 @@ impl OrtInference {
                 model_name,
                 platform_accelerator_label(),
                 plan.allow_cpu_fallback,
-                || commit_accelerated(model_bytes, plan.allow_cpu_fallback),
+                || {
+                    commit_accelerated_recovering_cache(
+                        model_name,
+                        model_bytes,
+                        plan.allow_cpu_fallback,
+                    )
+                },
                 || commit_cpu(model_bytes),
             )?
         } else {
             commit_cpu(model_bytes)?
         };
 
-        let input_name = session
-            .inputs()
-            .first()
-            .ok_or_else(|| InferenceError::Load("model has no inputs".into()))?
-            .name()
-            .to_owned();
-        let output_names = session
-            .outputs()
-            .iter()
-            .map(|o| o.name().to_owned())
-            .collect();
+        let (input_name, output_names) = session_io_names(&session)?;
+        // Retain the model bytes only while a mid-session CPU demotion is still
+        // reachable; otherwise drop them (and their ~4 MB) here.
+        let demotable = cpu_demotion_possible(backend, backend_label);
         Ok(Self {
             session,
             input_name,
             output_names,
             backend: backend_label,
             input_shape: Vec::new(),
+            model_name: model_name.to_owned(),
+            backend_pref: backend,
+            model_bytes: demotable.then(|| model_bytes.to_vec()),
+            consecutive_run_failures: 0,
+            cpu_fallback_used: !demotable,
         })
     }
 
@@ -146,6 +202,179 @@ impl OrtInference {
     pub fn backend(&self) -> &'static str {
         self.backend
     }
+
+    /// One forward pass, with no failure bookkeeping. [`HandInference::run`] wraps
+    /// this with the consecutive-failure counter and the CPU demotion.
+    fn run_once(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
+        // Refill the reused i64 shape buffer in place (ort shapes are i64; our
+        // usize dims convert infallibly for any realistic image/landmark tensor).
+        self.input_shape.clear();
+        for &d in &input.shape {
+            self.input_shape.push(
+                i64::try_from(d)
+                    .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?,
+            );
+        }
+        let in_tensor =
+            TensorRef::from_array_view((self.input_shape.as_slice(), input.data.as_slice()))
+                .map_err(run_err)?;
+
+        let outputs = self
+            .session
+            .run(ort::inputs![self.input_name.as_str() => in_tensor])
+            .map_err(run_err)?;
+
+        // Reuse `out`: size it to the output count, then refill each tensor's
+        // buffers in place, in declared order. `Shape` derefs to `[i64]`.
+        out.truncate(self.output_names.len());
+        while out.len() < self.output_names.len() {
+            out.push(Tensor::default());
+        }
+        for (slot, name) in out.iter_mut().zip(&self.output_names) {
+            let (shape, data) = outputs[name.as_str()]
+                .try_extract_tensor::<f32>()
+                .map_err(run_err)?;
+            slot.data.clear();
+            slot.data.extend_from_slice(data);
+            slot.shape.clear();
+            for &d in shape.iter() {
+                slot.shape.push(
+                    usize::try_from(d)
+                        .map_err(|e| InferenceError::Run(format!("bad output dim: {e}")))?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild this model's session on the CPU execution provider, abandoning the
+    /// accelerator for the rest of the process. Called **once**, on the failure
+    /// edge, when [`should_demote_to_cpu`] says a persistent inference failure has
+    /// outlived every transient explanation.
+    ///
+    /// Blocking and allocating (it re-commits an ONNX graph) and it runs on the
+    /// inference worker thread, which `AGENTS.md` forbids allocating on in steady
+    /// state. That is why this is a *one-shot edge*, not per-frame bookkeeping: the
+    /// healthy path costs one `u32` store, the failing path one `u32` increment, and
+    /// this function runs at most once in the life of the session.
+    ///
+    /// **No rebuild loop, by construction.** `cpu_fallback_used` is latched `true`
+    /// *before* the rebuild is attempted and is never cleared, so:
+    /// - a rebuild that **succeeds** leaves `backend == BACKEND_CPU`, and there is
+    ///   nowhere further to fall — [`should_demote_to_cpu`] refuses forever;
+    /// - a rebuild that **fails** leaves the broken accelerated session in place and
+    ///   still refuses forever — the model degrades to per-frame errors exactly as
+    ///   it did before this existed, rather than re-committing an ONNX graph on the
+    ///   worker thread every ten frames for the rest of an 8-hour soak.
+    ///
+    /// This is the flap the audio supervisor hit, closed the same way: the recovery
+    /// is one-way, so a source that fails, recovers, and fails again cannot pump it.
+    fn demote_to_cpu(&mut self, err: &InferenceError) {
+        // Latch FIRST — before anything that can fail — so no path re-enters.
+        self.cpu_fallback_used = true;
+        // `take`: a demotion consumes the retained bytes, returning their ~4 MB.
+        let Some(bytes) = self.model_bytes.take() else {
+            return;
+        };
+        tracing::warn!(
+            model = %self.model_name,
+            ep = self.backend,
+            failures = self.consecutive_run_failures,
+            %err,
+            "inference has failed on the accelerated execution provider for \
+             {INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES} consecutive frames; rebuilding this \
+             model on the CPU execution provider (a persistent EP failure at inference time is \
+             otherwise unrecoverable — it would error every frame for the rest of the session \
+             while the provider reported healthy)"
+        );
+        match commit_cpu(&bytes) {
+            Ok((session, label)) => match session_io_names(&session) {
+                Ok((input_name, output_names)) => {
+                    self.session = session;
+                    self.input_name = input_name;
+                    self.output_names = output_names;
+                    self.backend = label;
+                    tracing::warn!(
+                        model = %self.model_name,
+                        backend = label,
+                        "this model is now running on the CPU execution provider — hand tracking \
+                         survives, but hotter and slower than a healthy GPU session; the settings \
+                         panel's backend row shows the degraded mixed state"
+                    );
+                }
+                Err(e) => tracing::error!(
+                    model = %self.model_name,
+                    "CPU rebuild committed but its input/output names could not be read ({e}); \
+                     keeping the failing accelerated session — hand tracking is down for this model"
+                ),
+            },
+            Err(e) => tracing::error!(
+                model = %self.model_name,
+                "CPU rebuild FAILED ({e}) after a persistent accelerated inference failure; \
+                 there is no further fallback and none will be attempted — hand tracking is down \
+                 for this model"
+            ),
+        }
+    }
+}
+
+/// Whether this session could still demote itself to the CPU EP later: only an
+/// [`HandTrackingBackend::Auto`] session that actually reached an accelerator has
+/// anywhere to fall.
+///
+/// [`HandTrackingBackend::ForceGpu`] must **not** demote — it is the A/B control,
+/// and it is *supposed* to fail loudly rather than quietly become the CPU run it
+/// exists to rule out (the same reasoning as [`accelerator_missing_under_force`]).
+/// [`HandTrackingBackend::ForceCpu`] and an `Auto` session that already landed on
+/// [`BACKEND_CPU`] are on the CPU already.
+fn cpu_demotion_possible(backend: HandTrackingBackend, label: &'static str) -> bool {
+    ep_plan(backend).allow_cpu_fallback && label != BACKEND_CPU
+}
+
+/// Whether a persistently failing model should now be rebuilt on the CPU EP.
+///
+/// The whole inference-time demotion decision, as a pure function of the three
+/// things it depends on — so it is unit-testable with no GPU EP present (there are
+/// none in CI), exactly like [`ep_plan`]:
+///
+/// - `consecutive_failures`: only a *persistent* failure demotes
+///   ([`INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES`]); a one-off hiccup must never
+///   tear down and re-commit an ONNX graph on the worker thread.
+/// - `backend`: only [`HandTrackingBackend::Auto`] demotes (see
+///   [`cpu_demotion_possible`]).
+/// - `cpu_fallback_used`: the one-shot latch. Once the CPU rebuild has been
+///   *attempted*, this is `true` forever, so no later failure can start another —
+///   there is nowhere left to fall back to, and a rebuild loop on a continuously
+///   failing model is the flapping hazard this guards.
+fn should_demote_to_cpu(
+    consecutive_failures: u32,
+    backend: HandTrackingBackend,
+    cpu_fallback_used: bool,
+) -> bool {
+    !cpu_fallback_used
+        && ep_plan(backend).allow_cpu_fallback
+        && consecutive_failures >= INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES
+}
+
+/// The model's input name and its outputs in declared order.
+///
+/// Shared by [`OrtInference::load`] and the CPU rebuild in
+/// [`OrtInference::demote_to_cpu`]: the rebuilt session is the same graph, but the
+/// names are re-read from it rather than carried over, so the struct can never
+/// describe a session it no longer holds.
+fn session_io_names(session: &Session) -> Result<(String, Vec<String>), InferenceError> {
+    let input_name = session
+        .inputs()
+        .first()
+        .ok_or_else(|| InferenceError::Load("model has no inputs".into()))?
+        .name()
+        .to_owned();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|o| o.name().to_owned())
+        .collect();
+    Ok((input_name, output_names))
 }
 
 /// How a [`HandTrackingBackend`] preference resolves into the two independent
@@ -274,14 +503,12 @@ fn base_builder() -> Result<SessionBuilder, InferenceError> {
         .map_err(load_err)
 }
 
-/// Build the platform-accelerated session and commit it, returning the committed
-/// session and the registered backend label.
+/// Build the platform-accelerated `SessionBuilder` (EP registered, session
+/// options applied), returning it with the backend label that registered.
 ///
 /// On Windows this also applies the `DirectML` session options
 /// (`configure_accelerator_session`); on Linux [`register_accelerator`] is a
-/// no-op and the label is [`BACKEND_CPU`]. `commit_from_memory` consumes the
-/// builder, which is why the CPU fallback in [`OrtInference::load`] rebuilds a
-/// fresh one rather than reusing this.
+/// no-op and the label is [`BACKEND_CPU`].
 ///
 /// `allow_cpu_fallback` is the plan's fallback flag, and it also decides what an
 /// EP that *fails to register* means: with a fallback allowed (`Auto`) a soft
@@ -289,10 +516,19 @@ fn base_builder() -> Result<SessionBuilder, InferenceError> {
 /// unaccelerated; with it forbidden ([`HandTrackingBackend::ForceGpu`]) the
 /// missing accelerator is an error rather than a silently unaccelerated session
 /// reported as a success (see [`accelerator_missing_under_force`]).
-fn commit_accelerated(
+///
+/// Split from the commit so that **every** commit attempt starts from a *fresh*
+/// builder: the first one, the post-cache-purge retry in
+/// [`commit_accelerated_recovering_cache`], and the CPU rebuild in
+/// [`OrtInference::load`]. That is not cosmetic — the purge deletes the very
+/// directory this builder's `CoreML` EP was registered against, so the retry must
+/// re-register the EP against the freshly re-created cache dir rather than reuse a
+/// builder holding the stale one (and `ort` guarantees nothing about a builder
+/// whose commit has already failed).
+fn accelerated_builder(
     model_bytes: &[u8],
     allow_cpu_fallback: bool,
-) -> Result<(Session, &'static str), InferenceError> {
+) -> Result<(SessionBuilder, &'static str), InferenceError> {
     let mut builder = base_builder()?;
     #[cfg(target_os = "windows")]
     {
@@ -311,15 +547,134 @@ fn commit_accelerated(
             platform_accelerator_label()
         )));
     }
+    Ok((builder, label))
+}
+
+/// Build the platform-accelerated session and commit it, returning the committed
+/// session and the registered backend label.
+fn commit_accelerated(
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+) -> Result<(Session, &'static str), InferenceError> {
+    let (mut builder, label) = accelerated_builder(model_bytes, allow_cpu_fallback)?;
     let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
     Ok((session, label))
+}
+
+/// [`commit_accelerated`], with one macOS-only recovery step in front of the CPU
+/// degradation: treat a commit failure as a **poisoned `CoreML` artifact cache**,
+/// purge that one model's cache directory, and retry the accelerated commit
+/// exactly once.
+///
+/// Why this exists: [`coreml_cache_dir`] keys the compiled-artifact cache by a
+/// hash of the model bytes, so a corrupt entry produces the *same* commit failure
+/// on every launch, forever (empirically: a garbled `.mlmodelc` fails session
+/// creation with `Failed to create MLModel … Unable to load model`). Under
+/// [`HandTrackingBackend::Auto`] the EP fallback would then dutifully degrade that
+/// model to the CPU on every launch, and an unattended kiosk would run hand
+/// tracking unaccelerated for the rest of its life with one startup `warn!` as the
+/// only evidence. A poisoned cache is not hypothetical here — a *stale* one was the
+/// root cause of the historical `output_features has no value` crash (see
+/// `docs/runbooks/onnx-coreml-model-surgery.md`).
+///
+/// **Exactly one retry.** A retry *loop* against a genuinely broken EP would delete
+/// and recompile the `CoreML` artifact on every launch forever; one retry
+/// distinguishes "cache was poisoned, we recovered" from "the GPU EP is broken on
+/// this box" and then lets the caller degrade.
+///
+/// The build-time failure that [`accelerated_builder`] raises (`ForceGpu` with no
+/// accelerator registered) is deliberately **not** cache-recovered: no commit ran,
+/// so no cache is implicated and there is nothing to purge.
+///
+/// Non-macOS targets have no EP artifact cache in this code, so this is a
+/// transparent pass-through to [`commit_accelerated`].
+fn commit_accelerated_recovering_cache(
+    model_name: &str,
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+) -> Result<(Session, &'static str), InferenceError> {
+    let (mut builder, label) = accelerated_builder(model_bytes, allow_cpu_fallback)?;
+    match builder.commit_from_memory(model_bytes).map_err(load_err) {
+        Ok(session) => Ok((session, label)),
+        Err(first_err) => {
+            retry_after_cache_purge(model_name, model_bytes, allow_cpu_fallback, first_err)
+        }
+    }
+}
+
+/// Purge this model's `CoreML` artifact cache and retry the accelerated commit
+/// once; on a second failure (or when there was no purgeable cache to blame)
+/// return the error so [`load_with_ep_fallback`] can degrade to the CPU EP.
+///
+/// The three `warn!` lines here are the operator's whole diagnosis: they name the
+/// model and the exact cache directory, say that it was purged, and say whether
+/// the retry then *recovered the accelerator* or *failed again* — which is the
+/// difference between "one bad cache write, self-healed" and "the GPU EP is
+/// genuinely broken on this host, investigate the driver/OS".
+#[cfg(target_os = "macos")]
+fn retry_after_cache_purge(
+    model_name: &str,
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+    first_err: InferenceError,
+) -> Result<(Session, &'static str), InferenceError> {
+    let Some(dir) = purge_model_cache(model_bytes) else {
+        // Nothing was purged — no cache directory (caching unavailable), or the
+        // computed path failed the guard. Either way a poisoned cache cannot be
+        // the explanation, so do not retry: degrade (or, under ForceGpu, fail).
+        return Err(first_err);
+    };
+    tracing::warn!(
+        model = model_name,
+        cache_dir = %dir.display(),
+        err = %first_err,
+        "CoreML accelerated commit failed; purged this model's compiled-artifact cache \
+         directory and retrying the accelerated commit once (a corrupt cache entry would \
+         otherwise fail identically on every launch, degrading this model to the CPU forever)"
+    );
+    match commit_accelerated(model_bytes, allow_cpu_fallback) {
+        Ok(loaded) => {
+            tracing::warn!(
+                model = model_name,
+                cache_dir = %dir.display(),
+                "CoreML cache was poisoned; the purge + recompile RECOVERED the accelerated \
+                 session — this launch is slower (the artifact recompiled), later launches are not"
+            );
+            Ok(loaded)
+        }
+        Err(retry_err) => {
+            tracing::warn!(
+                model = model_name,
+                cache_dir = %dir.display(),
+                err = %retry_err,
+                "CoreML accelerated commit failed AGAIN on a freshly purged cache — the GPU \
+                 execution provider is broken on this host, not merely cache-poisoned; this \
+                 model degrades to the CPU execution provider (unless pinned to ForceGpu, \
+                 which fails loudly instead)"
+            );
+            Err(retry_err)
+        }
+    }
+}
+
+/// No on-disk EP artifact cache on this target: a commit failure is the final
+/// word, and the caller degrades to the CPU EP exactly as before.
+#[cfg(not(target_os = "macos"))]
+fn retry_after_cache_purge(
+    _model_name: &str,
+    _model_bytes: &[u8],
+    _allow_cpu_fallback: bool,
+    first_err: InferenceError,
+) -> Result<(Session, &'static str), InferenceError> {
+    Err(first_err)
 }
 
 /// Build a CPU-only session (no GPU EP registered) and commit it.
 ///
 /// Used both for [`HandTrackingBackend::ForceCpu`] and as the fallback when an
-/// accelerated commit fails. Starts from a fresh [`base_builder`] because the
-/// accelerated builder was consumed by its failed commit.
+/// accelerated commit fails. Starts from a fresh [`base_builder`]: the failed
+/// accelerated builder still has the GPU EP registered on it, so rebuilding — not
+/// reusing — is what makes this session genuinely CPU-only.
 fn commit_cpu(model_bytes: &[u8]) -> Result<(Session, &'static str), InferenceError> {
     let session = base_builder()?
         .commit_from_memory(model_bytes)
@@ -445,33 +800,65 @@ fn model_cache_key(model_bytes: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[cfg(all(target_os = "macos", test))]
+thread_local! {
+    /// Test-only override of the `CoreML` cache root ([`coreml_cache_root`]).
+    ///
+    /// The on-disk cache is off by default under `cfg(test)` (see
+    /// [`coreml_cache_root`]); the poisoned-cache recovery regression needs it on,
+    /// so it points this at its own temp directory — never the real user cache.
+    ///
+    /// Deliberately **thread-local**, not a process global: under a plain
+    /// `cargo test` (one process, tests on threads) a global would switch the
+    /// cache on for every *other* concurrently-running test too, resurrecting
+    /// exactly the parallel cache-population race [`coreml_cache_root`] documents.
+    /// A thread-local is scoped to the one test that opted in, under either runner.
+    static CACHE_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Root directory holding every model's `CoreML` artifact cache:
+/// `<user cache>/waveconductor/coreml-cache`. Each model gets exactly one
+/// directory *directly* beneath it, named by [`model_cache_key`].
+///
+/// This is the single source of truth for that root. [`coreml_cache_dir`] (which
+/// creates a model's directory) and [`purge_model_cache`] (which deletes it) both
+/// derive from here, so the delete can never be aimed at a path the create never
+/// produced — see [`is_purgeable_model_cache_dir`].
+///
+/// `None` under `cfg(test)` unless a test overrides it: the unit tests load the
+/// same model from many parallel `nextest` processes, and ONNX Runtime's `CoreML`
+/// EP is not safe against two of them populating the shared cache directory at
+/// once (the loser of the move-into-place race fails with "an item with the same
+/// name already exists"). A test loads each model once, so the cache buys nothing,
+/// and skipping it also keeps tests out of the real user cache dir. Production
+/// keeps the cache for fast startup, where each model is loaded exactly once.
+#[cfg(target_os = "macos")]
+fn coreml_cache_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    let root = CACHE_ROOT_OVERRIDE.with(|root| root.borrow().clone());
+    #[cfg(not(test))]
+    let root = Some(
+        dirs::cache_dir()?
+            .join("waveconductor")
+            .join("coreml-cache"),
+    );
+    root
+}
+
 /// Resolve the on-disk `CoreML` model-cache directory for a specific model
-/// (`<cache>/waveconductor/coreml-cache/<model-key>`), creating it if absent.
+/// (`<coreml-cache-root>/<model-key>`), creating it if absent.
 ///
 /// The per-model `<model-key>` ([`model_cache_key`]) is what makes reusing the
 /// cache across model revisions safe — see that function for why a directory
 /// shared between models corrupts after a model change.
 ///
-/// Disabled under `cfg(test)`: the unit tests load the same model from many
-/// parallel processes, and ONNX Runtime's `CoreML` EP is not safe against two of
-/// them populating the shared cache directory at once (the loser of the
-/// move-into-place race fails with "an item with the same name already exists").
-/// A test loads each model once, so the cache buys nothing, and skipping it also
-/// keeps tests from writing into the real user cache dir. Production (non-test)
-/// keeps the cache for fast startup, where each model is loaded exactly once.
-///
-/// Returns `None` when caching is disabled, no cache dir is available, or it
-/// cannot be created; the caller then loads without a cache (recompiling the
-/// Core ML artifact each run) rather than failing.
+/// Returns `None` when caching is disabled ([`coreml_cache_root`]), no cache dir
+/// is available, or it cannot be created; the caller then loads without a cache
+/// (recompiling the Core ML artifact each run) rather than failing.
 #[cfg(target_os = "macos")]
 fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
-    if cfg!(test) {
-        return None;
-    }
-    let dir = dirs::cache_dir()?
-        .join("waveconductor")
-        .join("coreml-cache")
-        .join(model_cache_key(model_bytes));
+    let dir = coreml_cache_root()?.join(model_cache_key(model_bytes));
     match std::fs::create_dir_all(&dir) {
         Ok(()) => Some(dir),
         Err(e) => {
@@ -481,8 +868,65 @@ fn coreml_cache_dir(model_bytes: &[u8]) -> Option<PathBuf> {
     }
 }
 
+/// Whether `dir` is safe to hand to `remove_dir_all` as one model's `CoreML`
+/// artifact cache. **The guard on a recursive delete under the user's cache
+/// directory** — a bug here removes something it shouldn't, so it is a separate,
+/// directly-tested predicate rather than an inline condition.
+///
+/// All three conditions must hold:
+///
+/// 1. `dir`'s parent is *exactly* `root` — one component below the cache root, so
+///    neither the root itself nor anything deeper or outside it can be passed.
+/// 2. `dir` has a real final component. `Path::file_name` is `None` for a path
+///    ending in `..` or `/`, which is what stops a lexical `root/..` (whose
+///    `parent()` *is* `root`) from qualifying.
+/// 3. `dir` is a real directory *and not a symlink*: `symlink_metadata` does not
+///    follow links, so a symlink planted in the cache root can never redirect the
+///    delete at its target.
+///
+/// A path failing any of these is not deleted; the caller logs and degrades.
+#[cfg(target_os = "macos")]
+fn is_purgeable_model_cache_dir(dir: &Path, root: &Path) -> bool {
+    dir.parent() == Some(root)
+        && dir.file_name().is_some()
+        && std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+/// Delete one model's `CoreML` artifact cache directory, returning the purged
+/// path (`None` if nothing was purged).
+///
+/// The path is derived from [`coreml_cache_dir`] — *the same function that
+/// created it* — never re-assembled by hand, and is then re-checked against
+/// [`is_purgeable_model_cache_dir`] before the recursive delete. A path that fails
+/// the guard is logged and left alone.
+#[cfg(target_os = "macos")]
+fn purge_model_cache(model_bytes: &[u8]) -> Option<PathBuf> {
+    let root = coreml_cache_root()?;
+    let dir = coreml_cache_dir(model_bytes)?;
+    if !is_purgeable_model_cache_dir(&dir, &root) {
+        tracing::warn!(
+            "refusing to purge CoreML cache path {} — it is not a directory sitting directly \
+             under the cache root {}; leaving it alone and degrading this model instead",
+            dir.display(),
+            root.display()
+        );
+        return None;
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            tracing::warn!(
+                "could not purge CoreML cache dir {}: {e}; degrading this model instead",
+                dir.display()
+            );
+            None
+        }
+    }
+}
+
 impl HandInference for OrtInference {
-    /// Run one stage.
+    /// Run one stage, and recover from a *persistently* failing execution provider
+    /// by demoting this model to the CPU EP.
     ///
     /// Allocation-free on the steady-state hot path. The input is bound as a
     /// borrowed [`TensorRef`] view over the pipeline's reused per-frame input
@@ -495,46 +939,57 @@ impl HandInference for OrtInference {
     ///
     /// Outputs are written in the model's **declared output order** (see the
     /// struct doc), which the landmark stage selects by index.
+    ///
+    /// **The recovery.** A GPU EP that fails at *inference* (rather than at commit,
+    /// which [`OrtInference::load`] already handles) has until now been terminal:
+    /// the worker counts the error, pushes it, and runs the identical failing
+    /// forward pass on the next frame — every frame, for the whole session — while
+    /// the provider still reports `Streaming`. That is the historical `CoreML`
+    /// failure mode (`output_features has no value`; see
+    /// `docs/runbooks/onnx-coreml-model-surgery.md`). So: a success resets the
+    /// consecutive-failure counter; [`INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES`]
+    /// failures in a row on an [`HandTrackingBackend::Auto`] session
+    /// ([`should_demote_to_cpu`]) rebuild the model on the CPU EP once
+    /// ([`OrtInference::demote_to_cpu`]) and retry the failing frame on it. The
+    /// demotion is one-way and one-shot, so there is no rebuild loop.
+    ///
+    /// The demotion is *not* laundered into looking healthy: [`Self::backend_label`]
+    /// starts reporting [`BACKEND_CPU`], which the provider folds into the mixed
+    /// `"ort/CoreML+CPU"` label and the settings panel renders amber.
     fn run(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
-        // Refill the reused i64 shape buffer in place (ort shapes are i64; our
-        // usize dims convert infallibly for any realistic image/landmark tensor).
-        self.input_shape.clear();
-        for &d in &input.shape {
-            self.input_shape.push(
-                i64::try_from(d)
-                    .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?,
-            );
-        }
-        let in_tensor =
-            TensorRef::from_array_view((self.input_shape.as_slice(), input.data.as_slice()))
-                .map_err(run_err)?;
-
-        let outputs = self
-            .session
-            .run(ort::inputs![self.input_name.as_str() => in_tensor])
-            .map_err(run_err)?;
-
-        // Reuse `out`: size it to the output count, then refill each tensor's
-        // buffers in place, in declared order. `Shape` derefs to `[i64]`.
-        out.truncate(self.output_names.len());
-        while out.len() < self.output_names.len() {
-            out.push(Tensor::default());
-        }
-        for (slot, name) in out.iter_mut().zip(&self.output_names) {
-            let (shape, data) = outputs[name.as_str()]
-                .try_extract_tensor::<f32>()
-                .map_err(run_err)?;
-            slot.data.clear();
-            slot.data.extend_from_slice(data);
-            slot.shape.clear();
-            for &d in shape.iter() {
-                slot.shape.push(
-                    usize::try_from(d)
-                        .map_err(|e| InferenceError::Run(format!("bad output dim: {e}")))?,
-                );
+        match self.run_once(input, out) {
+            Ok(()) => {
+                // The whole cost of the healthy path: one store, no allocation.
+                self.consecutive_run_failures = 0;
+                Ok(())
+            }
+            Err(err) => {
+                self.consecutive_run_failures = self.consecutive_run_failures.saturating_add(1);
+                if !should_demote_to_cpu(
+                    self.consecutive_run_failures,
+                    self.backend_pref,
+                    self.cpu_fallback_used,
+                ) {
+                    return Err(err);
+                }
+                self.demote_to_cpu(&err);
+                // Retry this frame on the rebuilt session. If the rebuild failed,
+                // `run_once` simply fails again on the old session — and the latch
+                // in `demote_to_cpu` guarantees we never try to rebuild a second
+                // time, however many frames keep failing.
+                let retried = self.run_once(input, out);
+                if retried.is_ok() {
+                    self.consecutive_run_failures = 0;
+                }
+                retried
             }
         }
-        Ok(())
+    }
+
+    /// The EP this model is running on right now — [`BACKEND_CPU`] after a
+    /// mid-session demotion, whatever [`OrtInference::load`] registered before one.
+    fn backend_label(&self) -> Option<&'static str> {
+        Some(self.backend)
     }
 }
 
@@ -564,6 +1019,152 @@ mod tests {
             v1,
             model_cache_key(b"palm-model-rev-1"),
             "the same model bytes must map to the same cache key"
+        );
+    }
+
+    /// Point this thread's `CoreML` artifact cache at `root` for the rest of the
+    /// test (thread-local — see [`CACHE_ROOT_OVERRIDE`]).
+    #[cfg(target_os = "macos")]
+    fn use_cache_root(root: &Path) {
+        CACHE_ROOT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(root.to_path_buf()));
+    }
+
+    /// Overwrite every regular file under `dir` with garbage, keeping the tree
+    /// shape — the shape a half-written / truncated cache entry leaves behind.
+    /// Returns how many files were poisoned.
+    #[cfg(target_os = "macos")]
+    fn poison_every_file(dir: &Path) -> usize {
+        let mut poisoned = 0;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            for entry in std::fs::read_dir(&next).expect("read cache dir") {
+                let path = entry.expect("cache dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    std::fs::write(&path, b"POISONED").expect("poison cache file");
+                    poisoned += 1;
+                }
+            }
+        }
+        poisoned
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_purge_guard_only_accepts_a_model_dir_directly_under_the_cache_root() {
+        // This predicate gates a `remove_dir_all` under the user's cache
+        // directory, so every way of aiming it somewhere else must be refused.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path().join("coreml-cache");
+        let model = root.join("0123456789abcdef");
+        let victim = tmp.path().join("precious"); // OUTSIDE the cache root
+        std::fs::create_dir_all(model.join("0_dynamic_nn")).expect("model cache tree");
+        std::fs::create_dir_all(&victim).expect("victim dir");
+        std::fs::write(root.join("stray_file"), b"x").expect("stray file");
+        std::os::unix::fs::symlink(&victim, root.join("evil_link")).expect("symlink");
+
+        assert!(
+            is_purgeable_model_cache_dir(&model, &root),
+            "the real per-model cache dir is exactly what may be purged"
+        );
+        for (path, why) in [
+            (root.clone(), "the cache root itself must never be deleted"),
+            (
+                model.join("0_dynamic_nn"),
+                "a path deeper than one component below the root",
+            ),
+            (
+                root.join(".."),
+                "a lexical `..` escape — its parent() IS the root, so only the \
+                 file_name check refuses it",
+            ),
+            (victim.clone(), "a path outside the cache root entirely"),
+            (root.join("stray_file"), "a file, not a directory"),
+            (
+                root.join("evil_link"),
+                "a symlink — the delete must never follow it to its target",
+            ),
+            (root.join("never_created"), "a path that does not exist"),
+        ] {
+            assert!(
+                !is_purgeable_model_cache_dir(&path, &root),
+                "{}: {why}",
+                path.display()
+            );
+        }
+        // The symlink's target survived the guard being asked about it.
+        assert!(victim.is_dir(), "the guard must not touch anything");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_poisoned_coreml_cache_is_purged_and_the_accelerated_commit_recovers() {
+        // The hole this closes: the CoreML cache key is a pure function of the
+        // model bytes, so a corrupt entry fails the accelerated commit
+        // IDENTICALLY on every launch (empirically: "Failed to create MLModel …
+        // Unable to load model"). Under Auto the EP fallback would then degrade
+        // this model to the CPU on every launch, forever — an unattended kiosk
+        // running hand tracking unaccelerated for its whole life off one bad
+        // write. The purge + single retry must recover the accelerator instead.
+        //
+        // Uses a temp cache root (thread-local override), never the user's.
+        let tmp = tempfile::tempdir().expect("temp cache root");
+        use_cache_root(tmp.path());
+        let bytes = model_bytes("palm_detection.onnx");
+
+        // Cold load: compiles the CoreML artifact and populates the cache.
+        let cold = OrtInference::load(&bytes, HandTrackingBackend::Auto, "palm_detection.onnx")
+            .expect("cold load");
+        assert_eq!(
+            cold.backend(),
+            BACKEND_COREML,
+            "premise: the cold load must reach CoreML, or this test proves nothing"
+        );
+        drop(cold);
+
+        let dir = coreml_cache_dir(&bytes).expect("the cache dir the cold load wrote");
+        let poisoned = poison_every_file(&dir);
+        assert!(
+            poisoned > 0,
+            "the CoreML EP wrote no cache artifacts to {} — nothing to poison, so this \
+             test would pass vacuously",
+            dir.display()
+        );
+
+        // Warm load over the poisoned cache: the accelerated commit fails, the
+        // cache dir is purged, and the retry recompiles and lands on CoreML.
+        // Without the purge this would return BACKEND_CPU — every launch.
+        let recovered =
+            OrtInference::load(&bytes, HandTrackingBackend::Auto, "palm_detection.onnx")
+                .expect("load over a poisoned cache");
+        assert_eq!(
+            recovered.backend(),
+            BACKEND_COREML,
+            "a poisoned CoreML cache must be purged and the accelerated commit retried — \
+             degrading to the CPU here is the permanent-silent-CPU kiosk failure"
+        );
+    }
+
+    /// The settings panel's degraded-backend verdict
+    /// (`settings::panel_user::provider_status::backend_degradation`) is compiled
+    /// on every target, including builds without this feature, so it cannot name
+    /// these constants: it matches the CPU label as a literal and asks
+    /// `input::provider::platform_has_gpu_execution_provider()` whether this host
+    /// ever had an accelerator to lose. Both of those are restatements of things
+    /// defined here, so pin them — if they drift, a kiosk with *both* models on the
+    /// CPU stops showing the amber row and looks perfectly healthy again.
+    #[test]
+    fn the_labels_the_settings_panel_matches_on_still_hold() {
+        assert_eq!(
+            BACKEND_CPU, "ort/CPU",
+            "the panel matches this label as a literal"
+        );
+        assert_eq!(
+            platform_accelerator_label() != BACKEND_CPU,
+            crate::input::provider::platform_has_gpu_execution_provider(),
+            "the panel's platform-accelerator predicate must agree with this \
+             module's per-target EP choice"
         );
     }
 
@@ -838,6 +1439,188 @@ mod tests {
         assert!(
             presence < 0.5,
             "presence {presence} on an empty (all-zeros) input should be < 0.5"
+        );
+    }
+
+    #[test]
+    fn demotion_needs_a_persistent_failure_on_an_auto_session_that_has_not_demoted() {
+        use HandTrackingBackend::{Auto, ForceCpu, ForceGpu};
+        const N: u32 = INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES;
+
+        // A transient must never tear down and re-commit an ONNX graph on the
+        // worker thread: below the threshold, nothing happens.
+        for failures in [0, 1, N - 1] {
+            assert!(
+                !should_demote_to_cpu(failures, Auto, false),
+                "{failures} consecutive failures is a transient, not a broken EP"
+            );
+        }
+        // A persistent failure on an Auto session that still has the CPU in
+        // reserve: demote.
+        for failures in [N, N + 1, u32::MAX] {
+            assert!(
+                should_demote_to_cpu(failures, Auto, false),
+                "{failures} consecutive failures is a dead EP — rebuild on the CPU"
+            );
+        }
+        // ForceGpu is the A/B *control*: it is supposed to fail loudly, not
+        // quietly become the CPU session the operator pinned the setting to rule
+        // out. ForceCpu is already on the CPU and can never reach this path.
+        for backend in [ForceGpu, ForceCpu] {
+            assert!(
+                !should_demote_to_cpu(u32::MAX, backend, false),
+                "{backend:?} must never demote — only Auto does"
+            );
+        }
+        // The anti-flapping latch: once the one CPU rebuild has been ATTEMPTED
+        // (whether it succeeded or failed), no later failure may start another.
+        // Without this, a model that keeps failing would re-commit an ONNX graph
+        // on the worker thread every N frames for the rest of an 8-hour soak.
+        assert!(
+            !should_demote_to_cpu(u32::MAX, Auto, true),
+            "the CPU fallback is one-shot — a used latch must never rebuild again"
+        );
+    }
+
+    #[test]
+    fn only_an_accelerated_auto_session_retains_the_bytes_needed_to_demote() {
+        // The retained model bytes (~4 MB) are the price of being able to rebuild
+        // on the CPU; a session that can never demote must not pay it, and must
+        // start with the latch already spent.
+        assert!(cpu_demotion_possible(
+            HandTrackingBackend::Auto,
+            BACKEND_COREML
+        ));
+        assert!(cpu_demotion_possible(
+            HandTrackingBackend::Auto,
+            BACKEND_DIRECTML
+        ));
+        assert!(
+            !cpu_demotion_possible(HandTrackingBackend::Auto, BACKEND_CPU),
+            "already on the CPU EP — there is nowhere to fall back to"
+        );
+        assert!(
+            !cpu_demotion_possible(HandTrackingBackend::ForceGpu, BACKEND_COREML),
+            "ForceGpu must fail loudly, never silently degrade"
+        );
+        assert!(!cpu_demotion_possible(
+            HandTrackingBackend::ForceCpu,
+            BACKEND_CPU
+        ));
+    }
+
+    #[test]
+    fn a_persistently_failing_ep_demotes_the_model_to_the_cpu_and_keeps_tracking_alive() {
+        // The hole this closes: an EP failure at INFERENCE time (the historical
+        // CoreML `output_features has no value`) had zero coverage — the worker
+        // would count the error and run the identical failing forward pass every
+        // frame, forever, while the provider reported healthy. A persistent
+        // failure must instead rebuild this model on the CPU EP, once.
+        //
+        // The persistent failure is induced with a shape ONNX Runtime rejects on
+        // every call (a real `InferenceError::Run` out of `session.run`, not a
+        // mock): the demotion path cannot tell one un-runnable session from
+        // another, which is the point — it reacts to persistence, not to a
+        // specific error string.
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
+        let started_accelerated = model.backend() != BACKEND_CPU;
+
+        let bad_input = Tensor::zeros(vec![1, 192, 192, 3]); // landmark wants 224²
+        let mut out = Vec::new();
+        for i in 0..INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES {
+            assert!(
+                model.run(&bad_input, &mut out).is_err(),
+                "the wrong-shape input must fail on every call (failure {i})"
+            );
+        }
+
+        assert_eq!(
+            model.backend(),
+            BACKEND_CPU,
+            "after {INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES} consecutive inference \
+             failures the model must have been rebuilt on the CPU EP"
+        );
+        assert_eq!(
+            HandInference::backend_label(&model),
+            Some(BACKEND_CPU),
+            "the demotion must be OBSERVABLE — this is what lights the settings \
+             panel's amber degraded-backend row"
+        );
+        // Hand tracking survives the demotion: the rebuilt CPU session runs the
+        // real input shape and yields the declared output set.
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
+            .expect("the demoted CPU session must still run the model");
+        assert_eq!(out.len(), 4, "the rebuilt session is the same graph");
+
+        // No rebuild loop: the latch is spent, so a further persistent failure
+        // cannot trigger a second re-commit (there is nowhere left to fall).
+        assert!(
+            model.cpu_fallback_used,
+            "the one-shot CPU fallback must be latched after use"
+        );
+        assert!(
+            model.model_bytes.is_none(),
+            "the retained model bytes are released once the demotion is spent"
+        );
+        for _ in 0..(INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES * 3) {
+            assert!(model.run(&bad_input, &mut out).is_err());
+        }
+        assert!(
+            !should_demote_to_cpu(
+                model.consecutive_run_failures,
+                model.backend_pref,
+                model.cpu_fallback_used
+            ),
+            "a model that keeps failing after demotion must never rebuild again"
+        );
+        assert_eq!(model.backend(), BACKEND_CPU);
+
+        // Sanity on hosts with a GPU EP (macOS here): the session really did start
+        // accelerated, so the assertions above are about a genuine demotion rather
+        // than a session that was on the CPU all along.
+        #[cfg(target_os = "macos")]
+        assert!(
+            started_accelerated,
+            "premise: macOS must load this model on CoreML, or this test proves nothing"
+        );
+        let _ = started_accelerated;
+    }
+
+    #[test]
+    fn a_single_transient_failure_does_not_demote_or_stick() {
+        // One bad frame must not tear down the session, and must not leave a
+        // latent failure count that makes the next 9 bad frames demote a healthy
+        // model: any success resets the counter.
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
+        let loaded_on = model.backend();
+        let mut out = Vec::new();
+
+        assert!(model
+            .run(&Tensor::zeros(vec![1, 192, 192, 3]), &mut out)
+            .is_err());
+        assert_eq!(model.consecutive_run_failures, 1);
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
+            .expect("a good frame after a bad one");
+        assert_eq!(
+            model.consecutive_run_failures, 0,
+            "a success must reset the consecutive-failure count"
+        );
+        assert_eq!(
+            model.backend(),
+            loaded_on,
+            "a single transient failure must not rebuild the session"
         );
     }
 

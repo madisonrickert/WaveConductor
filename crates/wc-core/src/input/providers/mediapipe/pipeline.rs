@@ -448,6 +448,20 @@ impl Pipeline {
         self.last_diagnostics
     }
 
+    /// The execution provider each stage is running on *right now*
+    /// (palm, landmark), or `None` per stage for a backend with no EP concept (the
+    /// test mocks) — see [`HandInference::backend_label`].
+    ///
+    /// Read live rather than latched at load because a stage can **demote itself to
+    /// the CPU EP mid-session** when its accelerator fails inference persistently.
+    /// The worker samples this each processed frame and ships it to the provider, so
+    /// a degradation that happens at hour three of a soak still reaches the settings
+    /// panel's amber backend row. Two `Copy` field reads: no lock, no allocation.
+    #[must_use]
+    pub fn backend_labels(&self) -> (Option<&'static str>, Option<&'static str>) {
+        (self.palm.backend_label(), self.landmark.backend_label())
+    }
+
     /// Run one frame through both stages and return the tracked hands.
     ///
     /// `dt` is the time since the previous processed frame (for palm velocity).
