@@ -351,10 +351,13 @@ fn start_worker(
         recycle: recycle_tx,
         tuning,
         // Fixed defaults for now: BodySmoother::set_params exists for live
-        // tuning, but BodyTrackingRequest carries no tuning fields yet (Plan
-        // C Task 14 is expected to add them and route them here alongside
-        // the idle_throttle mirror above). Left unwired rather than
-        // inventing request fields this task doesn't own.
+        // tuning, and BodyTrackingRequest now carries mask_ema/
+        // one_euro_min_cutoff/one_euro_beta (Plan C Task 9 added the struct
+        // fields so Radiance's insert_tracking_requests compiles), but
+        // routing those values into this constructor and reconciling their
+        // defaults with DEFAULT_MIN_CUTOFF/DEFAULT_BETA above is Plan C Task
+        // 14's bounded plumbing step, not this one's. Left unwired rather
+        // than inventing the plumbing this task doesn't own.
         smoother: BodySmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA),
         target: BodyTarget::default(),
         had_person: false,
@@ -464,6 +467,9 @@ mod tests {
         let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
         app.insert_resource(BodyTrackingRequest {
             idle_throttle: false,
+            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
+            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
+            one_euro_beta: DEFAULT_BETA,
         });
 
         let tracked = update_until(&mut app, |w| w.resource::<BodyTrackingState>().present);
@@ -505,6 +511,9 @@ mod tests {
         let mut app = body_app(empty_detector_outputs(), confident_landmark_outputs());
         app.insert_resource(BodyTrackingRequest {
             idle_throttle: false,
+            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
+            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
+            one_euro_beta: DEFAULT_BETA,
         });
         // Give the worker ample time to stream empty frames.
         for _ in 0..40 {
@@ -525,6 +534,9 @@ mod tests {
         let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
         app.insert_resource(BodyTrackingRequest {
             idle_throttle: false,
+            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
+            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
+            one_euro_beta: DEFAULT_BETA,
         });
         assert!(update_until(&mut app, |w| w
             .resource::<BodyTrackingState>()

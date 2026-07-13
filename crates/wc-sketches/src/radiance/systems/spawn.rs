@@ -1,10 +1,344 @@
 //! `OnEnter(AppState::Radiance)` spawn plus the `OnExit` teardown.
-//! (Populated in Task 9; the marker lands first so the material driver
-//! compiles.)
+//!
+//! Allocates the particle storage buffer (zeroed = all dead; the kernel's
+//! edge-respawn births every particle), the billboard mesh (count × 6
+//! vertices, data unused — the vertex shader derives everything from
+//! `vertex_index`), the silhouette quad, and the sim resources; inserts the
+//! Plan A/B activation requests. On exit everything is dropped, the requests
+//! are removed (stopping the mic stream and the body worker), and the
+//! render-world `RadianceSimParams` copy dies via the compute plugin's
+//! removal companion.
+//!
+//! This module (and everything it spawns/consumes) is gated behind the
+//! `body-tracking-mediapipe` feature: it needs `MaskTexture`/
+//! `SilhouetteEdges`/`BodyTrackingRequest` (wc-core gates the whole
+//! `wc_core::input::body` module behind this name) and
+//! `RadianceSilhouetteMaterial`/`RadianceState` (gated the same way one
+//! layer up — see `radiance::render` and `radiance::systems::sim_params`).
+//! The `cargo doc` gate builds default features only, so this module must be
+//! absent there — see `Cargo.toml`'s `body-tracking-mediapipe` forwarding
+//! feature, and `radiance::compute::mod`/`radiance::render` for the
+//! identical precedent.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::Image;
+use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::storage::ShaderBuffer;
+use bytemuck::{cast_slice, Zeroable};
+use wc_core::audio::input::AudioCaptureRequest;
+use wc_core::input::body::{
+    BodyTrackingRequest, MaskTexture, SilhouetteEdges, MASK_SIZE, MAX_EDGE_POINTS,
+};
+
+use crate::radiance::compute::sim_params::{
+    RadianceParticle, RadianceSimParams, RadianceSimParamsGpu,
+};
+use crate::radiance::render::{
+    silhouette_fill_color, RadianceMaterial, RadianceSilhouetteMaterial, QUAD_HALF_PX,
+};
+use crate::radiance::settings::RadianceSettings;
+use crate::radiance::systems::sim_params::RadianceState;
 
 /// Marker component on every entity owned by the Radiance sketch;
 /// `OnExit(AppState::Radiance)` despawns everything tagged with it.
 #[derive(Component)]
 pub struct RadianceRoot;
+
+/// Ensure the Plan B mask + edge resources exist (init-if-absent).
+///
+/// With the body-tracking plugin present these already exist and this is a
+/// no-op; in headless tests, feature-reduced harnesses, and the synthetic
+/// capture path this creates the same shapes so the silhouette material, the
+/// phantom, and the edge upload always have a target. Runs first in the
+/// `OnEnter` chain.
+pub fn ensure_body_surfaces(
+    mask: Option<Res<'_, MaskTexture>>,
+    edges: Option<Res<'_, SilhouetteEdges>>,
+    mut images: ResMut<'_, Assets<Image>>,
+    mut commands: Commands<'_, '_>,
+) {
+    if mask.is_none() {
+        let image = Image::new_fill(
+            Extent3d {
+                width: u32::try_from(MASK_SIZE).unwrap_or(256),
+                height: u32::try_from(MASK_SIZE).unwrap_or(256),
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[0u8],
+            TextureFormat::R8Unorm,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        commands.insert_resource(MaskTexture(images.add(image)));
+    }
+    if edges.is_none() {
+        commands.insert_resource(SilhouetteEdges {
+            points: Vec::with_capacity(MAX_EDGE_POINTS),
+            generation: 0,
+        });
+    }
+}
+
+/// `OnEnter(AppState::Radiance)`: allocate the buffers, spawn the two draw
+/// entities, insert the sim resources.
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "particle_count is bounded by the 10k..300k settings slider, exact as f32"
+)]
+pub fn spawn_radiance(
+    settings: Res<'_, RadianceSettings>,
+    mask: Res<'_, MaskTexture>,
+    mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
+    mut meshes: ResMut<'_, Assets<Mesh>>,
+    mut particle_materials: ResMut<'_, Assets<RadianceMaterial>>,
+    mut silhouette_materials: ResMut<'_, Assets<RadianceSilhouetteMaterial>>,
+    window: Single<'_, '_, &Window>,
+    mut commands: Commands<'_, '_>,
+) {
+    let count = settings.particle_count.clamp(1_000.0, 300_000.0) as u32;
+    let capacity = count as usize;
+
+    // Zeroed = all dead; the kernel births every particle at the edge list.
+    // RENDER_WORLD-only: the CPU never rewrites it after this seed.
+    let particles = vec![RadianceParticle::zeroed(); capacity];
+    let particles_handle = buffers.add(ShaderBuffer::new(
+        cast_slice::<RadianceParticle, u8>(&particles),
+        RenderAssetUsages::RENDER_WORLD,
+    ));
+
+    // Billboard mesh: count × 6 origin vertices; only the draw count matters
+    // (the flame/particles idiom).
+    let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; capacity * 6];
+    let mut billboard_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    billboard_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    let billboard_mesh_handle = meshes.add(billboard_mesh);
+
+    let w = window.width().max(1.0);
+    let h = window.height().max(1.0);
+
+    // One-frame placeholder uniforms; drive_radiance_materials overwrites
+    // every lane next Update.
+    let stops = settings.palette.stops();
+    let particle_material = particle_materials.add(RadianceMaterial {
+        particles: particles_handle.clone(),
+        params_a: Vec4::new(0.55, QUAD_HALF_PX, 0.0, 0.0),
+        color_a: stops[0],
+        color_b: stops[1],
+        color_c: stops[2],
+        params_b: Vec4::ZERO,
+    });
+    let silhouette_material = silhouette_materials.add(RadianceSilhouetteMaterial {
+        mask: mask.0.clone(),
+        fill_params: Vec4::new(
+            settings.silhouette_fill,
+            settings.rim_glow,
+            settings.mask_threshold,
+            f32::from(u8::from(settings.mirror)),
+        ),
+        effect_params: Vec4::ZERO,
+        fill_color: silhouette_fill_color(),
+        rim_color: stops[2],
+    });
+
+    // Silhouette quad under (z 0.0) the billboards (z 1.0) in Transparent2d's
+    // z-sort.
+    commands.spawn((
+        RadianceRoot,
+        bevy::mesh::Mesh2d(meshes.add(Mesh::from(Rectangle::new(w, h)))),
+        bevy::sprite_render::MeshMaterial2d(silhouette_material),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        GlobalTransform::default(),
+        Visibility::default(),
+    ));
+    commands.spawn((
+        RadianceRoot,
+        bevy::mesh::Mesh2d(billboard_mesh_handle),
+        bevy::sprite_render::MeshMaterial2d(particle_material),
+        Transform::from_xyz(0.0, 0.0, 1.0),
+        GlobalTransform::default(),
+        Visibility::default(),
+    ));
+
+    // Zeroed params (emission 0, no edges) until the first bake next Update.
+    commands.insert_resource(RadianceSimParams {
+        params: RadianceSimParamsGpu::zeroed(),
+        particles: particles_handle,
+        particle_count: count,
+    });
+    commands.insert_resource(RadianceState::default());
+}
+
+/// `OnEnter(AppState::Radiance)` (chained after `spawn_radiance`): start the
+/// mic capture + body tracking via the Plan A/B activation contracts.
+///
+/// Deviation from the task brief: the brief's sample also early-returns
+/// under a `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY` toggle on
+/// `wc_core::debug::DebugToggles`, but that field does not exist yet — it is
+/// Plan C Task 13's scope (adding the env var, the `DebugToggles` field, and
+/// its exhaustive test-literal/serializer updates). Wiring a synthetic-body
+/// skip here would either invent the field (duplicating Task 13's work) or
+/// silently no-op, so this system always inserts both requests; Task 13
+/// adds the early-out when it lands.
+pub fn insert_tracking_requests(
+    settings: Res<'_, RadianceSettings>,
+    mut commands: Commands<'_, '_>,
+) {
+    let device = settings.audio_input_device.trim();
+    commands.insert_resource(AudioCaptureRequest {
+        device_name: if device.is_empty() {
+            None
+        } else {
+            Some(device.to_owned())
+        },
+        paused: false,
+    });
+    commands.insert_resource(BodyTrackingRequest {
+        idle_throttle: false,
+        mask_ema: settings.mask_ema,
+        one_euro_min_cutoff: settings.one_euro_min_cutoff,
+        one_euro_beta: settings.one_euro_beta,
+    });
+}
+
+/// `OnExit(AppState::Radiance)`: drop the sim resources (releasing the
+/// particle buffer's VRAM via its sole handle) and stop capture/tracking by
+/// removing the activation requests (their contract: remove to stop).
+pub fn remove_radiance_resources(mut commands: Commands<'_, '_>) {
+    commands.remove_resource::<RadianceSimParams>();
+    commands.remove_resource::<RadianceState>();
+    commands.remove_resource::<AudioCaptureRequest>();
+    commands.remove_resource::<BodyTrackingRequest>();
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "test assertions")]
+mod tests {
+    use super::*;
+    use bevy::asset::AssetPlugin;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<ShaderBuffer>();
+        app.init_asset::<Mesh>();
+        app.init_asset::<Image>();
+        app.init_asset::<RadianceMaterial>();
+        app.init_asset::<RadianceSilhouetteMaterial>();
+        app.world_mut().spawn(Window::default());
+        app.insert_resource(RadianceSettings::default());
+        app
+    }
+
+    /// `ensure_body_surfaces` creates the mask + edges when absent and
+    /// leaves an existing pair untouched.
+    #[test]
+    fn ensure_body_surfaces_is_init_if_absent() {
+        let mut app = test_app();
+        app.world_mut()
+            .run_system_once(ensure_body_surfaces)
+            .expect("runs");
+        let first = app.world().resource::<MaskTexture>().0.clone();
+        assert!(app.world().get_resource::<SilhouetteEdges>().is_some());
+        app.world_mut()
+            .run_system_once(ensure_body_surfaces)
+            .expect("runs again");
+        assert_eq!(
+            app.world().resource::<MaskTexture>().0,
+            first,
+            "existing mask must not be replaced"
+        );
+    }
+
+    /// Spawn sizes the buffer + mesh from the setting, inserts the sim
+    /// resources zeroed, and teardown drops them plus both requests.
+    #[test]
+    fn spawn_sizes_buffers_and_teardown_drops_resources() {
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<RadianceSettings>()
+            .particle_count = 12_000.0;
+        app.world_mut()
+            .run_system_once(ensure_body_surfaces)
+            .expect("surfaces");
+        app.world_mut()
+            .run_system_once(spawn_radiance)
+            .expect("spawn runs");
+
+        let sim = app.world().resource::<RadianceSimParams>();
+        assert_eq!(sim.particle_count, 12_000);
+        assert!(
+            sim.params.emission_prob.abs() < f32::EPSILON,
+            "zeroed until first bake"
+        );
+        let handle = sim.particles.clone();
+        let buffers = app.world().resource::<Assets<ShaderBuffer>>();
+        let buffer = buffers.get(&handle).expect("particle buffer present");
+        let data = buffer.data.as_ref().expect("cpu seed present");
+        assert_eq!(data.len(), 12_000 * 32, "32-byte particles at full count");
+        assert!(data.iter().all(|&b| b == 0), "zeroed = all dead");
+
+        // Two draw entities (silhouette + billboards) under the marker.
+        let mut roots = app
+            .world_mut()
+            .query_filtered::<Entity, With<RadianceRoot>>();
+        assert_eq!(roots.iter(app.world()).count(), 2);
+
+        app.world_mut()
+            .run_system_once(insert_tracking_requests)
+            .expect("requests");
+        assert!(app.world().get_resource::<AudioCaptureRequest>().is_some());
+        assert!(app.world().get_resource::<BodyTrackingRequest>().is_some());
+
+        app.world_mut()
+            .run_system_once(remove_radiance_resources)
+            .expect("teardown");
+        assert!(app.world().get_resource::<RadianceSimParams>().is_none());
+        assert!(app.world().get_resource::<RadianceState>().is_none());
+        assert!(app.world().get_resource::<AudioCaptureRequest>().is_none());
+        assert!(app.world().get_resource::<BodyTrackingRequest>().is_none());
+    }
+
+    /// The device name maps empty → system default (None), trimmed → Some.
+    #[test]
+    fn request_maps_device_name() {
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<RadianceSettings>()
+            .audio_input_device = "  USB Interface  ".to_owned();
+        app.world_mut()
+            .run_system_once(insert_tracking_requests)
+            .expect("requests");
+        let req = app.world().resource::<AudioCaptureRequest>();
+        assert_eq!(req.device_name.as_deref(), Some("USB Interface"));
+        assert!(!req.paused);
+    }
+
+    /// The body request carries the three Dev tuning fields straight from
+    /// settings (unwired past the struct until Task 14 plumbs them into the
+    /// worker; see `wc_core::input::body::systems::start_worker`'s comment).
+    #[test]
+    fn request_carries_tuning_fields_from_settings() {
+        let mut app = test_app();
+        {
+            let mut settings = app.world_mut().resource_mut::<RadianceSettings>();
+            settings.mask_ema = 0.42;
+            settings.one_euro_min_cutoff = 2.5;
+            settings.one_euro_beta = 0.11;
+        }
+        app.world_mut()
+            .run_system_once(insert_tracking_requests)
+            .expect("requests");
+        let req = app.world().resource::<BodyTrackingRequest>();
+        assert!((req.mask_ema - 0.42).abs() < f32::EPSILON);
+        assert!((req.one_euro_min_cutoff - 2.5).abs() < f32::EPSILON);
+        assert!((req.one_euro_beta - 0.11).abs() < f32::EPSILON);
+    }
+}

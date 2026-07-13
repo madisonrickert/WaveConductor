@@ -71,6 +71,20 @@ pub struct BodyTrackingRequest {
     /// throttle included) so a person walking up still re-activates the
     /// sketch. Driven by Plan C from `SketchActivity`.
     pub idle_throttle: bool,
+    /// Worker-side temporal EMA factor on the segmentation mask (0 = raw,
+    /// higher = steadier/laggier). Read at worker (re)start; Radiance's Dev
+    /// knob routes here via its `requires_restart` reload (Plan C Task 9
+    /// constructs this field; Plan C Task 14 plumbs it into the worker/
+    /// smoothing config below — until then the value is carried but unread,
+    /// same posture as `BodySmoother::set_params`'s existing unwired
+    /// write-only setters).
+    pub mask_ema: f32,
+    /// One-Euro landmark filter min-cutoff, Hz. Same routing/posture as
+    /// [`Self::mask_ema`].
+    pub one_euro_min_cutoff: f32,
+    /// One-Euro landmark filter beta (speed coefficient). Same routing/
+    /// posture as [`Self::mask_ema`].
+    pub one_euro_beta: f32,
 }
 
 /// One tracked body landmark in mask-UV space.
