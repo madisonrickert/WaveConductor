@@ -70,6 +70,10 @@ impl Plugin for SketchesPlugin {
         // the material pipeline compiled even before sketch entry.
         app.add_plugins(Material2dPlugin::<crate::cymatics::render::CymaticsMaterial>::default());
 
+        // Radiance additive billboard material, registered once (Plugin
+        // singleton; the mesh + material entity spawns on Radiance entry).
+        app.add_plugins(Material2dPlugin::<crate::radiance::render::RadianceMaterial>::default());
+
         // Shared hand-mesh overlay infra, registered once (like the particle
         // plugins above) so each sketch's `HandMeshPlugin` can be added without
         // re-registering the material or composite node. `MaterialPlugin` and

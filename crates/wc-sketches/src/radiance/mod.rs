@@ -16,6 +16,7 @@
 //!    single source of truth for wiring order.
 
 pub mod compute;
+pub mod render;
 pub mod settings;
 pub mod systems;
 
