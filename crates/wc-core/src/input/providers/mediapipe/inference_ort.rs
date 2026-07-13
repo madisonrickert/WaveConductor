@@ -82,13 +82,20 @@ impl OrtInference {
     /// CPU-only session and returns [`BACKEND_CPU`], so one broken EP never costs
     /// all hand tracking. `model_name` names the failing model in the warning.
     ///
+    /// [`HandTrackingBackend::ForceGpu`] is the strict counterpart, and it is
+    /// strict about *both* ways an accelerator can go missing: a commit failure
+    /// surfaces as an error, and so does a GPU EP that never registered at all
+    /// (no DX12 device, a driver that refuses registration, or a target with no
+    /// GPU EP compiled in). Otherwise the A/B control would quietly run the very
+    /// CPU session it exists to rule out — see [`accelerator_missing_under_force`].
+    ///
     /// The session's CPU thread pool is capped to two intra-op threads with
     /// spin-waiting disabled (see [`base_builder`]).
     ///
     /// # Errors
     /// Returns [`InferenceError::Load`] if the session cannot be built or
     /// committed (and, under [`HandTrackingBackend::ForceGpu`], if the GPU EP
-    /// fails at commit), or if the model has no input.
+    /// fails to register or fails at commit), or if the model has no input.
     pub fn load(
         model_bytes: &[u8],
         backend: HandTrackingBackend,
@@ -98,8 +105,9 @@ impl OrtInference {
         let (session, backend_label) = if plan.try_accelerated {
             load_with_ep_fallback(
                 model_name,
+                platform_accelerator_label(),
                 plan.allow_cpu_fallback,
-                || commit_accelerated(model_bytes),
+                || commit_accelerated(model_bytes, plan.allow_cpu_fallback),
                 || commit_cpu(model_bytes),
             )?
         } else {
@@ -179,6 +187,10 @@ fn ep_plan(backend: HandTrackingBackend) -> EpPlan {
 /// actually took (the accelerated label on success, whatever `build_cpu` returns
 /// on the fallback path).
 ///
+/// `ep` is the accelerator that was attempted ([`platform_accelerator_label`]):
+/// logging it makes the warning self-describing (`ep = "ort/DirectML"`) instead
+/// of leaving the reader to infer the platform from the surrounding lines.
+///
 /// Generic over the session type `S` and error `E: Display` so the retry decision
 /// is unit-testable without any GPU EP: a test passes closures returning `Ok`/`Err`
 /// to drive every branch. `E: Display` is used only to render the failing EP's
@@ -186,6 +198,7 @@ fn ep_plan(backend: HandTrackingBackend) -> EpPlan {
 /// tester's "upload the log" workflow captures the diagnostic.
 fn load_with_ep_fallback<S, E: Display>(
     model_name: &str,
+    ep: &'static str,
     allow_cpu_fallback: bool,
     try_accelerated: impl FnOnce() -> Result<(S, &'static str), E>,
     build_cpu: impl FnOnce() -> Result<(S, &'static str), E>,
@@ -195,6 +208,7 @@ fn load_with_ep_fallback<S, E: Display>(
         Err(err) if allow_cpu_fallback => {
             tracing::warn!(
                 model = model_name,
+                ep,
                 %err,
                 "accelerated execution provider failed to commit the graph; \
                  rebuilding this model on the CPU execution provider"
@@ -203,6 +217,43 @@ fn load_with_ep_fallback<S, E: Display>(
         }
         Err(err) => Err(err),
     }
+}
+
+/// The accelerator this target *would* register: `CoreML` on macOS, `DirectML`
+/// on Windows, and [`BACKEND_CPU`] elsewhere (no GPU EP is compiled in, so the
+/// "accelerated" path is a plain CPU session).
+///
+/// Known before registration is attempted, which is exactly when the warning in
+/// [`load_with_ep_fallback`] needs it — [`register_accelerator`] only returns a
+/// label on the paths that got far enough to have one.
+const fn platform_accelerator_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        BACKEND_COREML
+    }
+    #[cfg(target_os = "windows")]
+    {
+        BACKEND_DIRECTML
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        BACKEND_CPU
+    }
+}
+
+/// Whether a GPU EP the operator *forced* is in fact absent: the plan forbids a
+/// CPU fallback, yet registration produced the CPU label.
+///
+/// [`register_accelerator`] fails soft — it warns and returns [`BACKEND_CPU`]
+/// when the EP refuses to attach (no DX12 device, a driver that rejects
+/// registration, or a target with no GPU EP at all). Under
+/// [`HandTrackingBackend::Auto`] that is the intended safety net. Under
+/// [`HandTrackingBackend::ForceGpu`] it is a lie by omission: the operator's
+/// deliberate "no CPU" A/B control would commit and happily run an unaccelerated
+/// session, reporting success. Forcing the GPU therefore fails on a *registration*
+/// failure exactly as it does on a commit failure.
+fn accelerator_missing_under_force(label: &str, allow_cpu_fallback: bool) -> bool {
+    !allow_cpu_fallback && label == BACKEND_CPU
 }
 
 /// Build a `SessionBuilder` with the CPU-thread-pool options shared by every
@@ -231,7 +282,17 @@ fn base_builder() -> Result<SessionBuilder, InferenceError> {
 /// no-op and the label is [`BACKEND_CPU`]. `commit_from_memory` consumes the
 /// builder, which is why the CPU fallback in [`OrtInference::load`] rebuilds a
 /// fresh one rather than reusing this.
-fn commit_accelerated(model_bytes: &[u8]) -> Result<(Session, &'static str), InferenceError> {
+///
+/// `allow_cpu_fallback` is the plan's fallback flag, and it also decides what an
+/// EP that *fails to register* means: with a fallback allowed (`Auto`) a soft
+/// landing on [`BACKEND_CPU`] is the safety net, so the session commits
+/// unaccelerated; with it forbidden ([`HandTrackingBackend::ForceGpu`]) the
+/// missing accelerator is an error rather than a silently unaccelerated session
+/// reported as a success (see [`accelerator_missing_under_force`]).
+fn commit_accelerated(
+    model_bytes: &[u8],
+    allow_cpu_fallback: bool,
+) -> Result<(Session, &'static str), InferenceError> {
     let mut builder = base_builder()?;
     #[cfg(target_os = "windows")]
     {
@@ -242,6 +303,14 @@ fn commit_accelerated(model_bytes: &[u8]) -> Result<(Session, &'static str), Inf
     // unsupported op still falls to the CPU. The label reflects registration, not
     // whole-graph placement (see [`OrtInference::backend`]).
     let label = register_accelerator(&mut builder, model_bytes);
+    if accelerator_missing_under_force(label, allow_cpu_fallback) {
+        return Err(InferenceError::Load(format!(
+            "no GPU execution provider registered on this host (target accelerator: {}), \
+             and the inference backend is pinned to ForceGpu — refusing to run the \
+             unaccelerated session the operator ruled out; select Auto or ForceCpu",
+            platform_accelerator_label()
+        )));
+    }
     let session = builder.commit_from_memory(model_bytes).map_err(load_err)?;
     Ok((session, label))
 }
@@ -535,6 +604,7 @@ mod tests {
         let mut cpu_built = false;
         let (session, label) = load_with_ep_fallback::<u32, String>(
             "palm_detection.onnx",
+            BACKEND_DIRECTML,
             true,
             || Ok((42, BACKEND_DIRECTML)),
             || {
@@ -557,6 +627,7 @@ mod tests {
         // commit must degrade to the CPU EP, not abort the whole load.
         let (session, label) = load_with_ep_fallback::<u32, String>(
             "palm_detection.onnx",
+            BACKEND_DIRECTML,
             true,
             || Err("80004005: DmlGraphFusionHelper".to_owned()),
             || Ok((7, BACKEND_CPU)),
@@ -573,6 +644,7 @@ mod tests {
         let mut cpu_built = false;
         let result = load_with_ep_fallback::<u32, String>(
             "palm_detection.onnx",
+            BACKEND_DIRECTML,
             false,
             || Err("commit failed".to_owned()),
             || {
@@ -585,6 +657,30 @@ mod tests {
             !cpu_built,
             "no CPU rebuild is attempted when fallback is disallowed"
         );
+    }
+
+    #[test]
+    fn force_gpu_treats_a_failed_ep_registration_as_a_failure() {
+        // `register_accelerator` fails soft: it warns and hands back the CPU
+        // label when the EP will not attach (no DX12 device, a driver that
+        // refuses registration). Under Auto that is the safety net; under
+        // ForceGpu — the A/B *control* — committing that unaccelerated session
+        // and reporting success would quietly run the very CPU path the operator
+        // pinned the setting to rule out.
+        assert!(
+            accelerator_missing_under_force(BACKEND_CPU, false),
+            "ForceGpu + no registered accelerator must fail, not run on the CPU"
+        );
+        assert!(
+            !accelerator_missing_under_force(BACKEND_CPU, true),
+            "Auto's soft landing on the CPU EP is the intended safety net"
+        );
+        for label in [BACKEND_COREML, BACKEND_DIRECTML] {
+            assert!(
+                !accelerator_missing_under_force(label, false),
+                "{label} registered — ForceGpu is satisfied"
+            );
+        }
     }
 
     fn model_bytes(name: &str) -> Vec<u8> {
@@ -623,6 +719,31 @@ mod tests {
         assert_eq!(
             backend, BACKEND_CPU,
             "non-accelerated targets use the CPU EP"
+        );
+    }
+
+    #[test]
+    fn force_cpu_loads_a_cpu_only_session() {
+        // The seam `backend_label_is_one_of_the_known_values` does not cover:
+        // that test pins Auto -> the platform accelerator, this one pins
+        // ForceCpu -> the CPU EP, and together they pin `load`'s routing in both
+        // directions. Without it, `load` could drop its `plan.try_accelerated`
+        // dispatch entirely — always taking the fallback path — and every other
+        // test would still pass while ForceCpu silently registered CoreML,
+        // defeating the operator's only lever against a flaky GPU EP.
+        //
+        // Needs no GPU EP of its own (it asserts the *absence* of one), so it
+        // runs anywhere the vendored model does.
+        let model = OrtInference::load(
+            &model_bytes("palm_detection.onnx"),
+            HandTrackingBackend::ForceCpu,
+            "palm_detection.onnx",
+        )
+        .expect("load via ort");
+        assert_eq!(
+            model.backend(),
+            BACKEND_CPU,
+            "ForceCpu must build a CPU-only session — no GPU EP may be registered"
         );
     }
 

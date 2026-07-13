@@ -693,6 +693,23 @@ impl HandTrackingProvider for MediaPipeProvider {
             .unwrap_or_default()
     }
 
+    /// The EP the sessions actually registered on, latched by `start` from
+    /// `build_pipeline` — including the degraded mixed labels (`ort/CoreML+CPU`,
+    /// `ort/DirectML+CPU`) a per-model commit fallback produces. `None` before
+    /// `start`, so the settings panel shows no "Running:" row rather than the
+    /// internal `BACKEND_NOT_STARTED` sentinel.
+    ///
+    /// (Plain code spans, not intra-doc links: those consts and
+    /// `Self::build_pipeline` are private to this module, and this is a public
+    /// trait method's doc — a link would resolve only under
+    /// `--document-private-items`.)
+    ///
+    /// A plain field read: no lock, no allocation (see the trait's doc — the
+    /// settings panel reads this every frame it is open).
+    fn backend_label(&self) -> Option<&'static str> {
+        (self.backend_label != BACKEND_NOT_STARTED).then_some(self.backend_label)
+    }
+
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }

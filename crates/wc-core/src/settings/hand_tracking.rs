@@ -56,10 +56,13 @@ pub enum HandTrackingBackend {
     /// warn and rebuild that model on the CPU EP. The safety net — the default.
     #[default]
     Auto,
-    /// Attempt the platform GPU EP and do **not** fall back: a commit failure is
-    /// surfaced as a load error. Disables the safety net deliberately, so a
-    /// broken EP is loud rather than silently degraded — a diagnosis lever, not a
-    /// deployment default.
+    /// Attempt the platform GPU EP and do **not** fall back: a load error is
+    /// surfaced whenever the accelerator does not actually take, whether it
+    /// failed to *register* (no DX12 device, a driver that refuses it, a target
+    /// with no GPU EP) or failed to *commit* the graph. Disables the safety net
+    /// deliberately, so a broken EP is loud rather than silently degraded — a
+    /// diagnosis lever and an A/B control, not a deployment default. (`Auto` is
+    /// the mode that treats both of those as a soft landing on the CPU.)
     ForceGpu,
     /// Never register a GPU EP; build a CPU-only session from the start. The
     /// fastest way to confirm CPU tracking works, and the operator's lever when a

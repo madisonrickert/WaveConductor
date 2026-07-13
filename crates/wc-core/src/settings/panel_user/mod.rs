@@ -35,8 +35,8 @@
 //!   the Advanced-toggle field-visibility gate).
 //! - [`fields`] — the reflection walker that turns a settings struct's
 //!   `SettingDef` table into labelled Grid rows.
-//! - [`provider_status`] — the hand-tracking provider status row shown under
-//!   the "Tracking provider" dropdown.
+//! - [`provider_status`] — the hand-tracking status rows shown under the
+//!   "Tracking provider" and "Inference backend" dropdowns.
 //! - [`widgets`] — the typed value widgets (`Number`, `Boolean`, `Color`,
 //!   `Text`, `Enum`, `RuntimeEnum`, `FilePath`, plus the unreachable-for-now
 //!   `Vec2`/`Vec3` branches).
@@ -127,13 +127,15 @@ fn draw_user_panel(world: &mut World) {
     let style = *world.resource::<OverlayStyle>();
     let opacity_mul = world.resource::<UiOpacity>().current;
 
-    // Snapshot the hand-tracking provider's lifecycle state for the status
-    // row under the "Tracking provider" dropdown (Task: surface the ~1-2 s
-    // MediaPipe model-load/camera-open window instead of looking dead).
-    // Taken before the egui closure borrows `world`, mirroring the dev
-    // panel's registry snapshot; fails soft to `None` (no row) when the
-    // registry resource is absent (tests, `Off` with an empty registry).
-    let provider_status = provider_status::provider_status_snapshot(world);
+    // Snapshot the hand-tracking status rows: the provider's lifecycle state
+    // (surfacing the ~1-2 s MediaPipe model-load/camera-open window instead of
+    // looking dead) and the inference backend the sessions actually registered
+    // on (so a kiosk whose GPU EP degraded one model to the CPU *looks*
+    // degraded, rather than reading as healthy for the whole soak). Taken
+    // before the egui closure borrows `world`, mirroring the dev panel's
+    // registry snapshot; each half fails soft to `None` (no row) when its
+    // source resource is absent (tests, `Off` with an empty registry).
+    let hand_tracking_status = provider_status::hand_tracking_status_snapshot(world);
 
     // Read the active AppState + the sketch manifest to determine which
     // sketch's settings show in the Sketch tab and what label it carries.
@@ -280,7 +282,7 @@ fn draw_user_panel(world: &mut World) {
                                     world,
                                     ui,
                                     key,
-                                    provider_status,
+                                    hand_tracking_status,
                                     #[cfg(feature = "templates")]
                                     &template_rows,
                                     #[cfg(feature = "templates")]
