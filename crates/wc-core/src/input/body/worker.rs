@@ -394,7 +394,7 @@ fn run_worker_loop(
                 } else {
                     spare.as_deref_mut()
                 };
-                match pipeline.process(&frame, idle_throttled, payload_ref) {
+                match pipeline.process(&frame, now, idle_throttled, payload_ref) {
                     Ok(result) => {
                         let payload = if idle_throttled { None } else { spare.take() };
                         let diag = worker_diag(

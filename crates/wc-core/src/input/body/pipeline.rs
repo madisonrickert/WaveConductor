@@ -1,13 +1,16 @@
 //! Two-stage `BlazePose` pipeline: a camera `Frame` in, landmarks + world
-//! landmarks + a warped/EMA'd mask + silhouette edges out.
+//! landmarks + a warped/temporally-blended mask + silhouette edges out.
 //!
 //! Flow per frame: square-pad the frame; run the person detector ONLY when no
 //! track is carried (detect-then-track — the aux landmark rows 33/34 supply
 //! next frame's ROI, so a healthy track never pays the detector); warp the
 //! rotated ROI into a 256² crop; run the landmark model; gate on its
-//! pose-presence scalar; project the 39 rows back to square-norm; publish the
-//! first 33 in content-norm (mask UV space); warp + EMA the segmentation
-//! mask; extract silhouette edges into the pooled payload.
+//! pose-presence scalar; project the 39 rows back to square-norm; heavily
+//! One-Euro filter the aux alignment rows before deriving next frame's
+//! tracking ROI so the crop does not jitter; publish the first 33 in
+//! content-norm (mask UV space); de-rotate the metric world landmarks by the
+//! ROI rotation; warp + uncertainty-blend the segmentation mask; extract
+//! silhouette edges into the pooled payload.
 //!
 //! The **idle detector-only probe** (`detector_only = true`) runs just the
 //! detector as a presence sensor at the idle rate: landmarks/mask stages are
@@ -24,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bevy::math::Vec3;
+use bevy::math::{Vec2, Vec3};
 use image::RgbImage;
 
 use super::detector::{
@@ -34,9 +37,10 @@ use super::detector::{
 use super::edges::extract_edges;
 use super::mask::{MaskProcessor, DEFAULT_MASK_EMA_ALPHA};
 use super::roi::{
-    project_body_landmarks, roi_from_body_landmarks, roi_from_detection, roi_trackable,
-    ContentRect, RoiRect, LANDMARK_ROWS, LANDMARK_VALUES,
+    project_body_landmarks, roi_from_alignment_points, roi_from_detection, roi_trackable,
+    ContentRect, RoiRect, AUX_CENTER_ROW, AUX_SCALE_ROW, LANDMARK_ROWS, LANDMARK_VALUES,
 };
+use super::smoothing::OneEuroFilter;
 use super::transport::BodyFramePayload;
 use super::{BodyLandmark, BODY_LANDMARK_COUNT, MASK_SIZE};
 use crate::input::capture::Frame;
@@ -49,6 +53,91 @@ const LM_SIZE: u32 = 256;
 /// (`MediaPipe`'s `min_suppression_threshold: 0.3`).
 const PERSON_BLEND_IOU: f32 = 0.3;
 
+/// Aux-landmark One-Euro min cutoff (Hz). `MediaPipe` smooths the aux
+/// alignment rows *much harder* than the main landmarks so the tracking crop
+/// stays rock-steady when the subject is still yet stays responsive to sudden
+/// movement (`pose_landmark_filtering.pbtxt` aux bank: `one_euro_filter
+/// { min_cutoff: 0.01 beta: 10.0 derivate_cutoff: 1.0 }`).
+const AUX_MIN_CUTOFF: f32 = 0.01;
+
+/// Aux-landmark One-Euro speed coefficient (`beta: 10.0`; see
+/// [`AUX_MIN_CUTOFF`]).
+const AUX_BETA: f32 = 10.0;
+
+/// Floor for the aux object scale so a degenerate (collapsed) aux pair never
+/// divides the adaptive-cutoff speed by ~0.
+const AUX_MIN_OBJECT_SCALE: f32 = 0.05;
+
+/// Heavy two-point One-Euro filter over the aux alignment rows (33 = tracking
+/// ROI centre, 34 = circumscribing-circle point) applied **before** the
+/// next-frame tracking ROI is derived. Without it, the raw per-frame aux rows
+/// jitter the crop centre/size/rotation, and everything warped from that crop
+/// (landmarks + mask + edges) inherits the jitter.
+///
+/// Mirrors `MediaPipe`'s aux `LandmarksSmoothingCalculator` (see the `AUX_*`
+/// consts). Upstream connects `OBJECT_SCALE_ROI` to the aux bank with **no**
+/// `disable_value_scaling`, so — like the main landmarks — the speed driving
+/// the adaptive cutoff is normalized by the pose's apparent object scale. That
+/// scale is the aux alignment box side, `2·|scale − centre|`, computed from the
+/// **raw** points each frame (matching upstream's `OBJECT_SCALE_ROI`, built
+/// from the unfiltered aux landmarks). Fixed arrays — no allocation on the
+/// frame path.
+struct AuxRoiFilter {
+    /// Per point (0 = centre, 1 = scale) x-channel One-Euro filters.
+    x: [OneEuroFilter; 2],
+    /// Per point y-channel One-Euro filters.
+    y: [OneEuroFilter; 2],
+    /// Monotonic time of the previous filtered frame; `None` until the first.
+    last_now: Option<Duration>,
+}
+
+impl AuxRoiFilter {
+    /// Build the four aux channels with the fixed upstream aux params.
+    fn new() -> Self {
+        let ch = || OneEuroFilter::new(AUX_MIN_CUTOFF, AUX_BETA);
+        Self {
+            x: [ch(), ch()],
+            y: [ch(), ch()],
+            last_now: None,
+        }
+    }
+
+    /// Forget history so a newly-acquired track starts fresh: a returning (or
+    /// different) person must not inherit the previous track's filter state.
+    fn reset(&mut self) {
+        for f in &mut self.x {
+            f.reset();
+        }
+        for f in &mut self.y {
+            f.reset();
+        }
+        self.last_now = None;
+    }
+
+    /// Filter the raw aux `center`/`scale_point` at time `now`, returning the
+    /// smoothed pair for ROI derivation. The first sample after a
+    /// [`Self::reset`] passes through (cold start).
+    fn filter(&mut self, center: Vec2, scale_point: Vec2, now: Duration) -> (Vec2, Vec2) {
+        let dt = self
+            .last_now
+            .map_or(0.0, |prev| now.saturating_sub(prev).as_secs_f32());
+        self.last_now = Some(now);
+        // Object scale from the RAW points (upstream's OBJECT_SCALE_ROI is
+        // built from unfiltered aux landmarks); value_scale divides the speed.
+        let object_scale = (2.0 * (scale_point - center).length()).max(AUX_MIN_OBJECT_SCALE);
+        let value_scale = 1.0 / object_scale;
+        let c = Vec2::new(
+            self.x[0].filter(center.x, dt, value_scale),
+            self.y[0].filter(center.y, dt, value_scale),
+        );
+        let s = Vec2::new(
+            self.x[1].filter(scale_point.x, dt, value_scale),
+            self.y[1].filter(scale_point.y, dt, value_scale),
+        );
+        (c, s)
+    }
+}
+
 /// Tunables for the pose pipeline.
 #[derive(Debug, Clone)]
 pub struct PoseConfig {
@@ -57,8 +146,10 @@ pub struct PoseConfig {
     /// Minimum pose-presence probability from the landmark model to keep the
     /// track (matches `MediaPipe`'s default tracking confidence).
     pub presence_threshold: f32,
-    /// Temporal EMA factor for the mask (see `mask::DEFAULT_MASK_EMA_ALPHA`);
-    /// live-tunable through [`BodyLiveTuning`].
+    /// Mask temporal-blend combine-with-previous ratio (see
+    /// `mask::DEFAULT_MASK_EMA_ALPHA` and `mask::uncertainty_blend`);
+    /// live-tunable through [`BodyLiveTuning`]. Field name kept as `mask_ema*`
+    /// for continuity; its meaning is the combine ratio, not an EMA alpha.
     pub mask_ema_alpha: f32,
 }
 
@@ -73,8 +164,9 @@ impl Default for PoseConfig {
 }
 
 /// Live (lock-free) tunables shared between the Bevy main thread and the
-/// worker: the idle-throttle flag read by the worker *loop* and the mask EMA
-/// factor read by this pipeline each frame. Same shape as the hand provider's
+/// worker: the idle-throttle flag read by the worker *loop* and the mask
+/// combine-with-previous ratio read by this pipeline each frame. Same shape as
+/// the hand provider's
 /// `MediaPipeLiveTuning` (f32 bit patterns in `AtomicU32`, all `Relaxed` —
 /// independent scalars, one-frame-stale reads are harmless).
 #[derive(Debug)]
@@ -106,13 +198,13 @@ impl BodyLiveTuning {
         self.idle_throttle.load(Ordering::Relaxed)
     }
 
-    /// Live-set the mask EMA factor.
+    /// Live-set the mask combine-with-previous ratio.
     pub fn set_mask_ema_alpha(&self, alpha: f32) {
         self.mask_ema_alpha
             .store(alpha.to_bits(), Ordering::Relaxed);
     }
 
-    /// The current mask EMA factor.
+    /// The current mask combine-with-previous ratio.
     #[must_use]
     pub fn mask_ema_alpha(&self) -> f32 {
         f32::from_bits(self.mask_ema_alpha.load(Ordering::Relaxed))
@@ -204,7 +296,11 @@ pub struct PosePipeline {
     tracked: Option<RoiRect>,
     /// Optional live tuning shared with the provider systems.
     live_tuning: Option<Arc<BodyLiveTuning>>,
-    /// Mask warp/EMA state (owns its 3×256 KB f32 buffers).
+    /// Heavy One-Euro filter on the aux alignment rows, applied before the
+    /// next-frame tracking ROI is derived so the crop does not jitter. Reset
+    /// on every fresh track (detector re-run / track drop).
+    aux_filter: AuxRoiFilter,
+    /// Mask warp/temporal-blend state (owns its 3×256 KB f32 buffers).
     mask: MaskProcessor,
     /// Diagnostics for the most recent processed frame.
     last_diagnostics: PoseDiagnostics,
@@ -234,6 +330,7 @@ impl PosePipeline {
             config,
             tracked: None,
             live_tuning: None,
+            aux_filter: AuxRoiFilter::new(),
             mask: MaskProcessor::new(),
             last_diagnostics: PoseDiagnostics::default(),
             square_buf: RgbImage::default(),
@@ -264,10 +361,12 @@ impl PosePipeline {
         self.last_diagnostics
     }
 
-    /// Run one frame. `detector_only` selects the idle presence probe (see
-    /// module docs). `payload`, when given, receives the quantized mask and
-    /// the extracted edges (full frames only; probes and absent frames decay
-    /// the mask into it instead).
+    /// Run one frame. `now` is the worker-relative capture time driving the
+    /// aux-ROI One-Euro filter's timestep (mirrors `BodySmoother::smooth`).
+    /// `detector_only` selects the idle presence probe (see module docs).
+    /// `payload`, when given, receives the quantized mask and the extracted
+    /// edges (full frames only; probes and absent frames decay the mask into it
+    /// instead).
     ///
     /// # Errors
     /// Returns [`InferenceError`] if a model stage that was supposed to run
@@ -276,12 +375,13 @@ impl PosePipeline {
     pub fn process(
         &mut self,
         frame: &Frame,
+        now: Duration,
         detector_only: bool,
         mut payload: Option<&mut BodyFramePayload>,
     ) -> Result<PoseResult, InferenceError> {
         let frame_start = Instant::now();
         let mut diag = PoseDiagnostics::default();
-        let alpha = self
+        let blend_ratio = self
             .live_tuning
             .as_ref()
             .map_or(self.config.mask_ema_alpha, |t| t.mask_ema_alpha());
@@ -290,7 +390,7 @@ impl PosePipeline {
             // A bad frame breaks tracking: re-acquire next frame.
             self.tracked = None;
             diag.detector_reason = DetectorRunReason::InvalidFrame;
-            self.fade_mask_into(alpha, payload.as_deref_mut());
+            self.fade_mask_into(blend_ratio, payload.as_deref_mut());
             diag.total = frame_start.elapsed();
             self.last_diagnostics = diag;
             return Ok(PoseResult::absent());
@@ -318,7 +418,7 @@ impl PosePipeline {
             self.square_buf = square;
             let det = det?;
             let (present, confidence) = det.as_ref().map_or((false, 0.0), |d| (true, d.score));
-            self.fade_mask_into(alpha, payload.as_deref_mut());
+            self.fade_mask_into(blend_ratio, payload.as_deref_mut());
             diag.present = present;
             diag.confidence = confidence;
             diag.total = frame_start.elapsed();
@@ -331,6 +431,9 @@ impl PosePipeline {
         }
 
         // Detect-then-track: run the detector only without a carried track.
+        // A fresh track (no carried ROI) means the aux filter must cold-start
+        // so a new person does not inherit stale filter state.
+        let fresh_track = self.tracked.is_none();
         let roi = if let Some(roi) = self.tracked {
             diag.detector_reason = DetectorRunReason::Tracking;
             Some(roi)
@@ -350,14 +453,22 @@ impl PosePipeline {
         let Some(roi) = roi else {
             // Nobody in frame: fade the mask, stay quiet.
             self.square_buf = square;
-            self.fade_mask_into(alpha, payload.as_deref_mut());
+            self.fade_mask_into(blend_ratio, payload.as_deref_mut());
             diag.total = frame_start.elapsed();
             self.last_diagnostics = diag;
             return Ok(PoseResult::absent());
         };
 
         let stage = Instant::now();
-        let outcome = self.landmark_stage(&square, roi, content, alpha, payload.as_deref_mut());
+        let outcome = self.landmark_stage(
+            &square,
+            roi,
+            content,
+            now,
+            fresh_track,
+            blend_ratio,
+            payload.as_deref_mut(),
+        );
         diag.landmark = stage.elapsed();
         self.square_buf = square;
         let outcome = outcome?;
@@ -369,7 +480,7 @@ impl PosePipeline {
         } else {
             // Presence collapsed: drop the track and fade the mask.
             self.tracked = None;
-            self.fade_mask_into(alpha, payload);
+            self.fade_mask_into(blend_ratio, payload);
             PoseResult::absent()
         };
         diag.present = result.present;
@@ -402,13 +513,20 @@ impl PosePipeline {
     }
 
     /// Landmark/mask stage for one ROI. `Ok(None)` = presence below
-    /// threshold (person lost).
+    /// threshold (person lost). `fresh_track` cold-starts the aux-ROI filter
+    /// (new track); `now` supplies its timestep.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "worker-side stage threads frame time, track-freshness, and blend ratio alongside the ROI/content/payload; splitting into a param struct would obscure the straight-line data flow"
+    )]
     fn landmark_stage(
         &mut self,
         square: &RgbImage,
         roi: RoiRect,
         content: ContentRect,
-        alpha: f32,
+        now: Duration,
+        fresh_track: bool,
+        blend_ratio: f32,
         payload: Option<&mut BodyFramePayload>,
     ) -> Result<Option<TrackedBody>, InferenceError> {
         warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
@@ -421,7 +539,19 @@ impl PosePipeline {
         }
 
         let rows = project_body_landmarks(picked.landmarks, &roi);
-        let next_roi = roi_from_body_landmarks(&rows);
+        // Heavily filter the aux alignment points before deriving next frame's
+        // tracking ROI so the crop does not jitter (upstream aux filter). A
+        // fresh track resets the filter first (no stale state from a prior
+        // person); the raw points seed the object scale.
+        if fresh_track {
+            self.aux_filter.reset();
+        }
+        let (aux_center, aux_scale) = self.aux_filter.filter(
+            rows[AUX_CENTER_ROW].pos.truncate(),
+            rows[AUX_SCALE_ROW].pos.truncate(),
+            now,
+        );
+        let next_roi = roi_from_alignment_points(aux_center, aux_scale);
 
         // Publish the first 33 rows in content-norm (mask UV space).
         let mut landmarks = [BodyLandmark::default(); BODY_LANDMARK_COUNT];
@@ -429,11 +559,13 @@ impl PosePipeline {
             dst.pos = content.to_content_norm(row.pos);
             dst.visibility = row.visibility;
         }
-        let world_landmarks = decode_world_landmarks(picked.world);
+        // World landmarks are de-rotated by the ROI rotation into an
+        // image-aligned frame (upstream WorldLandmarkProjectionCalculator).
+        let world_landmarks = decode_world_landmarks(picked.world, &roi);
 
         // Mask + edges into the pooled payload (worker-side, per spec).
         if let Some(payload) = payload {
-            self.mask.ingest(picked.mask, &roi, content, alpha);
+            self.mask.ingest(picked.mask, &roi, content, blend_ratio);
             self.mask.write_u8(&mut payload.mask);
             extract_edges(self.mask.smoothed(), &mut payload.edges);
         }
@@ -449,9 +581,11 @@ impl PosePipeline {
         }))
     }
 
-    /// Person-absent path: decay the mask EMA and, when a payload is
-    /// supplied, publish the faded mask + its (shrinking) edge list so a
-    /// stale silhouette never lingers on screen.
+    /// Person-absent path: decay the mask accumulator toward empty and, when a
+    /// payload is supplied, publish the faded mask + its (shrinking) edge list
+    /// so a stale silhouette never lingers on screen. (The decay is our own
+    /// graceful-fade extra, not part of the upstream blend; it keeps its
+    /// original EMA-style `acc -= acc·alpha` behavior, driven by the same knob.)
     fn fade_mask_into(&mut self, alpha: f32, payload: Option<&mut BodyFramePayload>) {
         self.mask.decay(alpha);
         if let Some(payload) = payload {
@@ -530,15 +664,27 @@ fn pick_pose_landmark_outputs(out: &[Tensor]) -> Result<PoseLandmarkOutputs<'_>,
 
 /// Decode the `[1, 117]` world tensor: 39 × (x, y, z) metric metres,
 /// hip-centred; the first [`BODY_LANDMARK_COUNT`] rows are published.
-fn decode_world_landmarks(raw: &[f32]) -> [Vec3; BODY_LANDMARK_COUNT] {
+///
+/// The raw world coordinates come out in the **crop-aligned** frame (rotated
+/// with the ROI). `MediaPipe`'s `WorldLandmarkProjectionCalculator`
+/// (`world_landmark_projection_calculator.cc`) rotates x/y by the ROI rotation
+/// back into an image/gravity-aligned frame (z unchanged):
+///
+/// ```text
+/// x' = cos·x − sin·y
+/// y' = sin·x + cos·y
+/// ```
+///
+/// so a tilted subject's world landmarks are not left rotated with the crop.
+fn decode_world_landmarks(raw: &[f32], roi: &RoiRect) -> [Vec3; BODY_LANDMARK_COUNT] {
+    let (sin, cos) = roi.rotation.sin_cos();
     let mut out = [Vec3::ZERO; BODY_LANDMARK_COUNT];
     for (i, lm) in out.iter_mut().enumerate() {
         let base = i * 3;
-        *lm = Vec3::new(
-            raw.get(base).copied().unwrap_or(0.0),
-            raw.get(base + 1).copied().unwrap_or(0.0),
-            raw.get(base + 2).copied().unwrap_or(0.0),
-        );
+        let x = raw.get(base).copied().unwrap_or(0.0);
+        let y = raw.get(base + 1).copied().unwrap_or(0.0);
+        let z = raw.get(base + 2).copied().unwrap_or(0.0);
+        *lm = Vec3::new(cos * x - sin * y, sin * x + cos * y, z);
     }
     out
 }
@@ -862,7 +1008,7 @@ mod tests {
         let frame = solid_frame();
 
         let r1 = p
-            .process(&frame, false, Some(&mut payload))
+            .process(&frame, Duration::from_millis(0), false, Some(&mut payload))
             .expect("frame 1");
         assert!(r1.present);
         assert!(r1.confidence > 0.8);
@@ -881,7 +1027,7 @@ mod tests {
 
         // Frame 2: the carried aux-row track skips the detector entirely.
         let r2 = p
-            .process(&frame, false, Some(&mut payload))
+            .process(&frame, Duration::from_millis(16), false, Some(&mut payload))
             .expect("frame 2");
         assert!(r2.present);
         assert_eq!(p.diagnostics().detector_reason, DetectorRunReason::Tracking);
@@ -891,8 +1037,13 @@ mod tests {
     fn mask_and_edges_land_in_the_payload() {
         let mut p = person_pipeline();
         let mut payload = crate::input::body::transport::BodyFramePayload::new();
-        p.process(&solid_frame(), false, Some(&mut payload))
-            .expect("process");
+        p.process(
+            &solid_frame(),
+            Duration::from_millis(0),
+            false,
+            Some(&mut payload),
+        )
+        .expect("process");
         // The fixture's mask blob covers the crop centre; after warping, the
         // frame-space mask must be lit near the ROI centre and dark far away.
         let max = payload.mask.iter().copied().max().unwrap_or(0);
@@ -914,12 +1065,22 @@ mod tests {
         );
         let mut payload = crate::input::body::transport::BodyFramePayload::new();
         let r = p
-            .process(&solid_frame(), false, Some(&mut payload))
+            .process(
+                &solid_frame(),
+                Duration::from_millis(0),
+                false,
+                Some(&mut payload),
+            )
             .expect("process");
         assert!(!r.present, "conf below threshold must read absent");
         // Next frame must re-detect (track not carried).
-        p.process(&solid_frame(), false, Some(&mut payload))
-            .expect("frame 2");
+        p.process(
+            &solid_frame(),
+            Duration::from_millis(16),
+            false,
+            Some(&mut payload),
+        )
+        .expect("frame 2");
         assert_eq!(
             p.diagnostics().detector_reason,
             DetectorRunReason::ColdStart
@@ -939,7 +1100,9 @@ mod tests {
             Box::new(FailingInference), // landmark stage must not run
             PoseConfig::default(),
         );
-        let r = p.process(&solid_frame(), false, None).expect("process");
+        let r = p
+            .process(&solid_frame(), Duration::from_millis(0), false, None)
+            .expect("process");
         assert!(!r.present);
         assert_eq!(r.confidence, 0.0);
     }
@@ -955,7 +1118,9 @@ mod tests {
             Box::new(FailingInference),
             PoseConfig::default(),
         );
-        let r = p.process(&solid_frame(), true, None).expect("probe");
+        let r = p
+            .process(&solid_frame(), Duration::from_millis(0), true, None)
+            .expect("probe");
         assert!(r.present, "idle probe must still report presence");
         assert!(r.confidence > 0.8);
         assert_eq!(
@@ -968,20 +1133,22 @@ mod tests {
     fn invalid_frame_clears_the_track() {
         let mut p = person_pipeline();
         let good = solid_frame();
-        p.process(&good, false, None).expect("acquire");
+        p.process(&good, Duration::from_millis(0), false, None)
+            .expect("acquire");
         let bad = Frame {
             width: 10, // inconsistent: no bytes
             ..Frame::default()
         };
         let r = p
-            .process(&bad, false, None)
+            .process(&bad, Duration::from_millis(16), false, None)
             .expect("invalid frame is not an error");
         assert!(!r.present);
         assert_eq!(
             p.diagnostics().detector_reason,
             DetectorRunReason::InvalidFrame
         );
-        p.process(&good, false, None).expect("reacquire");
+        p.process(&good, Duration::from_millis(32), false, None)
+            .expect("reacquire");
         assert_eq!(
             p.diagnostics().detector_reason,
             DetectorRunReason::ColdStart
@@ -997,7 +1164,109 @@ mod tests {
         assert!((tuning.mask_ema_alpha() - 0.9).abs() < 1e-6);
         // Round-trips through the atomic; the pipeline reads it per frame.
         let mut payload = crate::input::body::transport::BodyFramePayload::new();
-        p.process(&solid_frame(), false, Some(&mut payload))
-            .expect("process");
+        p.process(
+            &solid_frame(),
+            Duration::from_millis(0),
+            false,
+            Some(&mut payload),
+        )
+        .expect("process");
+    }
+
+    #[test]
+    fn aux_filter_reduces_roi_centre_jitter() {
+        // A still subject whose aux CENTRE jitters ±~0.006 around (0.5, 0.5),
+        // with a steady scale point above it. The heavy aux One-Euro filter
+        // must shrink the centre's frame-to-frame variance well below the raw
+        // input's, so the derived tracking ROI stops jittering.
+        let mut f = AuxRoiFilter::new();
+        let scale_point = Vec2::new(0.5, 0.3);
+        let jitter = [
+            0.006_f32, -0.006, 0.005, -0.005, 0.006, -0.004, 0.005, -0.006,
+        ];
+        let mut raw_xs = Vec::new();
+        let mut filt_xs = Vec::new();
+        for i in 0..120_u64 {
+            let idx = usize::try_from(i % 8).unwrap_or(0);
+            let center = Vec2::new(0.5 + jitter[idx], 0.5);
+            let ms = i.saturating_mul(16);
+            let (c, _s) = f.filter(center, scale_point, Duration::from_millis(ms));
+            if i >= 40 {
+                // Skip the filter warm-up.
+                raw_xs.push(center.x);
+                filt_xs.push(c.x);
+            }
+        }
+        let variance = |xs: &[f32]| {
+            let n = f32::from(u16::try_from(xs.len()).unwrap_or(1)).max(1.0);
+            let mean = xs.iter().sum::<f32>() / n;
+            xs.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n
+        };
+        let raw_var = variance(&raw_xs);
+        let filt_var = variance(&filt_xs);
+        assert!(raw_var > 1e-6, "raw input must actually jitter: {raw_var}");
+        assert!(
+            filt_var < raw_var * 0.25,
+            "filtered var {filt_var} not << raw var {raw_var}"
+        );
+    }
+
+    #[test]
+    fn aux_filter_reset_cold_starts() {
+        // After building history, reset() must make the next sample pass
+        // through (a returning person inherits no stale filter state).
+        let mut f = AuxRoiFilter::new();
+        let scale_point = Vec2::new(0.5, 0.3);
+        for i in 0..10_u64 {
+            f.filter(
+                Vec2::new(0.5, 0.5),
+                scale_point,
+                Duration::from_millis(i.saturating_mul(16)),
+            );
+        }
+        f.reset();
+        // A far-away first sample after reset is returned verbatim, not eased
+        // from the pre-reset (0.5, 0.5) history.
+        let (c, s) = f.filter(
+            Vec2::new(0.8, 0.2),
+            Vec2::new(0.8, 0.05),
+            Duration::from_secs(1),
+        );
+        assert!(
+            (c.x - 0.8).abs() < 1e-6 && (c.y - 0.2).abs() < 1e-6,
+            "c={c:?}"
+        );
+        assert!(
+            (s.x - 0.8).abs() < 1e-6 && (s.y - 0.05).abs() < 1e-6,
+            "s={s:?}"
+        );
+    }
+
+    #[test]
+    fn decode_world_landmarks_derotates_by_roi_rotation() {
+        use std::f32::consts::FRAC_PI_2;
+        let mut world = vec![0.0_f32; LANDMARK_ROWS * 3];
+        world[0] = 0.1;
+        world[1] = -0.2;
+        world[2] = 0.05;
+        // ROI rotated 90° → (sin, cos) = (1, 0): x' = −y, y' = x, z unchanged.
+        let roi = RoiRect {
+            cx: 0.5,
+            cy: 0.5,
+            size: 0.4,
+            rotation: FRAC_PI_2,
+        };
+        let out = decode_world_landmarks(&world, &roi);
+        assert!((out[0].x - 0.2).abs() < 1e-5, "x={}", out[0].x); // −(−0.2)
+        assert!((out[0].y - 0.1).abs() < 1e-5, "y={}", out[0].y);
+        assert!((out[0].z - 0.05).abs() < 1e-6, "z={}", out[0].z);
+        // Zero rotation is the identity copy.
+        let roi0 = RoiRect {
+            rotation: 0.0,
+            ..roi
+        };
+        let out0 = decode_world_landmarks(&world, &roi0);
+        assert!((out0[0].x - 0.1).abs() < 1e-6, "x0={}", out0[0].x);
+        assert!((out0[0].y + 0.2).abs() < 1e-6, "y0={}", out0[0].y);
     }
 }
