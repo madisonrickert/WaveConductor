@@ -22,6 +22,14 @@ pub mod spawn;
 #[cfg(feature = "body-tracking-mediapipe")]
 pub mod sim_params;
 
+// `SketchActivity` → activation-request sync. Consumes
+// `wc_core::input::body::BodyTrackingRequest` (gated behind this feature)
+// alongside the unconditional `wc_core::audio::input::AudioCaptureRequest`,
+// so the whole module is gated identically to `spawn`/`sim_params` above —
+// same `cargo doc` default-features-only rationale.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod activity;
+
 // Camera arbitration consumes only `wc_core::input::provider`, an
 // unconditional module (no body/hand feature gate) — so this module builds
 // in every configuration, including the default-features doc gate.
