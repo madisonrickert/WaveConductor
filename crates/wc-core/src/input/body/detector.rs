@@ -27,7 +27,10 @@ pub const POSE_ANCHOR_COUNT: usize = 2254;
 
 /// Maximum weighted-NMS person clusters [`weighted_nms_into`] emits per frame.
 /// A kiosk stage rarely needs more, and the fixed bound keeps the candidate
-/// buffer allocation-free and the stickiness/cycle scans cheap.
+/// buffer allocation-free and the stickiness/cycle scans cheap. Known
+/// limitation: with 5+ people in frame, the sticky dancer can be starved out
+/// of the list if four others out-score them (stickiness only sees the
+/// clusters that survive this cap).
 pub const MAX_PERSON_CANDIDATES: usize = 4;
 
 /// Keypoints per detection: 0 = mid-hip (ROI centre), 1 = full-body

@@ -213,7 +213,8 @@ pub struct BodyLiveTuning {
     /// [`PoseConfig::mask_ema_alpha`] as `f32` bits.
     mask_ema_alpha: AtomicU32,
     /// Person-cycle request counter. The main side increments it (a counter,
-    /// not a bool, so rapid hotkey presses are never coalesced away); the
+    /// not a bool, so a press is never lost outright — though presses landing
+    /// within one worker frame coalesce into a single cycle); the
     /// worker compares it against its last-seen value and forces a detector
     /// pass + track switch to the next dancer when it differs.
     cycle_request: AtomicU32,
@@ -941,6 +942,10 @@ fn refine_landmarks_from_heatmap(landmarks: &mut [f32], heatmap: &[f32]) {
         // [0, 1] × heatmap dimension.
         let center_col_f = lx / LANDMARK_INPUT * hm_f;
         let center_row_f = ly / LANDMARK_INPUT * hm_f;
+        // Deliberate departure from upstream: a marginally-negative coord is
+        // skipped here, where upstream's int cast truncates it to cell 0 and
+        // refines anyway. Off-crop landmarks are already unreliable; leaving
+        // them unrefined is the conservative reading.
         if !(center_col_f >= 0.0
             && center_col_f < hm_f
             && center_row_f >= 0.0
@@ -1241,9 +1246,10 @@ pub(crate) mod fixtures {
     /// all-zeros `[1, 64, 64, 39]` heatmap. Sigmoid(0) = 0.5 is a uniform
     /// field, so refinement pulls each landmark to its (centred) kernel-window
     /// centroid: a no-op for a centred landmark (aux rows 33/34 stay put, so
-    /// the tracking ROI is unchanged) and a sub-pixel nudge for off-centre
-    /// ones. Tests asserting exact landmark positions build their own blob
-    /// heatmap; see `heatmap_refinement_*`.
+    /// the tracking ROI is unchanged) and a cell-quantization shift (up to a
+    /// few crop pixels — one 64-grid cell spans 4) for off-centre ones. Tests
+    /// asserting exact landmark positions build their own blob heatmap; see
+    /// `heatmap_refinement_*`.
     pub(crate) fn confident_landmark_outputs() -> Vec<Tensor> {
         confident_landmark_outputs_with_conf(0.9)
     }
