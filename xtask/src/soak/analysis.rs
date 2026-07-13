@@ -10,6 +10,9 @@
 //!
 //! Mechanical (a machine can be trusted with these):
 //! - The app died, hung, or froze. Unambiguous.
+//! - The app panicked on a worker thread and kept rendering (see
+//!   [`crate::soak::logscan`] — the process survives, so only the log knows).
+//! - A single frame took long enough to be a visible wedge.
 //! - RSS rises with a steep, well-fit slope over hours. A least-squares fit
 //!   plus its r² separates "climbing" from "noisy but level".
 //! - FPS in the last quarter of the run is materially below the first quarter.
@@ -19,8 +22,15 @@
 //! honest answer for the middle band is [`Verdict::Review`] — emit the numbers,
 //! name the artifact, and let the operating agent (or Madison) judge. This tool
 //! never fabricates a pass.
+//!
+//! And *not answerable at all* by a run of a given length: see
+//! [`resolves_a_leak`]. A run whose span is too short for the fit to resolve a
+//! leak even at the fail slope cannot pass — it validated the harness, not the
+//! build, and it says so.
 
 use serde::{Deserialize, Serialize};
+
+use super::logscan::LogFindings;
 
 /// One joined sample: the app's self-reported health plus the externally
 /// measured RSS, taken by the launcher on its own schedule.
@@ -36,6 +46,14 @@ pub struct Sample {
     pub app_uptime_secs: Option<f64>,
     /// Smoothed FPS from the app's diagnostics.
     pub fps: Option<f64>,
+    /// The app's longest *single* frame, in milliseconds, since its previous
+    /// health snapshot — a high-water mark, not an average. This is the only
+    /// lane that can see a wedge shorter than the launcher's sample interval:
+    /// `app_uptime_secs` advances right through a 25-second hitch in a 30-second
+    /// window, and smoothed FPS has recovered by the time the next sample lands.
+    /// `None` from an app binary older than this field.
+    #[serde(default)]
+    pub max_frame_time_ms: Option<f64>,
     /// Current top-level state (`Line`, `Dots`, ...).
     pub state: Option<String>,
     /// Current sketch activity (`Active` / `Idle` / `Screensaver`).
@@ -131,6 +149,24 @@ pub struct Thresholds {
     pub fps_fail_decay: f64,
     /// Fractional FPS drop that needs review.
     pub fps_review_decay: f64,
+    /// Longest single frame (ms) at or above which the run fails outright.
+    ///
+    /// The app caps itself at 60 fps (16.7 ms/frame), so 2 s is ~120 dropped
+    /// frames: two full seconds in which a kiosk window is a frozen image.
+    /// Nothing on the steady-state path — not a sketch swap, not a settings
+    /// reload, not a debug-build pipeline compile — legitimately costs that.
+    /// A wedge does. This is the lane that sees the 20-to-29-second hitch the
+    /// `app_uptime_secs` freeze detector (which only resolves to one 30 s sample
+    /// interval) walks straight past.
+    pub hitch_fail_ms: f64,
+    /// Longest single frame (ms) at or above which the run needs review.
+    ///
+    /// Deliberately *not* one dropped frame: the soak runs a debug binary, and
+    /// entering a sketch there really can cost a few hundred milliseconds of
+    /// pipeline and asset work. 500 ms (~30 frames) is above that and below
+    /// anything a person would call a stutter rather than a stall — so it lands
+    /// in front of an operator instead of failing the build.
+    pub hitch_review_ms: f64,
     /// Samples needed before a trend fit is trusted at all.
     pub min_trend_samples: usize,
 }
@@ -144,6 +180,8 @@ impl Default for Thresholds {
             rss_min_r_squared: 0.5,
             fps_fail_decay: 0.20,
             fps_review_decay: 0.05,
+            hitch_fail_ms: 2000.0,
+            hitch_review_ms: 500.0,
             min_trend_samples: 8,
         }
     }
@@ -171,6 +209,16 @@ pub struct Analysis {
     /// Launcher wall-clock times (seconds) at which the app's own clock had not
     /// advanced since the previous sample — i.e. it was frozen.
     pub freezes: Vec<f64>,
+    /// Launcher wall-clock times (seconds) of the samples whose frame-time
+    /// watermark reached [`Thresholds::hitch_review_ms`] — the sub-sample wedges.
+    pub hitches: Vec<f64>,
+    /// The worst single frame (ms) the app reported over the whole fitted run.
+    /// `None` when no sample carried a watermark.
+    pub max_hitch_ms: Option<f64>,
+    /// What the scan of `app.log` found: a worker-thread panic the process
+    /// survived, or `ERROR`-level lines. Every metric lane can report perfect
+    /// health through both.
+    pub log: LogFindings,
     /// Sketch advances the app reported performing.
     pub cycles: u64,
     /// Number of samples analyzed.
@@ -250,7 +298,7 @@ pub fn linear_trend(points: &[(f64, f64)]) -> Option<Trend> {
         ((covariance * covariance) / (time_variance * value_variance)).clamp(0.0, 1.0)
     };
 
-    let quarter = (n / 4).max(1);
+    let quarter = quarter_len(n);
     let mean_of = |slice: &[(f64, f64)]| -> f64 {
         #[allow(
             clippy::as_conversions,
@@ -275,12 +323,69 @@ pub fn linear_trend(points: &[(f64, f64)]) -> Option<Trend> {
     })
 }
 
+/// The number of leading (and trailing) points that make up a "quarter" in
+/// [`linear_trend`]. Shared so [`quarter_gap_hours`] measures the gap between
+/// exactly the two windows whose means become [`Trend::delta`].
+fn quarter_len(n: usize) -> usize {
+    (n / 4).max(1)
+}
+
+/// Hours between the *mean sample time* of the first quarter and that of the
+/// last quarter — the two windows whose difference in value is [`Trend::delta`].
+///
+/// For an evenly-sampled run this is about three quarters of the run's span. It
+/// is measured rather than assumed, so an unevenly-sampled run (a stalled
+/// launcher, a `--report` over a partial file) is judged on what it actually
+/// covered.
+#[must_use]
+pub fn quarter_gap_hours(points: &[(f64, f64)]) -> f64 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let quarter = quarter_len(points.len());
+    #[allow(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "usize -> f64 has no From impl; quarter lengths are in the hundreds"
+    )]
+    let len = quarter as f64;
+    let mean_t = |slice: &[(f64, f64)]| slice.iter().map(|p| p.0).sum::<f64>() / len;
+    let first = mean_t(&points[..quarter]);
+    let last = mean_t(&points[points.len() - quarter..]);
+    (last - first) / SECS_PER_HOUR
+}
+
+/// Could this run resolve a leak *at all*?
+///
+/// The leak verdict is gated on `delta` (last-quarter mean minus first-quarter
+/// mean) clearing [`Thresholds::rss_noise_floor_mib`]. Over a short run, the two
+/// quarter windows are close together in time, so even a textbook leak at the
+/// *fail* slope gains less than the noise floor between them and falls through
+/// every branch to a pass. That is a false PASS on a real leak, and the only
+/// honest answer is that the run was too short to say.
+///
+/// So: a leak at [`Thresholds::rss_fail_mib_per_hour`], sustained across this
+/// run's own quarter gap, must be able to produce a `delta` at or above the
+/// noise floor. At the defaults (20 MiB/h fail, 16 MiB floor) that needs a
+/// quarter gap of 0.8 h — about a 64-minute run. Nothing here is hardcoded: the
+/// question is asked of the thresholds and the samples in front of it.
+#[must_use]
+pub fn resolves_a_leak(points: &[(f64, f64)], thresholds: &Thresholds) -> bool {
+    thresholds.rss_fail_mib_per_hour * quarter_gap_hours(points) >= thresholds.rss_noise_floor_mib
+}
+
 /// Launcher wall-clock times at which the app's own clock failed to advance
 /// since the previous sample — the freeze detector.
 ///
 /// Samples with no `app_uptime_secs` (an unreadable or not-yet-written
 /// `health.json`) are skipped rather than treated as freezes: the app may
 /// simply not have published its first snapshot yet.
+///
+/// **Resolution.** This lane only sees a wedge that spans a whole launcher
+/// sample interval (30 s by default): a 25-second hitch still advances the app's
+/// clock by ~5 s across the window, which clears [`FREEZE_ADVANCE_SECS`] with
+/// room to spare. Everything shorter than a sample interval is [`detect_hitches`]'
+/// job, which is why the app publishes a per-interval frame-time high-water mark.
 #[must_use]
 pub fn detect_freezes(samples: &[Sample]) -> Vec<f64> {
     let mut freezes = Vec::new();
@@ -299,15 +404,34 @@ pub fn detect_freezes(samples: &[Sample]) -> Vec<f64> {
     freezes
 }
 
+/// Launcher wall-clock times of the samples whose frame-time watermark reached
+/// `review_ms` — the wedges too short for [`detect_freezes`] to see.
+#[must_use]
+pub fn detect_hitches(samples: &[Sample], review_ms: f64) -> Vec<f64> {
+    samples
+        .iter()
+        .filter(|s| s.max_frame_time_ms.is_some_and(|ms| ms >= review_ms))
+        .map(|s| s.t_secs)
+        .collect()
+}
+
 /// Analyze a completed (or aborted) soak run.
+///
+/// `log` is the scan of the run's `app.log` ([`crate::soak::logscan::scan_log`]),
+/// passed in rather than read here so this stays a pure function of its inputs.
 #[must_use]
 #[allow(
     clippy::too_many_lines,
-    reason = "one linear classifier: outcome, then freezes, then RSS, then FPS. Each branch \
-              carries the operator-facing sentence it emits; splitting them apart would \
-              scatter the verdict logic across four functions to satisfy a line count"
+    reason = "one linear classifier: outcome, then the log, then freezes and hitches, then RSS, \
+              then FPS. Each branch carries the operator-facing sentence it emits; splitting them \
+              apart would scatter the verdict logic across five functions to satisfy a line count"
 )]
-pub fn analyze(samples: &[Sample], outcome: Outcome, thresholds: Thresholds) -> Analysis {
+pub fn analyze(
+    samples: &[Sample],
+    outcome: Outcome,
+    thresholds: Thresholds,
+    log: &LogFindings,
+) -> Analysis {
     let mut failures: Vec<String> = Vec::new();
     let mut review: Vec<String> = Vec::new();
     let mut verdict = Verdict::Pass;
@@ -333,6 +457,40 @@ pub fn analyze(samples: &[Sample], outcome: Outcome, thresholds: Thresholds) -> 
         Outcome::Completed => {}
     }
 
+    // --- the log: the failures every metric lane reports health through -------
+    // A panic on a worker thread does not kill the process (debug builds unwind,
+    // and the audio watcher explicitly catches). Hand tracking can be dead for
+    // five hours while RSS, FPS, and the app's clock all look perfect.
+    if log.panic_count > 0 {
+        failures.push(format!(
+            "the app panicked {} time(s) and kept running — a worker thread died while the \
+             process went on rendering, so no metric lane can see this. First: {}",
+            log.panic_count,
+            log.panics.first().map_or("(unquoted)", String::as_str),
+        ));
+        verdict = Verdict::Fail;
+    }
+    if log.error_count > 0 {
+        let mut quoted = String::new();
+        for line in &log.errors {
+            quoted.push_str("\n      ");
+            quoted.push_str(line);
+        }
+        review.push(format!(
+            "{} ERROR-level line(s) in app.log — a lost device, an audio path that never \
+             recovered, or a shader that failed to reload are all survivable and all silent in \
+             the metrics. Judge these:{quoted}",
+            log.error_count,
+        ));
+        verdict = verdict.worst(Verdict::Review);
+    }
+    if let Some(why) = &log.unreadable {
+        review.push(format!(
+            "app.log could not be read ({why}) — the panic / ERROR lane was blind for this run"
+        ));
+        verdict = verdict.worst(Verdict::Review);
+    }
+
     let freezes = detect_freezes(samples);
     if !freezes.is_empty() {
         failures.push(format!(
@@ -342,6 +500,52 @@ pub fn analyze(samples: &[Sample], outcome: Outcome, thresholds: Thresholds) -> 
             freezes.first().copied().unwrap_or_default(),
         ));
         verdict = Verdict::Fail;
+    }
+
+    // --- hitches: the wedges shorter than one sample interval -----------------
+    let hitches = detect_hitches(samples, thresholds.hitch_review_ms);
+    let max_hitch_ms = samples
+        .iter()
+        .filter_map(|s| s.max_frame_time_ms)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_hitch_ms = max_hitch_ms.is_finite().then_some(max_hitch_ms);
+
+    match max_hitch_ms {
+        None if !samples.is_empty() => {
+            review.push(
+                "no sample carried a frame-time watermark — the hitch lane was blind, so a wedge \
+                 shorter than the sample interval could not have been seen (is the app binary \
+                 older than this launcher? rebuild it)"
+                    .to_string(),
+            );
+            verdict = verdict.worst(Verdict::Review);
+        }
+        Some(worst) if worst >= thresholds.hitch_fail_ms => {
+            failures.push(format!(
+                "the app's worst single frame took {:.0} ms ({} sample interval(s) held a frame \
+                 over {:.0} ms, first at t={:.0}s) — that is a wedged window, not a stutter, and \
+                 it is far too short for the freeze detector to resolve",
+                worst,
+                hitches.len(),
+                thresholds.hitch_review_ms,
+                hitches.first().copied().unwrap_or_default(),
+            ));
+            verdict = Verdict::Fail;
+        }
+        Some(worst) if !hitches.is_empty() => {
+            review.push(format!(
+                "the app's worst single frame took {:.0} ms, over the {:.0} ms review threshold \
+                 ({} sample interval(s), first at t={:.0}s). A debug-build sketch entry can cost \
+                 a few hundred ms legitimately; a repeating hitch cannot. Check whether these land \
+                 on the sketch-cycle boundaries.",
+                worst,
+                thresholds.hitch_review_ms,
+                hitches.len(),
+                hitches.first().copied().unwrap_or_default(),
+            ));
+            verdict = verdict.worst(Verdict::Review);
+        }
+        _ => {}
     }
 
     // --- RSS: the leak signal ------------------------------------------------
@@ -367,6 +571,41 @@ pub fn analyze(samples: &[Sample], outcome: Outcome, thresholds: Thresholds) -> 
         ));
         verdict = verdict.worst(Verdict::Review);
     } else if let Some(t) = rss {
+        // Before reading the slope: could a run this short have *resolved* a leak
+        // at all? If a textbook leak at the fail slope would not have moved the
+        // quarter means past the noise floor over this span, then every RSS
+        // branch below is guaranteed to fall through — and a fall-through is a
+        // PASS. That PASS would be a lie, so the run cannot have one.
+        if !resolves_a_leak(&rss_points, &thresholds) {
+            let gap_h = quarter_gap_hours(&rss_points);
+            let would_gain = thresholds.rss_fail_mib_per_hour * gap_h;
+            // What the *run* would have to span, extrapolating the gap-to-span
+            // ratio this run actually exhibits (≈3/4 for even sampling).
+            let span_h = (rss_points.last().map_or(0.0, |p| p.0)
+                - rss_points.first().map_or(0.0, |p| p.0))
+                / SECS_PER_HOUR;
+            let ratio = if span_h > 0.0 { gap_h / span_h } else { 0.75 };
+            let needed_h = if ratio > 0.0 {
+                (thresholds.rss_noise_floor_mib / thresholds.rss_fail_mib_per_hour) / ratio
+            } else {
+                f64::INFINITY
+            };
+            review.push(format!(
+                "this run is too short to say anything about a leak. Its quarter means are only \
+                 {:.0} min apart, so even a textbook leak at the {:.0} MiB/hour fail threshold \
+                 would gain just {:.1} MiB between them — under the {:.0} MiB noise floor, which \
+                 means every leak branch is guaranteed to fall through no matter what memory did. \
+                 Resolving a leak at that threshold needs a run of about {:.1} h. A run this short \
+                 validates the HARNESS, not the BUILD: it says nothing about memory.",
+                gap_h * 60.0,
+                thresholds.rss_fail_mib_per_hour,
+                would_gain,
+                thresholds.rss_noise_floor_mib,
+                needed_h,
+            ));
+            verdict = verdict.worst(Verdict::Review);
+        }
+
         let above_noise = t.delta >= thresholds.rss_noise_floor_mib;
         let well_fit = t.r_squared >= thresholds.rss_min_r_squared;
         if t.slope_per_hour >= thresholds.rss_fail_mib_per_hour && above_noise && well_fit {
@@ -449,6 +688,9 @@ pub fn analyze(samples: &[Sample], outcome: Outcome, thresholds: Thresholds) -> 
         fps_active,
         fps_decay,
         freezes,
+        hitches,
+        max_hitch_ms,
+        log: log.clone(),
         cycles: samples.iter().filter_map(|s| s.cycles).max().unwrap_or(0),
         samples: samples.len(),
         thresholds,
@@ -488,14 +730,22 @@ mod tests {
         i as f64 * DT
     }
 
+    /// A log scan that found nothing — the default for every fixture that is not
+    /// about the log lane.
+    fn clean() -> LogFindings {
+        LogFindings::default()
+    }
+
     /// A sample at `t` seconds with `rss_mib` MiB resident and `fps` FPS, in an
-    /// active sketch, with the app's clock tracking the launcher's.
+    /// active sketch, with the app's clock tracking the launcher's and a healthy
+    /// frame-time watermark (one 60 fps frame).
     fn sample(t: f64, rss_mib: f64, fps: f64) -> Sample {
         Sample {
             t_secs: t,
             rss_kib: Some(mib_to_kib(rss_mib)),
             app_uptime_secs: Some(t),
             fps: Some(fps),
+            max_frame_time_ms: Some(16.7),
             state: Some("Line".to_string()),
             activity: Some("Active".to_string()),
             thermal_tier: Some("cool".to_string()),
@@ -551,7 +801,7 @@ mod tests {
     #[test]
     fn flat_rss_and_flat_fps_passes() {
         let s = series(960, |_| 400.0, |_| 60.0); // 8 h at 30 s
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(
             a.verdict,
             Verdict::Pass,
@@ -567,7 +817,7 @@ mod tests {
     fn steadily_climbing_rss_fails_as_a_leak() {
         // +40 MiB/hour: a hard leak. 960 samples * 30 s = 8 h.
         let s = series(960, |t| 400.0 + (t / SECS_PER_HOUR) * 40.0, |_| 60.0);
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Fail);
         assert!(
             a.failures.iter().any(|f| f.contains("RSS climbed")),
@@ -584,7 +834,7 @@ mod tests {
     fn noisy_but_level_rss_passes() {
         // Deterministic pseudo-noise: a fast sine, no drift.
         let s = series(960, |t| 400.0 + (t * 0.023).sin() * 30.0, |_| 60.0);
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(
             a.verdict,
             Verdict::Pass,
@@ -600,7 +850,7 @@ mod tests {
     fn sawtooth_rss_with_a_level_floor_does_not_fail() {
         // 30-minute teeth: +60 MiB across each tooth, then straight back down.
         let s = series(960, |t| 400.0 + (t % 1800.0) / 30.0, |_| 60.0);
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_ne!(
             a.verdict,
             Verdict::Fail,
@@ -619,7 +869,7 @@ mod tests {
             |t| 400.0 + (t / SECS_PER_HOUR) * 30.0 + (t % 1800.0) / 120.0,
             |_| 60.0,
         );
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_ne!(
             a.verdict,
             Verdict::Pass,
@@ -635,7 +885,7 @@ mod tests {
             |_| 400.0,
             |t| 60.0 - (t / (8.0 * SECS_PER_HOUR)) * 20.0,
         );
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Fail);
         assert!(
             a.failures.iter().any(|f| f.contains("FPS decayed")),
@@ -649,7 +899,7 @@ mod tests {
     fn mild_fps_drift_asks_for_review_rather_than_failing() {
         // ~8% decay: inside the review band.
         let s = series(960, |_| 400.0, |t| 60.0 - (t / (8.0 * SECS_PER_HOUR)) * 5.0);
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Review);
         assert!(a.failures.is_empty(), "{:?}", a.failures);
         assert!(a.review.iter().any(|r| r.contains("FPS drifted")));
@@ -664,7 +914,7 @@ mod tests {
             sample.activity = Some("Screensaver".to_string());
             sample.fps = Some(3.0); // the Hot-tier "resting ember"
         }
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert!(
             a.failures.iter().all(|f| !f.contains("FPS")),
             "screensaver present-rate is not a regression: {:?}",
@@ -683,7 +933,7 @@ mod tests {
         }
         let freezes = detect_freezes(&s);
         assert_eq!(freezes.len(), 9, "every sample after the stall is frozen");
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Fail);
         assert!(a.failures.iter().any(|f| f.contains("froze")));
     }
@@ -698,7 +948,7 @@ mod tests {
     #[test]
     fn an_early_exit_fails_regardless_of_the_metrics() {
         let s = series(960, |_| 400.0, |_| 60.0);
-        let a = analyze(&s, Outcome::ExitedEarly, Thresholds::default());
+        let a = analyze(&s, Outcome::ExitedEarly, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Fail);
         assert!(a
             .failures
@@ -709,7 +959,7 @@ mod tests {
     #[test]
     fn a_timeout_fails() {
         let s = series(960, |_| 400.0, |_| 60.0);
-        let a = analyze(&s, Outcome::TimedOut, Thresholds::default());
+        let a = analyze(&s, Outcome::TimedOut, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Fail);
     }
 
@@ -718,7 +968,7 @@ mod tests {
     #[test]
     fn too_few_samples_asks_for_review_instead_of_passing() {
         let s = series(4, |_| 400.0, |_| 60.0);
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Review);
         assert!(a.review.iter().any(|r| r.contains("trend fit")));
     }
@@ -729,9 +979,241 @@ mod tests {
         for sample in &mut s {
             sample.rss_kib = None;
         }
-        let a = analyze(&s, Outcome::Completed, Thresholds::default());
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
         assert_eq!(a.verdict, Verdict::Review);
         assert!(a.review.iter().any(|r| r.contains("no RSS readings")));
+    }
+
+    // ---- the r² gate, which is what separates a leak from a sawtooth --------
+
+    /// The gate's own test. A series that is **steep** (25 MiB/hour, past the 20
+    /// MiB/hour fail slope), **above the noise floor** (it gains ~150 MiB), and
+    /// **badly fit** (a ±100 MiB oscillation dominates the variance, r² ≈ 0.4).
+    ///
+    /// Every other fixture clears one of the earlier conditions before r² is ever
+    /// consulted, so this is the only test in which `rss_min_r_squared` actually
+    /// decides anything. Hardcode `linear_trend`'s `r_squared` to `1.0` and this
+    /// test — and only this test — turns the REVIEW into a FAIL. That is the
+    /// point: r² is the one thing standing between a violently oscillating
+    /// bounded cache and a build being failed for a leak it does not have.
+    #[test]
+    fn a_steep_above_noise_but_badly_fit_series_is_reviewed_not_failed() {
+        let s = series(
+            960,
+            |t| 400.0 + (t / SECS_PER_HOUR) * 25.0 + (t * 0.01).sin() * 100.0,
+            |_| 60.0,
+        );
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
+        let rss = a.rss.expect("rss trend");
+
+        // The behaviour first, so that a mutated r² fails *here* — on the verdict
+        // it changes — rather than only on a fixture invariant.
+        assert!(
+            a.failures.is_empty(),
+            "the r² gate must keep a badly-fit series out of FAIL — that is the whole job of the \
+             gate (r²={:.2}): {:?}",
+            rss.r_squared,
+            a.failures
+        );
+        assert_eq!(
+            a.verdict,
+            Verdict::Review,
+            "steep + above noise + badly fit is a judgment call, not a mechanical leak: {:?}",
+            a.review
+        );
+
+        // ...and then the fixture invariants, so that a series which quietly stops
+        // being steep / above-noise / badly-fit fails loudly instead of passing
+        // this test for the wrong reason.
+        assert!(
+            rss.slope_per_hour >= Thresholds::default().rss_fail_mib_per_hour,
+            "fixture must be steep enough to reach the FAIL branch: {:.1} MiB/h",
+            rss.slope_per_hour
+        );
+        assert!(
+            rss.delta >= Thresholds::default().rss_noise_floor_mib,
+            "fixture must clear the noise floor: {:.1} MiB",
+            rss.delta
+        );
+        assert!(
+            rss.r_squared < Thresholds::default().rss_min_r_squared,
+            "fixture must fit BADLY, or r² never decides anything: r²={:.2}",
+            rss.r_squared
+        );
+    }
+
+    // ---- a run too short to resolve a leak cannot pass -----------------------
+
+    /// The gap I3 named: a 30-minute run's quarter means are ~22 minutes apart,
+    /// so a *textbook* 20 MiB/hour leak moves them only ~7.5 MiB — under the 16
+    /// MiB noise floor. Every leak branch falls through, and a fall-through used
+    /// to be a PASS. It must not be.
+    #[test]
+    fn a_real_leak_in_a_run_too_short_to_resolve_it_does_not_pass() {
+        // 60 samples * 30 s = 30 minutes, climbing at exactly the fail slope.
+        let s = series(60, |t| 400.0 + (t / SECS_PER_HOUR) * 20.0, |_| 60.0);
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
+        assert_ne!(
+            a.verdict,
+            Verdict::Pass,
+            "a 20 MiB/h leak in a 30-minute run must never read as a pass"
+        );
+        assert!(
+            a.review.iter().any(|r| r.contains("too short")),
+            "and it must say WHY it cannot judge: {:?}",
+            a.review
+        );
+    }
+
+    /// The smoke invocation AGENTS.md documents (`--duration 2m --sample 5s`)
+    /// collects enough samples to fit — and must still not claim a pass.
+    #[test]
+    fn the_documented_smoke_run_reviews_rather_than_passing() {
+        // 2 minutes at a 5 s sample = 24 samples, all flat and healthy.
+        let s: Vec<Sample> = (0..24_i32)
+            .map(|i| sample(f64::from(i) * 5.0, 400.0, 60.0))
+            .collect();
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
+        assert_eq!(
+            a.verdict,
+            Verdict::Review,
+            "a 2-minute smoke run validates the harness, not the build: {:?}",
+            a.review
+        );
+        assert!(
+            a.review.iter().any(|r| r.contains("HARNESS")),
+            "{:?}",
+            a.review
+        );
+    }
+
+    /// ...but the 8-hour gate run *can* resolve one, so it is still allowed to
+    /// pass. The short-run guard must not swallow every verdict.
+    #[test]
+    fn the_eight_hour_gate_run_still_resolves_a_leak() {
+        let points: Vec<(f64, f64)> = (0..960).map(|i| (at(i), 400.0)).collect();
+        assert!(resolves_a_leak(&points, &Thresholds::default()));
+        assert!((quarter_gap_hours(&points) - 6.0).abs() < 0.1);
+    }
+
+    // ---- the log: what every metric lane reports health through --------------
+
+    /// C1's failure scenario, end to end: the inference worker panics at hour 3,
+    /// the process keeps rendering, and RSS / FPS / uptime / exit code are all
+    /// perfect. Only the log knows, so only the log can fail it.
+    #[test]
+    fn a_worker_panic_fails_a_run_whose_metrics_are_perfect() {
+        let s = series(960, |_| 400.0, |_| 60.0);
+        let log = LogFindings {
+            lines_scanned: 40_000,
+            panic_count: 1,
+            panics: vec![
+                "thread 'mediapipe-inference' panicked at inference_ort.rs:214".to_string(),
+            ],
+            ..LogFindings::default()
+        };
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &log);
+        assert_eq!(a.verdict, Verdict::Fail);
+        assert!(
+            a.failures.iter().any(|f| f.contains("mediapipe-inference")),
+            "the verdict must quote the panic: {:?}",
+            a.failures
+        );
+    }
+
+    #[test]
+    fn error_lines_in_the_log_ask_for_review() {
+        let s = series(960, |_| 400.0, |_| 60.0);
+        let log = LogFindings {
+            error_count: 3,
+            errors: vec!["ERROR wgpu_core::device: Device lost".to_string()],
+            ..LogFindings::default()
+        };
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &log);
+        assert_eq!(a.verdict, Verdict::Review);
+        assert!(
+            a.review.iter().any(|r| r.contains("Device lost")),
+            "{:?}",
+            a.review
+        );
+    }
+
+    #[test]
+    fn an_unreadable_log_asks_for_review_because_the_lane_was_blind() {
+        let s = series(960, |_| 400.0, |_| 60.0);
+        let log = LogFindings {
+            unreadable: Some("app.log: No such file".to_string()),
+            ..LogFindings::default()
+        };
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &log);
+        assert_eq!(a.verdict, Verdict::Review);
+        assert!(
+            a.review.iter().any(|r| r.contains("blind")),
+            "{:?}",
+            a.review
+        );
+    }
+
+    // ---- hitches: the wedges the freeze detector cannot resolve --------------
+
+    /// C2's failure scenario: a 25-second wedge inside a 30-second sample window.
+    /// The app's clock still advances ~5 s across it, so the freeze lane sees
+    /// nothing; the smoothed FPS has recovered by the next sample, so that lane
+    /// sees nothing either. The frame-time watermark is the only witness.
+    #[test]
+    fn a_sub_sample_wedge_fails_even_though_the_freeze_lane_misses_it() {
+        let mut s = series(960, |_| 400.0, |_| 60.0);
+        s[500].max_frame_time_ms = Some(25_000.0);
+
+        assert!(
+            detect_freezes(&s).is_empty(),
+            "precondition: the app's clock advanced right through the wedge, so the freeze \
+             detector is blind to it — this is exactly why the watermark exists"
+        );
+
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
+        assert_eq!(a.verdict, Verdict::Fail);
+        assert!(
+            a.failures.iter().any(|f| f.contains("wedged window")),
+            "{:?}",
+            a.failures
+        );
+        assert_eq!(a.hitches, vec![at(500)]);
+    }
+
+    /// A few hundred milliseconds at a sketch entry, in a debug build, is not a
+    /// failure — but it is not silence either.
+    #[test]
+    fn a_sub_second_hitch_is_reviewed_rather_than_failed() {
+        let mut s = series(960, |_| 400.0, |_| 60.0);
+        s[300].max_frame_time_ms = Some(700.0);
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
+        assert_eq!(a.verdict, Verdict::Review);
+        assert!(a.failures.is_empty(), "{:?}", a.failures);
+        assert!(
+            a.max_hitch_ms.is_some_and(|m| (m - 700.0).abs() < 1e-9),
+            "{:?}",
+            a.max_hitch_ms
+        );
+    }
+
+    /// An app binary that predates the watermark publishes no `max_frame_time_ms`
+    /// at all. The hitch lane is then blind, and a blind lane must say so rather
+    /// than report a clean run.
+    #[test]
+    fn samples_with_no_watermark_ask_for_review() {
+        let mut s = series(960, |_| 400.0, |_| 60.0);
+        for sample in &mut s {
+            sample.max_frame_time_ms = None;
+        }
+        let a = analyze(&s, Outcome::Completed, Thresholds::default(), &clean());
+        assert_eq!(a.verdict, Verdict::Review);
+        assert!(
+            a.review.iter().any(|r| r.contains("hitch lane was blind")),
+            "{:?}",
+            a.review
+        );
+        assert_eq!(a.max_hitch_ms, None);
     }
 
     #[test]

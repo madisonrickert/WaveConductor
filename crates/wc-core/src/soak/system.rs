@@ -62,6 +62,17 @@ pub struct SoakRuntime {
     cycles: u64,
     /// True once `AppExit` has been requested, so we request it only once.
     exit_requested: bool,
+    /// Longest single frame (in milliseconds) seen *since the last publish*.
+    ///
+    /// The high-water mark exists because the launcher's other freeze signal —
+    /// `uptime_secs` failing to advance between two launcher samples — can only
+    /// resolve a wedge longer than the sample interval (30 s by default). A
+    /// 25-second hitch every ten minutes advances the app's clock plenty
+    /// between samples and is invisible to it, while Bevy's *smoothed* FPS
+    /// recovers long before the next sample too. A watermark that survives to
+    /// the next publish is the only lane that sees it. Reset on each publish,
+    /// so it describes the interval, not the whole run.
+    max_frame_time_ms: f32,
     /// Reused snapshot-formatting buffer — never reallocated in steady state.
     scratch: String,
 }
@@ -98,6 +109,10 @@ pub struct HealthSnapshot {
     pub fps: Option<f64>,
     /// Smoothed frame time in milliseconds. `None` as for `fps`.
     pub frame_time_ms: Option<f64>,
+    /// Longest single frame, in milliseconds, since the previous snapshot. Not
+    /// smoothed and not averaged: this is the hitch lane, and a hitch that is
+    /// averaged away is a hitch that ships.
+    pub max_frame_time_ms: f32,
     /// Current top-level state (`Line`, `Dots`, `Home`, ...).
     pub state: String,
     /// Current sketch activity (`Active`, `Idle`, `Screensaver`), or `None` at
@@ -138,6 +153,15 @@ pub fn drive_soak(
     };
     let elapsed = time.elapsed();
 
+    // The hitch watermark, updated every frame: one `f32` compare, no branch of
+    // consequence, no allocation. `Time<Real>`'s delta is the *wall-clock* length
+    // of the previous frame, which is exactly what a wedged frame is long in —
+    // a virtual-time delta would be clamped and hide the very thing we hunt.
+    let frame_ms = time.delta().as_secs_f32() * 1000.0;
+    if frame_ms > runtime.max_frame_time_ms {
+        runtime.max_frame_time_ms = frame_ms;
+    }
+
     if elapsed >= runtime.next_health {
         runtime.published += 1;
         let snapshot = snapshot(
@@ -148,8 +172,14 @@ pub fn drive_soak(
             activity.as_deref(),
             runtime.published,
             runtime.cycles,
+            runtime.max_frame_time_ms,
         );
         publish(&config, &mut runtime, &snapshot);
+        // Reset the watermark *after* publishing it: each snapshot reports the
+        // worst frame of the interval it closes, not of the run so far. A
+        // run-long maximum would report one hitch forever and could never say
+        // *when* it happened.
+        runtime.max_frame_time_ms = 0.0;
         // Advance by whole intervals from the deadline (not from `elapsed`), so
         // a late frame does not drift the schedule; `max` guarantees progress
         // even if a very long hitch skipped several intervals.
@@ -198,6 +228,11 @@ pub fn hold_sketch_active(
 }
 
 /// Gather the current readings into a [`HealthSnapshot`]. Pure over its inputs.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the snapshot's fields are its arguments; grouping them into a struct \
+              would only rename this list"
+)]
 fn snapshot(
     elapsed: Duration,
     diagnostics: Option<&DiagnosticsStore>,
@@ -206,6 +241,7 @@ fn snapshot(
     activity: Option<&State<SketchActivity>>,
     published: u64,
     cycles: u64,
+    max_frame_time_ms: f32,
 ) -> HealthSnapshot {
     let smoothed = |path: &bevy::diagnostic::DiagnosticPath| -> Option<f64> {
         diagnostics?.get(path).and_then(Diagnostic::smoothed)
@@ -214,6 +250,7 @@ fn snapshot(
         uptime_secs: elapsed.as_secs_f64(),
         fps: smoothed(&FrameTimeDiagnosticsPlugin::FPS),
         frame_time_ms: smoothed(&FrameTimeDiagnosticsPlugin::FRAME_TIME),
+        max_frame_time_ms,
         state: app_state.map_or_else(|| "Unknown".to_string(), |s| format!("{:?}", s.get())),
         activity: activity.map(|a| format!("{:?}", a.get())),
         thermal_tier: thermal.map_or_else(
@@ -256,11 +293,15 @@ fn write_health_json(out: &mut String, s: &HealthSnapshot) {
     // `writeln!` into a `String` is infallible; the discard documents that.
     let _ = writeln!(
         out,
-        "{{\"uptime_secs\":{:.3},\"fps\":{},\"frame_time_ms\":{},\"state\":\"{}\",\"activity\":{},\
+        "{{\"uptime_secs\":{:.3},\"fps\":{},\"frame_time_ms\":{},\"max_frame_time_ms\":{},\
+         \"state\":\"{}\",\"activity\":{},\
          \"thermal_tier\":\"{}\",\"thermal_temp_c\":{},\"published\":{},\"cycles\":{}}}",
         s.uptime_secs,
         opt_f64(s.fps),
         opt_f64(s.frame_time_ms),
+        // Through `opt_f64` for its non-finite guard: a NaN here would emit a
+        // snapshot the launcher could not parse, blinding every lane at once.
+        opt_f64(Some(f64::from(s.max_frame_time_ms))),
         s.state,
         s.activity
             .as_deref()
@@ -295,6 +336,7 @@ mod tests {
             uptime_secs: 12.5,
             fps: Some(59.94),
             frame_time_ms: Some(16.68),
+            max_frame_time_ms: 33.4,
             state: "Line".to_string(),
             activity: Some("Active".to_string()),
             thermal_tier: "cool".to_string(),
@@ -311,6 +353,7 @@ mod tests {
         assert!(out.contains("\"uptime_secs\":12.500"), "{out}");
         assert!(out.contains("\"fps\":59.940"), "{out}");
         assert!(out.contains("\"frame_time_ms\":16.680"), "{out}");
+        assert!(out.contains("\"max_frame_time_ms\":33.400"), "{out}");
         assert!(out.contains("\"state\":\"Line\""), "{out}");
         assert!(out.contains("\"activity\":\"Active\""), "{out}");
         assert!(out.contains("\"thermal_tier\":\"cool\""), "{out}");
@@ -354,12 +397,15 @@ mod tests {
 
     #[test]
     fn snapshot_degrades_gracefully_without_any_resources() {
-        let s = snapshot(Duration::from_secs(2), None, None, None, None, 1, 0);
+        let s = snapshot(Duration::from_secs(2), None, None, None, None, 1, 0, 40.0);
         assert_eq!(s.state, "Unknown");
         assert_eq!(s.activity, None);
         assert_eq!(s.thermal_tier, "unknown");
         assert_eq!(s.fps, None);
         assert!((s.uptime_secs - 2.0).abs() < f64::EPSILON);
+        // The hitch lane does not depend on the diagnostics store, so it still
+        // reports even when every other reading is missing.
+        assert!((s.max_frame_time_ms - 40.0).abs() < f32::EPSILON);
     }
 
     /// The scratch buffer is reused across publishes: a second format must not
@@ -461,5 +507,79 @@ mod tests {
             .drain()
             .count();
         assert_eq!(exits, 1, "AppExit is requested exactly once");
+    }
+
+    /// Build a soak app whose health interval is `health` and whose output goes
+    /// to `dir`. Used by the two watermark tests below.
+    fn watermark_app(dir: std::path::PathBuf, health: Duration) -> App {
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin);
+        app.add_message::<AppExit>();
+        app.init_resource::<NextState<AppState>>();
+        let config = SoakConfig {
+            dir,
+            duration: Duration::from_hours(8),
+            health,
+            cycle: None,
+            activity: SoakActivity::Active,
+        };
+        app.insert_resource(SoakRuntime::new(&config));
+        app.insert_resource(config);
+        app.add_systems(Update, drive_soak);
+        app
+    }
+
+    /// The hitch lane: the worst frame between two publishes must survive to the
+    /// publish, because *that* is the only signal that sees a wedge shorter than
+    /// the launcher's sample interval. A smoothed average would erase it.
+    #[test]
+    fn the_watermark_holds_the_worst_frame_between_publishes() {
+        // Health interval far longer than the test: exactly one publish (the one
+        // armed at t=0), then the watermark accumulates undisturbed.
+        let mut app = watermark_app(
+            std::env::temp_dir().join("wc_soak_watermark_hold"),
+            Duration::from_hours(1),
+        );
+        app.update();
+        std::thread::sleep(Duration::from_millis(25));
+        app.update();
+        std::thread::sleep(Duration::from_millis(5));
+        app.update();
+
+        let mark = app.world().resource::<SoakRuntime>().max_frame_time_ms;
+        assert!(
+            mark >= 20.0,
+            "the 25 ms frame must still be the high-water mark, not averaged away with the 5 ms \
+             one; got {mark} ms"
+        );
+    }
+
+    /// ...and it is reset by the publish, so each snapshot describes the interval
+    /// it closes. A watermark that were never reset would report one early hitch
+    /// for the rest of the run and could never say when a later one happened.
+    #[test]
+    fn publishing_resets_the_watermark() {
+        let dir = std::env::temp_dir().join("wc_soak_watermark_reset");
+        // Zero health interval: every frame publishes.
+        let mut app = watermark_app(dir.clone(), Duration::ZERO);
+        app.update();
+        std::thread::sleep(Duration::from_millis(25));
+        app.update();
+
+        let mark = app.world().resource::<SoakRuntime>().max_frame_time_ms;
+        assert!(
+            mark.abs() < f32::EPSILON,
+            "the publish must zero the watermark; got {mark} ms"
+        );
+        let written = std::fs::read_to_string(dir.join("health.json")).unwrap();
+        assert!(
+            written.contains("\"max_frame_time_ms\":"),
+            "the snapshot carries the hitch lane: {written}"
+        );
+        assert!(
+            !written.contains("\"max_frame_time_ms\":null"),
+            "a real frame was measured, so it must not be null: {written}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -19,8 +19,10 @@
 //! 3. Every `--sample` seconds, read that snapshot and pair it with an
 //!    externally-measured RSS ([`rss`]); append the joined row to
 //!    `<dir>/samples.ndjson` immediately, so a killed run still leaves data.
-//! 4. When the app exits (or blows past its grace window), fit the trends and
-//!    draw a verdict ([`analysis`]), write `<dir>/run.json`, and report.
+//! 4. When the app exits (or blows past its grace window), scan `app.log` for
+//!    the failures no metric can see ([`logscan`] — a worker-thread panic the
+//!    process survived, an `ERROR`-level line), fit the trends and draw a
+//!    verdict ([`analysis`]), write `<dir>/run.json`, and report.
 //!
 //! ## Memory, over eight hours
 //!
@@ -41,6 +43,7 @@
 #![allow(clippy::print_stdout, reason = "xtask is a CLI; printing is its job")]
 
 pub mod analysis;
+pub mod logscan;
 pub mod rss;
 pub mod timefmt;
 
@@ -250,7 +253,9 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| s.t_secs >= warmup.as_secs_f64())
         .cloned()
         .collect();
-    let analysis = analyze(&fitted, run.outcome, Thresholds::default());
+    // The log lane is not filtered by warmup: a panic at second 3 is a panic.
+    let log = logscan::scan_log(&out_dir.join("app.log"));
+    let analysis = analyze(&fitted, run.outcome, Thresholds::default(), &log);
 
     let report = RunReport {
         label,
@@ -405,6 +410,7 @@ fn take_sample(elapsed: Duration, pid: u32, health_path: &Path) -> Sample {
         rss_kib: rss::sample_rss_kib(pid),
         app_uptime_secs: health.as_ref().map(|h| h.uptime_secs),
         fps: health.as_ref().and_then(|h| h.fps),
+        max_frame_time_ms: health.as_ref().and_then(|h| h.max_frame_time_ms),
         state: health.as_ref().map(|h| h.state.clone()),
         activity: health.as_ref().and_then(|h| h.activity.clone()),
         thermal_tier: health.as_ref().map(|h| h.thermal_tier.clone()),
@@ -419,6 +425,12 @@ fn take_sample(elapsed: Duration, pid: u32, health_path: &Path) -> Sample {
 struct HealthSnapshot {
     uptime_secs: f64,
     fps: Option<f64>,
+    /// The worst single frame since the app's previous snapshot. `#[serde(default)]`
+    /// so a stale app binary (built before this field existed) still parses —
+    /// the analysis then reports the hitch lane as blind rather than silently
+    /// dropping every other reading in the snapshot.
+    #[serde(default)]
+    max_frame_time_ms: Option<f64>,
     state: String,
     activity: Option<String>,
     thermal_tier: String,
@@ -466,7 +478,16 @@ fn report_existing(dir: &Path, json: bool) -> Result<(), Box<dyn std::error::Err
         .into_iter()
         .filter(|s| s.t_secs >= previous.config.warmup_secs)
         .collect();
-    let analysis = analyze(&fitted, previous.outcome, previous.analysis.thresholds);
+    // Re-scanned, not read back from the old `run.json`: `--report` re-derives
+    // every lane from the run's own artifacts, so a fix to the scanner applies
+    // to runs already on disk.
+    let log = logscan::scan_log(&dir.join("app.log"));
+    let analysis = analyze(
+        &fitted,
+        previous.outcome,
+        previous.analysis.thresholds,
+        &log,
+    );
 
     let report = RunReport {
         analysis,
@@ -547,11 +568,46 @@ fn print_human(report: &RunReport) {
     } else {
         println!("  FPS      (no active-sketch readings)");
     }
+    match a.max_hitch_ms {
+        Some(worst) => println!(
+            "  hitches  {} over {:.0} ms (worst single frame {:.0} ms)",
+            a.hitches.len(),
+            a.thresholds.hitch_review_ms,
+            worst,
+        ),
+        None => println!("  hitches  (no frame-time watermark — lane blind)"),
+    }
     println!("  freezes  {}", a.freezes.len());
+    if a.log.is_clean() {
+        println!("  log      {} line(s), clean", a.log.lines_scanned);
+    } else {
+        println!(
+            "  log      {} line(s), {} panic(s), {} ERROR(s){}",
+            a.log.lines_scanned,
+            a.log.panic_count,
+            a.log.error_count,
+            a.log
+                .unreadable
+                .as_ref()
+                .map_or_else(String::new, |why| format!(" — UNREADABLE: {why}")),
+        );
+    }
     println!();
 
     match a.verdict {
-        Verdict::Pass => println!("VERDICT: PASS — no leak trend, no FPS decay, no freeze."),
+        Verdict::Pass => {
+            println!(
+                "VERDICT: PASS — ran to completion; no leak trend the fit could resolve, no FPS \
+                 decay,"
+            );
+            println!(
+                "         no freeze, no frame over {:.0} ms, no panic or ERROR in the log.",
+                a.thresholds.hitch_review_ms,
+            );
+            println!(
+                "         PASS is not \"no leak\": see the blind spots in AGENTS.md > Soak testing."
+            );
+        }
         Verdict::Fail => {
             println!("VERDICT: FAIL");
             for f in &a.failures {
@@ -645,11 +701,13 @@ mod tests {
     #[test]
     fn app_health_json_deserializes() {
         let raw = "{\"uptime_secs\":12.500,\"fps\":59.940,\"frame_time_ms\":16.680,\
+                   \"max_frame_time_ms\":33.400,\
                    \"state\":\"Line\",\"activity\":\"Active\",\"thermal_tier\":\"cool\",\
                    \"thermal_temp_c\":45.50,\"published\":3,\"cycles\":1}\n";
         let h: HealthSnapshot = serde_json::from_str(raw).expect("app's health.json parses");
         assert!((h.uptime_secs - 12.5).abs() < f64::EPSILON);
         assert_eq!(h.fps, Some(59.94));
+        assert_eq!(h.max_frame_time_ms, Some(33.4));
         assert_eq!(h.state, "Line");
         assert_eq!(h.activity.as_deref(), Some("Active"));
         assert_eq!(h.thermal_tier, "cool");
@@ -659,13 +717,29 @@ mod tests {
     /// The nulls the app writes when a reading is unavailable must parse too.
     #[test]
     fn app_health_json_with_nulls_deserializes() {
-        let raw = "{\"uptime_secs\":1.0,\"fps\":null,\"frame_time_ms\":null,\"state\":\"Home\",\
+        let raw = "{\"uptime_secs\":1.0,\"fps\":null,\"frame_time_ms\":null,\
+                   \"max_frame_time_ms\":null,\"state\":\"Home\",\
                    \"activity\":null,\"thermal_tier\":\"unknown\",\"thermal_temp_c\":null,\
                    \"published\":1,\"cycles\":0}";
         let h: HealthSnapshot = serde_json::from_str(raw).expect("parses");
         assert_eq!(h.fps, None);
+        assert_eq!(h.max_frame_time_ms, None);
         assert_eq!(h.activity, None);
         assert_eq!(h.thermal_temp_c, None);
+    }
+
+    /// A snapshot from an app binary older than the hitch lane must still parse:
+    /// dropping the whole snapshot would blind *every* lane (uptime, FPS, state)
+    /// over a stale binary, which is a far worse failure than one absent field.
+    /// The analysis reports the missing watermark as a blind lane instead.
+    #[test]
+    fn a_health_json_without_the_watermark_still_parses() {
+        let raw = "{\"uptime_secs\":1.0,\"fps\":60.0,\"frame_time_ms\":16.6,\"state\":\"Line\",\
+                   \"activity\":\"Active\",\"thermal_tier\":\"cool\",\"thermal_temp_c\":null,\
+                   \"published\":1,\"cycles\":0}";
+        let h: HealthSnapshot = serde_json::from_str(raw).expect("parses without the field");
+        assert_eq!(h.max_frame_time_ms, None);
+        assert_eq!(h.fps, Some(60.0));
     }
 
     #[test]
@@ -677,6 +751,7 @@ mod tests {
             rss_kib: Some(412_345),
             app_uptime_secs: Some(29.5),
             fps: Some(60.0),
+            max_frame_time_ms: Some(18.2),
             state: Some("Line".to_string()),
             activity: Some("Active".to_string()),
             thermal_tier: Some("cool".to_string()),
