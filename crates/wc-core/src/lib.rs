@@ -32,6 +32,10 @@ pub mod platform;
 pub mod render;
 pub mod settings;
 pub mod sketch;
+// Long-run soak instrumentation: like `capture`, compiled out of release
+// entirely (the module's own `//!` docs carry the detail).
+#[cfg(debug_assertions)]
+pub mod soak;
 /// Image template library (native-only, behind the `templates` feature).
 #[cfg(feature = "templates")]
 pub mod templates;
@@ -58,12 +62,14 @@ impl Plugin for CorePlugin {
         // Visual-debugging scaffold — debug builds only (compiled out of
         // release). DebugPlugin inserts DebugToggles only when a WC_DEBUG_* var
         // is set; CapturePlugin wires the capture systems only when WC_CAPTURE
-        // is set. A normal debug run with neither env carries essentially
-        // nothing.
+        // is set; SoakPlugin wires the soak instrumentation only when WC_SOAK is
+        // set. A normal debug run with none of them carries essentially nothing.
         #[cfg(debug_assertions)]
         app.add_plugins(capture::CapturePlugin);
         #[cfg(debug_assertions)]
         app.add_plugins(debug::DebugPlugin);
+        #[cfg(debug_assertions)]
+        app.add_plugins(soak::SoakPlugin);
         app.add_plugins(ui::WaveConductorUiPlugin);
         #[cfg(feature = "templates")]
         app.add_plugins(templates::resource::TemplatesPlugin);

@@ -12,6 +12,7 @@ mod capture;
 mod check_secrets;
 mod manifest;
 mod msi;
+mod soak;
 mod util;
 mod validate_shaders;
 
@@ -32,6 +33,9 @@ enum Command {
     CheckSecrets(check_secrets::Args),
     /// Deterministic visual capture + baseline regression for a scenario.
     Capture(capture::Args),
+    /// Long-run soak: drive the app under representative load, sample RSS / FPS
+    /// / thermal, and judge leak and decay trends (the pre-tag release gate).
+    SoakTest(soak::Args),
     /// Build the release binary and assemble a self-contained WaveConductor.app (macOS).
     BundleMac(bundle::mac::Args),
     /// Build the release binary and assemble a self-contained Linux staging dir.
@@ -54,6 +58,7 @@ fn main() {
         }
         Command::CheckSecrets(args) => check_secrets::run(args),
         Command::Capture(args) => capture::run(args),
+        Command::SoakTest(args) => soak::run(args),
         Command::BundleMac(args) => bundle::mac::run(args),
         Command::BundleLinux(args) => bundle::linux::run(args),
         Command::BundleWindows(args) => bundle::windows::run(args),
