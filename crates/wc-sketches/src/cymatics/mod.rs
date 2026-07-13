@@ -1089,4 +1089,127 @@ mod tests {
             .expect("Cymatics manifest entry should be registered");
         assert_eq!(entry.display_name, "Cymatics");
     }
+
+    /// `warm_start_state`: `center` and `center2` land at distinct points
+    /// inside `[0,1]^2`, rather than the overlapping `(0.5, 0.5)` pair
+    /// [`CymaticsState::default()`] produces (which makes a bloomed mask show
+    /// only one blob, not two).
+    #[test]
+    fn warm_start_centers_are_distinct_and_in_unit_square() {
+        let settings = CymaticsSettings::default();
+        let state = warm_start_state(&settings);
+
+        assert!(
+            (0.0..=1.0).contains(&state.center.x) && (0.0..=1.0).contains(&state.center.y),
+            "center must stay inside the sim UV field, got {:?}",
+            state.center
+        );
+        assert!(
+            (0.0..=1.0).contains(&state.center2.x) && (0.0..=1.0).contains(&state.center2.y),
+            "center2 must stay inside the sim UV field, got {:?}",
+            state.center2
+        );
+        assert!(
+            state.center.distance(state.center2) > 0.1,
+            "center and center2 must be visibly separated, not overlapping at (0.5, 0.5) each \
+             like CymaticsState::default() (distance was {})",
+            state.center.distance(state.center2)
+        );
+    }
+
+    /// `warm_start_state`: the seeded `active_radius` clears the resting
+    /// floor ([`MINIMUM_ACTIVE_RADIUS`] = 0.1) at default settings, and is
+    /// sourced from the live `attract_radius` Dev knob rather than a new
+    /// invented constant.
+    #[test]
+    fn warm_start_active_radius_clears_the_resting_floor() {
+        let settings = CymaticsSettings::default();
+        let state = warm_start_state(&settings);
+
+        assert!(
+            state.active_radius > MINIMUM_ACTIVE_RADIUS,
+            "seeded active_radius ({}) must exceed the resting floor ({MINIMUM_ACTIVE_RADIUS}) \
+             at default settings",
+            state.active_radius
+        );
+        assert!(
+            (state.active_radius - settings.attract_radius).abs() < f32::EPSILON,
+            "active_radius must be seeded from the live attract_radius Dev knob, not a \
+             hardcoded value"
+        );
+    }
+
+    /// `warm_start_state`: `ramp_time` is seeded to `WARM_START_RAMP_TIME`
+    /// (the constant chosen by capture review in Task 1), which is above
+    /// [`CymaticsState::default()`]'s resting `0.0` and within the bounds
+    /// [`update_cymatics_sim_params`] maintains for the rest of the sketch's
+    /// life ([`RAMP_TIME_CAP`]). This test intentionally reads
+    /// `WARM_START_RAMP_TIME` rather than hardcoding a second copy of the
+    /// number, so it stays correct no matter what the visual review lands on.
+    #[test]
+    fn warm_start_ramp_time_clears_default_and_stays_within_the_clock_cap() {
+        let settings = CymaticsSettings::default();
+        let state = warm_start_state(&settings);
+
+        assert!(
+            state.ramp_time > CymaticsState::default().ramp_time,
+            "warm-started ramp_time must exceed the CymaticsState::default() resting value (0.0)"
+        );
+        assert!(
+            state.ramp_time <= RAMP_TIME_CAP,
+            "warm-started ramp_time ({}) must not exceed RAMP_TIME_CAP ({RAMP_TIME_CAP})",
+            state.ramp_time
+        );
+        assert!(
+            (state.ramp_time - WARM_START_RAMP_TIME).abs() < f32::EPSILON,
+            "warm_start_state must seed exactly WARM_START_RAMP_TIME, the constant the visual \
+             review landed on"
+        );
+    }
+
+    /// `warm_start_state` is pure: identical settings in always produce a
+    /// bit-identical [`CymaticsState`] out. No `Time`, no RNG, no mutable
+    /// global state is read.
+    #[test]
+    fn warm_start_state_is_pure() {
+        let settings = CymaticsSettings::default();
+        let a = warm_start_state(&settings);
+        let b = warm_start_state(&settings);
+
+        assert!(a.center.distance(b.center) < f32::EPSILON);
+        assert!(a.center2.distance(b.center2) < f32::EPSILON);
+        assert!((a.active_radius - b.active_radius).abs() < f32::EPSILON);
+        assert!((a.ramp_time - b.ramp_time).abs() < f32::EPSILON);
+    }
+
+    /// Repeated `OnEnter(AppState::Cymatics)` cycles — the field tester's
+    /// exact reproduction ("cycling thru" the picker four times in under a
+    /// minute) — seed an identical [`CymaticsState`] every time, not a
+    /// drifting or progressively-blanker one. Runs the real
+    /// `init_cymatics_state` system (not just `warm_start_state` directly)
+    /// through the same remove-then-reinsert cycle `OnExit`/`OnEnter`
+    /// perform in the real app.
+    #[test]
+    fn repeated_on_enter_seeds_identical_state_each_time() {
+        let mut world = World::new();
+        world.insert_resource(CymaticsSettings::default());
+
+        world
+            .run_system_once(init_cymatics_state)
+            .expect("init_cymatics_state run (first entry)");
+        let first = world.resource::<CymaticsState>().clone();
+
+        // Mirrors OnExit's remove_cymatics_sim_params dropping CymaticsState,
+        // then a second OnEnter re-inserting it.
+        let _ = world.remove_resource::<CymaticsState>();
+        world
+            .run_system_once(init_cymatics_state)
+            .expect("init_cymatics_state run (second entry)");
+        let second = world.resource::<CymaticsState>().clone();
+
+        assert!(first.center.distance(second.center) < f32::EPSILON);
+        assert!(first.center2.distance(second.center2) < f32::EPSILON);
+        assert!((first.active_radius - second.active_radius).abs() < f32::EPSILON);
+        assert!((first.ramp_time - second.ramp_time).abs() < f32::EPSILON);
+    }
 }
