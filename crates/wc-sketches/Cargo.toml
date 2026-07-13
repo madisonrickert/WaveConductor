@@ -15,6 +15,10 @@ workspace = true
 [features]
 default = []
 hand-tracking-gestures = ["wc-core/hand-tracking-gestures"]
+# Forwards to wc-core's base (camera-independent, CI-testable headless)
+# BlazePose feature. Radiance's sim baker (radiance::systems::sim_params)
+# consumes `wc_core::input::body`, which wc-core gates behind this name.
+body-tracking-mediapipe = ["wc-core/body-tracking-mediapipe"]
 # Per-image template adjustments (Line): the registered adjustments map, the
 # custom dock-section UI, the re-seed/colour-influence drivers, and orphan
 # pruning. Native-only (pulls wc-core/templates, which uses rfd/image/blake3).

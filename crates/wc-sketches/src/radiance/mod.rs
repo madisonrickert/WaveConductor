@@ -17,6 +17,7 @@
 
 pub mod compute;
 pub mod settings;
+pub mod systems;
 
 use bevy::prelude::*;
 use wc_core::lifecycle::state::AppState;
