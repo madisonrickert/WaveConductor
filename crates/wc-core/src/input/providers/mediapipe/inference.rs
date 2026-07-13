@@ -99,6 +99,21 @@ pub trait HandInference: Send {
     /// # Errors
     /// Returns [`InferenceError::Run`] if the forward pass fails.
     fn run(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError>;
+
+    /// The execution provider this stage is running on *right now*, if it has a
+    /// meaningful one (`"ort/CoreML"`, `"ort/CPU"`, …).
+    ///
+    /// Live, not latched at load: [`super::inference_ort::OrtInference`] can
+    /// **demote itself to the CPU EP mid-session** when the accelerator fails
+    /// inference persistently, and this is how that demotion reaches the provider's
+    /// diagnostics and the settings panel's amber degraded-backend row. Reading it
+    /// per frame must stay free — it is a `Copy` field read, no lock, no allocation.
+    ///
+    /// Defaults to `None` for backends with no EP concept (the test mocks), which
+    /// the provider reads as "nothing to report; keep the label `start` latched".
+    fn backend_label(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[cfg(test)]

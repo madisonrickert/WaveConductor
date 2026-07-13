@@ -68,7 +68,50 @@ pub struct OrtInference {
     /// fixed per model, so refilling this in place each frame (rather than
     /// `collect`ing a fresh `Vec`) keeps `run` off the per-frame allocator.
     input_shape: Vec<i64>,
+    /// This model's file name, for the demotion warning (`load` takes it as a
+    /// borrow; a mid-session failure needs it long after `load` returned).
+    model_name: String,
+    /// The operator's EP preference, needed at *run* time because only
+    /// [`HandTrackingBackend::Auto`] may demote — see [`should_demote_to_cpu`].
+    backend_pref: HandTrackingBackend,
+    /// The model bytes, retained **only** while a CPU demotion is still possible
+    /// (`Auto` + currently accelerated), so [`Self::demote_to_cpu`] can re-commit
+    /// the graph. ~4 MB per model; `None` — and the memory returned — for
+    /// `ForceCpu`/`ForceGpu`, for a session already on the CPU EP, and immediately
+    /// after a demotion is attempted, none of which can ever rebuild.
+    model_bytes: Option<Vec<u8>>,
+    /// Consecutive failed [`HandInference::run`] calls. Reset to 0 by any success;
+    /// the demotion trigger at
+    /// [`INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES`]. A `u32` increment on the
+    /// failure path and a store on the success path — the healthy hot path stays
+    /// allocation-free.
+    consecutive_run_failures: u32,
+    /// Whether the one-shot CPU demotion has been *used up* — set at load when
+    /// there was never anywhere to fall back to, and set before the rebuild is
+    /// attempted so that a rebuild which itself fails can never be retried.
+    /// This is the anti-flapping latch: see [`Self::demote_to_cpu`].
+    cpu_fallback_used: bool,
 }
+
+/// Consecutive failed inference runs before an `Auto` model demotes itself to the
+/// CPU execution provider ([`should_demote_to_cpu`]).
+///
+/// **Why 10.** The trigger has to sit above every transient and below any outage a
+/// human would notice, and inference runs at the worker's rate cap:
+///
+/// - *Above transients.* A single failed forward pass — a momentary GPU/ANE
+///   resource hiccup, a frame that raced a display re-enumeration — must never tear
+///   down and re-commit an ONNX graph. One is noise; ten in a row is not: a healthy
+///   EP does not fail ten consecutive frames and then recover.
+/// - *Below a human-visible outage.* At the 30 Hz inference cap, 10 consecutive
+///   failures is ≈0.33 s of dead hand tracking before recovery starts. Even under
+///   the 4 Hz idle throttle (`worker::IDLE_INFERENCE_HZ`, nobody watching) it is
+///   2.5 s — and the alternative, today's behaviour, is *eight hours* of dead
+///   tracking while the provider reports healthy.
+///
+/// The exact value is not delicate; anything in ~5–30 satisfies both. 10 is the
+/// round number in the middle.
+const INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES: u32 = 10;
 
 impl OrtInference {
     /// Load an ONNX model from its bytes, resolving its execution provider from
@@ -129,23 +172,21 @@ impl OrtInference {
             commit_cpu(model_bytes)?
         };
 
-        let input_name = session
-            .inputs()
-            .first()
-            .ok_or_else(|| InferenceError::Load("model has no inputs".into()))?
-            .name()
-            .to_owned();
-        let output_names = session
-            .outputs()
-            .iter()
-            .map(|o| o.name().to_owned())
-            .collect();
+        let (input_name, output_names) = session_io_names(&session)?;
+        // Retain the model bytes only while a mid-session CPU demotion is still
+        // reachable; otherwise drop them (and their ~4 MB) here.
+        let demotable = cpu_demotion_possible(backend, backend_label);
         Ok(Self {
             session,
             input_name,
             output_names,
             backend: backend_label,
             input_shape: Vec::new(),
+            model_name: model_name.to_owned(),
+            backend_pref: backend,
+            model_bytes: demotable.then(|| model_bytes.to_vec()),
+            consecutive_run_failures: 0,
+            cpu_fallback_used: !demotable,
         })
     }
 
@@ -161,6 +202,179 @@ impl OrtInference {
     pub fn backend(&self) -> &'static str {
         self.backend
     }
+
+    /// One forward pass, with no failure bookkeeping. [`HandInference::run`] wraps
+    /// this with the consecutive-failure counter and the CPU demotion.
+    fn run_once(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
+        // Refill the reused i64 shape buffer in place (ort shapes are i64; our
+        // usize dims convert infallibly for any realistic image/landmark tensor).
+        self.input_shape.clear();
+        for &d in &input.shape {
+            self.input_shape.push(
+                i64::try_from(d)
+                    .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?,
+            );
+        }
+        let in_tensor =
+            TensorRef::from_array_view((self.input_shape.as_slice(), input.data.as_slice()))
+                .map_err(run_err)?;
+
+        let outputs = self
+            .session
+            .run(ort::inputs![self.input_name.as_str() => in_tensor])
+            .map_err(run_err)?;
+
+        // Reuse `out`: size it to the output count, then refill each tensor's
+        // buffers in place, in declared order. `Shape` derefs to `[i64]`.
+        out.truncate(self.output_names.len());
+        while out.len() < self.output_names.len() {
+            out.push(Tensor::default());
+        }
+        for (slot, name) in out.iter_mut().zip(&self.output_names) {
+            let (shape, data) = outputs[name.as_str()]
+                .try_extract_tensor::<f32>()
+                .map_err(run_err)?;
+            slot.data.clear();
+            slot.data.extend_from_slice(data);
+            slot.shape.clear();
+            for &d in shape.iter() {
+                slot.shape.push(
+                    usize::try_from(d)
+                        .map_err(|e| InferenceError::Run(format!("bad output dim: {e}")))?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild this model's session on the CPU execution provider, abandoning the
+    /// accelerator for the rest of the process. Called **once**, on the failure
+    /// edge, when [`should_demote_to_cpu`] says a persistent inference failure has
+    /// outlived every transient explanation.
+    ///
+    /// Blocking and allocating (it re-commits an ONNX graph) and it runs on the
+    /// inference worker thread, which `AGENTS.md` forbids allocating on in steady
+    /// state. That is why this is a *one-shot edge*, not per-frame bookkeeping: the
+    /// healthy path costs one `u32` store, the failing path one `u32` increment, and
+    /// this function runs at most once in the life of the session.
+    ///
+    /// **No rebuild loop, by construction.** `cpu_fallback_used` is latched `true`
+    /// *before* the rebuild is attempted and is never cleared, so:
+    /// - a rebuild that **succeeds** leaves `backend == BACKEND_CPU`, and there is
+    ///   nowhere further to fall — [`should_demote_to_cpu`] refuses forever;
+    /// - a rebuild that **fails** leaves the broken accelerated session in place and
+    ///   still refuses forever — the model degrades to per-frame errors exactly as
+    ///   it did before this existed, rather than re-committing an ONNX graph on the
+    ///   worker thread every ten frames for the rest of an 8-hour soak.
+    ///
+    /// This is the flap the audio supervisor hit, closed the same way: the recovery
+    /// is one-way, so a source that fails, recovers, and fails again cannot pump it.
+    fn demote_to_cpu(&mut self, err: &InferenceError) {
+        // Latch FIRST — before anything that can fail — so no path re-enters.
+        self.cpu_fallback_used = true;
+        // `take`: a demotion consumes the retained bytes, returning their ~4 MB.
+        let Some(bytes) = self.model_bytes.take() else {
+            return;
+        };
+        tracing::warn!(
+            model = %self.model_name,
+            ep = self.backend,
+            failures = self.consecutive_run_failures,
+            %err,
+            "inference has failed on the accelerated execution provider for \
+             {INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES} consecutive frames; rebuilding this \
+             model on the CPU execution provider (a persistent EP failure at inference time is \
+             otherwise unrecoverable — it would error every frame for the rest of the session \
+             while the provider reported healthy)"
+        );
+        match commit_cpu(&bytes) {
+            Ok((session, label)) => match session_io_names(&session) {
+                Ok((input_name, output_names)) => {
+                    self.session = session;
+                    self.input_name = input_name;
+                    self.output_names = output_names;
+                    self.backend = label;
+                    tracing::warn!(
+                        model = %self.model_name,
+                        backend = label,
+                        "this model is now running on the CPU execution provider — hand tracking \
+                         survives, but hotter and slower than a healthy GPU session; the settings \
+                         panel's backend row shows the degraded mixed state"
+                    );
+                }
+                Err(e) => tracing::error!(
+                    model = %self.model_name,
+                    "CPU rebuild committed but its input/output names could not be read ({e}); \
+                     keeping the failing accelerated session — hand tracking is down for this model"
+                ),
+            },
+            Err(e) => tracing::error!(
+                model = %self.model_name,
+                "CPU rebuild FAILED ({e}) after a persistent accelerated inference failure; \
+                 there is no further fallback and none will be attempted — hand tracking is down \
+                 for this model"
+            ),
+        }
+    }
+}
+
+/// Whether this session could still demote itself to the CPU EP later: only an
+/// [`HandTrackingBackend::Auto`] session that actually reached an accelerator has
+/// anywhere to fall.
+///
+/// [`HandTrackingBackend::ForceGpu`] must **not** demote — it is the A/B control,
+/// and it is *supposed* to fail loudly rather than quietly become the CPU run it
+/// exists to rule out (the same reasoning as [`accelerator_missing_under_force`]).
+/// [`HandTrackingBackend::ForceCpu`] and an `Auto` session that already landed on
+/// [`BACKEND_CPU`] are on the CPU already.
+fn cpu_demotion_possible(backend: HandTrackingBackend, label: &'static str) -> bool {
+    ep_plan(backend).allow_cpu_fallback && label != BACKEND_CPU
+}
+
+/// Whether a persistently failing model should now be rebuilt on the CPU EP.
+///
+/// The whole inference-time demotion decision, as a pure function of the three
+/// things it depends on — so it is unit-testable with no GPU EP present (there are
+/// none in CI), exactly like [`ep_plan`]:
+///
+/// - `consecutive_failures`: only a *persistent* failure demotes
+///   ([`INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES`]); a one-off hiccup must never
+///   tear down and re-commit an ONNX graph on the worker thread.
+/// - `backend`: only [`HandTrackingBackend::Auto`] demotes (see
+///   [`cpu_demotion_possible`]).
+/// - `cpu_fallback_used`: the one-shot latch. Once the CPU rebuild has been
+///   *attempted*, this is `true` forever, so no later failure can start another —
+///   there is nowhere left to fall back to, and a rebuild loop on a continuously
+///   failing model is the flapping hazard this guards.
+fn should_demote_to_cpu(
+    consecutive_failures: u32,
+    backend: HandTrackingBackend,
+    cpu_fallback_used: bool,
+) -> bool {
+    !cpu_fallback_used
+        && ep_plan(backend).allow_cpu_fallback
+        && consecutive_failures >= INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES
+}
+
+/// The model's input name and its outputs in declared order.
+///
+/// Shared by [`OrtInference::load`] and the CPU rebuild in
+/// [`OrtInference::demote_to_cpu`]: the rebuilt session is the same graph, but the
+/// names are re-read from it rather than carried over, so the struct can never
+/// describe a session it no longer holds.
+fn session_io_names(session: &Session) -> Result<(String, Vec<String>), InferenceError> {
+    let input_name = session
+        .inputs()
+        .first()
+        .ok_or_else(|| InferenceError::Load("model has no inputs".into()))?
+        .name()
+        .to_owned();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|o| o.name().to_owned())
+        .collect();
+    Ok((input_name, output_names))
 }
 
 /// How a [`HandTrackingBackend`] preference resolves into the two independent
@@ -711,7 +925,8 @@ fn purge_model_cache(model_bytes: &[u8]) -> Option<PathBuf> {
 }
 
 impl HandInference for OrtInference {
-    /// Run one stage.
+    /// Run one stage, and recover from a *persistently* failing execution provider
+    /// by demoting this model to the CPU EP.
     ///
     /// Allocation-free on the steady-state hot path. The input is bound as a
     /// borrowed [`TensorRef`] view over the pipeline's reused per-frame input
@@ -724,46 +939,57 @@ impl HandInference for OrtInference {
     ///
     /// Outputs are written in the model's **declared output order** (see the
     /// struct doc), which the landmark stage selects by index.
+    ///
+    /// **The recovery.** A GPU EP that fails at *inference* (rather than at commit,
+    /// which [`OrtInference::load`] already handles) has until now been terminal:
+    /// the worker counts the error, pushes it, and runs the identical failing
+    /// forward pass on the next frame — every frame, for the whole session — while
+    /// the provider still reports `Streaming`. That is the historical `CoreML`
+    /// failure mode (`output_features has no value`; see
+    /// `docs/runbooks/onnx-coreml-model-surgery.md`). So: a success resets the
+    /// consecutive-failure counter; [`INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES`]
+    /// failures in a row on an [`HandTrackingBackend::Auto`] session
+    /// ([`should_demote_to_cpu`]) rebuild the model on the CPU EP once
+    /// ([`OrtInference::demote_to_cpu`]) and retry the failing frame on it. The
+    /// demotion is one-way and one-shot, so there is no rebuild loop.
+    ///
+    /// The demotion is *not* laundered into looking healthy: [`Self::backend_label`]
+    /// starts reporting [`BACKEND_CPU`], which the provider folds into the mixed
+    /// `"ort/CoreML+CPU"` label and the settings panel renders amber.
     fn run(&mut self, input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
-        // Refill the reused i64 shape buffer in place (ort shapes are i64; our
-        // usize dims convert infallibly for any realistic image/landmark tensor).
-        self.input_shape.clear();
-        for &d in &input.shape {
-            self.input_shape.push(
-                i64::try_from(d)
-                    .map_err(|e| InferenceError::Run(format!("input dim overflow: {e}")))?,
-            );
-        }
-        let in_tensor =
-            TensorRef::from_array_view((self.input_shape.as_slice(), input.data.as_slice()))
-                .map_err(run_err)?;
-
-        let outputs = self
-            .session
-            .run(ort::inputs![self.input_name.as_str() => in_tensor])
-            .map_err(run_err)?;
-
-        // Reuse `out`: size it to the output count, then refill each tensor's
-        // buffers in place, in declared order. `Shape` derefs to `[i64]`.
-        out.truncate(self.output_names.len());
-        while out.len() < self.output_names.len() {
-            out.push(Tensor::default());
-        }
-        for (slot, name) in out.iter_mut().zip(&self.output_names) {
-            let (shape, data) = outputs[name.as_str()]
-                .try_extract_tensor::<f32>()
-                .map_err(run_err)?;
-            slot.data.clear();
-            slot.data.extend_from_slice(data);
-            slot.shape.clear();
-            for &d in shape.iter() {
-                slot.shape.push(
-                    usize::try_from(d)
-                        .map_err(|e| InferenceError::Run(format!("bad output dim: {e}")))?,
-                );
+        match self.run_once(input, out) {
+            Ok(()) => {
+                // The whole cost of the healthy path: one store, no allocation.
+                self.consecutive_run_failures = 0;
+                Ok(())
+            }
+            Err(err) => {
+                self.consecutive_run_failures = self.consecutive_run_failures.saturating_add(1);
+                if !should_demote_to_cpu(
+                    self.consecutive_run_failures,
+                    self.backend_pref,
+                    self.cpu_fallback_used,
+                ) {
+                    return Err(err);
+                }
+                self.demote_to_cpu(&err);
+                // Retry this frame on the rebuilt session. If the rebuild failed,
+                // `run_once` simply fails again on the old session — and the latch
+                // in `demote_to_cpu` guarantees we never try to rebuild a second
+                // time, however many frames keep failing.
+                let retried = self.run_once(input, out);
+                if retried.is_ok() {
+                    self.consecutive_run_failures = 0;
+                }
+                retried
             }
         }
-        Ok(())
+    }
+
+    /// The EP this model is running on right now — [`BACKEND_CPU`] after a
+    /// mid-session demotion, whatever [`OrtInference::load`] registered before one.
+    fn backend_label(&self) -> Option<&'static str> {
+        Some(self.backend)
     }
 }
 
@@ -1191,6 +1417,188 @@ mod tests {
         assert!(
             presence < 0.5,
             "presence {presence} on an empty (all-zeros) input should be < 0.5"
+        );
+    }
+
+    #[test]
+    fn demotion_needs_a_persistent_failure_on_an_auto_session_that_has_not_demoted() {
+        use HandTrackingBackend::{Auto, ForceCpu, ForceGpu};
+        const N: u32 = INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES;
+
+        // A transient must never tear down and re-commit an ONNX graph on the
+        // worker thread: below the threshold, nothing happens.
+        for failures in [0, 1, N - 1] {
+            assert!(
+                !should_demote_to_cpu(failures, Auto, false),
+                "{failures} consecutive failures is a transient, not a broken EP"
+            );
+        }
+        // A persistent failure on an Auto session that still has the CPU in
+        // reserve: demote.
+        for failures in [N, N + 1, u32::MAX] {
+            assert!(
+                should_demote_to_cpu(failures, Auto, false),
+                "{failures} consecutive failures is a dead EP — rebuild on the CPU"
+            );
+        }
+        // ForceGpu is the A/B *control*: it is supposed to fail loudly, not
+        // quietly become the CPU session the operator pinned the setting to rule
+        // out. ForceCpu is already on the CPU and can never reach this path.
+        for backend in [ForceGpu, ForceCpu] {
+            assert!(
+                !should_demote_to_cpu(u32::MAX, backend, false),
+                "{backend:?} must never demote — only Auto does"
+            );
+        }
+        // The anti-flapping latch: once the one CPU rebuild has been ATTEMPTED
+        // (whether it succeeded or failed), no later failure may start another.
+        // Without this, a model that keeps failing would re-commit an ONNX graph
+        // on the worker thread every N frames for the rest of an 8-hour soak.
+        assert!(
+            !should_demote_to_cpu(u32::MAX, Auto, true),
+            "the CPU fallback is one-shot — a used latch must never rebuild again"
+        );
+    }
+
+    #[test]
+    fn only_an_accelerated_auto_session_retains_the_bytes_needed_to_demote() {
+        // The retained model bytes (~4 MB) are the price of being able to rebuild
+        // on the CPU; a session that can never demote must not pay it, and must
+        // start with the latch already spent.
+        assert!(cpu_demotion_possible(
+            HandTrackingBackend::Auto,
+            BACKEND_COREML
+        ));
+        assert!(cpu_demotion_possible(
+            HandTrackingBackend::Auto,
+            BACKEND_DIRECTML
+        ));
+        assert!(
+            !cpu_demotion_possible(HandTrackingBackend::Auto, BACKEND_CPU),
+            "already on the CPU EP — there is nowhere to fall back to"
+        );
+        assert!(
+            !cpu_demotion_possible(HandTrackingBackend::ForceGpu, BACKEND_COREML),
+            "ForceGpu must fail loudly, never silently degrade"
+        );
+        assert!(!cpu_demotion_possible(
+            HandTrackingBackend::ForceCpu,
+            BACKEND_CPU
+        ));
+    }
+
+    #[test]
+    fn a_persistently_failing_ep_demotes_the_model_to_the_cpu_and_keeps_tracking_alive() {
+        // The hole this closes: an EP failure at INFERENCE time (the historical
+        // CoreML `output_features has no value`) had zero coverage — the worker
+        // would count the error and run the identical failing forward pass every
+        // frame, forever, while the provider reported healthy. A persistent
+        // failure must instead rebuild this model on the CPU EP, once.
+        //
+        // The persistent failure is induced with a shape ONNX Runtime rejects on
+        // every call (a real `InferenceError::Run` out of `session.run`, not a
+        // mock): the demotion path cannot tell one un-runnable session from
+        // another, which is the point — it reacts to persistence, not to a
+        // specific error string.
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
+        let started_accelerated = model.backend() != BACKEND_CPU;
+
+        let bad_input = Tensor::zeros(vec![1, 192, 192, 3]); // landmark wants 224²
+        let mut out = Vec::new();
+        for i in 0..INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES {
+            assert!(
+                model.run(&bad_input, &mut out).is_err(),
+                "the wrong-shape input must fail on every call (failure {i})"
+            );
+        }
+
+        assert_eq!(
+            model.backend(),
+            BACKEND_CPU,
+            "after {INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES} consecutive inference \
+             failures the model must have been rebuilt on the CPU EP"
+        );
+        assert_eq!(
+            HandInference::backend_label(&model),
+            Some(BACKEND_CPU),
+            "the demotion must be OBSERVABLE — this is what lights the settings \
+             panel's amber degraded-backend row"
+        );
+        // Hand tracking survives the demotion: the rebuilt CPU session runs the
+        // real input shape and yields the declared output set.
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
+            .expect("the demoted CPU session must still run the model");
+        assert_eq!(out.len(), 4, "the rebuilt session is the same graph");
+
+        // No rebuild loop: the latch is spent, so a further persistent failure
+        // cannot trigger a second re-commit (there is nowhere left to fall).
+        assert!(
+            model.cpu_fallback_used,
+            "the one-shot CPU fallback must be latched after use"
+        );
+        assert!(
+            model.model_bytes.is_none(),
+            "the retained model bytes are released once the demotion is spent"
+        );
+        for _ in 0..(INFERENCE_DEMOTE_AFTER_CONSECUTIVE_FAILURES * 3) {
+            assert!(model.run(&bad_input, &mut out).is_err());
+        }
+        assert!(
+            !should_demote_to_cpu(
+                model.consecutive_run_failures,
+                model.backend_pref,
+                model.cpu_fallback_used
+            ),
+            "a model that keeps failing after demotion must never rebuild again"
+        );
+        assert_eq!(model.backend(), BACKEND_CPU);
+
+        // Sanity on hosts with a GPU EP (macOS here): the session really did start
+        // accelerated, so the assertions above are about a genuine demotion rather
+        // than a session that was on the CPU all along.
+        #[cfg(target_os = "macos")]
+        assert!(
+            started_accelerated,
+            "premise: macOS must load this model on CoreML, or this test proves nothing"
+        );
+        let _ = started_accelerated;
+    }
+
+    #[test]
+    fn a_single_transient_failure_does_not_demote_or_stick() {
+        // One bad frame must not tear down the session, and must not leave a
+        // latent failure count that makes the next 9 bad frames demote a healthy
+        // model: any success resets the counter.
+        let mut model = OrtInference::load(
+            &model_bytes("hand_landmark.onnx"),
+            HandTrackingBackend::Auto,
+            "hand_landmark.onnx",
+        )
+        .expect("load via ort");
+        let loaded_on = model.backend();
+        let mut out = Vec::new();
+
+        assert!(model
+            .run(&Tensor::zeros(vec![1, 192, 192, 3]), &mut out)
+            .is_err());
+        assert_eq!(model.consecutive_run_failures, 1);
+        model
+            .run(&Tensor::zeros(vec![1, 224, 224, 3]), &mut out)
+            .expect("a good frame after a bad one");
+        assert_eq!(
+            model.consecutive_run_failures, 0,
+            "a success must reset the consecutive-failure count"
+        );
+        assert_eq!(
+            model.backend(),
+            loaded_on,
+            "a single transient failure must not rebuild the session"
         );
     }
 

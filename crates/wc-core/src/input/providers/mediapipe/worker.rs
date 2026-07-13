@@ -105,6 +105,19 @@ pub struct MediaPipeWorkerDiagnostics {
     /// the configured rate stays authoritative; the actual inference period is
     /// always visible via [`Self::inference_interval`].
     pub idle_throttled: bool,
+    /// The execution provider the **palm** stage is running on right now, sampled
+    /// from the pipeline each processed frame (`None` for a mock backend with no EP
+    /// concept). Live rather than latched at load, because a model can demote itself
+    /// to the CPU EP mid-session when its accelerator fails inference persistently
+    /// (`inference_ort::OrtInference::run`); the provider folds this and
+    /// [`Self::landmark_backend`] into the backend label the settings panel shows
+    /// amber. Without it, an hour-three degradation would keep reporting the healthy
+    /// label `start` latched. Two `&'static str` reads — no allocation.
+    pub palm_backend: Option<&'static str>,
+    /// The execution provider the **landmark** stage is running on right now (see
+    /// [`Self::palm_backend`]). Reported separately because a demotion — like a
+    /// commit-time fallback — hits one model, not both.
+    pub landmark_backend: Option<&'static str>,
 }
 
 /// Handle to a running worker; dropping or [`Self::stop`] joins the thread.
@@ -467,6 +480,10 @@ fn worker_diag(
     pipeline_errors: u64,
     idle_throttled: bool,
 ) -> MediaPipeWorkerDiagnostics {
+    // Sampled every processed frame (including the error path, which is exactly
+    // when a model may have just demoted itself), so the provider's backend label
+    // tracks a mid-session EP demotion instead of the one `start` latched.
+    let (palm_backend, landmark_backend) = pipeline.backend_labels();
     MediaPipeWorkerDiagnostics {
         pipeline: pipeline.diagnostics(),
         dropped_frames: drops.camera,
@@ -475,6 +492,8 @@ fn worker_diag(
         inference_interval,
         pipeline_errors,
         idle_throttled,
+        palm_backend,
+        landmark_backend,
     }
 }
 
@@ -533,6 +552,89 @@ mod tests {
             out.clone_from(&self.outputs);
             Ok(())
         }
+    }
+
+    /// A stage that reports a fixed execution provider, standing in for an
+    /// `OrtInference` that has (or has not) demoted itself to the CPU EP.
+    struct LabelledInference {
+        outputs: Vec<Tensor>,
+        backend: &'static str,
+    }
+
+    impl HandInference for LabelledInference {
+        fn run(&mut self, _input: &Tensor, out: &mut Vec<Tensor>) -> Result<(), InferenceError> {
+            out.clone_from(&self.outputs);
+            Ok(())
+        }
+        fn backend_label(&self) -> Option<&'static str> {
+            Some(self.backend)
+        }
+    }
+
+    #[test]
+    fn worker_reports_the_live_per_stage_execution_providers() {
+        // A model that demotes itself to the CPU EP mid-session
+        // (`inference_ort::OrtInference::run`) is only *observable* if the worker
+        // ships each stage's live EP to the provider — which folds them into the
+        // backend label the settings panel renders amber. If this plumbing breaks,
+        // an hour-three degradation keeps reporting the healthy label `start`
+        // latched, which is precisely the silent failure the work exists to stop.
+        let palm = LabelledInference {
+            outputs: vec![
+                Tensor::zeros(vec![1, 2016, 18]),
+                Tensor {
+                    data: vec![-100.0; 2016],
+                    shape: vec![1, 2016, 1],
+                },
+            ],
+            backend: "ort/CoreML",
+        };
+        let landmark = LabelledInference {
+            outputs: vec![
+                Tensor::zeros(vec![1, 63]),
+                Tensor::zeros(vec![1, 1]),
+                Tensor::zeros(vec![1, 1]),
+                Tensor {
+                    data: pipeline_fixtures::open_world_tensor(),
+                    shape: vec![1, 63],
+                },
+            ],
+            // The landmark stage has demoted; the palm stage has not — the mixed
+            // state the provider must surface rather than hide.
+            backend: "ort/CPU",
+        };
+        let pipeline = Pipeline::new(
+            Box::new(palm),
+            Box::new(landmark),
+            PipelineConfig::default(),
+        );
+        let (producer, mut consumer) = rtrb::RingBuffer::<WorkerMsg>::new(64);
+        let mut handle = spawn_worker(
+            looping_solid_source(),
+            pipeline,
+            30,
+            tuning(false),
+            producer,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut seen = None;
+        while Instant::now() < deadline && seen.is_none() {
+            while let Ok(msg) = consumer.pop() {
+                if let WorkerMsg::Diagnostics(d) = msg {
+                    if d.palm_backend.is_some() {
+                        seen = Some((d.palm_backend, d.landmark_backend));
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        handle.stop();
+        assert_eq!(
+            seen,
+            Some((Some("ort/CoreML"), Some("ort/CPU"))),
+            "the worker must report each stage's LIVE execution provider"
+        );
     }
 
     fn empty_pipeline() -> Pipeline {
