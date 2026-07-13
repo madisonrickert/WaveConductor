@@ -5,6 +5,13 @@
 //! cutoff normalized by the body's apparent size (distance-invariant
 //! smoothing strength, following `MediaPipe`'s `LandmarksSmoothingCalculator`).
 //!
+//! Per-landmark visibility is separately low-passed (`MediaPipe`'s
+//! `VisibilitySmoothingCalculator`, alpha 0.1) so a joint does not flicker in
+//! and out of "visible" between frames, and the metric world landmarks use a
+//! filter bank tuned apart from the screen bank (`WORLD_MIN_CUTOFF`/`WORLD_BETA`,
+//! `value_scale = 1.0`), matching upstream's `pose_landmark_filtering` world
+//! options.
+//!
 //! Velocities: the pinned `BodyTrackingState.velocities` are the finite
 //! differences of the *smoothed* screen positions, additionally EMA'd
 //! (`VELOCITY_EMA_ALPHA`) so Plan C's limb impulses don't flutter with
@@ -34,6 +41,33 @@ pub const DEFAULT_BETA: f32 = 80.0;
 /// Cutoff for the derivative low-pass (Hz) — the One-Euro paper's default.
 const DERIVATE_CUTOFF: f32 = 1.0;
 
+/// World-landmark One-Euro min cutoff (Hz). Upstream filters the *world*
+/// (metric, hip-centred metres) landmarks with a **separate** tuning from the
+/// screen landmarks — `pose_landmark_filtering.pbtxt` world bank:
+/// `one_euro_filter { min_cutoff: 0.1 beta: 40.0 derivate_cutoff: 1.0
+/// disable_value_scaling: true }`. They differ from the screen params
+/// (0.05/80) on purpose: world coordinates are in metres, not image-normalized
+/// pixels, so their speed is *not* divided by the apparent object scale
+/// (`value_scale` stays 1.0), and both the at-rest cutoff and the speed
+/// coefficient are tuned for that metric unit rather than reused from the
+/// screen bank (reusing 0.05/80 would give world coords half the rest cutoff
+/// and double the speed response upstream intends).
+pub const WORLD_MIN_CUTOFF: f32 = 0.1;
+
+/// World-landmark One-Euro speed coefficient (`beta: 40.0`; see
+/// [`WORLD_MIN_CUTOFF`] for why the world bank is tuned apart from the screen
+/// bank).
+pub const WORLD_BETA: f32 = 40.0;
+
+/// Low-pass alpha for per-landmark visibility. `MediaPipe` low-passes
+/// visibility with `VisibilitySmoothingCalculator { low_pass_filter
+/// { alpha: 0.1 } }` (`pose_landmark_filtering.pbtxt`, applied to the
+/// normalized, world, and aux banks) *before* the coordinate smoothing.
+/// Visibility is a probability, so it gets a plain exponential low-pass, not a
+/// One-Euro filter: this stops a landmark flickering in and out of "visible"
+/// between frames so a downstream visibility gate does not chatter.
+const VISIBILITY_LOW_PASS_ALPHA: f32 = 0.1;
+
 /// Floor for the apparent body size (normalized units), so a degenerate
 /// collapsed landmark set never divides the speed by ~0.
 const MIN_BODY_SCALE: f32 = 0.05;
@@ -53,8 +87,10 @@ fn low_pass(x: f32, alpha: f32, prev: f32) -> f32 {
     alpha * x + (1.0 - alpha) * prev
 }
 
-/// One-Euro filter for a single scalar channel.
-struct OneEuroFilter {
+/// One-Euro filter for a single scalar channel. Exposed to the rest of the
+/// body module (`pub(super)`) so the worker-side aux-ROI filter in `pipeline`
+/// can reuse the exact same math instead of duplicating it.
+pub(super) struct OneEuroFilter {
     min_cutoff: f32,
     beta: f32,
     /// Last filtered value; `None` until the first sample.
@@ -64,7 +100,7 @@ struct OneEuroFilter {
 }
 
 impl OneEuroFilter {
-    const fn new(min_cutoff: f32, beta: f32) -> Self {
+    pub(super) const fn new(min_cutoff: f32, beta: f32) -> Self {
         Self {
             min_cutoff,
             beta,
@@ -76,7 +112,7 @@ impl OneEuroFilter {
     /// Filter sample `x` over `dt` seconds; `value_scale` divides the speed
     /// driving the adaptive cutoff. First sample (or non-positive `dt`)
     /// passes through / holds.
-    fn filter(&mut self, x: f32, dt: f32, value_scale: f32) -> f32 {
+    pub(super) fn filter(&mut self, x: f32, dt: f32, value_scale: f32) -> f32 {
         let Some(x_prev) = self.x_prev else {
             self.x_prev = Some(x);
             return x;
@@ -94,7 +130,7 @@ impl OneEuroFilter {
     }
 
     /// Forget history (cold start) without touching parameters.
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.x_prev = None;
         self.dx_prev = 0.0;
     }
@@ -158,7 +194,8 @@ fn body_scale(landmarks: &[BodyLandmark; BODY_LANDMARK_COUNT]) -> f32 {
 
 /// One frame of smoothed output.
 pub struct SmoothedBody {
-    /// Smoothed content-norm landmarks (visibility passed through).
+    /// Smoothed content-norm landmarks (positions One-Euro filtered,
+    /// visibility low-passed).
     pub landmarks: [BodyLandmark; BODY_LANDMARK_COUNT],
     /// Smoothed metric world landmarks.
     pub world: [Vec3; BODY_LANDMARK_COUNT],
@@ -175,7 +212,17 @@ pub struct BodySmoother {
     /// Monotonic time of the previous smooth; `None` until the first.
     last_now: Option<Duration>,
     pos: [Vec3Filter; BODY_LANDMARK_COUNT],
+    /// World-landmark filter bank. Tuned apart from `pos` with the fixed
+    /// upstream world params ([`WORLD_MIN_CUTOFF`]/[`WORLD_BETA`]) and driven
+    /// with `value_scale = 1.0` (no object-scale normalization, matching
+    /// `disable_value_scaling: true`); [`Self::set_params`] deliberately does
+    /// not retune it.
     world: [Vec3Filter; BODY_LANDMARK_COUNT],
+    /// Per-landmark low-passed visibility (`VISIBILITY_LOW_PASS_ALPHA`); see
+    /// [`Self::smooth`].
+    vis: [f32; BODY_LANDMARK_COUNT],
+    /// Whether `vis` holds real history (first frame passes visibility through).
+    has_vis: bool,
     /// Previous smoothed positions (velocity finite differences).
     prev_pos: [Vec3; BODY_LANDMARK_COUNT],
     /// Whether `prev_pos` holds real history.
@@ -193,7 +240,9 @@ impl BodySmoother {
             beta,
             last_now: None,
             pos: std::array::from_fn(|_| Vec3Filter::new(min_cutoff, beta)),
-            world: std::array::from_fn(|_| Vec3Filter::new(min_cutoff, beta)),
+            world: std::array::from_fn(|_| Vec3Filter::new(WORLD_MIN_CUTOFF, WORLD_BETA)),
+            vis: [0.0; BODY_LANDMARK_COUNT],
+            has_vis: false,
             prev_pos: [Vec3::ZERO; BODY_LANDMARK_COUNT],
             has_prev: false,
             vel: [Vec3::ZERO; BODY_LANDMARK_COUNT],
@@ -206,6 +255,7 @@ impl BodySmoother {
     pub fn clear(&mut self) {
         self.last_now = None;
         self.has_prev = false;
+        self.has_vis = false;
         self.vel = [Vec3::ZERO; BODY_LANDMARK_COUNT];
         for f in &mut self.pos {
             f.reset();
@@ -226,14 +276,15 @@ impl BodySmoother {
         (self.min_cutoff, self.beta)
     }
 
-    /// Live-retune every channel without resetting filter state.
+    /// Live-retune the **screen** landmark filter without resetting filter
+    /// state. The world bank keeps its fixed upstream params
+    /// ([`WORLD_MIN_CUTOFF`]/[`WORLD_BETA`]) — the Dev knob these arguments come
+    /// from tunes screen-space smoothing, and world coordinates are a different
+    /// (metric) unit whose tuning must not track it.
     pub fn set_params(&mut self, min_cutoff: f32, beta: f32) {
         self.min_cutoff = min_cutoff;
         self.beta = beta;
         for f in &mut self.pos {
-            f.set_params(min_cutoff, beta);
-        }
-        for f in &mut self.world {
             f.set_params(min_cutoff, beta);
         }
     }
@@ -263,6 +314,15 @@ impl BodySmoother {
         for i in 0..BODY_LANDMARK_COUNT {
             out.landmarks[i].pos = self.pos[i].filter(target[i].pos, dt, pos_scale);
             out.world[i] = self.world[i].filter(target_world[i], dt, 1.0);
+            // Visibility low-pass (alpha 0.1); first frame passes through so a
+            // fresh track has no fade-in from the zero state.
+            let new_vis = target[i].visibility;
+            out.landmarks[i].visibility = if self.has_vis {
+                low_pass(new_vis, VISIBILITY_LOW_PASS_ALPHA, self.vis[i])
+            } else {
+                new_vis
+            };
+            self.vis[i] = out.landmarks[i].visibility;
             // Velocity: finite-difference the SMOOTHED position, then EMA.
             let v_raw = if self.has_prev && dt > 0.0 {
                 (out.landmarks[i].pos - self.prev_pos[i]) / dt
@@ -274,6 +334,7 @@ impl BodySmoother {
             self.prev_pos[i] = out.landmarks[i].pos;
         }
         self.has_prev = true;
+        self.has_vis = true;
         out
     }
 }
@@ -395,5 +456,71 @@ mod tests {
             "retuned heavy smoothing, not reset: {}",
             out.landmarks[0].pos.x
         );
+    }
+
+    #[test]
+    fn visibility_low_passes_toward_a_stepped_target() {
+        let mut s = BodySmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        let (mut a, wa) = body_at(0.5); // visibility 0.9
+                                        // First frame passes visibility straight through (no fade-in).
+        let f0 = s.smooth(&a, &wa, Duration::from_millis(0));
+        assert!((f0.landmarks[0].visibility - 0.9).abs() < 1e-6);
+        // Step visibility to 0 and hold. Low-pass (alpha 0.1) must EASE, not
+        // snap: one step = 0.1·0.0 + 0.9·0.9 = 0.81.
+        for lm in &mut a {
+            lm.visibility = 0.0;
+        }
+        let f1 = s.smooth(&a, &wa, Duration::from_millis(16));
+        assert!(
+            (f1.landmarks[0].visibility - 0.81).abs() < 1e-5,
+            "vis={}",
+            f1.landmarks[0].visibility
+        );
+        // Converges toward 0 over many frames.
+        let mut last = f1;
+        for i in 2..80_u64 {
+            last = s.smooth(&a, &wa, Duration::from_millis(i * 16));
+        }
+        assert!(
+            last.landmarks[0].visibility < 0.02,
+            "settled vis={}",
+            last.landmarks[0].visibility
+        );
+    }
+
+    #[test]
+    fn clear_resets_visibility_history() {
+        let mut s = BodySmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        let (mut a, wa) = body_at(0.5);
+        s.smooth(&a, &wa, Duration::from_millis(0)); // seed vis 0.9
+        for lm in &mut a {
+            lm.visibility = 0.2;
+        }
+        s.smooth(&a, &wa, Duration::from_millis(16)); // mid-decay (~0.83)
+        s.clear();
+        // Cold start: the new visibility passes straight through, not eased
+        // from the pre-clear history.
+        let back = s.smooth(&a, &wa, Duration::from_millis(160));
+        assert!((back.landmarks[0].visibility - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn world_filter_keeps_its_own_params_when_screen_is_retuned() {
+        let mut s = BodySmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA);
+        let (a, wa) = body_at(0.0);
+        s.smooth(&a, &wa, Duration::from_millis(0));
+        // Freeze the SCREEN filter (near-zero cutoff, no adaptivity).
+        s.set_params(0.0001, 0.0);
+        let (b, wb) = body_at(1.0); // screen x and world x both jump to 1.0
+        let out = s.smooth(&b, &wb, Duration::from_millis(16));
+        // Screen barely moves (retuned heavy)…
+        assert!(
+            out.landmarks[0].pos.x < 0.05,
+            "screen x={}",
+            out.landmarks[0].pos.x
+        );
+        // …but the world bank kept WORLD_MIN_CUTOFF/WORLD_BETA (set_params does
+        // not touch it), so it eases visibly toward the target.
+        assert!(out.world[0].x > 0.05, "world x={}", out.world[0].x);
     }
 }
