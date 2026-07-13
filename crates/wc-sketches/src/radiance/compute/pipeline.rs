@@ -4,7 +4,7 @@
 //!
 //! 1. `ExtractResourcePlugin` clones [`RadianceSimParams`] (POD + one
 //!    `Handle`, memcpy clone) from the main world each frame;
-//!    [`remove_radiance_sim_params_if_absent`] mirrors removals the plugin
+//!    `remove_radiance_sim_params_if_absent` mirrors removals the plugin
 //!    does not propagate (the established landmine — see
 //!    `particles/compute.rs`).
 //! 2. [`extract_silhouette_edges`] copies the edge list generation-gated
@@ -127,7 +127,7 @@ pub struct RadiancePipeline {
     pub edges_buffer: Buffer,
 }
 
-/// Per-frame bind group + dispatch size, consumed by [`radiance_compute`].
+/// Per-frame bind group + dispatch size, consumed by `radiance_compute`.
 #[derive(Resource)]
 pub struct RadianceComputeBindGroup {
     /// sim uniform (0), particle storage rw (1), edge storage ro (2).

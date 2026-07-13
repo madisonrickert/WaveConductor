@@ -41,7 +41,10 @@ hand-tracking-mediapipe = [
 # In-process MediaPipe BlazePose body tracking (Radiance's tracker; pulls the
 # camera backends). Inert until a sketch requests it, so shipping it in the
 # default set costs nothing at runtime.
-body-tracking-mediapipe = ["wc-core/body-tracking-camera"]
+body-tracking-mediapipe = [
+    "wc-core/body-tracking-camera",
+    "wc-sketches/body-tracking-mediapipe",
+]
 
 [dependencies]
 bevy = { workspace = true }
