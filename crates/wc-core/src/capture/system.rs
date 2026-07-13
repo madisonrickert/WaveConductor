@@ -250,6 +250,9 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     if t.disable_bloom {
         parts.push("\"disable_bloom\":true".to_string());
     }
+    if t.disable_heatmap_refine {
+        parts.push("\"disable_heatmap_refine\":true".to_string());
+    }
     if t.disable_bone_composite {
         parts.push("\"disable_bone_composite\":true".to_string());
     }
@@ -384,6 +387,7 @@ mod tests {
             disable_smear: true,
             disable_explode: false,
             disable_bloom: false,
+            disable_heatmap_refine: false,
             disable_bone_composite: false,
             disable_bone_camera: false,
             solid_particles: None,

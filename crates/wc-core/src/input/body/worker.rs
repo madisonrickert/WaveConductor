@@ -105,10 +105,28 @@ pub fn load_pose_pipeline(model_dir: &Path) -> Result<(PosePipeline, &'static st
     let (detector, det_backend) = load_model(model_dir, POSE_DETECTION_MODEL)?;
     let (landmark, lm_backend) = load_model(model_dir, POSE_LANDMARK_MODEL)?;
     let backend = combined_backend(det_backend, lm_backend);
-    Ok((
-        PosePipeline::new(detector, landmark, PoseConfig::default()),
-        backend,
-    ))
+    let config = PoseConfig {
+        disable_heatmap_refine: heatmap_refine_disabled(),
+        ..PoseConfig::default()
+    };
+    Ok((PosePipeline::new(detector, landmark, config), backend))
+}
+
+/// Whether `WC_DEBUG_DISABLE_HEATMAP_REFINE` is set in the process
+/// environment. Debug builds only; release always refines — the capture / A-B
+/// harness is a debug-only affordance, matching the `#[cfg(debug_assertions)]`
+/// gating of the whole `WC_DEBUG_*` namespace (`crate::debug`). Read here, on
+/// the worker thread, because the parsed `DebugToggles` resource lives in the
+/// Bevy main world and does not cross to the worker.
+#[cfg(debug_assertions)]
+fn heatmap_refine_disabled() -> bool {
+    std::env::var_os("WC_DEBUG_DISABLE_HEATMAP_REFINE").is_some()
+}
+
+/// Release builds always refine (see the debug-gated sibling).
+#[cfg(not(debug_assertions))]
+fn heatmap_refine_disabled() -> bool {
+    false
 }
 
 /// Load one ONNX model as a boxed [`ModelInference`] with its backend label.
@@ -1080,6 +1098,26 @@ mod model_tests {
         ] {
             assert!(shapes.contains(&want), "missing {want:?} in {shapes:?}");
         }
+    }
+
+    #[test]
+    fn pose_landmark_emits_the_refinement_heatmap() {
+        // The heatmap head backs the landmark refinement pass (upstream
+        // RefineLandmarksFromHeatmapCalculator). pick_pose_landmark_outputs
+        // treats it as optional and degrades gracefully, so a model export
+        // that silently dropped it would disable refinement without erroring —
+        // this contract test fails loudly instead.
+        let mut model =
+            OrtInference::load(&model_bytes(POSE_LANDMARK_MODEL)).expect("load landmark");
+        let mut out = Vec::new();
+        model
+            .run(&Tensor::zeros(vec![1, 256, 256, 3]), &mut out)
+            .expect("landmark forward pass");
+        let shapes: Vec<&[usize]> = out.iter().map(|t| t.shape.as_slice()).collect();
+        assert!(
+            shapes.contains(&[1, 64, 64, 39].as_slice()),
+            "no [1,64,64,39] refinement heatmap in {shapes:?}"
+        );
     }
 
     #[test]

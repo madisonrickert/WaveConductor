@@ -46,6 +46,12 @@ pub struct DebugToggles {
     pub disable_explode: bool,
     /// `WC_DEBUG_DISABLE_BLOOM`: zero/disable the main camera bloom.
     pub disable_bloom: bool,
+    /// `WC_DEBUG_DISABLE_HEATMAP_REFINE`: skip the `BlazePose` heatmap landmark
+    /// refinement pass in the body pipeline, so the hardware session can A/B the
+    /// refined landmarks against the raw regression head. Read on the main side
+    /// only for `run.json` serialization; the worker reads the same env var
+    /// directly at pipeline build (see `input::body::pipeline::PoseConfig`).
+    pub disable_heatmap_refine: bool,
     /// `WC_DEBUG_DISABLE_BONE_COMPOSITE`: skip the bone-composite node.
     pub disable_bone_composite: bool,
     /// `WC_DEBUG_DISABLE_BONE_CAMERA`: do not spawn the off-screen bone camera.
@@ -105,6 +111,7 @@ impl DebugToggles {
             disable_smear: present("WC_DEBUG_DISABLE_SMEAR"),
             disable_explode: present("WC_DEBUG_DISABLE_EXPLODE"),
             disable_bloom: present("WC_DEBUG_DISABLE_BLOOM"),
+            disable_heatmap_refine: present("WC_DEBUG_DISABLE_HEATMAP_REFINE"),
             disable_bone_composite: present("WC_DEBUG_DISABLE_BONE_COMPOSITE"),
             disable_bone_camera: present("WC_DEBUG_DISABLE_BONE_CAMERA"),
             solid_particles,
@@ -250,6 +257,7 @@ mod tests {
         assert!(!t.disable_smear);
         assert!(!t.disable_explode);
         assert!(!t.disable_bloom);
+        assert!(!t.disable_heatmap_refine);
         assert!(!t.disable_bone_composite);
         assert!(!t.disable_bone_camera);
         assert_eq!(t.solid_particles, None);
@@ -285,6 +293,17 @@ mod tests {
         let t = DebugToggles::from_env_vars(&vars);
         assert!(t.force_radiance_synthetic_body);
         assert!(!DebugToggles::from_env_vars(&[]).force_radiance_synthetic_body);
+    }
+
+    #[test]
+    fn disable_heatmap_refine_flag_parses_by_presence() {
+        let vars = vec![(
+            "WC_DEBUG_DISABLE_HEATMAP_REFINE".to_string(),
+            String::new(),
+        )];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.disable_heatmap_refine);
+        assert!(!DebugToggles::from_env_vars(&[]).disable_heatmap_refine);
     }
 
     #[test]

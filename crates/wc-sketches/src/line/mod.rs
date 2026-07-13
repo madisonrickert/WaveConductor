@@ -549,6 +549,7 @@ mod tests {
             force_g: None,
             disable_smear: false,
             disable_explode: false,
+            disable_heatmap_refine: false,
             disable_bloom: false,
             disable_bone_composite: false,
             disable_bone_camera: false,

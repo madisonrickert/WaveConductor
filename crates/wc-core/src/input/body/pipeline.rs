@@ -31,14 +31,15 @@ use bevy::math::{Vec2, Vec3};
 use image::RgbImage;
 
 use super::detector::{
-    best_person, decode_pose_detections_into, generate_pose_anchors, Anchor, PersonDetection,
-    DETECTOR_INPUT, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN,
+    best_person, decode_pose_detections_into, generate_pose_anchors, sigmoid, Anchor,
+    PersonDetection, DETECTOR_INPUT, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN,
 };
 use super::edges::extract_edges;
 use super::mask::{MaskProcessor, DEFAULT_MASK_EMA_ALPHA};
 use super::roi::{
     project_body_landmarks, roi_from_alignment_points, roi_from_detection, roi_trackable,
-    ContentRect, RoiRect, AUX_CENTER_ROW, AUX_SCALE_ROW, LANDMARK_ROWS, LANDMARK_VALUES,
+    ContentRect, RoiRect, AUX_CENTER_ROW, AUX_SCALE_ROW, LANDMARK_INPUT, LANDMARK_ROWS,
+    LANDMARK_VALUES,
 };
 use super::smoothing::OneEuroFilter;
 use super::transport::BodyFramePayload;
@@ -48,6 +49,22 @@ use crate::input::onnx::{InferenceError, ModelInference, Tensor};
 
 /// Landmark model input side as `u32` (the warp target).
 const LM_SIZE: u32 = 256;
+
+/// Heatmap tensor side: the pose landmark model emits a
+/// `[1, HEATMAP_SIZE, HEATMAP_SIZE, LANDMARK_ROWS]` refinement heatmap
+/// (NHWC, batch 1) alongside the regression head.
+const HEATMAP_SIZE: usize = 64;
+
+/// Refinement kernel window side. `MediaPipe`'s pose graph
+/// (`modules/pose_landmark/tensors_to_pose_landmarks_and_segmentation.pbtxt`)
+/// sets `RefineLandmarksFromHeatmapCalculator { kernel_size: 7 }`.
+const HEATMAP_KERNEL_SIZE: usize = 7;
+
+/// Minimum in-window max sigmoid confidence to accept a refinement
+/// (`min_confidence_to_refine`). The pose graph leaves it unset, so the proto
+/// default `0.5` applies (`refine_landmarks_from_heatmap_calculator.proto`).
+/// Below this the landmark keeps its raw regression-head x/y.
+const HEATMAP_MIN_CONFIDENCE: f32 = 0.5;
 
 /// `IoU` threshold for blending detections around the argmax seed
 /// (`MediaPipe`'s `min_suppression_threshold: 0.3`).
@@ -151,6 +168,12 @@ pub struct PoseConfig {
     /// live-tunable through [`BodyLiveTuning`]. Field name kept as `mask_ema*`
     /// for continuity; its meaning is the combine ratio, not an EMA alpha.
     pub mask_ema_alpha: f32,
+    /// Skip the heatmap landmark refinement pass (upstream
+    /// `RefineLandmarksFromHeatmapCalculator`). Seeded at worker build from
+    /// `WC_DEBUG_DISABLE_HEATMAP_REFINE` (debug builds only; release always
+    /// refines) so the hardware session can A/B refined vs raw landmarks;
+    /// directly settable in tests.
+    pub disable_heatmap_refine: bool,
 }
 
 impl Default for PoseConfig {
@@ -159,6 +182,7 @@ impl Default for PoseConfig {
             detector_score_threshold: 0.5,
             presence_threshold: 0.5,
             mask_ema_alpha: DEFAULT_MASK_EMA_ALPHA,
+            disable_heatmap_refine: false,
         }
     }
 }
@@ -538,7 +562,20 @@ impl PosePipeline {
             return Ok(None);
         }
 
-        let rows = project_body_landmarks(picked.landmarks, &roi);
+        // Heatmap landmark refinement (upstream `RefineLandmarksFromHeatmap`),
+        // in crop space before projection and the aux filter. Copy the raw
+        // regression rows into a stack scratch array, refine x/y in place, then
+        // project. Skipped when the A/B toggle is set or the model emitted no
+        // heatmap. No allocation: `refined` is a fixed 195-float stack array.
+        let mut refined = [0.0_f32; LANDMARK_ROWS * LANDMARK_VALUES];
+        let copy_len = refined.len().min(picked.landmarks.len());
+        refined[..copy_len].copy_from_slice(&picked.landmarks[..copy_len]);
+        if !self.config.disable_heatmap_refine {
+            if let Some(heatmap) = picked.heatmap {
+                refine_landmarks_from_heatmap(&mut refined, heatmap);
+            }
+        }
+        let rows = project_body_landmarks(&refined, &roi);
         // Heavily filter the aux alignment points before deriving next frame's
         // tracking ROI so the crop does not jitter (upstream aux filter). A
         // fresh track resets the filter first (no stale state from a prior
@@ -629,14 +666,21 @@ struct PoseLandmarkOutputs<'a> {
     mask: &'a [f32],
     /// `[1, 117]`: 39 × (x, y, z) metric world landmarks.
     world: &'a [f32],
+    /// `[1, HEATMAP_SIZE, HEATMAP_SIZE, LANDMARK_ROWS]` refinement heatmap,
+    /// when the model emitted it. `None` degrades gracefully to no refinement
+    /// (a model export that stripped the heatmap head), which the vendored
+    /// model contract test guards against.
+    heatmap: Option<&'a [f32]>,
 }
 
-/// Select the landmark model's outputs **by shape** (order-independent), so
-/// extra outputs — e.g. the `[1, 64, 64, 39]` heatmap — are ignored wherever
-/// they appear. The four shapes are mutually distinct, so shape matching is
-/// unambiguous; a missing shape reports everything observed.
+/// Select the landmark model's outputs **by shape** (order-independent). The
+/// four required shapes are mutually distinct, so shape matching is
+/// unambiguous; a missing required shape reports everything observed. The
+/// `[1, 64, 64, 39]` refinement heatmap is optional (see
+/// [`PoseLandmarkOutputs::heatmap`]).
 fn pick_pose_landmark_outputs(out: &[Tensor]) -> Result<PoseLandmarkOutputs<'_>, InferenceError> {
     let find = |shape: &[usize]| out.iter().find(|t| t.shape == shape);
+    let heatmap = find(&[1, HEATMAP_SIZE, HEATMAP_SIZE, LANDMARK_ROWS]).map(|t| t.data.as_slice());
     let (Some(landmarks), Some(conf), Some(mask), Some(world)) = (
         find(&[1, LANDMARK_ROWS * LANDMARK_VALUES]),
         find(&[1, 1]),
@@ -659,7 +703,82 @@ fn pick_pose_landmark_outputs(out: &[Tensor]) -> Result<PoseLandmarkOutputs<'_>,
         confidence,
         mask: &mask.data,
         world: &world.data,
+        heatmap,
     })
+}
+
+/// Port of `MediaPipe`'s `RefineLandmarksFromHeatmapCalculator`
+/// (`mediapipe/calculators/util/refine_landmarks_from_heatmap_calculator.cc`,
+/// `RefineLandmarksFromHeatMap`), specialized to the pose graph's options.
+///
+/// For each of the [`LANDMARK_ROWS`] landmark rows it locates the landmark's
+/// cell in the `[HEATMAP_SIZE, HEATMAP_SIZE, LANDMARK_ROWS]` heatmap (NHWC,
+/// batch 1), scans a [`HEATMAP_KERNEL_SIZE`]² window (offset
+/// `(kernel_size - 1) / 2` = 3), sigmoids each cell, and — when the window's
+/// max confidence clears [`HEATMAP_MIN_CONFIDENCE`] and the weight sum is
+/// positive — replaces x/y with the confidence-weighted centroid. z,
+/// visibility, and presence are left untouched: the pose graph leaves
+/// `refine_presence`/`refine_visibility` at their `false` proto defaults.
+///
+/// Runs in **crop space** on the raw landmark array (crop pixels in
+/// `[0, LANDMARK_INPUT]`), BEFORE projection and the aux One-Euro filter — the
+/// same graph order as upstream. Allocation-free: edits the caller's scratch
+/// array in place. Landmarks whose centre cell falls outside the heatmap are
+/// left unchanged (upstream's `continue`).
+fn refine_landmarks_from_heatmap(landmarks: &mut [f32], heatmap: &[f32]) {
+    // NHWC strides (batch 1): idx = hm_row_size·row + hm_pixel_size·col + lm.
+    let hm_f = hf(HEATMAP_SIZE);
+    let hm_pixel_size = LANDMARK_ROWS; // channels per pixel
+    let hm_row_size = HEATMAP_SIZE * hm_pixel_size; // floats per heatmap row
+    let offset = (HEATMAP_KERNEL_SIZE - 1) / 2;
+    for lm in 0..LANDMARK_ROWS {
+        let base = lm * LANDMARK_VALUES;
+        let (Some(&lx), Some(&ly)) = (landmarks.get(base), landmarks.get(base + 1)) else {
+            break;
+        };
+        // Raw landmarks are crop PIXELS; upstream indexes by normalized
+        // [0, 1] × heatmap dimension.
+        let center_col_f = lx / LANDMARK_INPUT * hm_f;
+        let center_row_f = ly / LANDMARK_INPUT * hm_f;
+        if !(center_col_f >= 0.0
+            && center_col_f < hm_f
+            && center_row_f >= 0.0
+            && center_row_f < hm_f)
+        {
+            continue;
+        }
+        let center_col = idx(floor_u32(center_col_f));
+        let center_row = idx(floor_u32(center_row_f));
+        let begin_col = center_col.saturating_sub(offset);
+        let end_col = (center_col + offset + 1).min(HEATMAP_SIZE);
+        let begin_row = center_row.saturating_sub(offset);
+        let end_row = (center_row + offset + 1).min(HEATMAP_SIZE);
+        let mut sum = 0.0_f32;
+        let mut weighted_col = 0.0_f32;
+        let mut weighted_row = 0.0_f32;
+        let mut max_confidence = 0.0_f32;
+        for row in begin_row..end_row {
+            for col in begin_col..end_col {
+                let cell = heatmap.get(hm_row_size * row + hm_pixel_size * col + lm);
+                let confidence = sigmoid(cell.copied().unwrap_or(0.0));
+                sum += confidence;
+                weighted_col += hf(col) * confidence;
+                weighted_row += hf(row) * confidence;
+                max_confidence = max_confidence.max(confidence);
+            }
+        }
+        if max_confidence >= HEATMAP_MIN_CONFIDENCE && sum > 0.0 {
+            // Upstream sets normalized x/y = weighted / hm / sum; convert back
+            // to crop pixels (× LANDMARK_INPUT) for the rest of the pipeline.
+            landmarks[base] = weighted_col / hm_f / sum * LANDMARK_INPUT;
+            landmarks[base + 1] = weighted_row / hm_f / sum * LANDMARK_INPUT;
+        }
+    }
+}
+
+/// Lossless small-`usize` → `f32` for heatmap indices/dims (all ≤ 64).
+fn hf(v: usize) -> f32 {
+    u16::try_from(v).map_or(0.0, f32::from)
 }
 
 /// Decode the `[1, 117]` world tensor: 39 × (x, y, z) metric metres,
@@ -878,8 +997,13 @@ pub(crate) mod fixtures {
 
     /// Landmark outputs for a confident, well-spread pose: 39 rows spread
     /// down the crop (aux rows 33/34 form a valid upright tracking ROI), a
-    /// centred mask blob, constant world rows, presence 0.9 — plus a
-    /// heatmap-shaped extra output to prove shape-based picking skips it.
+    /// centred mask blob, constant world rows, presence 0.9 — plus an
+    /// all-zeros `[1, 64, 64, 39]` heatmap. Sigmoid(0) = 0.5 is a uniform
+    /// field, so refinement pulls each landmark to its (centred) kernel-window
+    /// centroid: a no-op for a centred landmark (aux rows 33/34 stay put, so
+    /// the tracking ROI is unchanged) and a sub-pixel nudge for off-centre
+    /// ones. Tests asserting exact landmark positions build their own blob
+    /// heatmap; see `heatmap_refinement_*`.
     pub(crate) fn confident_landmark_outputs() -> Vec<Tensor> {
         confident_landmark_outputs_with_conf(0.9)
     }
@@ -1268,5 +1392,104 @@ mod tests {
         let out0 = decode_world_landmarks(&world, &roi0);
         assert!((out0[0].x - 0.1).abs() < 1e-6, "x0={}", out0[0].x);
         assert!((out0[0].y + 0.2).abs() < 1e-6, "y0={}", out0[0].y);
+    }
+
+    /// Write a single heatmap cell `(row, col)` for landmark channel `lm`.
+    fn set_heatmap_cell(hm: &mut [f32], row: usize, col: usize, lm: usize, v: f32) {
+        hm[(HEATMAP_SIZE * LANDMARK_ROWS) * row + LANDMARK_ROWS * col + lm] = v;
+    }
+
+    #[test]
+    fn heatmap_refinement_moves_xy_to_the_weighted_centroid() {
+        // Landmark 0 at crop centre (128, 128) → heatmap centre cell (32, 32);
+        // with kernel 7 the window is rows/cols 29..=35. Two equal-confidence
+        // blob cells at (row 30, col 34) and (row 34, col 34), everything else
+        // ~0 confidence. Hand computation (blob conf ≈ 1, background ≈ 0):
+        //   sum          = 2·c
+        //   weighted_col  = (34 + 34)·c = 68·c
+        //   weighted_row  = (30 + 34)·c = 64·c
+        //   refined x_norm = 68·c / 64 / (2·c) = 0.53125 → 0.53125·256 = 136.0
+        //   refined y_norm = 64·c / 64 / (2·c) = 0.5     → 0.5·256     = 128.0
+        let mut landmarks = [0.0_f32; LANDMARK_ROWS * LANDMARK_VALUES];
+        landmarks[0] = 128.0;
+        landmarks[1] = 128.0;
+        let mut heatmap = vec![-30.0_f32; HEATMAP_SIZE * HEATMAP_SIZE * LANDMARK_ROWS];
+        set_heatmap_cell(&mut heatmap, 30, 34, 0, 20.0);
+        set_heatmap_cell(&mut heatmap, 34, 34, 0, 20.0);
+
+        refine_landmarks_from_heatmap(&mut landmarks, &heatmap);
+        assert!((landmarks[0] - 136.0).abs() < 1e-2, "x={}", landmarks[0]);
+        assert!((landmarks[1] - 128.0).abs() < 1e-2, "y={}", landmarks[1]);
+    }
+
+    #[test]
+    fn heatmap_refinement_below_threshold_leaves_the_landmark_unchanged() {
+        // Same geometry, but the blob's max confidence is sigmoid(-1) ≈ 0.269,
+        // under the 0.5 min_confidence_to_refine → x/y are left as-is.
+        let mut landmarks = [0.0_f32; LANDMARK_ROWS * LANDMARK_VALUES];
+        landmarks[0] = 128.0;
+        landmarks[1] = 128.0;
+        let mut heatmap = vec![-30.0_f32; HEATMAP_SIZE * HEATMAP_SIZE * LANDMARK_ROWS];
+        set_heatmap_cell(&mut heatmap, 30, 34, 0, -1.0);
+        set_heatmap_cell(&mut heatmap, 34, 34, 0, -1.0);
+
+        refine_landmarks_from_heatmap(&mut landmarks, &heatmap);
+        assert!((landmarks[0] - 128.0).abs() < 1e-6, "x={}", landmarks[0]);
+        assert!((landmarks[1] - 128.0).abs() < 1e-6, "y={}", landmarks[1]);
+    }
+
+    /// Confident landmark fixture whose heatmap carries a single strong blob
+    /// pulling ONLY landmark 0 to a higher crop-x cell; every other channel is
+    /// far below threshold, so only landmark 0's published position moves.
+    fn confident_outputs_with_lm0_blob() -> Vec<Tensor> {
+        let mut outs = confident_landmark_outputs();
+        for t in &mut outs {
+            if t.shape == vec![1, HEATMAP_SIZE, HEATMAP_SIZE, LANDMARK_ROWS] {
+                let mut h = vec![-30.0_f32; HEATMAP_SIZE * HEATMAP_SIZE * LANDMARK_ROWS];
+                // Landmark 0 raw crop is (118, 50) → cell (col 29, row 12);
+                // pull it to (col 32, row 9), inside the 7×7 window.
+                set_heatmap_cell(&mut h, 9, 32, 0, 20.0);
+                t.data = h;
+            }
+        }
+        outs
+    }
+
+    #[test]
+    fn disable_heatmap_refine_toggle_skips_the_pass() {
+        // Same frame, same detector, same landmark fixture with an off-centre
+        // blob for landmark 0: with refinement ON the published landmark 0 is
+        // pulled toward higher x; with the toggle set it stays at the raw
+        // regression position.
+        let make = |disable: bool| {
+            let cfg = PoseConfig {
+                disable_heatmap_refine: disable,
+                ..PoseConfig::default()
+            };
+            PosePipeline::new(
+                Box::new(StaticInference {
+                    outputs: hot_person_detector_outputs(),
+                }),
+                Box::new(StaticInference {
+                    outputs: confident_outputs_with_lm0_blob(),
+                }),
+                cfg,
+            )
+        };
+        let mut on = make(false);
+        let mut off = make(true);
+        let r_on = on
+            .process(&solid_frame(), Duration::from_millis(0), false, None)
+            .expect("refine on");
+        let r_off = off
+            .process(&solid_frame(), Duration::from_millis(0), false, None)
+            .expect("refine off");
+        assert!(r_on.present && r_off.present);
+        assert!(
+            r_on.landmarks[0].pos.x > r_off.landmarks[0].pos.x + 1e-3,
+            "refinement must move landmark 0 (on={}, off={})",
+            r_on.landmarks[0].pos.x,
+            r_off.landmarks[0].pos.x
+        );
     }
 }
