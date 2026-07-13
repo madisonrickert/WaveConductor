@@ -237,9 +237,10 @@ pub struct RadianceSettings {
 
     /// Worker-side temporal EMA factor on the segmentation mask (higher =
     /// steadier, laggier). Routed through the body-tracking request on
-    /// restart (Task 14).
+    /// restart (Task 14). Default must match
+    /// `wc_core::input::body::mask::DEFAULT_MASK_EMA_ALPHA` (`0.35`).
     #[setting(
-        default = 0.6_f32,
+        default = 0.35_f32,
         min = 0.0_f32,
         max = 0.98_f32,
         step = 0.02_f32,
@@ -252,8 +253,10 @@ pub struct RadianceSettings {
     pub mask_ema: f32,
 
     /// One-Euro landmark filter min-cutoff (Hz). Routed like mask smoothing.
+    /// Default must match
+    /// `wc_core::input::body::smoothing::DEFAULT_MIN_CUTOFF` (`0.05`).
     #[setting(
-        default = 1.0_f32,
+        default = 0.05_f32,
         min = 0.01_f32,
         max = 10.0_f32,
         step = 0.01_f32,
@@ -266,12 +269,17 @@ pub struct RadianceSettings {
     pub one_euro_min_cutoff: f32,
 
     /// One-Euro landmark filter beta (speed coefficient). Routed like mask
-    /// smoothing.
+    /// smoothing. Default must match
+    /// `wc_core::input::body::smoothing::DEFAULT_BETA` (`80.0`) — note the
+    /// much larger scale than the hand provider's beta (`6.0`): `MediaPipe`'s
+    /// pose landmark filter uses body-scale-normalized speed (see
+    /// `smoothing::body_scale`), which is a smaller unit than the hand
+    /// provider's, so the compensating coefficient is proportionally larger.
     #[setting(
-        default = 0.05_f32,
+        default = 80.0_f32,
         min = 0.0_f32,
-        max = 1.0_f32,
-        step = 0.005_f32,
+        max = 200.0_f32,
+        step = 1.0_f32,
         label = "One-Euro beta",
         section = "Tracking",
         category = Dev,
@@ -414,13 +422,13 @@ fn default_mask_threshold() -> f32 {
     0.5
 }
 fn default_mask_ema() -> f32 {
-    0.6
+    0.35
 }
 fn default_one_euro_min_cutoff() -> f32 {
-    1.0
+    0.05
 }
 fn default_one_euro_beta() -> f32 {
-    0.05
+    80.0
 }
 fn default_mask_debug_overlay() -> bool {
     false

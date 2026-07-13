@@ -17,7 +17,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rtrb::{Consumer, Producer};
 
 use super::pipeline::BodyLiveTuning;
-use super::smoothing::{BodySmoother, DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
+use super::smoothing::BodySmoother;
 use super::transport::{
     seed_payload_pool, BodyFramePayload, BodyWorkerMsg, PAYLOAD_POOL_SIZE, RESULT_RING_CAPACITY,
 };
@@ -132,7 +132,7 @@ pub fn sync_body_tracking(
             diagnostics.idle_throttled = req.idle_throttle;
         }
         (Some(req), false) => {
-            *runtime = Some(start_worker(&worker, &config, req.idle_throttle));
+            *runtime = Some(start_worker(&worker, &config, &req));
             *diagnostics = BodyTrackingDiagnostics {
                 status: BodyTrackingStatus::Starting,
                 idle_throttled: req.idle_throttle,
@@ -285,11 +285,18 @@ pub fn poll_body_worker(
     }
 }
 
-/// Build the rings, seed the payload pool, and spawn the worker.
+/// Build the rings, seed the payload pool, and spawn the worker. Reads the
+/// three Dev-panel tuning fields off `request` (Plan C Task 14): the mask EMA
+/// factor seeds the shared live-tuning cell the worker polls each frame, and
+/// the One-Euro min-cutoff/beta seed the main-thread smoother constructed
+/// below. Because these fields are `requires_restart` (Plan C Task 2),
+/// `sync_body_tracking` only reaches this function on a fresh request insert
+/// — including the re-insert after a Dev-panel reload — so a settings change
+/// always takes effect on the next worker (re)start.
 fn start_worker(
     worker: &BodyTrackingWorker,
     config: &BodyTrackingConfig,
-    idle_throttle: bool,
+    request: &BodyTrackingRequest,
 ) -> BodyRuntime {
     let (result_tx, result_rx) = rtrb::RingBuffer::new(RESULT_RING_CAPACITY);
     // Sized PAYLOAD_POOL_SIZE + 1: the transport seeding invariant (seed_payload_pool
@@ -300,8 +307,8 @@ fn start_worker(
         "recycle ring must hold PAYLOAD_POOL_SIZE + 1 so seeding + one in-flight payload never fails"
     );
     seed_payload_pool(&mut recycle_tx);
-    let tuning = Arc::new(BodyLiveTuning::new(super::mask::DEFAULT_MASK_EMA_ALPHA));
-    tuning.set_idle_throttle(idle_throttle);
+    let tuning = Arc::new(BodyLiveTuning::new(request.mask_ema));
+    tuning.set_idle_throttle(request.idle_throttle);
 
     #[cfg(test)]
     let injected_source = worker
@@ -350,15 +357,13 @@ fn start_worker(
         consumer: result_rx,
         recycle: recycle_tx,
         tuning,
-        // Fixed defaults for now: BodySmoother::set_params exists for live
-        // tuning, and BodyTrackingRequest now carries mask_ema/
-        // one_euro_min_cutoff/one_euro_beta (Plan C Task 9 added the struct
-        // fields so Radiance's insert_tracking_requests compiles), but
-        // routing those values into this constructor and reconciling their
-        // defaults with DEFAULT_MIN_CUTOFF/DEFAULT_BETA above is Plan C Task
-        // 14's bounded plumbing step, not this one's. Left unwired rather
-        // than inventing the plumbing this task doesn't own.
-        smoother: BodySmoother::new(DEFAULT_MIN_CUTOFF, DEFAULT_BETA),
+        // One-Euro params seeded straight from the request (see the
+        // function doc). BodySmoother::set_params exists for retuning an
+        // already-running smoother without resetting filter state, but
+        // nothing currently calls it mid-run: these fields are
+        // requires_restart, so a change always arrives via a fresh
+        // start_worker call instead.
+        smoother: BodySmoother::new(request.one_euro_min_cutoff, request.one_euro_beta),
         target: BodyTarget::default(),
         had_person: false,
     }
@@ -401,6 +406,7 @@ mod tests {
         confident_landmark_outputs, empty_detector_outputs, hot_person_detector_outputs,
     };
     use super::super::pipeline::{PoseConfig, PosePipeline};
+    use super::super::smoothing::{DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
     use super::super::{
         BodyTrackingDiagnostics, BodyTrackingPlugin, BodyTrackingRequest, BodyTrackingState,
         MaskTexture, SilhouetteEdges,
@@ -526,6 +532,43 @@ mod tests {
             world.resource::<InteractionTimer>().last_interaction(),
             Duration::ZERO,
             "empty frames must never reset the idle timer"
+        );
+    }
+
+    #[test]
+    fn worker_start_reads_tuning_fields_from_the_request() {
+        // Plan C Task 14: the three Dev-panel tuning fields on the request
+        // must reach the worker's live-tuning cell (mask EMA) and the
+        // main-thread smoother (One-Euro min-cutoff/beta) at worker start,
+        // not just sit on the struct unread.
+        let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
+        app.insert_resource(BodyTrackingRequest {
+            idle_throttle: false,
+            mask_ema: 0.9,
+            one_euro_min_cutoff: 3.5,
+            one_euro_beta: 12.0,
+        });
+        // One update is enough for sync_body_tracking to observe the fresh
+        // request and call start_worker.
+        app.update();
+
+        let world = app.world();
+        let worker = world.resource::<BodyTrackingWorker>();
+        let runtime = worker.runtime.lock().expect("runtime lock");
+        let rt = runtime.as_ref().expect("worker must have started");
+        assert!(
+            (rt.tuning.mask_ema_alpha() - 0.9).abs() < 1e-6,
+            "mask_ema did not reach BodyLiveTuning: {}",
+            rt.tuning.mask_ema_alpha()
+        );
+        let (min_cutoff, beta) = rt.smoother.params();
+        assert!(
+            (min_cutoff - 3.5).abs() < 1e-6,
+            "one_euro_min_cutoff did not reach BodySmoother: {min_cutoff}"
+        );
+        assert!(
+            (beta - 12.0).abs() < 1e-6,
+            "one_euro_beta did not reach BodySmoother: {beta}"
         );
     }
 

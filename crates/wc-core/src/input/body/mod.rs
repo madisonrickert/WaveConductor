@@ -72,18 +72,17 @@ pub struct BodyTrackingRequest {
     /// sketch. Driven by Plan C from `SketchActivity`.
     pub idle_throttle: bool,
     /// Worker-side temporal EMA factor on the segmentation mask (0 = raw,
-    /// higher = steadier/laggier). Read at worker (re)start; Radiance's Dev
-    /// knob routes here via its `requires_restart` reload (Plan C Task 9
-    /// constructs this field; Plan C Task 14 plumbs it into the worker/
-    /// smoothing config below — until then the value is carried but unread,
-    /// same posture as `BodySmoother::set_params`'s existing unwired
-    /// write-only setters).
+    /// higher = steadier/laggier). Read at worker (re)start
+    /// (`systems::start_worker` seeds [`pipeline::BodyLiveTuning`] from this
+    /// field); Radiance's Dev knob routes here via its `requires_restart`
+    /// reload.
     pub mask_ema: f32,
-    /// One-Euro landmark filter min-cutoff, Hz. Same routing/posture as
-    /// [`Self::mask_ema`].
+    /// One-Euro landmark filter min-cutoff, Hz. Same routing as
+    /// [`Self::mask_ema`]; seeds `systems::start_worker`'s
+    /// [`smoothing::BodySmoother`] construction.
     pub one_euro_min_cutoff: f32,
-    /// One-Euro landmark filter beta (speed coefficient). Same routing/
-    /// posture as [`Self::mask_ema`].
+    /// One-Euro landmark filter beta (speed coefficient). Same routing as
+    /// [`Self::mask_ema`].
     pub one_euro_beta: f32,
 }
 

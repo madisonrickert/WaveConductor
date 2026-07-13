@@ -215,6 +215,17 @@ impl BodySmoother {
         }
     }
 
+    /// Current One-Euro parameters, `(min_cutoff, beta)`. Test-only
+    /// introspection to verify the worker-start plumbing (Plan C Task 14)
+    /// reaches this smoother; production code only ever sets params
+    /// (construction / [`Self::set_params`]) and never needs to read them
+    /// back.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn params(&self) -> (f32, f32) {
+        (self.min_cutoff, self.beta)
+    }
+
     /// Live-retune every channel without resetting filter state.
     pub fn set_params(&mut self, min_cutoff: f32, beta: f32) {
         self.min_cutoff = min_cutoff;
