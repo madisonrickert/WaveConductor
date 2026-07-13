@@ -44,6 +44,11 @@ const SUBCOMMANDS: &[Entry] = &[
         description: "Deterministic visual capture + baseline regression for a scenario.",
     },
     Entry {
+        name: "soak-test",
+        description:
+            "Long-run soak under representative load: RSS / FPS / thermal trends + verdict.",
+    },
+    Entry {
         name: "bundle-mac",
         description: "Build the release binary and assemble a self-contained WaveConductor.app.",
     },

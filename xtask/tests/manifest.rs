@@ -24,6 +24,7 @@ const EXPECTED_SUBCOMMANDS: &[&str] = &[
     "manifest",
     "check-secrets",
     "capture",
+    "soak-test",
     "bundle-mac",
     "bundle-linux",
     "bundle-windows",
