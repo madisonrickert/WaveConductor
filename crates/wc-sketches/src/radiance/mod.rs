@@ -32,6 +32,17 @@
 pub mod compute;
 pub mod render;
 pub mod settings;
+// Consumes `wc_core::input::body` (`EdgePoint`/`MASK_SIZE`/`MAX_EDGE_POINTS`),
+// which wc-core gates behind this feature (camera-independent, CI-testable
+// headless). One generator, three consumers (unit tests here, the Task 12
+// screensaver phantom, and the Task 13 capture dancer), so it lives at the
+// sketch root beside `systems` rather than inside it. The `cargo doc` gate
+// builds default features only, so this module must be absent there — see
+// `Cargo.toml`'s `body-tracking-mediapipe` forwarding feature, and
+// `radiance::systems::mod`/`radiance::compute::mod` for the identical
+// precedent.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod synthetic;
 pub mod systems;
 
 use bevy::prelude::*;
