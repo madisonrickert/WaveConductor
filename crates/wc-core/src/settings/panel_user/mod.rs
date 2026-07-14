@@ -40,8 +40,12 @@
 //! - [`widgets`] — the typed value widgets (`Number`, `Boolean`, `Color`,
 //!   `Text`, `Enum`, `RuntimeEnum`, `FilePath`, plus the unreachable-for-now
 //!   `Vec2`/`Vec3` branches).
-//! - [`template_picker`] (feature `templates`) — the template-library
+//! - `template_picker` (feature `templates`) — the template-library
 //!   `ComboBox` widget, its thumbnail cache, and its two-step delete confirm.
+//!   (Plain code span, not an intra-doc link: `mod template_picker` is
+//!   `#[cfg(feature = "templates")]`, so a link from this ungated module doc
+//!   dangles when the crate is documented without the feature — the same
+//!   reason widgets.rs spells it as a code span.)
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};

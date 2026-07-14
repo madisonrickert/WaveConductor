@@ -95,10 +95,10 @@ fn next_and_prev_cycle_through_sketches() {
         *app.world().resource::<State<AppState>>().get(),
         AppState::Dots
     );
-    // Wrap around: SKETCH_ORDER has 4 entries (Line, Flame, Dots, Cymatics —
-    // Waves is a de-routed seam, AUDIT.md T5), so 4 nexts from Dots should
-    // land back on Dots.
-    for _ in 0..4 {
+    // Wrap around: SKETCH_ORDER has 5 entries (Line, Flame, Dots, Cymatics,
+    // Radiance — Waves is a de-routed seam, AUDIT.md T5), so 5 nexts from
+    // Dots should land back on Dots.
+    for _ in 0..5 {
         press_key(&mut app, KeyCode::KeyX);
         app.update();
     }

@@ -549,6 +549,7 @@ mod tests {
             force_g: None,
             disable_smear: false,
             disable_explode: false,
+            disable_heatmap_refine: false,
             disable_bloom: false,
             disable_bone_composite: false,
             disable_bone_camera: false,
@@ -558,6 +559,7 @@ mod tests {
             force_cymatics_interaction: false,
             force_flame_warp: false,
             force_flame_camera_pose: false,
+            force_radiance_synthetic_body: false,
         };
         assert!(should_register_smear(Some(&all_off)));
         assert!(should_register_smear(None)); // no toggles → everything on

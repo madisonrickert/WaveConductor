@@ -80,6 +80,8 @@ Scenarios defined today:
 | `cymatics-synthetic` | `cymatics` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
 | `cymatics-interacting` | `cymatics` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_CYMATICS_INTERACTION = "1"` |
 | `cymatics-screensaver` | `cymatics` | `mock` | `clean` | `[180, 360, 600, 1200]` | `FORCE_SCREENSAVER = "1"` |
+| `radiance-synthetic` | `radiance` | `off` | `clean` | `[60, 120, 240, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"` |
+| `radiance-screensaver` | `radiance` | `off` | `clean` | `[120, 360, 720, 1200]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"`, `FORCE_SCREENSAVER = "1"` |
 
 The `line-screensaver` scenario drives Line's attract mode: the "Wandering
 Pulses" choreography
@@ -108,6 +110,16 @@ into a knot, (c) pulses read as a gentle local bow/wave near the walker, not a
 collapse toward it, (d) whites stay bright white (not dim grey), and (e)
 stirred-up particles pick up a subtle cool tint (velocity color, attract-only),
 while calm regions keep the warm-white personality.
+
+Radiance review guidance (`radiance-synthetic`): (a) a dark glassy humanoid
+silhouette with a thin bright rim, mirrored, centered, limbs visibly swinging
+across frames; (b) particles emanate outward from the silhouette edge — never
+from empty space — rising with a flame-like drift; (c) frames after a
+synthetic beat (frame 120 lands just after one) show an outward burst;
+(d) `delta_prev` stays well above ~5 (continuous motion). For
+`radiance-screensaver`: a slower, thinner ember-toned aura around a gently
+drifting phantom; whites/hot tones read ember-orange, and the field is
+visibly sparser than the active scenario.
 
 Schema:
 
@@ -158,6 +170,7 @@ the scenario's `[debug]` table or `--debug KEY=VAL` (the launcher re-prefixes
 | `WC_DEBUG_FORCE_SCREENSAVER` | Drive `SketchActivity::Screensaver` at startup so a capture lands in attract mode without waiting out the idle timer (presence = on; value ignored). |
 | `WC_DEBUG_FORCE_TIER=<cool\|warm\|hot>` | Pin the screensaver's thermal tier so each tier can be captured deterministically. Unparseable value -> live `ThermalState`. |
 | `WC_DEBUG_FORCE_CYMATICS_INTERACTION` | Force the Cymatics primary centre to be held at UV `(0.5, 0.5)` every frame so `active_radius` grows deterministically without hardware or a real mouse press. Used by the `cymatics-interacting` scenario. Presence = on. |
+| `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY` | Drive Radiance from the deterministic synthetic dancer (mask/edges/landmarks/audio) and suppress the mic + camera activation requests. Used by both radiance capture scenarios. Presence = on. |
 
 Flag toggles (`DISABLE_*`) are true whenever their var is present, regardless of
 value — `=1` and `=` both activate them. `FORCE_G` and `SOLID_PARTICLES` are

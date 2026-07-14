@@ -46,6 +46,12 @@ pub struct DebugToggles {
     pub disable_explode: bool,
     /// `WC_DEBUG_DISABLE_BLOOM`: zero/disable the main camera bloom.
     pub disable_bloom: bool,
+    /// `WC_DEBUG_DISABLE_HEATMAP_REFINE`: skip the `BlazePose` heatmap landmark
+    /// refinement pass in the body pipeline, so the hardware session can A/B the
+    /// refined landmarks against the raw regression head. Read on the main side
+    /// only for `run.json` serialization; the worker reads the same env var
+    /// directly at pipeline build (see `input::body::pipeline::PoseConfig`).
+    pub disable_heatmap_refine: bool,
     /// `WC_DEBUG_DISABLE_BONE_COMPOSITE`: skip the bone-composite node.
     pub disable_bone_composite: bool,
     /// `WC_DEBUG_DISABLE_BONE_CAMERA`: do not spawn the off-screen bone camera.
@@ -75,6 +81,12 @@ pub struct DebugToggles {
     /// Flame camera pose — zoomed in, panned off-center — so captures
     /// regression-guard the target-aware view matrix. Presence = on.
     pub force_flame_camera_pose: bool,
+    /// `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY`: drive Radiance from the
+    /// deterministic synthetic dancer (mask + edges + landmarks + audio)
+    /// instead of the mic/camera pipelines, and suppress the
+    /// `AudioCaptureRequest`/`BodyTrackingRequest` inserts so a capture run
+    /// never opens hardware. Presence = on.
+    pub force_radiance_synthetic_body: bool,
 }
 
 impl DebugToggles {
@@ -99,6 +111,7 @@ impl DebugToggles {
             disable_smear: present("WC_DEBUG_DISABLE_SMEAR"),
             disable_explode: present("WC_DEBUG_DISABLE_EXPLODE"),
             disable_bloom: present("WC_DEBUG_DISABLE_BLOOM"),
+            disable_heatmap_refine: present("WC_DEBUG_DISABLE_HEATMAP_REFINE"),
             disable_bone_composite: present("WC_DEBUG_DISABLE_BONE_COMPOSITE"),
             disable_bone_camera: present("WC_DEBUG_DISABLE_BONE_CAMERA"),
             solid_particles,
@@ -107,6 +120,7 @@ impl DebugToggles {
             force_cymatics_interaction: present("WC_DEBUG_FORCE_CYMATICS_INTERACTION"),
             force_flame_warp: present("WC_DEBUG_FORCE_FLAME_WARP"),
             force_flame_camera_pose: present("WC_DEBUG_FORCE_FLAME_CAMERA_POSE"),
+            force_radiance_synthetic_body: present("WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY"),
         }
     }
 
@@ -243,12 +257,14 @@ mod tests {
         assert!(!t.disable_smear);
         assert!(!t.disable_explode);
         assert!(!t.disable_bloom);
+        assert!(!t.disable_heatmap_refine);
         assert!(!t.disable_bone_composite);
         assert!(!t.disable_bone_camera);
         assert_eq!(t.solid_particles, None);
         assert!(!t.force_cymatics_interaction);
         assert!(!t.force_flame_warp);
         assert!(!t.force_flame_camera_pose);
+        assert!(!t.force_radiance_synthetic_body);
     }
 
     #[test]
@@ -266,6 +282,25 @@ mod tests {
         )];
         let t = DebugToggles::from_env_vars(&vars);
         assert!(t.force_flame_camera_pose);
+    }
+
+    #[test]
+    fn radiance_synthetic_body_flag_parses_by_presence() {
+        let vars = vec![(
+            "WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY".to_string(),
+            String::new(),
+        )];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.force_radiance_synthetic_body);
+        assert!(!DebugToggles::from_env_vars(&[]).force_radiance_synthetic_body);
+    }
+
+    #[test]
+    fn disable_heatmap_refine_flag_parses_by_presence() {
+        let vars = vec![("WC_DEBUG_DISABLE_HEATMAP_REFINE".to_string(), String::new())];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.disable_heatmap_refine);
+        assert!(!DebugToggles::from_env_vars(&[]).disable_heatmap_refine);
     }
 
     #[test]

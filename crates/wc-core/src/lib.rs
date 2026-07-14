@@ -52,6 +52,10 @@ impl Plugin for CorePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(lifecycle::LifecyclePlugin);
         app.add_plugins(input::HandTrackingPlugin);
+        // Body tracking (BlazePose person detector + landmark/segmentation worker).
+        // Inert until a sketch inserts BodyTrackingRequest (Radiance, Plan C).
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_plugins(input::body::BodyTrackingPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
         // Frame-rate cap (restores GPU headroom; see the frame_limiter module

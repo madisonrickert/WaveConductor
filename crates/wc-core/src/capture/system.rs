@@ -250,6 +250,9 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     if t.disable_bloom {
         parts.push("\"disable_bloom\":true".to_string());
     }
+    if t.disable_heatmap_refine {
+        parts.push("\"disable_heatmap_refine\":true".to_string());
+    }
     if t.disable_bone_composite {
         parts.push("\"disable_bone_composite\":true".to_string());
     }
@@ -277,6 +280,9 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     }
     if t.force_flame_camera_pose {
         parts.push("\"force_flame_camera_pose\":true".to_string());
+    }
+    if t.force_radiance_synthetic_body {
+        parts.push("\"force_radiance_synthetic_body\":true".to_string());
     }
     format!("{{{}}}", parts.join(","))
 }
@@ -381,6 +387,7 @@ mod tests {
             disable_smear: true,
             disable_explode: false,
             disable_bloom: false,
+            disable_heatmap_refine: false,
             disable_bone_composite: false,
             disable_bone_camera: false,
             solid_particles: None,
@@ -389,6 +396,7 @@ mod tests {
             force_cymatics_interaction: false,
             force_flame_warp: false,
             force_flame_camera_pose: true,
+            force_radiance_synthetic_body: true,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");
@@ -397,6 +405,10 @@ mod tests {
         assert!(json.contains("\"force_g\":8000"), "{json}");
         assert!(json.contains("\"disable_smear\":true"), "{json}");
         assert!(json.contains("\"force_flame_camera_pose\":true"), "{json}");
+        assert!(
+            json.contains("\"force_radiance_synthetic_body\":true"),
+            "{json}"
+        );
         // Off toggles must not appear.
         assert!(!json.contains("disable_bloom"), "{json}");
         assert!(!json.contains("force_flame_warp"), "{json}");

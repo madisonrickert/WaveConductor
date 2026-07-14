@@ -55,6 +55,8 @@ use wc_core::input::selection::{
     AUTO_LEAP_DEVICE_GRACE,
 };
 #[cfg(feature = "hand-tracking-gestures")]
+use wc_core::lifecycle::state::AppState;
+#[cfg(feature = "hand-tracking-gestures")]
 use wc_core::settings::{HandProviderChoice, HandTrackingSettings};
 
 /// Book-keeping for the live provider switch.
@@ -239,6 +241,7 @@ pub fn install_hand_tracking_providers() {
 pub fn apply_provider_choice(
     settings: Res<'_, HandTrackingSettings>,
     time: Res<'_, Time>,
+    state: Option<Res<'_, State<AppState>>>,
     mut control: ResMut<'_, HandProviderControl>,
     mut registry: ResMut<'_, ProviderRegistry>,
 ) {
@@ -323,6 +326,30 @@ pub fn apply_provider_choice(
             }
         }
 
+        return;
+    }
+
+    // Camera-contention guard. While Radiance is the active sketch, its body
+    // worker owns the webcam (see
+    // `wc_sketches::radiance::systems::arbitration`, which suspends the
+    // MediaPipe hand provider on entry). Rebuilding the registry here would
+    // `register()` — and thus auto-start — a MediaPipe hand provider that
+    // opens that same device, fighting the body worker for it. Defer the
+    // switch: leave `last_applied` unchanged so the pending change is
+    // re-detected and applied on the first frame after Radiance exits.
+    //
+    // Gating on `AppState` rather than the `SuspendedHandCamera` marker is
+    // deliberate: that marker exists only when MediaPipe was suspended *on
+    // entry*, so it would miss an operator switching *to* MediaPipe from
+    // Off/Leap mid-sketch — the exact case that grabs the camera. Radiance
+    // never reads hand data, so deferring any hand-provider change while it
+    // runs costs nothing. (Absent state, e.g. in unit tests, never defers.)
+    if state.is_some_and(|s| *s.get() == AppState::Radiance) {
+        tracing::debug!(
+            from = ?control.last_applied,
+            to = ?choice,
+            "hand-tracking: deferring provider switch while Radiance owns the webcam"
+        );
         return;
     }
 
@@ -827,6 +854,83 @@ mod tests {
             "switch stops the old provider"
         );
         assert_eq!(app.world().resource::<ProviderRegistry>().iter().count(), 0);
+    }
+
+    /// While Radiance owns the webcam, a dropdown change must NOT rebuild the
+    /// registry — a rebuild would `register()` (auto-start) a `MediaPipe` hand
+    /// provider and open the camera the body worker holds. The switch is
+    /// deferred, not lost: `last_applied` stays put so it re-applies on exit.
+    #[test]
+    fn radiance_defers_provider_switch() {
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            DevicePresence::Attached,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Idle,
+            },
+        );
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.insert_state(AppState::Radiance);
+        // Operator flips the dropdown to MediaPipe mid-Radiance.
+        app.world_mut()
+            .resource_mut::<HandTrackingSettings>()
+            .provider = HandProviderChoice::MediaPipe;
+        app.update();
+
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            0,
+            "deferred: the old provider must not be torn down"
+        );
+        assert!(
+            app.world()
+                .resource::<ProviderRegistry>()
+                .provider(ProviderId::Leap)
+                .is_some(),
+            "registry must be untouched while deferred"
+        );
+        assert_eq!(
+            app.world().resource::<HandProviderControl>().last_applied,
+            HandProviderChoice::Auto,
+            "last_applied unchanged so the switch re-applies after Radiance exits"
+        );
+    }
+
+    /// The same switch outside Radiance applies immediately — the guard is
+    /// state-scoped, not a blanket block. `Off` makes the rebuild observable
+    /// (empty registry) without constructing hardware.
+    #[test]
+    fn non_radiance_state_applies_provider_switch() {
+        let (mut app, stops) = test_app(
+            ProviderId::Leap,
+            ServiceConnection::Connected,
+            DevicePresence::Attached,
+            HandProviderControl {
+                last_applied: HandProviderChoice::Auto,
+                watch: AutoMediaPipeWatch::Idle,
+                leap_watch: AutoLeapWatch::Idle,
+            },
+        );
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.insert_state(AppState::Home);
+        app.world_mut()
+            .resource_mut::<HandTrackingSettings>()
+            .provider = HandProviderChoice::Off;
+        app.update();
+
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            1,
+            "outside Radiance the switch applies and stops the old provider"
+        );
+        assert_eq!(
+            app.world().resource::<ProviderRegistry>().iter().count(),
+            0,
+            "dropdown change rebuilds to Off"
+        );
     }
 
     // ── Auto's Leap device watch (bookkeeping; no real providers) ───────
