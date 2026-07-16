@@ -3,13 +3,13 @@
 //! Reliable, accurate, no-admin *CPU-die* temperature is not achievable on
 //! consumer Windows: every accurate CPU source (Intel DTS/MSR, AMD SMU) sits
 //! behind a ring-0 driver, which is the entire reason tools like
-//! LibreHardwareMonitor exist. The one genuinely no-admin, in-process, both-vendor
+//! `LibreHardwareMonitor` exist. The one genuinely no-admin, in-process, both-vendor
 //! signal is the **GPU/SoC die temperature the WDDM stack exposes** through
 //! `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` — the same sensor Task
 //! Manager's GPU-temperature readout uses. On the deployment mini-PCs (AMD Ryzen
 //! + Radeon 780M, Intel Core Ultra + Arc/Iris Xe) the iGPU and CPU share a die, so
-//! this is an adequate coarse "is the SoC getting hot, throttle now" proxy, which
-//! is exactly what [`super::super::ThermalState`] needs (not per-core telemetry).
+//!   this is an adequate coarse "is the `SoC` getting hot, throttle now" proxy, which
+//!   is exactly what [`super::super::ThermalState`] needs (not per-core telemetry).
 //!
 //! ## No new dependency
 //!
@@ -105,7 +105,7 @@ fn enumerate_adapters() -> Vec<u32> {
     // SAFETY: `desc` is a zeroed, correctly-typed `D3DKMT_ENUMADAPTERS2`; a null
     // `pAdapters` with `NumAdapters == 0` requests only the count per the
     // `D3DKMTEnumAdapters2` contract.
-    let status = unsafe { D3DKMTEnumAdapters2(&mut desc) };
+    let status = unsafe { D3DKMTEnumAdapters2(&raw mut desc) };
     // NT_SUCCESS is a non-negative NTSTATUS. `usize::try_from` avoids an `as` cast
     // (u32 always fits usize on our 64-bit targets; 0 on the impossible failure).
     let count = usize::try_from(desc.NumAdapters).unwrap_or(0);
@@ -118,7 +118,7 @@ fn enumerate_adapters() -> Vec<u32> {
     // SAFETY: `pAdapters` points at a buffer of exactly `count`
     // `D3DKMT_ADAPTERINFO` elements (the count the kernel just returned); pointer
     // and length are consistent for the duration of the call.
-    let status = unsafe { D3DKMTEnumAdapters2(&mut desc) };
+    let status = unsafe { D3DKMTEnumAdapters2(&raw mut desc) };
     if status.0 < 0 {
         return Vec::new();
     }
@@ -136,7 +136,7 @@ fn enumerate_adapters() -> Vec<u32> {
 /// temperature), or the value is outside [`PLAUSIBLE_C`].
 fn read_adapter_celsius(h_adapter: u32) -> Option<f32> {
     let mut perf = D3DKMT_ADAPTER_PERFDATA::default();
-    let perf_ptr: *mut D3DKMT_ADAPTER_PERFDATA = &mut perf;
+    let perf_ptr: *mut D3DKMT_ADAPTER_PERFDATA = &raw mut perf;
     let mut query = D3DKMT_QUERYADAPTERINFO {
         hAdapter: h_adapter,
         Type: KMTQAITYPE_ADAPTERPERFDATA,
@@ -148,7 +148,7 @@ fn read_adapter_celsius(h_adapter: u32) -> Option<f32> {
     // (a live, correctly-sized `D3DKMT_ADAPTER_PERFDATA`) with a matching
     // `PrivateDriverDataSize`, as the `KMTQAITYPE_ADAPTERPERFDATA` query requires.
     // `perf` outlives the call and is not aliased elsewhere.
-    let status = unsafe { D3DKMTQueryAdapterInfo(&mut query) };
+    let status = unsafe { D3DKMTQueryAdapterInfo(&raw mut query) };
     if status.0 < 0 {
         return None;
     }
