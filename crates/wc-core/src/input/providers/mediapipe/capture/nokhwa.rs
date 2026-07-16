@@ -79,25 +79,101 @@ fn choose_camera_format(
         .copied()
 }
 
+/// Enumerate the available capture devices as `(index, human_name)` pairs.
+///
+/// Queries the platform capture backend (Media Foundation on Windows, the
+/// nokhwa auto-backend elsewhere). Returns an empty list on any query failure,
+/// which the caller treats as "fall back to the configured index." Only the
+/// integer-indexed devices are kept — string-addressed backends (IP cameras)
+/// are not a webcam-selection target here.
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+fn enumerate_devices() -> Vec<(u32, String)> {
+    use nokhwa::utils::{ApiBackend, CameraIndex};
+
+    #[cfg(target_os = "windows")]
+    let backend = ApiBackend::MediaFoundation;
+    #[cfg(not(target_os = "windows"))]
+    let backend = ApiBackend::Auto;
+
+    match nokhwa::query(backend) {
+        Ok(list) => list
+            .iter()
+            .filter_map(|info| match info.index() {
+                CameraIndex::Index(i) => Some((*i, info.human_name())),
+                CameraIndex::String(_) => None,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Choose the device index whose human-readable name contains `want`
+/// (case-insensitive substring), else `fallback`.
+///
+/// Pure and hardware-free so device selection is unit-tested. First match wins;
+/// `None`/no-match/empty-list all return `fallback`, preserving pure index
+/// behavior when no name is configured.
+#[cfg(feature = "hand-tracking-mediapipe-camera")]
+fn match_camera_by_name(devices: &[(u32, String)], want: Option<&str>, fallback: u32) -> u32 {
+    let Some(want) = want else {
+        return fallback;
+    };
+    let want = want.to_lowercase();
+    devices
+        .iter()
+        .find(|(_, name)| name.to_lowercase().contains(&want))
+        .map_or(fallback, |(index, _)| *index)
+}
+
 #[cfg(feature = "hand-tracking-mediapipe-camera")]
 impl NokhwaFrameSource {
-    /// Open `camera_index`, narrow to the cheapest usable enumerated format, and
-    /// start streaming.
+    /// Select a device (by `camera_name` if given, else `camera_index`), narrow
+    /// to the cheapest usable enumerated format, and start streaming.
     ///
-    /// Opens at `AbsoluteHighestFrameRate` first (the request that reliably opens
-    /// across `V4L2`/`AVFoundation`/`MSMF`), then queries the device's enumerated
-    /// formats and switches to the one [`choose_camera_format`] picks. Both
-    /// enumeration and the format switch degrade gracefully: any failure leaves
-    /// the camera on the format it already opened with.
+    /// Device selection first: enumerating and matching `camera_name` as a
+    /// case-insensitive substring lets the app bind to a specific camera (e.g.
+    /// the `OBSBot`) even when the OS does not place it at index 0 — on Windows,
+    /// MSMF also enumerates a "Windows Virtual Camera Device" and an RDP camera
+    /// bus, so a bare index is a gamble. Enumeration degrades gracefully to
+    /// `camera_index` on any query failure or no match, and the resolved roster
+    /// is logged for field diagnostics. Runs once at start — not a hot path.
+    ///
+    /// Then opens at `AbsoluteHighestFrameRate` first (the request that reliably
+    /// opens across `V4L2`/`AVFoundation`/`MSMF`), queries the device's
+    /// enumerated formats and switches to the one [`choose_camera_format`] picks.
+    /// Both the format enumeration and switch degrade gracefully: any failure
+    /// leaves the camera on the format it already opened with.
     ///
     /// # Errors
     /// Returns [`CaptureError::NoCamera`] if the device cannot be opened.
-    pub fn open(camera_index: u32) -> Result<Self, CaptureError> {
+    pub fn open(camera_index: u32, camera_name: Option<&str>) -> Result<Self, CaptureError> {
         use nokhwa::pixel_format::RgbFormat;
         use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
         use nokhwa::Camera;
 
-        let index = CameraIndex::Index(camera_index);
+        // Resolve the target device and log the roster before opening.
+        let devices = enumerate_devices();
+        let index_num = match_camera_by_name(&devices, camera_name, camera_index);
+        if devices.is_empty() {
+            tracing::info!(
+                opening_index = index_num,
+                "webcam: device enumeration returned no cameras; opening configured index"
+            );
+        } else {
+            let roster = devices
+                .iter()
+                .map(|(i, name)| format!("[{i}] {name}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::info!(
+                cameras = %roster,
+                requested_name = ?camera_name,
+                opening_index = index_num,
+                "webcam: enumerated capture devices"
+            );
+        }
+
+        let index = CameraIndex::Index(index_num);
         let requested =
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         let mut camera =
@@ -301,5 +377,39 @@ mod camera_format_tests {
         let chosen = choose_camera_format(&formats).expect("the bounded MJPEG");
         assert_eq!(chosen.format(), FrameFormat::MJPEG);
         assert_eq!((chosen.width(), chosen.height()), (640, 480));
+    }
+
+    fn devices() -> Vec<(u32, String)> {
+        vec![
+            (0, "Windows Virtual Camera Device".to_string()),
+            (1, "OBSBOT Tiny 2 Lite StreamCamera".to_string()),
+            (2, "Integrated Webcam".to_string()),
+        ]
+    }
+
+    #[test]
+    fn name_match_selects_device_not_at_index_zero() {
+        // The OBSBot is enumerated at index 1, not 0 (index 0 is a virtual cam).
+        assert_eq!(match_camera_by_name(&devices(), Some("OBSBOT"), 0), 1);
+    }
+
+    #[test]
+    fn name_match_is_case_insensitive_substring() {
+        assert_eq!(match_camera_by_name(&devices(), Some("obsbot tiny"), 0), 1);
+    }
+
+    #[test]
+    fn no_name_match_falls_back_to_configured_index() {
+        assert_eq!(match_camera_by_name(&devices(), Some("Logitech"), 2), 2);
+    }
+
+    #[test]
+    fn none_name_uses_fallback_index() {
+        assert_eq!(match_camera_by_name(&devices(), None, 2), 2);
+    }
+
+    #[test]
+    fn empty_enumeration_uses_fallback_index() {
+        assert_eq!(match_camera_by_name(&[], Some("OBSBOT"), 0), 0);
     }
 }
