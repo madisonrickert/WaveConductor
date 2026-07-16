@@ -13,6 +13,26 @@
 fn main() {
     println!("cargo:rerun-if-changed=../../vendor/leapc/windows-x86_64/LeapC.dll");
 
+    // Point the linker at the vendored LeapC import library for this host.
+    //
+    // `leaprs`'s build script emits `-lLeapC` and a search path derived from
+    // `LEAPSDK_LIB_PATH`, but it resolves that path *relative to its own crate
+    // directory* in the registry, and the workspace `.cargo/config.toml` sets
+    // the var (non-forced) to the macOS vendor dir as the primary-platform
+    // default. On a fresh Windows checkout that default points at a directory
+    // with no `LeapC.lib`, so the final binary fails to link with unresolved
+    // `Leap*` externals. Emitting an absolute, host-correct search path here —
+    // built from `CARGO_MANIFEST_DIR`, so it is independent of where the repo is
+    // cloned — makes `cargo build` link out of the box with no manual env setup.
+    // macOS keeps using the existing config default + `leaprs` path unchanged.
+    #[cfg(target_os = "windows")]
+    {
+        let leapc_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/leapc/windows-x86_64");
+        println!("cargo:rustc-link-search=native={}", leapc_dir.display());
+        println!("cargo:rustc-link-lib=dylib=LeapC");
+    }
+
     #[cfg(target_os = "windows")]
     {
         let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR set by cargo");
