@@ -19,13 +19,17 @@
 //!
 //! ## Degradation (important)
 //!
-//! Many WDDM drivers report `Temperature == 0` for *integrated* GPUs. That is
-//! treated as "unsupported": [`WddmThermalSensor::new`] probes every adapter once
-//! and keeps only those returning a nonzero reading; if none do, it returns `None`
-//! so the sampler thread is never spawned and the monitor holds its Cool/Schedule
-//! no-sensor fallback (a frozen bogus reading would be worse than none). Because
-//! of this, the sensor must be **validated per hardware model at deployment**:
-//! confirm it reads nonzero under load on each target box during provisioning.
+//! Many WDDM drivers report `Temperature == 0` for *integrated* GPUs, which is
+//! treated as "unsupported" per-read: `read_adapter_celsius` maps `0` (and any
+//! out-of-band value) to `None`, and [`WddmThermalSensor::read_celsius`] takes
+//! the hottest adapter that reports a usable value that sample. Construction
+//! ([`WddmThermalSensor::new`]) keeps *every* enumerated adapter and only
+//! returns `None` when none can be enumerated at all — an adapter that reads `0`
+//! cold but a real value under load is retained, since the reading matters
+//! precisely when the box is hot. A frozen bogus reading is still avoided
+//! because the plausibility band rejects it per-sample. The sensor must be
+//! **validated per hardware model at deployment**: confirm it reads nonzero
+//! under load on each target box during provisioning.
 //!
 //! Units: `D3DKMT_ADAPTER_PERFDATA::Temperature` is deci-Celsius (`°C = raw / 10`).
 
@@ -58,20 +62,28 @@ pub struct WddmThermalSensor {
 }
 
 impl WddmThermalSensor {
-    /// Build the sensor, or `None` when no WDDM adapter exposes a usable
-    /// temperature (the common integrated-GPU `Temperature == 0` case). A `Some`
-    /// means at least one adapter read nonzero at probe time; later reads may still
-    /// transiently return `None`, which the sampler tolerates.
+    /// Build the sensor, or `None` only when no WDDM adapter can be *enumerated*
+    /// at all. A `Some` means at least one adapter handle exists; whether any of
+    /// them reports a usable temperature is decided per-sample by
+    /// [`Self::read_celsius`], which tolerates a transient (or permanent) `None`.
     #[must_use]
     pub fn new() -> Option<Self> {
-        let adapters: Vec<u32> = enumerate_adapters()
-            .into_iter()
-            .filter(|&h| read_adapter_celsius(h).is_some())
-            .collect();
+        // Keep every enumerated adapter handle rather than filtering by a probe
+        // reading here. A hybrid/discrete GPU can report `Temperature == 0`
+        // (= unsupported) while idle at cold boot yet a real value under load —
+        // and we want the reading precisely when the box is hot, so discarding
+        // such an adapter at construction would invert the intent. Deferring to
+        // per-sample `read_celsius` cannot regress: an adapter that always reads
+        // 0 yields `None` every sample (identical to excluding it), at the cost
+        // of one extra handle in the parked 3 s sampler's iteration.
+        let adapters = enumerate_adapters();
         if adapters.is_empty() {
-            tracing::info!(
-                "thermal(windows): no WDDM adapter reports a temperature; \
-                 degrading to the Cool/Schedule fallback"
+            // WARN, not INFO: silent thermal blindness (no throttle for an
+            // unattended multi-hour run) is exactly how the Vega-class regression
+            // went unnoticed. Surface it at provisioning-log level.
+            tracing::warn!(
+                "thermal(windows): no WDDM adapters enumerated; degrading to the \
+                 Cool/Schedule fallback — the thermal throttle will not engage"
             );
             return None;
         }
