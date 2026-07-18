@@ -61,6 +61,35 @@ impl Default for BodyTarget {
 /// bridge the thrash, short enough that a real exit clears promptly.
 const PRESENCE_HOLD: Duration = Duration::from_millis(300);
 
+/// Outcome of the presence-hold debounce for one body frame.
+enum PresenceDecision {
+    /// The detector reports a person: publish it and (re)arm the hold.
+    Present,
+    /// No detection, but still within the hold window: keep the last silhouette.
+    Held,
+    /// No detection and the hold window has elapsed: the person really left.
+    Absent,
+}
+
+/// Decide the debounced presence for one frame, and the (possibly re-armed)
+/// hold deadline. Pure so the [`PRESENCE_HOLD`] behaviour is unit-tested without
+/// standing up a worker/clock: a present frame arms `now + PRESENCE_HOLD`; an
+/// absent frame is [`PresenceDecision::Held`] until that deadline passes, then
+/// [`PresenceDecision::Absent`]. An absent frame never extends the deadline.
+fn presence_decision(
+    frame_present: bool,
+    now: Duration,
+    hold_until: Duration,
+) -> (PresenceDecision, Duration) {
+    if frame_present {
+        (PresenceDecision::Present, now + PRESENCE_HOLD)
+    } else if now < hold_until {
+        (PresenceDecision::Held, hold_until)
+    } else {
+        (PresenceDecision::Absent, hold_until)
+    }
+}
+
 /// Everything that exists only while a request is active.
 pub(crate) struct BodyRuntime {
     worker: WorkerHandle,
@@ -248,29 +277,34 @@ pub fn poll_body_worker(
                     // did, dropping the box merely shrinks the pool.
                     let _ = rt.recycle.push(payload);
                 }
-                if frame.present {
-                    person_frame = true;
-                    rt.present_hold_until = now + PRESENCE_HOLD;
-                    rt.target = BodyTarget {
-                        present: true,
-                        confidence: frame.confidence,
-                        landmarks: frame.landmarks,
-                        world: frame.world_landmarks,
-                        timestamp: frame.timestamp,
-                    };
-                } else if now >= rt.present_hold_until {
-                    // Presence-hold window elapsed → the person really left.
-                    if rt.target.present {
-                        // Reset the smoother so a return starts fresh (no stale
-                        // momentum), mirroring the hand smoother.
-                        rt.smoother.clear();
+                let (decision, hold_until) =
+                    presence_decision(frame.present, now, rt.present_hold_until);
+                rt.present_hold_until = hold_until;
+                match decision {
+                    PresenceDecision::Present => {
+                        person_frame = true;
+                        rt.target = BodyTarget {
+                            present: true,
+                            confidence: frame.confidence,
+                            landmarks: frame.landmarks,
+                            world: frame.world_landmarks,
+                            timestamp: frame.timestamp,
+                        };
                     }
-                    rt.target.present = false;
+                    // Within the hold window after a dropout: keep the last
+                    // target untouched (present stays true, last good pose held)
+                    // so a momentary detector dropout does not blank the aura.
+                    PresenceDecision::Held => {}
+                    PresenceDecision::Absent => {
+                        // Hold window elapsed → the person really left.
+                        if rt.target.present {
+                            // Reset the smoother so a return starts fresh (no
+                            // stale momentum), mirroring the hand smoother.
+                            rt.smoother.clear();
+                        }
+                        rt.target.present = false;
+                    }
                 }
-                // Within the hold window we keep the last target untouched
-                // (present stays true, last good pose held) so a momentary
-                // detector dropout does not blank the silhouette. See
-                // `PRESENCE_HOLD`.
             }
             BodyWorkerMsg::Backend(backend) => {
                 diagnostics.backend = backend;
@@ -599,6 +633,39 @@ mod tests {
             Duration::ZERO,
             "empty frames must never reset the idle timer"
         );
+    }
+
+    #[test]
+    fn presence_decision_arms_hold_on_present() {
+        let now = Duration::from_secs(1);
+        let (d, hold_until) = presence_decision(true, now, Duration::ZERO);
+        assert!(matches!(d, PresenceDecision::Present));
+        assert_eq!(hold_until, now + PRESENCE_HOLD);
+    }
+
+    #[test]
+    fn presence_decision_holds_through_brief_dropout() {
+        // Armed at t = 1000 ms → deadline = 1000 + PRESENCE_HOLD.
+        let hold_until = Duration::from_secs(1) + PRESENCE_HOLD;
+        // A dropout just before the deadline is held, and does not extend it.
+        let now = hold_until.saturating_sub(Duration::from_millis(1));
+        let (d, hu) = presence_decision(false, now, hold_until);
+        assert!(matches!(d, PresenceDecision::Held));
+        assert_eq!(hu, hold_until, "an absent frame must not extend the hold");
+    }
+
+    #[test]
+    fn presence_decision_drops_once_hold_elapses() {
+        let hold_until = Duration::from_secs(1) + PRESENCE_HOLD;
+        // At the deadline and beyond, the person is really gone.
+        assert!(matches!(
+            presence_decision(false, hold_until, hold_until).0,
+            PresenceDecision::Absent
+        ));
+        assert!(matches!(
+            presence_decision(false, hold_until + Duration::from_millis(50), hold_until).0,
+            PresenceDecision::Absent
+        ));
     }
 
     #[test]
