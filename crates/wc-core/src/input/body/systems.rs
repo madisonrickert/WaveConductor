@@ -52,6 +52,15 @@ impl Default for BodyTarget {
     }
 }
 
+/// How long to keep publishing the last silhouette after the detector stops
+/// reporting a person, debouncing brief detection dropouts. A stationary,
+/// partially-framed body (e.g. someone seated close to the camera, upper body
+/// only) sits right at the landmark model's `presence_threshold` (0.5), so its
+/// confidence dips below for a frame or two several times a second — without a
+/// hold that blanks the aura every time and reads as flicker. Long enough to
+/// bridge the thrash, short enough that a real exit clears promptly.
+const PRESENCE_HOLD: Duration = Duration::from_millis(300);
+
 /// Everything that exists only while a request is active.
 pub(crate) struct BodyRuntime {
     worker: WorkerHandle,
@@ -63,6 +72,10 @@ pub(crate) struct BodyRuntime {
     /// Whether the previous poll published a person — lets the state emit a
     /// single clearing write when the person leaves, then stay quiet.
     had_person: bool,
+    /// `Time::elapsed` value until which presence is held even though the
+    /// detector reports no person, to debounce brief dropouts. Set to
+    /// `now + PRESENCE_HOLD` on every present frame; see [`PRESENCE_HOLD`].
+    present_hold_until: Duration,
 }
 
 /// Owns the worker runtime. `rtrb` endpoints are `Send` but not `Sync`, and
@@ -237,18 +250,27 @@ pub fn poll_body_worker(
                 }
                 if frame.present {
                     person_frame = true;
-                } else if rt.target.present {
-                    // Person left: reset the smoother so a return starts
-                    // fresh (no stale momentum), mirroring the hand smoother.
-                    rt.smoother.clear();
+                    rt.present_hold_until = now + PRESENCE_HOLD;
+                    rt.target = BodyTarget {
+                        present: true,
+                        confidence: frame.confidence,
+                        landmarks: frame.landmarks,
+                        world: frame.world_landmarks,
+                        timestamp: frame.timestamp,
+                    };
+                } else if now >= rt.present_hold_until {
+                    // Presence-hold window elapsed → the person really left.
+                    if rt.target.present {
+                        // Reset the smoother so a return starts fresh (no stale
+                        // momentum), mirroring the hand smoother.
+                        rt.smoother.clear();
+                    }
+                    rt.target.present = false;
                 }
-                rt.target = BodyTarget {
-                    present: frame.present,
-                    confidence: frame.confidence,
-                    landmarks: frame.landmarks,
-                    world: frame.world_landmarks,
-                    timestamp: frame.timestamp,
-                };
+                // Within the hold window we keep the last target untouched
+                // (present stays true, last good pose held) so a momentary
+                // detector dropout does not blank the silhouette. See
+                // `PRESENCE_HOLD`.
             }
             BodyWorkerMsg::Backend(backend) => {
                 diagnostics.backend = backend;
@@ -396,6 +418,7 @@ fn start_worker(
         smoother: BodySmoother::new(request.one_euro_min_cutoff, request.one_euro_beta),
         target: BodyTarget::default(),
         had_person: false,
+        present_hold_until: Duration::ZERO,
     }
 }
 
