@@ -36,20 +36,18 @@
 //! baking a hot one — but it is a behaviour change to watch in the first soak.
 //! Threshold tuning is explicitly out of Plan 05's scope.
 
-// The only production caller of this module is the Windows WMI sensor, compiled
-// solely for `all(target_os = "windows", feature = "thermal-sensor-windows")`.
-// On every other target — including CI's macOS/Linux `--all-features` builds,
-// where the sensor's own `target_os = "windows"` gate keeps it out — these items
-// are `pub(crate)` in a private module with no non-test caller, so they would
-// trip `dead_code` under `-D warnings`. They are not dead: this file's tests
-// exercise them on every platform, and the Windows sensor consumes them in
-// production. A conditional `allow`, scoped to exactly the targets where the
-// caller is absent, is the correct expression of that. (`allow`, not `expect`:
-// an `expect` would itself be unfulfilled on the Windows build, where the
-// caller does exist.)
-#![cfg_attr(
-    not(all(target_os = "windows", feature = "thermal-sensor-windows")),
-    allow(dead_code)
+// This module is Plan 05 Task 1: the pure thermal-zone selection logic. Its only
+// production caller — the Windows WMI sensor, compiled solely for
+// `all(target_os = "windows", feature = "thermal-sensor-windows")` — is Plan 05
+// Tasks 2-3 and is not written yet. So on every target, including a native
+// Windows `--all-features` build and CI's macOS/Linux ones, these `pub(crate)`
+// items have no non-test caller and would trip `dead_code` under `-D warnings`.
+// They are not dead: this file's tests exercise them on every platform, and the
+// Windows sensor consumes them once Tasks 2-3 land. `allow`, not `expect`,
+// because there is currently no target on which the caller exists.
+#![allow(
+    dead_code,
+    reason = "Plan 05 Task 1 pure thermal-zone logic; consumed by the WMI sensor wired in Tasks 2-3"
 )]
 
 use std::ops::RangeInclusive;

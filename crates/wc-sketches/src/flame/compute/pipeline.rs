@@ -50,7 +50,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQue
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
-use super::sim_params::{FlameSimParams, FlameSimParamsGpu, LEVEL_PARAMS_STRIDE};
+use super::sim_params::{FlameNodeGpu, FlameSimParams, FlameSimParamsGpu, LEVEL_PARAMS_STRIDE};
 use crate::flame::levels::MAX_LEVELS;
 
 /// Compute workgroup width; level dispatches are `ceil(node_count / 256)`.
@@ -76,6 +76,17 @@ const SIM_PARAMS_SIZE: NonZeroU64 =
 const LEVEL_PARAMS_SIZE: NonZeroU64 = match NonZeroU64::new(16) {
     Some(n) => n,
     None => panic!("LEVEL_PARAMS_SIZE must be non-zero"),
+};
+
+/// `FlameNodeGpu` byte size (32) for binding 1's node storage `min_binding_size`.
+///
+/// `FlameNodeGpu` has fields, so it is non-zero-sized; the `panic!` is in a
+/// `const` expression and could only fire at compile time, never at runtime.
+/// Setting it (rather than `None`) makes wgpu reject a too-small bound node
+/// buffer at bind-group creation instead of at DX12 dispatch time.
+const NODE_SIZE: NonZeroU64 = match NonZeroU64::new(std::mem::size_of::<FlameNodeGpu>() as u64) {
+    Some(n) => n,
+    None => panic!("FlameNodeGpu must be non-zero-sized"),
 };
 
 // Every per-level dynamic offset must address within `u32`; the deepest slot's
@@ -196,7 +207,7 @@ fn init_flame_pipeline(
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: Some(NODE_SIZE),
                 },
                 count: None,
             },

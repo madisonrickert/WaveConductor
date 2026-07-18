@@ -238,9 +238,13 @@ impl Plugin for ThermalMonitorPlugin {
                 tracing::info!("thermal: sampler thread started");
             }
             None => {
-                tracing::info!(
+                // WARN, not INFO: with no sensor the thermal throttle never
+                // engages, so an unattended multi-hour run has no thermal
+                // protection. That must be visible at provisioning-log level —
+                // silent thermal blindness is how it went unnoticed before.
+                tracing::warn!(
                     "thermal: no temperature sensor on this platform; \
-                     ThermalState stays Cool/Schedule"
+                     ThermalState stays Cool/Schedule (thermal throttle disabled)"
                 );
             }
         }

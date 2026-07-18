@@ -3,13 +3,13 @@
 //! Reliable, accurate, no-admin *CPU-die* temperature is not achievable on
 //! consumer Windows: every accurate CPU source (Intel DTS/MSR, AMD SMU) sits
 //! behind a ring-0 driver, which is the entire reason tools like
-//! LibreHardwareMonitor exist. The one genuinely no-admin, in-process, both-vendor
+//! `LibreHardwareMonitor` exist. The one genuinely no-admin, in-process, both-vendor
 //! signal is the **GPU/SoC die temperature the WDDM stack exposes** through
 //! `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` — the same sensor Task
 //! Manager's GPU-temperature readout uses. On the deployment mini-PCs (AMD Ryzen
 //! + Radeon 780M, Intel Core Ultra + Arc/Iris Xe) the iGPU and CPU share a die, so
-//! this is an adequate coarse "is the SoC getting hot, throttle now" proxy, which
-//! is exactly what [`super::super::ThermalState`] needs (not per-core telemetry).
+//!   this is an adequate coarse "is the `SoC` getting hot, throttle now" proxy, which
+//!   is exactly what [`super::super::ThermalState`] needs (not per-core telemetry).
 //!
 //! ## No new dependency
 //!
@@ -19,13 +19,17 @@
 //!
 //! ## Degradation (important)
 //!
-//! Many WDDM drivers report `Temperature == 0` for *integrated* GPUs. That is
-//! treated as "unsupported": [`WddmThermalSensor::new`] probes every adapter once
-//! and keeps only those returning a nonzero reading; if none do, it returns `None`
-//! so the sampler thread is never spawned and the monitor holds its Cool/Schedule
-//! no-sensor fallback (a frozen bogus reading would be worse than none). Because
-//! of this, the sensor must be **validated per hardware model at deployment**:
-//! confirm it reads nonzero under load on each target box during provisioning.
+//! Many WDDM drivers report `Temperature == 0` for *integrated* GPUs, which is
+//! treated as "unsupported" per-read: `read_adapter_celsius` maps `0` (and any
+//! out-of-band value) to `None`, and [`WddmThermalSensor::read_celsius`] takes
+//! the hottest adapter that reports a usable value that sample. Construction
+//! ([`WddmThermalSensor::new`]) keeps *every* enumerated adapter and only
+//! returns `None` when none can be enumerated at all — an adapter that reads `0`
+//! cold but a real value under load is retained, since the reading matters
+//! precisely when the box is hot. A frozen bogus reading is still avoided
+//! because the plausibility band rejects it per-sample. The sensor must be
+//! **validated per hardware model at deployment**: confirm it reads nonzero
+//! under load on each target box during provisioning.
 //!
 //! Units: `D3DKMT_ADAPTER_PERFDATA::Temperature` is deci-Celsius (`°C = raw / 10`).
 
@@ -58,20 +62,28 @@ pub struct WddmThermalSensor {
 }
 
 impl WddmThermalSensor {
-    /// Build the sensor, or `None` when no WDDM adapter exposes a usable
-    /// temperature (the common integrated-GPU `Temperature == 0` case). A `Some`
-    /// means at least one adapter read nonzero at probe time; later reads may still
-    /// transiently return `None`, which the sampler tolerates.
+    /// Build the sensor, or `None` only when no WDDM adapter can be *enumerated*
+    /// at all. A `Some` means at least one adapter handle exists; whether any of
+    /// them reports a usable temperature is decided per-sample by
+    /// [`Self::read_celsius`], which tolerates a transient (or permanent) `None`.
     #[must_use]
     pub fn new() -> Option<Self> {
-        let adapters: Vec<u32> = enumerate_adapters()
-            .into_iter()
-            .filter(|&h| read_adapter_celsius(h).is_some())
-            .collect();
+        // Keep every enumerated adapter handle rather than filtering by a probe
+        // reading here. A hybrid/discrete GPU can report `Temperature == 0`
+        // (= unsupported) while idle at cold boot yet a real value under load —
+        // and we want the reading precisely when the box is hot, so discarding
+        // such an adapter at construction would invert the intent. Deferring to
+        // per-sample `read_celsius` cannot regress: an adapter that always reads
+        // 0 yields `None` every sample (identical to excluding it), at the cost
+        // of one extra handle in the parked 3 s sampler's iteration.
+        let adapters = enumerate_adapters();
         if adapters.is_empty() {
-            tracing::info!(
-                "thermal(windows): no WDDM adapter reports a temperature; \
-                 degrading to the Cool/Schedule fallback"
+            // WARN, not INFO: silent thermal blindness (no throttle for an
+            // unattended multi-hour run) is exactly how the Vega-class regression
+            // went unnoticed. Surface it at provisioning-log level.
+            tracing::warn!(
+                "thermal(windows): no WDDM adapters enumerated; degrading to the \
+                 Cool/Schedule fallback — the thermal throttle will not engage"
             );
             return None;
         }
@@ -105,7 +117,7 @@ fn enumerate_adapters() -> Vec<u32> {
     // SAFETY: `desc` is a zeroed, correctly-typed `D3DKMT_ENUMADAPTERS2`; a null
     // `pAdapters` with `NumAdapters == 0` requests only the count per the
     // `D3DKMTEnumAdapters2` contract.
-    let status = unsafe { D3DKMTEnumAdapters2(&mut desc) };
+    let status = unsafe { D3DKMTEnumAdapters2(&raw mut desc) };
     // NT_SUCCESS is a non-negative NTSTATUS. `usize::try_from` avoids an `as` cast
     // (u32 always fits usize on our 64-bit targets; 0 on the impossible failure).
     let count = usize::try_from(desc.NumAdapters).unwrap_or(0);
@@ -118,7 +130,7 @@ fn enumerate_adapters() -> Vec<u32> {
     // SAFETY: `pAdapters` points at a buffer of exactly `count`
     // `D3DKMT_ADAPTERINFO` elements (the count the kernel just returned); pointer
     // and length are consistent for the duration of the call.
-    let status = unsafe { D3DKMTEnumAdapters2(&mut desc) };
+    let status = unsafe { D3DKMTEnumAdapters2(&raw mut desc) };
     if status.0 < 0 {
         return Vec::new();
     }
@@ -136,7 +148,7 @@ fn enumerate_adapters() -> Vec<u32> {
 /// temperature), or the value is outside [`PLAUSIBLE_C`].
 fn read_adapter_celsius(h_adapter: u32) -> Option<f32> {
     let mut perf = D3DKMT_ADAPTER_PERFDATA::default();
-    let perf_ptr: *mut D3DKMT_ADAPTER_PERFDATA = &mut perf;
+    let perf_ptr: *mut D3DKMT_ADAPTER_PERFDATA = &raw mut perf;
     let mut query = D3DKMT_QUERYADAPTERINFO {
         hAdapter: h_adapter,
         Type: KMTQAITYPE_ADAPTERPERFDATA,
@@ -148,7 +160,7 @@ fn read_adapter_celsius(h_adapter: u32) -> Option<f32> {
     // (a live, correctly-sized `D3DKMT_ADAPTER_PERFDATA`) with a matching
     // `PrivateDriverDataSize`, as the `KMTQAITYPE_ADAPTERPERFDATA` query requires.
     // `perf` outlives the call and is not aliased elsewhere.
-    let status = unsafe { D3DKMTQueryAdapterInfo(&mut query) };
+    let status = unsafe { D3DKMTQueryAdapterInfo(&raw mut query) };
     if status.0 < 0 {
         return None;
     }

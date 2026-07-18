@@ -42,10 +42,25 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQue
 use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
-use super::particle::SimParams;
+use super::particle::{Particle, SimParams};
 
 /// Workgroup size must match `@workgroup_size(64)` in `simulate.wgsl`.
 const WORKGROUP_SIZE: u32 = 64;
+
+/// Compile-time size of one `Particle` for the storage bind-group entry's
+/// `min_binding_size`. Setting it (rather than `None`) makes wgpu reject a
+/// bound buffer smaller than one element at **bind-group creation** — a labeled
+/// error — instead of letting a Rust/WGSL `struct Particle` stride drift surface
+/// as an opaque draw/dispatch-time validation failure on the DX12 backend.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "size_of::<Particle>() fits in u64 on all supported targets; \
+              u64::try_from(usize) isn't const-stable in 1.89"
+)]
+const PARTICLE_SIZE: NonZeroU64 = match NonZeroU64::new(std::mem::size_of::<Particle>() as u64) {
+    Some(n) => n,
+    None => panic!("Particle must be non-zero-sized"),
+};
 
 /// Compile-time validated `SimParams` size for the uniform bind-group entry.
 ///
@@ -174,7 +189,7 @@ fn init_particle_pipeline(
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: Some(PARTICLE_SIZE),
                 },
                 count: None,
             },

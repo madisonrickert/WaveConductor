@@ -1,5 +1,9 @@
-# Ensure consistent line endings for all text files
-* text=auto
+# Ensure consistent line endings for all text files. Default every text file to
+# LF in the working tree on all platforms — the Rust toolchain (notably `cargo
+# fmt --check`) expects LF, and `* text=auto` alone checks Rust sources out as
+# CRLF on Windows. Binaries are still detected by `text=auto` and skipped; the
+# explicit `eol=crlf` rules below (bat/cmd/ps1) override this for Windows shells.
+* text=auto eol=lf
 
 # Treat common binary file types as binary (no diff or merge)
 *.jpg binary

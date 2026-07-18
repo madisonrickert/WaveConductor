@@ -78,8 +78,18 @@ const BACKEND_MIXED: &str = "ort/mixed";
 /// Construction-time configuration for the webcam provider.
 #[derive(Debug, Clone)]
 pub struct MediaPipeConfig {
-    /// Camera index to open (0 = default device).
+    /// Camera index to open (0 = default device). Used as the fallback when
+    /// `camera_name` is `None` or matches no enumerated device.
     pub camera_index: u32,
+    /// Preferred camera by human-readable name (case-insensitive substring).
+    /// When `Some`, device enumeration picks the first matching camera and
+    /// `camera_index` is the fallback. Defaults to `Some("OBSBOT")` so the
+    /// deployment's `OBSBot` is selected by name regardless of enumeration order
+    /// (a box with a virtual camera or an RDP camera bus may not place it at
+    /// index 0); inert — falls back to `camera_index` — on a box with no
+    /// matching camera. Name matching is a Windows/nokhwa concern; the macOS
+    /// `AVFoundation` path opens by index.
+    pub camera_name: Option<String>,
     /// Mirror the image horizontally (webcam-as-mirror — the natural
     /// installation interaction).
     pub mirror: bool,
@@ -125,6 +135,9 @@ impl Default for MediaPipeConfig {
     fn default() -> Self {
         Self {
             camera_index: 0,
+            // Prefer the deployment's OBSBot by name; falls back to camera_index
+            // (0) on any box where no enumerated camera name contains "OBSBOT".
+            camera_name: Some("OBSBOT".to_string()),
             mirror: true,
             max_inference_hz: 30,
             smoothing: true,
@@ -470,22 +483,28 @@ fn refill_metrics(
 
 /// Open a real webcam source on the calling (worker) thread, or error. Runs
 /// inside the worker so `!Send` camera backends never cross threads.
-fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, CaptureError> {
+fn open_camera_source(
+    camera_index: u32,
+    camera_name: Option<&str>,
+) -> Result<Box<dyn FrameSource>, CaptureError> {
     #[cfg(all(feature = "hand-tracking-mediapipe-camera", target_os = "macos"))]
     {
+        // AVFoundation opens by index; name-based selection is a Windows/nokhwa
+        // concern (multiple MSMF sources on one box).
+        let _ = camera_name;
         let source = capture::AvfFrameSource::open(camera_index)?;
         let boxed: Box<dyn FrameSource> = Box::new(source);
         Ok(boxed)
     }
     #[cfg(all(feature = "hand-tracking-mediapipe-camera", not(target_os = "macos")))]
     {
-        let source = capture::NokhwaFrameSource::open(camera_index)?;
+        let source = capture::NokhwaFrameSource::open(camera_index, camera_name)?;
         let boxed: Box<dyn FrameSource> = Box::new(source);
         Ok(boxed)
     }
     #[cfg(not(feature = "hand-tracking-mediapipe-camera"))]
     {
-        let _ = camera_index;
+        let _ = (camera_index, camera_name);
         Err(CaptureError::NoCamera(
             "build with the hand-tracking-mediapipe-camera feature".into(),
         ))
@@ -558,12 +577,13 @@ impl HandTrackingProvider for MediaPipeProvider {
             .ok()
             .and_then(|rt| rt.injected_source.take());
         let camera_index = self.config.camera_index;
+        let camera_name = self.config.camera_name.clone();
         let make_source: SourceFactory = match injected {
             Some(src) => Box::new(move || {
                 let boxed: Box<dyn FrameSource> = src;
                 Ok(boxed)
             }),
-            None => Box::new(move || open_camera_source(camera_index)),
+            None => Box::new(move || open_camera_source(camera_index, camera_name.as_deref())),
         };
         let (producer, consumer) = rtrb::RingBuffer::new(256);
         // The worker reads the shared tuning cell's idle-throttle flag each

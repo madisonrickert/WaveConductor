@@ -10,9 +10,29 @@
 //!
 //! No-op on non-Windows targets.
 
+// A build script signals failure by panicking — that is the sanctioned way to
+// fail a build when a setup-time invariant (an env var Cargo guarantees, a
+// vendored file that must exist) is violated. `expect`/`panic!` here are
+// therefore correct, not the runtime foot-guns the workspace
+// `expect_used`/`panic` lints guard against. These only surface under the
+// `-D warnings` gate on Windows, where the `#[cfg(target_os = "windows")]`
+// blocks below actually compile; scope the allow to this build-script
+// compilation unit so runtime code keeps the strict lints.
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "build scripts fail the build by panicking; setup-time invariants, not runtime paths"
+)]
+
 fn main() {
     println!("cargo:rerun-if-changed=../../vendor/leapc/windows-x86_64/LeapC.dll");
 
+    // The vendored-LeapC *link search path* is emitted by `wc-core`'s build
+    // script (the crate that owns the `leaprs` dependency), so it applies to the
+    // app binary, wc-core's own test/example binaries, and every dependent at
+    // once. This build script only handles the two app-binary-specific steps
+    // below: staging `LeapC.dll` next to the produced `.exe` for runtime
+    // adjacent-DLL discovery, and embedding the icon + version resource.
     #[cfg(target_os = "windows")]
     {
         let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR set by cargo");

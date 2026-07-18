@@ -411,7 +411,12 @@ pub fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Cap
     }
     #[cfg(all(feature = "body-tracking-camera", not(target_os = "macos")))]
     {
-        let source = crate::input::capture::NokhwaFrameSource::open(camera_index)?;
+        // Prefer the OBSBot by name, mirroring the hand provider's default: both
+        // webcam modalities target the same physical camera on the deployment,
+        // and MSMF does not reliably place it at index 0 (a virtual camera or an
+        // RDP camera bus may be enumerated first). Falls back to `camera_index`
+        // on any box with no matching camera, so non-OBSBot hosts are unchanged.
+        let source = crate::input::capture::NokhwaFrameSource::open(camera_index, Some("OBSBOT"))?;
         let boxed: Box<dyn FrameSource> = Box::new(source);
         Ok(boxed)
     }

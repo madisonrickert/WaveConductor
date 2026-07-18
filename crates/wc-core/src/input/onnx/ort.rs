@@ -552,6 +552,14 @@ fn accelerated_builder(
 
 /// Build the platform-accelerated session and commit it, returning the committed
 /// session and the registered backend label.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only reachable via the macOS-only retry_after_cache_purge cache-recovery path; \
+                  no caller on non-macOS targets"
+    )
+)]
 fn commit_accelerated(
     model_bytes: &[u8],
     allow_cpu_fallback: bool,
@@ -566,7 +574,7 @@ fn commit_accelerated(
 /// purge that one model's cache directory, and retry the accelerated commit
 /// exactly once.
 ///
-/// Why this exists: [`coreml_cache_dir`] keys the compiled-artifact cache by a
+/// Why this exists: `coreml_cache_dir` keys the compiled-artifact cache by a
 /// hash of the model bytes, so a corrupt entry produces the *same* commit failure
 /// on every launch, forever (empirically: a garbled `.mlmodelc` fails session
 /// creation with `Failed to create MLModel … Unable to load model`). Under
@@ -703,7 +711,7 @@ fn run_err<R>(e: ort::Error<R>) -> InferenceError {
 /// Windows `DirectML` rejects memory-pattern optimization and parallel graph
 /// execution, so both are disabled explicitly here. Parallel execution is
 /// already ONNX Runtime's default-off state, but spelling it out keeps the
-/// DirectML contract close to the registration site and catches future builder
+/// `DirectML` contract close to the registration site and catches future builder
 /// default changes. `CoreML` and CPU targets need no special session options.
 #[cfg(target_os = "windows")]
 fn configure_accelerator_session(
@@ -753,7 +761,7 @@ fn register_accelerator(builder: &mut SessionBuilder, model_bytes: &[u8]) -> &'s
 /// Register the Windows `DirectML` execution provider on `builder`, returning the
 /// backend label (`DirectML` on success, CPU on a graceful fallback).
 ///
-/// DirectML is the vendor-neutral DX12 EP, so one path accelerates AMD and Intel
+/// `DirectML` is the vendor-neutral DX12 EP, so one path accelerates AMD and Intel
 /// integrated GPUs alike. Registration fails gracefully to the CPU EP on a host
 /// with no DX12 device (e.g. a GPU-less CI runner).
 #[cfg(target_os = "windows")]

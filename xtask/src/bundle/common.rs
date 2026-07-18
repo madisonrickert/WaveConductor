@@ -133,6 +133,10 @@ pub fn set_executable(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 /// No-op on non-Unix platforms (Windows uses the `.exe` extension, not a mode bit).
 #[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature must match the fallible #[cfg(unix)] sibling so cross-platform callers can use `?`"
+)]
 pub fn set_executable(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }

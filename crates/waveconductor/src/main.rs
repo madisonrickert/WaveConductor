@@ -128,6 +128,23 @@ fn main() {
     app.run();
 }
 
+/// Windows GPU backend selection.
+///
+/// Pin DX12 (unless `WGPU_BACKENDS` overrides). Rationale:
+/// - Best integrated-GPU driver maturity on Windows for the deployment mini-PCs
+///   (Arc / Radeon 780M), and it avoids the wgpu-Vulkan-on-Arc variability.
+/// - Shares one API stack with the `DirectML` inference EP: `ort`'s `DirectML`
+///   provider is DX12, so the render path and hand-tracking inference exercise
+///   the same driver rather than two independent ones (Vulkan + DX12).
+///
+/// The DX12 shader compiler currently resolves to the legacy FXC (SM 5.1).
+/// Statically-linked DXC (SM 6) would produce better codegen for the compute-
+/// and loop-heavy shaders — enable the `statically-linked-dxc` bevy feature,
+/// which requires the MSVC **ATL** build-tools component (`atls.lib`) on every
+/// Windows builder. Deferred as a build-prerequisite decision for the team.
+///
+/// `WGPU_BACKENDS=vulkan` is the documented field-test escape hatch — it is
+/// checked first via `Backends::from_env()`.
 #[cfg(target_os = "windows")]
 fn wgpu_settings() -> WgpuSettings {
     let mut settings = WgpuSettings::default();
