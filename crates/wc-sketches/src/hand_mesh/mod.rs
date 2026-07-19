@@ -22,8 +22,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureFormat};
 use bevy::render::view::Msaa;
 use bevy::window::WindowResized;
-use wc_core::input::entity::{BoneCenters, TrackedHand, BONE_COUNT};
-use wc_core::input::projection::palm_to_world;
+use wc_core::input::entity::{BoneCenters, PalmPosition, TrackedHand, BONE_COUNT};
+use wc_core::input::projection::bone_to_world;
 use wc_core::lifecycle::state::AppState;
 use wc_core::sketch::sketch_active;
 
@@ -338,14 +338,24 @@ fn ensure_bone_meshes(
 
 /// Per-frame: project each hand's bone centres to world space and write the
 /// projected position to each child sphere's `Transform.translation`.
+///
+/// Each hand's palm position is the anchor: it maps through the existing
+/// (window-aspect-anisotropic) `palm_to_world` reach mapping, exactly as
+/// before. Every bone is then placed *relative to that anchor* via
+/// [`bone_to_world`], which uses a single isotropic px/mm scale for the
+/// offset — so the hand keeps its full-window reach but its internal
+/// proportions no longer squash/stretch on a non-16:9 (e.g. portrait)
+/// window. See the `wc_core::input::projection` module docs for the full
+/// anisotropic-position-vs-isotropic-shape rationale.
 fn update_bone_transforms(
-    hands: Query<'_, '_, (&BoneCenters, &Children), With<TrackedHand>>,
+    hands: Query<'_, '_, (&PalmPosition, &BoneCenters, &Children), With<TrackedHand>>,
     mut bones: Query<'_, '_, (&BoneIndex, &mut Transform), Without<TrackedHand>>,
     window: Single<'_, '_, &Window>,
 ) {
     let window_size = Vec2::new(window.width(), window.height());
 
-    for (bone_centers, children) in &hands {
+    for (palm_position, bone_centers, children) in &hands {
+        let palm_mm = palm_position.0;
         for child in children.iter() {
             let Ok((bone_index, mut transform)) = bones.get_mut(child) else {
                 continue;
@@ -354,8 +364,8 @@ fn update_bone_transforms(
             if idx >= BONE_COUNT {
                 continue;
             }
-            let center_mm = bone_centers.0[idx];
-            let projected = palm_to_world(center_mm, window_size);
+            let bone_mm = bone_centers.0[idx];
+            let projected = bone_to_world(palm_mm, bone_mm, window_size);
             transform.translation = Vec3::new(projected.x, projected.y, 0.0);
         }
     }
@@ -484,6 +494,94 @@ mod tests {
         assert_eq!(
             bone_count, BONE_COUNT,
             "idempotent: second reconcile must not duplicate bones; got {bone_count}"
+        );
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.5
+    }
+
+    /// Verifies [`update_bone_transforms`] places a bone relative to the
+    /// hand's palm anchor via [`bone_to_world`] — not via the old
+    /// per-bone-independent `palm_to_world` call — and that the resulting
+    /// offset is isotropic (equal x/y pixel delta for an equal x/y mm
+    /// offset) on a portrait window, where the anisotropic reach mapping
+    /// would otherwise squash the hand horizontally.
+    #[test]
+    fn update_bone_transforms_places_bones_isotropically_relative_to_palm() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(AssetPlugin::default());
+        app.add_plugins(bevy::mesh::MeshPlugin);
+        app.init_asset::<BoneWireframeMaterial>();
+        app.insert_resource(HandMeshConfig {
+            app_state: AppState::Dots,
+            bone_color: Color::WHITE,
+            glow_intensity: 5.0,
+            bone_radius: 10.0,
+        });
+
+        // Portrait window: the case bone_to_world's isotropic scale exists
+        // to fix (palm_to_world's independent per-axis reach mapping would
+        // otherwise squash bone offsets ~44% on X relative to Y here).
+        let window_size = Vec2::new(1080.0, 1920.0);
+        app.world_mut().spawn(Window {
+            resolution: (1080_u32, 1920_u32).into(),
+            ..Default::default()
+        });
+
+        let palm = Vec3::new(0.0, 195.0, 200.0);
+        let mut centers = [palm; BONE_COUNT];
+        // Bone 3: 10mm right and 10mm "up" (away from device) of the palm.
+        centers[3] = palm + Vec3::new(10.0, 10.0, 0.0);
+        let hand = app
+            .world_mut()
+            .spawn((TrackedHand, PalmPosition(palm), BoneCenters(centers)))
+            .id();
+
+        // Spawn the 20 real bone children via the production reconcile
+        // system (same code path the app uses), then place them.
+        app.world_mut()
+            .run_system_once(ensure_bone_meshes)
+            .expect("ensure_bone_meshes run");
+        app.world_mut()
+            .run_system_once(update_bone_transforms)
+            .expect("update_bone_transforms run");
+
+        let children = app
+            .world()
+            .get::<Children>(hand)
+            .map(|c| c.to_vec())
+            .unwrap_or_default();
+        let bone3 = children
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<BoneIndex>(e).map(|b| b.0) == Some(3))
+            .expect("bone index 3 exists among the reconciled children");
+
+        let transform = app
+            .world()
+            .get::<Transform>(bone3)
+            .expect("bone 3 has a Transform");
+
+        let expected = bone_to_world(palm, centers[3], window_size);
+        assert!(
+            approx(transform.translation.x, expected.x)
+                && approx(transform.translation.y, expected.y),
+            "bone 3 transform {:?} != bone_to_world {expected:?}",
+            transform.translation
+        );
+
+        // Isotropy sanity: the (10,10)mm offset must yield an equal x/y
+        // pixel delta from the anchor, unlike the old per-bone
+        // `palm_to_world` call, which would have scaled X by
+        // `window.x / LEAP_X_SPAN_MM` (~1080/400) and Y by
+        // `window.y / LEAP_Y_SPAN_MM` (~1920/310) independently.
+        let anchor = bone_to_world(palm, palm, window_size);
+        let delta = Vec2::new(transform.translation.x, transform.translation.y) - anchor;
+        assert!(
+            approx(delta.x, delta.y),
+            "bone offset is not isotropic on a portrait window: delta={delta:?}"
         );
     }
 
