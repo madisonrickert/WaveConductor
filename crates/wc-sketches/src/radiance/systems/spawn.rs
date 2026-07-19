@@ -141,29 +141,12 @@ pub fn spawn_radiance(
 
     // One-frame placeholder uniforms; drive_radiance_materials overwrites
     // every lane next Update.
-    let stops = settings.palette.stops();
-    let particle_material = particle_materials.add(RadianceMaterial {
-        particles: particles_handle.clone(),
-        params_a: Vec4::new(0.55, QUAD_HALF_PX, 0.0, 0.0),
-        color_a: stops[0],
-        color_b: stops[1],
-        color_c: stops[2],
-        params_b: Vec4::ZERO,
-    });
-    let silhouette_material = silhouette_materials.add(RadianceSilhouetteMaterial {
-        mask: mask.0.clone(),
-        fill_params: Vec4::new(
-            settings.silhouette_fill,
-            settings.rim_glow,
-            settings.mask_threshold,
-            f32::from(u8::from(settings.mirror)),
-        ),
-        effect_params: Vec4::ZERO,
-        fill_color: silhouette_fill_color(),
-        rim_color: stops[2],
-        // Slot 0 (channel R) until the driver retargets it at the primary.
-        channel_select: crate::radiance::render::channel_select_for_slot(0),
-    });
+    let particle_material = particle_materials.add(placeholder_particle_material(
+        &settings,
+        particles_handle.clone(),
+    ));
+    let silhouette_material =
+        silhouette_materials.add(placeholder_silhouette_material(&settings, mask.0.clone()));
 
     // Silhouette quad under (z 0.0) the billboards (z 1.0) in Transparent2d's
     // z-sort.
@@ -226,9 +209,17 @@ pub fn spawn_radiance(
         Visibility::default(),
     ));
 
-    // Zeroed params (emission 0, no edges) until the first bake next Update.
+    // Zeroed params (emission 0, no edges) until the first bake next Update —
+    // EXCEPT `particle_count`, which the baker deliberately never touches
+    // (it is buffer topology, owned here): the kernel guards with
+    // `min(arrayLength, params.particle_count)`, so leaving it zeroed makes
+    // every invocation early-return and the aura never simulates. (That was
+    // a real shipped bug: the uniform lane stayed 0 forever and the flame
+    // layer was silently dead.)
+    let mut params = RadianceSimParamsGpu::zeroed();
+    params.particle_count = count;
     commands.insert_resource(RadianceSimParams {
-        params: RadianceSimParamsGpu::zeroed(),
+        params,
         particles: particles_handle,
         particle_count: count,
     });
@@ -236,6 +227,58 @@ pub fn spawn_radiance(
     commands.insert_resource(RadiancePulses::default());
     commands.insert_resource(RadianceSparkles::default());
     commands.insert_resource(RadianceDistanceField::new(distance_image));
+}
+
+/// The first-frame particle material: base palette identity at phase 0 so
+/// the first rendered frame is already on-identity before the driver's
+/// first pack.
+fn placeholder_particle_material(
+    settings: &RadianceSettings,
+    particles: Handle<ShaderBuffer>,
+) -> RadianceMaterial {
+    let slot_colors = crate::radiance::render::slot_identity_colors(
+        settings.palette,
+        0.0,
+        settings.hue_spread,
+        0.0,
+    );
+    RadianceMaterial {
+        particles,
+        aura: crate::radiance::render::RadianceAuraUniform {
+            params: Vec4::new(0.55, QUAD_HALF_PX, 0.0, 0.0),
+            slot_colors,
+        },
+    }
+}
+
+/// The first-frame silhouette material: slot 0 faded in (the
+/// synthetic/phantom writers' slot) until the driver retargets the fade
+/// vector at the live tracking state.
+fn placeholder_silhouette_material(
+    settings: &RadianceSettings,
+    mask: Handle<Image>,
+) -> RadianceSilhouetteMaterial {
+    let slot_colors = crate::radiance::render::slot_identity_colors(
+        settings.palette,
+        0.0,
+        settings.hue_spread,
+        0.0,
+    );
+    RadianceSilhouetteMaterial {
+        mask,
+        fill_params: Vec4::new(
+            settings.silhouette_fill,
+            settings.rim_glow,
+            settings.mask_threshold,
+            f32::from(u8::from(settings.mirror)),
+        ),
+        effect_params: Vec4::ZERO,
+        fill_color: silhouette_fill_color(),
+        slots: crate::radiance::render::RadianceSilhouetteSlots {
+            rim_colors: slot_colors,
+            fades: Vec4::new(1.0, 0.0, 0.0, 0.0),
+        },
+    }
 }
 
 /// `OnEnter(AppState::Radiance)` (chained after `spawn_radiance`): start the
@@ -349,6 +392,12 @@ mod tests {
 
         let sim = app.world().resource::<RadianceSimParams>();
         assert_eq!(sim.particle_count, 12_000);
+        assert_eq!(
+            sim.params.particle_count, 12_000,
+            "the GPU uniform lane must carry the buffer length too — the \
+             kernel guards with min(arrayLength, params.particle_count), so a \
+             zeroed lane silently kills the whole simulation"
+        );
         assert!(
             sim.params.emission_prob.abs() < f32::EPSILON,
             "zeroed until first bake"
@@ -463,6 +512,7 @@ mod tests {
             force_flame_warp: false,
             force_flame_camera_pose: false,
             force_radiance_synthetic_body: true,
+            force_radiance_synthetic_duo: false,
         });
         app.world_mut()
             .run_system_once(insert_tracking_requests)

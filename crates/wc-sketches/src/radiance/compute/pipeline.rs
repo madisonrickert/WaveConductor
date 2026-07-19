@@ -11,7 +11,7 @@
 //!    (see `edge_upload`).
 //! 3. `init_radiance_pipeline` (`RenderStartup`) builds the bind-group
 //!    layout, queues the compute pipeline, and allocates the persistent
-//!    uniform buffer (336 B `SimParams`) and the persistent edge storage
+//!    uniform buffer (400 B `SimParams`) and the persistent edge storage
 //!    buffer (`MAX_EDGE_POINTS` × 16 B) once — never per frame.
 //! 4. `prepare_radiance_bind_group` (`PrepareBindGroups`, after the edge
 //!    upload) writes this frame's uniforms and builds (or reuses) the single
@@ -55,7 +55,7 @@ use super::sim_params::{RadianceSimParams, RadianceSimParamsGpu};
 /// `assets/shaders/radiance/simulate.wgsl`.
 const WORKGROUP_SIZE: u32 = 64;
 
-/// `RadianceSimParamsGpu` byte size (336) for binding 0's `min_binding_size`.
+/// `RadianceSimParamsGpu` byte size (400) for binding 0's `min_binding_size`.
 /// The `panic!` is inside a `const`, so a zero-sized regression fails at
 /// compile time.
 const SIM_PARAMS_SIZE: NonZeroU64 =
@@ -118,7 +118,7 @@ pub struct RadiancePipeline {
     bind_group_layout_descriptor: BindGroupLayoutDescriptor,
     /// Handle into Bevy's [`PipelineCache`].
     pipeline_id: CachedComputePipelineId,
-    /// Persistent `UNIFORM | COPY_DST` buffer for the 336-byte sim params;
+    /// Persistent `UNIFORM | COPY_DST` buffer for the 400-byte sim params;
     /// refilled each frame via `write_buffer` (no realloc).
     sim_params_buffer: Buffer,
     /// Persistent `STORAGE | COPY_DST` buffer of `MAX_EDGE_POINTS` edge
@@ -350,11 +350,11 @@ mod tests {
         app.update();
     }
 
-    /// Binding 0's `min_binding_size` is the exact 336-byte layout, and the
+    /// Binding 0's `min_binding_size` is the exact 400-byte layout, and the
     /// edge buffer holds the full contract capacity.
     #[test]
     fn buffer_size_constants_match_contracts() {
-        assert_eq!(SIM_PARAMS_SIZE.get(), 336);
+        assert_eq!(SIM_PARAMS_SIZE.get(), 400);
         assert_eq!(
             EDGES_BUFFER_SIZE,
             (MAX_EDGE_POINTS as u64) * 16,

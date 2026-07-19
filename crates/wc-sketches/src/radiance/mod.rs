@@ -1,9 +1,14 @@
-//! Radiance sketch: a webcam-tracked dancer's silhouette rendered as a dark
-//! glassy form with an emissive rim, wrapped in an aura of additive HDR
-//! particles born on the silhouette edge and driven by curl-noise flow,
-//! buoyancy, limb motion, and live audio input. Radiance does not generate
-//! audio; it listens (Plan A's input analysis) and watches (Plan B's body
-//! tracking).
+//! Radiance sketch: webcam-tracked dancers rendered as dark glassy forms
+//! with emissive per-body-colored rims, each wrapped in a turbulent particle
+//! FLAME — additive HDR grains born on the silhouette edge, white-hot at
+//! birth, cooling through the body's hue identity into dim embers, rising in
+//! tongue-modulated buoyant plumes, streaking outward as fast ejecta on
+//! audio onsets, and driven by curl-noise flow, limb motion, and live audio
+//! input. Up to four dancers burn simultaneously, each with a distinct hue
+//! derived from the active palette; the particle budget is shared (fade-
+//! weighted) so density stays constant as people come and go. Radiance does
+//! not generate audio; it listens (Plan A's input analysis) and watches
+//! (Plan B's body tracking).
 //!
 //! ## Data flow
 //!
@@ -51,8 +56,9 @@ pub mod distance_field;
 pub mod pulse;
 pub mod render;
 pub mod settings;
-// Extremity star-sparkles (fastest-oscillating limb + its mirror partner).
-// Consumes `wc_core::input::body` landmarks, gated identically.
+// Extremity sparkle motes (per-body constellations riding the
+// fastest-oscillating limbs). Consumes `wc_core::input::body` landmarks,
+// gated identically.
 #[cfg(feature = "body-tracking-mediapipe")]
 pub mod sparkle;
 // Consumes `wc_core::input::body` (`EdgePoint`/`MASK_SIZE`/`MAX_EDGE_POINTS`),

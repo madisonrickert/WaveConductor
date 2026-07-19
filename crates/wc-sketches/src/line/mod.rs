@@ -560,6 +560,7 @@ mod tests {
             force_flame_warp: false,
             force_flame_camera_pose: false,
             force_radiance_synthetic_body: false,
+            force_radiance_synthetic_duo: false,
         };
         assert!(should_register_smear(Some(&all_off)));
         assert!(should_register_smear(None)); // no toggles → everything on

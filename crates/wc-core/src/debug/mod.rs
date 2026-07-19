@@ -87,6 +87,12 @@ pub struct DebugToggles {
     /// `AudioCaptureRequest`/`BodyTrackingRequest` inserts so a capture run
     /// never opens hardware. Presence = on.
     pub force_radiance_synthetic_body: bool,
+    /// `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_DUO`: with the synthetic body
+    /// toggle above also set, add a second phantom dancer in slot 1 (offset
+    /// pose/phase, timed entry) so multi-body color identity, shared-budget
+    /// emission, and the fade-in ignite path can be captured
+    /// deterministically. Presence = on; a no-op without the body toggle.
+    pub force_radiance_synthetic_duo: bool,
 }
 
 impl DebugToggles {
@@ -121,6 +127,7 @@ impl DebugToggles {
             force_flame_warp: present("WC_DEBUG_FORCE_FLAME_WARP"),
             force_flame_camera_pose: present("WC_DEBUG_FORCE_FLAME_CAMERA_POSE"),
             force_radiance_synthetic_body: present("WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_BODY"),
+            force_radiance_synthetic_duo: present("WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_DUO"),
         }
     }
 
@@ -265,6 +272,7 @@ mod tests {
         assert!(!t.force_flame_warp);
         assert!(!t.force_flame_camera_pose);
         assert!(!t.force_radiance_synthetic_body);
+        assert!(!t.force_radiance_synthetic_duo);
     }
 
     #[test]
@@ -293,6 +301,17 @@ mod tests {
         let t = DebugToggles::from_env_vars(&vars);
         assert!(t.force_radiance_synthetic_body);
         assert!(!DebugToggles::from_env_vars(&[]).force_radiance_synthetic_body);
+    }
+
+    #[test]
+    fn radiance_synthetic_duo_flag_parses_by_presence() {
+        let vars = vec![(
+            "WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_DUO".to_string(),
+            String::new(),
+        )];
+        let t = DebugToggles::from_env_vars(&vars);
+        assert!(t.force_radiance_synthetic_duo);
+        assert!(!DebugToggles::from_env_vars(&[]).force_radiance_synthetic_duo);
     }
 
     #[test]

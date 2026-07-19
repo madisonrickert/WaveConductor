@@ -4,17 +4,19 @@
 // Reads + writes Particles in a storage buffer at @group(0) @binding(1).
 // Reads the silhouette edge list (CPU-extracted where the smoothed person
 // mask crosses 0.5) at @group(0) @binding(2). The edge buffer is allocated at
-// full MAX_EDGE_POINTS capacity and only the first edge_count entries are
-// live, so `% edge_count` indexing never leaves the allocation.
+// full MAX_EDGE_POINTS capacity; the CPU packs per-slot (start, count) ranges
+// so indexing `start + hash % count` never leaves a slot's live prefix.
 //
 // Life cycle: a particle is DEAD when age >= lifespan (a zeroed buffer is all
 // dead). Each frame a dead particle rolls a hash against emission_prob; on a
-// win it respawns at a hashed edge point, offset along the outward normal,
-// with initial velocity = normal * (spawn_speed + burst_speed). Alive
-// particles advance under buoyancy + limb impulses + drag, then are advected
-// along a divergence-free curl-noise flow. There is no OOB teleport — a
-// particle that drifts off-screen simply dies at end of life and respawns on
-// the silhouette.
+// win it picks a BODY SLOT from the fade-weighted emission CDF (slot_cdf), a
+// hashed edge point inside that slot's edge range, and respawns there offset
+// along the outward normal. A second roll against ejecta_prob decides whether
+// this spawn is a fast "shooting" streak (onset-driven, high normal velocity,
+// short life) or an ordinary flame particle. Alive particles advance under
+// tongue-modulated buoyancy + limb impulses + drag, then are advected along a
+// divergence-free curl-noise flow. There is no OOB teleport — a particle that
+// drifts off-screen simply dies at end of life and respawns on a silhouette.
 //
 // CPU parity: RadianceSimParamsGpu / RadianceParticle / RadianceImpulse in
 // crates/wc-sketches/src/radiance/compute/sim_params.rs mirror these structs
@@ -28,7 +30,9 @@ struct Particle {
     age: f32,
     lifespan: f32,
     seed: f32,
-    _pad: f32,
+    // Body slot index (0..4) stored as f32; the render shader rounds it back
+    // to index the per-slot color array.
+    slot: f32,
 };
 
 // Plan B contract shape: mask-UV position (0..1, y down) + outward unit
@@ -68,6 +72,16 @@ struct SimParams {
     uv_to_world: vec2<f32>,
     impulse_count: u32,
     frame: u32,
+    // Per-slot edge ranges + fade-weighted emission CDF (multi-body spawn
+    // apportioning; see the CPU baker).
+    slot_start: vec4<u32>,
+    slot_count: vec4<u32>,
+    slot_cdf: vec4<f32>,
+    // Onset-driven shooting-spark layer + flame-tongue buoyancy noise.
+    ejecta_prob: f32,
+    ejecta_speed: f32,
+    tongue_amp: f32,
+    tongue_freq: f32,
     impulses: array<Impulse, MAX_IMPULSES>,
 };
 
@@ -79,6 +93,9 @@ struct SimParams {
 // velocity, per second. 6.0 means a particle sitting on a limb reaches ~the
 // limb's velocity within a couple of frames without hard-snapping to it.
 const IMPULSE_COUPLING: f32 = 6.0;
+// Ejecta lifespan multiplier: shooting sparks die young, so the streaks stay
+// crisp instead of loitering as slow embers far from the body.
+const EJECTA_LIFE_MUL: f32 = 0.3;
 
 // PCG-style integer hash (Jarzynski & Olano) — cheap, well-distributed.
 fn pcg(v: u32) -> u32 {
@@ -158,6 +175,18 @@ fn mask_dir_to_world(dir: vec2<f32>) -> vec2<f32> {
     return d / len;
 }
 
+// Pick the spawn slot from the fade-weighted emission CDF: the first entry
+// the roll falls under. Returns 4 (invalid) when every weight is zero, which
+// the caller treats as "no live body — stay dead".
+fn pick_slot(r: f32) -> u32 {
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        if (r < params.slot_cdf[i]) {
+            return i;
+        }
+    }
+    return 4u;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = id.x;
@@ -174,24 +203,40 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         // Salt the roll with the CPU frame counter so a losing particle
         // re-rolls fresh every frame (emission_prob is already rate*dt baked).
-        // params.frame is incremented once per bake, so it never aliases the
-        // way the old u32(time * 60.0) did when time was pinned or two bakes
-        // shared a 1/60 s bucket.
         let frame = params.frame;
         if (rand01(hash2(idx, frame)) >= params.emission_prob) {
             return;
         }
-        let e = edges[hash2(idx * 2654435769u, frame) % params.edge_count];
+        // Fade-weighted slot pick: the shared budget is apportioned across
+        // the live bodies (density stays constant as dancers come and go).
+        let slot = pick_slot(rand01(hash2(idx ^ 0x9e3779b9u, frame)));
+        if (slot >= 4u || params.slot_count[slot] == 0u) {
+            return;
+        }
+        let e_idx = params.slot_start[slot]
+            + (hash2(idx * 2654435769u, frame) % params.slot_count[slot]);
+        let e = edges[min(e_idx, params.edge_count - 1u)];
         let n = mask_dir_to_world(e.normal);
-        p.position = mask_uv_to_world(e.pos) + n * params.spawn_offset;
-        p.velocity = n * (params.spawn_speed + params.burst_speed);
-        p.age = 0.0;
-        p.lifespan = mix(
+        var life = mix(
             params.lifespan_min,
             params.lifespan_max,
             rand01(hash2(idx, frame ^ 2654435769u)),
         );
+        // Ejecta roll: on onsets a fraction of spawns become shooting sparks
+        // — fast along the normal, short-lived, streaked by the velocity-
+        // stretch in render.wgsl.
+        var speed = params.spawn_speed + params.burst_speed;
+        if (rand01(hash2(idx ^ 0x51ed270bu, frame)) < params.ejecta_prob) {
+            speed = params.ejecta_speed
+                * (0.7 + 0.6 * rand01(hash2(idx, frame ^ 0x51ed270bu)));
+            life = life * EJECTA_LIFE_MUL;
+        }
+        p.position = mask_uv_to_world(e.pos) + n * params.spawn_offset;
+        p.velocity = n * speed;
+        p.age = 0.0;
+        p.lifespan = life;
         p.seed = rand01(hash2(idx, 2246822519u));
+        p.slot = f32(slot);
         particles[idx] = p;
         return;
     }
@@ -199,8 +244,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // --- Alive: forces -> drag -> integrate -> curl advection ----------
     p.age = p.age + params.dt;
 
-    // Buoyancy: constant upward acceleration (world +Y is up).
-    var accel = vec2<f32>(0.0, params.buoyancy);
+    // Buoyancy: upward acceleration modulated by two incommensurate sines
+    // along world x (plus a weak y term) — locally stronger columns of lift
+    // form the licking tongues of a flame instead of a uniform rising sheet.
+    // The sines each span ±1, so the sum spans ±1 after the 0.5 weights and
+    // the multiplier stays positive for tongue_amp <= 1.
+    let tongue = 1.0 + params.tongue_amp
+        * (0.5 * sin(p.position.x * params.tongue_freq + params.time * 1.7)
+            + 0.5 * sin(p.position.x * params.tongue_freq * 2.33
+                - params.time * 1.1
+                + p.position.y * params.tongue_freq * 0.5));
+    var accel = vec2<f32>(0.0, params.buoyancy * tongue);
 
     // Limb impulses: locally-weighted coupling toward each limb's velocity,
     // fading to zero by the slot radius — a fast limb sheds a burst.

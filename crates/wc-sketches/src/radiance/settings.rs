@@ -104,7 +104,7 @@ pub struct RadianceSettings {
     /// Curl-noise flow advection speed in world px/s (scaled by the highs
     /// drive). The primary "how alive is the aura" knob.
     #[setting(
-        default = 90.0_f32,
+        default = 40.0_f32,
         min = 0.0_f32,
         max = 400.0_f32,
         step = 5.0_f32,
@@ -118,7 +118,7 @@ pub struct RadianceSettings {
     /// Constant upward acceleration in world px/s² — the flame-like rise
     /// (pulsed by the bass drive).
     #[setting(
-        default = 60.0_f32,
+        default = 135.0_f32,
         min = 0.0_f32,
         max = 300.0_f32,
         step = 5.0_f32,
@@ -142,6 +142,67 @@ pub struct RadianceSettings {
     )]
     #[serde(default = "default_curl_octaves")]
     pub curl_octaves: u32,
+
+    /// Flame-tongue strength: how strongly buoyancy varies with noise along
+    /// the silhouette so the aura rises in licking tongues instead of a
+    /// uniform sheet. 0 = uniform buoyancy (the old look).
+    #[setting(
+        default = 0.65_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Flame tongues",
+        section = "Simulation",
+        category = User
+    )]
+    #[serde(default = "default_tongue_strength")]
+    pub tongue_strength: f32,
+
+    /// Ejecta amount: the fraction of spawns that become fast "shooting"
+    /// particles on audio onsets (bright streaks fired along the silhouette
+    /// normal). 0 disables the shooting-spark layer.
+    #[setting(
+        default = 0.6_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Beat ejecta",
+        section = "Simulation",
+        category = User
+    )]
+    #[serde(default = "default_ejecta_amount")]
+    pub ejecta_amount: f32,
+
+    /// Per-body hue spread, in fractions of a full hue turn per slot: each
+    /// tracked dancer's color identity is the palette hue rotated by
+    /// `slot × spread`, so multiple dancers read as distinct-but-harmonious
+    /// (0.13 ≈ 47° apart). 0 = every body shares the palette hue.
+    #[setting(
+        default = 0.13_f32,
+        min = 0.0_f32,
+        max = 0.35_f32,
+        step = 0.01_f32,
+        label = "Body hue spread",
+        section = "Look",
+        category = User
+    )]
+    #[serde(default = "default_hue_spread")]
+    pub hue_spread: f32,
+
+    /// Sparkle-mote budget: the maximum simultaneous twinkling motes across
+    /// all tracked bodies (the shader's fixed capacity is 12; see
+    /// `sparkle::MAX_SPARKLES`).
+    #[setting(
+        default = 10_u32,
+        min = 2_u32,
+        max = 12_u32,
+        step = 1_u32,
+        label = "Sparkle motes",
+        section = "Look",
+        category = User
+    )]
+    #[serde(default = "default_sparkle_count")]
+    pub sparkle_count: u32,
 
     /// Aura gradient palette.
     #[setting(
@@ -241,7 +302,7 @@ pub struct RadianceSettings {
     /// accelerates the phase on top of this base rate (see
     /// `bake_radiance_sim`); 0 pins the palette's original hues.
     #[setting(
-        default = 0.03_f32,
+        default = 0.02_f32,
         min = 0.0_f32,
         max = 0.2_f32,
         step = 0.005_f32,
@@ -456,13 +517,25 @@ fn default_emission_rate() -> f32 {
     0.5
 }
 fn default_flow_strength() -> f32 {
-    90.0
+    40.0
 }
 fn default_buoyancy() -> f32 {
-    60.0
+    135.0
 }
 fn default_curl_octaves() -> u32 {
     3
+}
+fn default_tongue_strength() -> f32 {
+    0.65
+}
+fn default_ejecta_amount() -> f32 {
+    0.6
+}
+fn default_hue_spread() -> f32 {
+    0.13
+}
+fn default_sparkle_count() -> u32 {
+    10
 }
 fn default_palette() -> RadiancePalette {
     RadiancePalette::Prism
@@ -489,7 +562,7 @@ fn default_sparkle_intensity() -> f32 {
     1.0
 }
 fn default_hue_cycle_speed() -> f32 {
-    0.03
+    0.02
 }
 fn default_audio_input_device() -> String {
     String::new()
@@ -549,7 +622,7 @@ mod tests {
             "sibling default"
         );
         assert!(
-            (parsed.flow_strength - 90.0).abs() < 1e-6,
+            (parsed.flow_strength - 40.0).abs() < 1e-6,
             "sibling default"
         );
         assert_eq!(parsed.palette, RadiancePalette::Prism, "sibling default");
@@ -568,6 +641,10 @@ mod tests {
         assert!((d.flow_strength - default_flow_strength()).abs() < f32::EPSILON);
         assert!((d.buoyancy - default_buoyancy()).abs() < f32::EPSILON);
         assert_eq!(d.curl_octaves, default_curl_octaves());
+        assert!((d.tongue_strength - default_tongue_strength()).abs() < f32::EPSILON);
+        assert!((d.ejecta_amount - default_ejecta_amount()).abs() < f32::EPSILON);
+        assert!((d.hue_spread - default_hue_spread()).abs() < f32::EPSILON);
+        assert_eq!(d.sparkle_count, default_sparkle_count());
         assert_eq!(d.palette, default_palette());
         assert!((d.silhouette_fill - default_silhouette_fill()).abs() < f32::EPSILON);
         assert!((d.rim_glow - default_rim_glow()).abs() < f32::EPSILON);

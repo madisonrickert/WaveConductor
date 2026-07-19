@@ -284,6 +284,9 @@ fn toggles_json(toggles: Option<&DebugToggles>) -> String {
     if t.force_radiance_synthetic_body {
         parts.push("\"force_radiance_synthetic_body\":true".to_string());
     }
+    if t.force_radiance_synthetic_duo {
+        parts.push("\"force_radiance_synthetic_duo\":true".to_string());
+    }
     format!("{{{}}}", parts.join(","))
 }
 
@@ -397,6 +400,7 @@ mod tests {
             force_flame_warp: false,
             force_flame_camera_pose: true,
             force_radiance_synthetic_body: true,
+            force_radiance_synthetic_duo: false,
         };
         let json = run_json_string(&config, Some(&toggles));
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");

@@ -38,6 +38,46 @@ pub fn synthetic_body_forced(toggles: Option<Res<'_, wc_core::debug::DebugToggle
     toggles.is_some_and(|t| t.force_radiance_synthetic_body)
 }
 
+/// Build a fully-visible synthetic `TrackedBody` from a phantom pose: the
+/// seven impulse landmarks with finite-difference velocities against
+/// `pose_prev` (one 60 Hz step earlier).
+#[cfg(debug_assertions)]
+fn synthetic_tracked_body(
+    pose: &crate::radiance::synthetic::PhantomPose,
+    pose_prev: &crate::radiance::synthetic::PhantomPose,
+    slot: usize,
+    fade: f32,
+    timestamp: std::time::Duration,
+) -> wc_core::input::body::TrackedBody {
+    use crate::radiance::synthetic::dancer_landmark_uv;
+
+    let uv_now = dancer_landmark_uv(pose);
+    let uv_prev = dancer_landmark_uv(pose_prev);
+    let h = 1.0 / 60.0;
+    let mut landmarks = [BodyLandmark::default(); BODY_LANDMARK_COUNT];
+    let mut velocities = [Vec3::ZERO; BODY_LANDMARK_COUNT];
+    for (i, &lm_index) in IMPULSE_LANDMARKS.iter().enumerate() {
+        landmarks[lm_index] = BodyLandmark {
+            pos: Vec3::new(uv_now[i].x, uv_now[i].y, 0.0),
+            visibility: 1.0,
+        };
+        let v = (uv_now[i] - uv_prev[i]) / h;
+        velocities[lm_index] = Vec3::new(v.x, v.y, 0.0);
+    }
+    wc_core::input::body::TrackedBody {
+        slot,
+        present: true,
+        fade,
+        confidence: 1.0,
+        landmarks,
+        world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
+        velocities,
+        timestamp,
+        crop_fraction: 1.0,
+        size: 0.25,
+    }
+}
+
 /// `Update` (debug builds, `sketch_active(Radiance)` + the toggle, ordered
 /// before the live baker): drive the deterministic dancer. Writes the mask +
 /// edge list every frame (fixed-dt capture wants per-frame freshness, and
@@ -45,7 +85,16 @@ pub fn synthetic_body_forced(toggles: Option<Res<'_, wc_core::debug::DebugToggle
 /// impulse landmarks with finite-difference velocities, and overwrites
 /// `AudioAnalysis` with the synthetic beat (running in `Update` after Plan
 /// A's `PreUpdate` publisher means this write wins for the baker).
+///
+/// Under `WC_DEBUG_FORCE_RADIANCE_SYNTHETIC_DUO` a second dancer (slot 1,
+/// offset pose/phase) enters at `synthetic::DUO_ENTRY_T` with a ramped
+/// fade, exercising the multi-body identity + ignite paths deterministically.
 #[cfg(debug_assertions)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system — the duo toggle adds the DebugToggles read to the \
+              existing surface-driver parameters"
+)]
 pub fn drive_synthetic_body(
     time: Res<'_, Time>,
     mask: Option<Res<'_, MaskTexture>>,
@@ -53,58 +102,64 @@ pub fn drive_synthetic_body(
     edges: Option<ResMut<'_, SilhouetteEdges>>,
     body: Option<ResMut<'_, BodyTrackingState>>,
     audio: Option<ResMut<'_, wc_core::audio::input::AudioAnalysis>>,
+    toggles: Option<Res<'_, wc_core::debug::DebugToggles>>,
     mut commands: Commands<'_, '_>,
 ) {
     use crate::radiance::synthetic::{
-        dancer_landmark_uv, dancing_pose, extract_edges, rasterize_mask, synthetic_audio,
+        dancing_pose, duo_partner_fade, duo_partner_pose, duo_primary_pose, extract_edges_slots,
+        rasterize_mask_slots, synthetic_audio, DUO_ENTRY_T,
     };
 
     let t = time.elapsed_secs();
-    let pose = dancing_pose(t);
+    let duo = toggles.is_some_and(|tg| tg.force_radiance_synthetic_duo);
+    let step = 1.0 / 60.0;
+    let pose0 = if duo {
+        duo_primary_pose(t)
+    } else {
+        dancing_pose(t)
+    };
+    let pose0_prev = if duo {
+        duo_primary_pose(t - step)
+    } else {
+        dancing_pose(t - step)
+    };
+    // The duo partner exists (mask + body) only after its timed entry; its
+    // synthetic fade then ramps like the real tracker's attack envelope.
+    let partner = (duo && t >= DUO_ENTRY_T).then(|| duo_partner_pose(t));
+    let partner_fade = duo_partner_fade(t);
 
-    // Mask + edges through the same shared surfaces the real tracker uses.
-    // The synthetic dancer is a single body in slot 0 (channel R of the RGBA
-    // mask; slot 0 owns the whole edge list).
+    // Mask + edges through the same shared surfaces the real tracker uses:
+    // slot 0 = channel R, slot 1 = channel G, slot-ordered edge list.
     if let (Some(mask), Some(mut edges)) = (mask, edges) {
         if let Some(mut image) = images.get_mut(&mask.0) {
             if let Some(data) = image.data.as_mut() {
-                rasterize_mask(&pose, data);
-                extract_edges(data, &mut edges.points);
-                edges.slot_counts = [0; wc_core::input::body::MAX_TRACKED_BODIES];
-                edges.slot_counts[0] = edges.points.len();
+                rasterize_mask_slots([Some(&pose0), partner.as_ref(), None, None], data);
+                let mut slot_counts = [0_usize; wc_core::input::body::MAX_TRACKED_BODIES];
+                let edges = &mut *edges;
+                extract_edges_slots(data, &mut edges.points, &mut slot_counts);
+                edges.slot_counts = slot_counts;
                 edges.generation = edges.generation.wrapping_add(1);
             }
         }
     }
 
-    // Landmarks + finite-difference velocities for the impulse slots.
-    let uv_now = dancer_landmark_uv(&pose);
-    let h = 1.0 / 60.0;
-    let uv_prev = dancer_landmark_uv(&dancing_pose(t - h));
-    let mut landmarks = [BodyLandmark::default(); BODY_LANDMARK_COUNT];
-    let mut velocities = [Vec3::ZERO; BODY_LANDMARK_COUNT];
-    for (slot, &lm_index) in IMPULSE_LANDMARKS.iter().enumerate() {
-        landmarks[lm_index] = BodyLandmark {
-            pos: Vec3::new(uv_now[slot].x, uv_now[slot].y, 0.0),
-            visibility: 1.0,
-        };
-        let v = (uv_now[slot] - uv_prev[slot]) / h;
-        velocities[lm_index] = Vec3::new(v.x, v.y, 0.0);
-    }
-    // One fully-faded-in synthetic body in slot 0, marked primary.
     let mut state = BodyTrackingState::default();
-    state.bodies[0] = Some(wc_core::input::body::TrackedBody {
-        slot: 0,
-        present: true,
-        fade: 1.0,
-        confidence: 1.0,
-        landmarks,
-        world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
-        velocities,
-        timestamp: time.elapsed(),
-        crop_fraction: 1.0,
-        size: 0.25,
-    });
+    state.bodies[0] = Some(synthetic_tracked_body(
+        &pose0,
+        &pose0_prev,
+        0,
+        1.0,
+        time.elapsed(),
+    ));
+    if partner.is_some() {
+        state.bodies[1] = Some(synthetic_tracked_body(
+            &duo_partner_pose(t),
+            &duo_partner_pose(t - step),
+            1,
+            partner_fade,
+            time.elapsed(),
+        ));
+    }
     state.primary = Some(0);
     match body {
         Some(mut existing) => *existing = state,
@@ -309,6 +364,7 @@ mod tests {
             force_flame_warp: false,
             force_flame_camera_pose: false,
             force_radiance_synthetic_body: true,
+            force_radiance_synthetic_duo: false,
         });
         let on = world
             .run_system_once(synthetic_body_forced)

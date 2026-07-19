@@ -1,33 +1,39 @@
-//! Extremity sparkles: two mirrored star-glints that ride the dancer's
-//! fastest-oscillating limb, twinkling through the rainbow.
+//! Extremity sparkles: a constellation of small twinkling motes riding every
+//! tracked dancer's high-motion extremities, tinted per body.
 //!
 //! ## What it does
 //!
-//! Every frame the tracker scores the four extremity landmarks (wrists +
-//! ankles — the appendages farthest from the centre of mass) by how *fast
-//! they oscillate*, not how fast they move: a per-axis Schmitt trigger on the
-//! One-Euro-smoothed landmark velocity counts direction flips into an
-//! exponentially-decaying flips-per-second score, so a hand waving at 3 Hz
-//! outranks a whole body drifting across frame. The winning limb gets the
-//! primary sparkle; its *contralateral partner* (left wrist ↔ right wrist,
-//! left ankle ↔ right ankle) gets the mirror sparkle — the "reflection
-//! across the Y-axis" is anchored to the real opposite limb's tracked
-//! position, never a geometric mirror point, so a sparkle can never float in
-//! empty air. If the partner is occluded the mirror fades out instead.
+//! Every frame, a per-body tracker scores the four extremity landmarks
+//! (wrists + ankles) by how *fast they oscillate*, not how fast they move: a
+//! per-axis Schmitt trigger on the One-Euro-smoothed landmark velocity counts
+//! direction flips into an exponentially-decaying flips-per-second score, so
+//! a hand waving at 3 Hz outranks a whole body drifting across frame. Each
+//! body's winning limb and its *contralateral partner* (left wrist ↔ right
+//! wrist, left ankle ↔ right ankle) anchor a handful of motes — small soft
+//! gaussian points that orbit the limb on slow per-mote drift paths, twinkle
+//! on staggered phases, and flash a gentle four-point glint only at the crest
+//! of their twinkle. Mote color is the body's identity color (the same
+//! per-slot derivation the flame and rims use), so each dancer's sparkles
+//! match their flame.
 //!
-//! The two glints twinkle on the same waveform with the mirror offset by
-//! [`MIRROR_OFFSET_S`] (0.5 s), and both colors sweep the full rainbow every
-//! [`RAINBOW_PERIOD_S`] (7 s) — the mirror sampling the wheel 0.5 s behind,
-//! so the pair always shows two neighbouring rainbow hues.
+//! The mote **budget is shared** across bodies ([`MAX_SPARKLES`] = 12 slots,
+//! capped by the `sparkle_count` setting): a solo dancer gets a fuller
+//! constellation (6 motes), a crowded floor spreads fewer per person (see
+//! [`per_body_quota`]). Every strength change rides an eased attack/release
+//! envelope ([`step_env`]) *and* the body's tracking fade, so motes bloom in
+//! and dissolve out — never binary. Highs-band audio shortens the twinkle
+//! period and lifts the master brightness (the mid/high lane per the spec;
+//! bass never drives the sparkles).
 //!
 //! ## Latency + hot-path posture
 //!
 //! Zero added pipeline latency: the system reads the same-frame
-//! primary `TrackedBody` the sim baker reads and packs one small uniform (the
+//! `BodyTrackingState` the sim baker reads and packs one small uniform (the
 //! `drive_radiance_materials` cost class). All state is fixed-size arrays on
 //! a `Copy` resource; nothing allocates after spawn. Priority switches are
-//! hysteretic ([`SWITCH_RATIO`]/[`SWITCH_FLOOR`]) so the sparkle does not
-//! flicker between two similarly-active limbs.
+//! hysteretic ([`SWITCH_RATIO`]/[`SWITCH_FLOOR`]) so a body's motes do not
+//! flicker between two similarly-active limbs, and a mote whose assignment
+//! changes fades out at its held position before re-igniting at the new one.
 
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::prelude::*;
@@ -40,10 +46,10 @@ use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
 use wc_core::input::body::landmark_index::{
     LEFT_ANKLE, LEFT_HIP, LEFT_WRIST, RIGHT_ANKLE, RIGHT_HIP, RIGHT_WRIST,
 };
-use wc_core::input::body::{BodyTrackingState, TrackedBody};
+use wc_core::input::body::{BodyTrackingState, TrackedBody, MAX_TRACKED_BODIES};
 use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
-use super::render::rotate_hue;
+use super::render::slot_identity_colors;
 use super::settings::RadianceSettings;
 use super::systems::sim_params::mask_uv_to_world;
 use super::systems::spawn::RadianceRoot;
@@ -51,22 +57,24 @@ use super::systems::spawn::RadianceRoot;
 /// The extremity candidates, ordered so [`PARTNER`] is a same-array index
 /// map: the appendages farthest from the centre of mass, each with a
 /// contralateral partner (which is why the nose is excluded — it has no
-/// mirror limb to anchor the reflected sparkle to).
+/// mirror limb to anchor the reflected motes to).
 pub const CANDIDATE_LANDMARKS: [usize; 4] = [LEFT_WRIST, RIGHT_WRIST, LEFT_ANKLE, RIGHT_ANKLE];
 /// Contralateral partner of each entry in [`CANDIDATE_LANDMARKS`]
 /// (candidate-index → candidate-index).
 pub const PARTNER: [usize; 4] = [1, 0, 3, 2];
 
-/// Twinkle waveform period, seconds.
+/// Fixed mote capacity (uniform array size; WGSL mirrors it). The
+/// `sparkle_count` setting caps how many of these slots are ever assigned —
+/// this constant is the hard budget across ALL bodies, documented per the
+/// shared-budget rule.
+pub const MAX_SPARKLES: usize = 12;
+/// Most motes any single body may carry (a solo dancer's constellation).
+pub const MAX_MOTES_PER_BODY: usize = 6;
+/// Base twinkle waveform period, seconds (the highs drive shortens it).
 pub const TWINKLE_PERIOD_S: f32 = 1.4;
-/// The mirror sparkle's animation clock lags the primary by this much
-/// (pinned by the feature spec: ~0.5 s offset twinkle).
-pub const MIRROR_OFFSET_S: f32 = 0.5;
-/// One full rainbow sweep, seconds (pinned by the feature spec: 7 s).
-pub const RAINBOW_PERIOD_S: f32 = 7.0;
-/// HDR red the rainbow wheel rotates from (fully saturated; clears the
-/// tonemapper knee so the glint blooms).
-pub const SPARKLE_HDR: f32 = 2.2;
+/// HDR gain on the body identity color for mote tint (clears the tonemapper
+/// knee so motes bloom).
+pub const SPARKLE_HDR_GAIN: f32 = 2.0;
 
 /// Schmitt-trigger hysteresis on landmark velocity, mask-UV/s: a direction
 /// flip only counts when the velocity actually crosses ±this, so One-Euro
@@ -77,7 +85,7 @@ pub const FLIP_HYSTERESIS_UV_S: f32 = 0.25;
 /// to hold priority through a beat, short enough to hand off within ~a bar.
 pub const SCORE_TAU_S: f32 = 1.2;
 /// A challenger must beat the incumbent by this ratio (plus the floor) to
-/// steal the sparkle — priority-switch hysteresis.
+/// steal the motes — priority-switch hysteresis.
 pub const SWITCH_RATIO: f32 = 1.3;
 /// Absolute score floor a challenger must clear (flips/s) so a still body
 /// never hands priority to noise.
@@ -88,17 +96,26 @@ pub const MIN_COM_DIST_UV: f32 = 0.12;
 /// Landmark visibility gate (matches the limb-impulse gate).
 pub const VISIBILITY_GATE: f32 = 0.5;
 
-/// Strength-envelope attack rate, 1/s (fade-in on acquiring a limb).
-const ENV_ATTACK_RATE: f32 = 8.0;
-/// Strength-envelope release rate, 1/s (fade-out on losing it).
-const ENV_RELEASE_RATE: f32 = 3.5;
+/// Strength-envelope attack rate, 1/s (bloom-in on acquiring a limb).
+const ENV_ATTACK_RATE: f32 = 6.0;
+/// Strength-envelope release rate, 1/s (dissolve on losing it).
+const ENV_RELEASE_RATE: f32 = 3.0;
+/// Envelope level below which a mote may adopt a new assignment (it faded
+/// out far enough that the position jump is invisible).
+const REASSIGN_ENV: f32 = 0.12;
+/// Mote orbit radius range, world px (per-mote constant within it).
+const DRIFT_RADIUS_MIN_PX: f32 = 9.0;
+/// See [`DRIFT_RADIUS_MIN_PX`].
+const DRIFT_RADIUS_SPAN_PX: f32 = 14.0;
 /// Frame-delta cap, matching the sim baker's hitch guard.
 const SPARKLE_DT_CAP: f32 = 0.05;
 
-/// Per-frame tracker + envelope state for the sparkle pair. Inserted on
-/// Radiance entry, removed on exit.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct RadianceSparkles {
+// ── Per-body oscillation tracker ────────────────────────────────────────────
+
+/// Per-body Schmitt oscillation scorer + hysteretic winner selection (one per
+/// tracked slot).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LimbOscillator {
     /// Schmitt sign state per candidate, x axis (`-1`, `0` = unarmed, `1`).
     sign_x: [i8; 4],
     /// Schmitt sign state per candidate, y axis.
@@ -107,32 +124,9 @@ pub struct RadianceSparkles {
     score: [f32; 4],
     /// Currently prioritized candidate index (into [`CANDIDATE_LANDMARKS`]).
     current: Option<usize>,
-    /// Primary sparkle strength envelope, `0..1`.
-    primary_env: f32,
-    /// Mirror sparkle strength envelope, `0..1`.
-    mirror_env: f32,
-    /// Last valid primary anchor, world px (held while fading out).
-    last_primary_world: Vec2,
-    /// Last valid mirror anchor, world px (held while fading out).
-    last_mirror_world: Vec2,
 }
 
-impl Default for RadianceSparkles {
-    fn default() -> Self {
-        Self {
-            sign_x: [0; 4],
-            sign_y: [0; 4],
-            score: [0.0; 4],
-            current: None,
-            primary_env: 0.0,
-            mirror_env: 0.0,
-            last_primary_world: Vec2::ZERO,
-            last_mirror_world: Vec2::ZERO,
-        }
-    }
-}
-
-impl RadianceSparkles {
+impl LimbOscillator {
     /// The current flips-per-second score of a candidate (test/diagnostic).
     #[must_use]
     pub fn score(&self, candidate: usize) -> f32 {
@@ -144,37 +138,190 @@ impl RadianceSparkles {
     pub fn current(&self) -> Option<usize> {
         self.current
     }
+
+    /// Advance the oscillation scores by one frame: decay every score toward
+    /// zero, then count hysteretic velocity-direction flips on both axes
+    /// into the flipping candidate's score. A limb oscillating at `f` Hz on
+    /// one axis converges to a score of `2f` (two flips per cycle); the
+    /// ranking only needs relative order.
+    pub fn step_scores(&mut self, body: &TrackedBody, dt: f32) {
+        let decay = (-dt / SCORE_TAU_S).exp();
+        for (i, &landmark) in CANDIDATE_LANDMARKS.iter().enumerate() {
+            self.score[i] *= decay;
+            let v = body.velocities[landmark];
+            let nx = schmitt_step(self.sign_x[i], v.x);
+            let ny = schmitt_step(self.sign_y[i], v.y);
+            let mut flips = 0.0_f32;
+            if self.sign_x[i] != 0 && nx != self.sign_x[i] {
+                flips += 1.0;
+            }
+            if self.sign_y[i] != 0 && ny != self.sign_y[i] {
+                flips += 1.0;
+            }
+            self.sign_x[i] = nx;
+            self.sign_y[i] = ny;
+            // Impulse-train EMA: converges to the flip rate in flips/s.
+            self.score[i] += flips / SCORE_TAU_S;
+        }
+    }
+
+    /// Re-select the prioritized candidate with switch hysteresis: the
+    /// incumbent keeps the motes unless it becomes ineligible or a
+    /// challenger beats it by [`SWITCH_RATIO`] (plus [`SWITCH_FLOOR`]).
+    pub fn select(&mut self, body: &TrackedBody) {
+        let com = body_com_uv(body);
+        let incumbent = self.current.filter(|&c| candidate_eligible(body, c, com));
+        let mut best: Option<usize> = None;
+        for i in 0..CANDIDATE_LANDMARKS.len() {
+            if !candidate_eligible(body, i, com) {
+                continue;
+            }
+            if best.is_none_or(|b| self.score[i] > self.score[b]) {
+                best = Some(i);
+            }
+        }
+        self.current = match (incumbent, best) {
+            (None, b) => b.filter(|&b| self.score[b] > SWITCH_FLOOR),
+            (Some(inc), Some(b)) if b != inc => {
+                if self.score[b] > self.score[inc] * SWITCH_RATIO + SWITCH_FLOOR {
+                    Some(b)
+                } else {
+                    Some(inc)
+                }
+            }
+            (Some(inc), _) => Some(inc),
+        };
+    }
+
+    /// Reset to unarmed (called when the body's slot empties so a returning
+    /// dancer starts from a clean tracker).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
-/// The uniform block the star-glint shader consumes.
+// ── Mote state + assignment ─────────────────────────────────────────────────
+
+/// A mote's assignment: `(body slot, candidate index)`.
+pub type MoteTarget = Option<(usize, usize)>;
+
+/// One mote's continuous state.
+#[derive(Clone, Copy, Debug, Default)]
+struct MoteState {
+    /// Strength envelope `0..1` (eased attack/release).
+    env: f32,
+    /// Last anchored world position (held while fading out).
+    pos: Vec2,
+    /// Current owner; a mote only re-anchors once its envelope has released
+    /// below [`REASSIGN_ENV`], so assignment churn reads as a cross-fade.
+    owner: MoteTarget,
+}
+
+/// Tracker + mote state for the whole constellation. Inserted on Radiance
+/// entry, removed on exit.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct RadianceSparkles {
+    /// Per-body-slot oscillation trackers.
+    trackers: [LimbOscillator; MAX_TRACKED_BODIES],
+    /// The mote pool (shared budget across all bodies).
+    motes: [MoteState; MAX_SPARKLES],
+}
+
+impl RadianceSparkles {
+    /// A slot's tracker (test/diagnostic).
+    #[must_use]
+    pub fn tracker(&self, slot: usize) -> &LimbOscillator {
+        &self.trackers[slot]
+    }
+}
+
+/// Motes each present body receives: an even split of the budget, capped at
+/// [`MAX_MOTES_PER_BODY`] so a solo dancer gets a rich-but-not-blinding
+/// constellation. `budget` is the `sparkle_count` setting clamped to
+/// [`MAX_SPARKLES`].
+#[must_use]
+pub fn per_body_quota(present_bodies: usize, budget: usize) -> usize {
+    if present_bodies == 0 {
+        return 0;
+    }
+    (budget.min(MAX_SPARKLES) / present_bodies).min(MAX_MOTES_PER_BODY)
+}
+
+/// Build the desired mote → (slot, candidate) assignment for this frame.
+/// Deterministic and stable: bodies fill the pool in slot order, each body's
+/// winner extremity takes the larger half of its quota, the partner the
+/// rest (or the winner takes all when the partner is ineligible). Stability
+/// plus the winner-selection hysteresis means the assignment only shifts
+/// when bodies actually come/go or hand off priority — and the per-mote
+/// envelope cross-fades even those shifts.
+#[must_use]
+pub fn assign_motes(
+    winners: [Option<usize>; MAX_TRACKED_BODIES],
+    partner_eligible: [bool; MAX_TRACKED_BODIES],
+    budget: usize,
+) -> [MoteTarget; MAX_SPARKLES] {
+    let mut out = [None; MAX_SPARKLES];
+    let present = winners.iter().filter(|w| w.is_some()).count();
+    let quota = per_body_quota(present, budget);
+    if quota == 0 {
+        return out;
+    }
+    let mut next = 0usize;
+    for (slot, winner) in winners.iter().enumerate() {
+        let Some(winner) = *winner else {
+            continue;
+        };
+        let winner_share = if partner_eligible[slot] {
+            quota.div_ceil(2)
+        } else {
+            quota
+        };
+        for i in 0..quota {
+            if next >= MAX_SPARKLES {
+                return out;
+            }
+            let candidate = if i < winner_share {
+                winner
+            } else {
+                PARTNER[winner]
+            };
+            out[next] = Some((slot, candidate));
+            next += 1;
+        }
+    }
+    out
+}
+
+/// The uniform block the mote shader consumes.
 #[derive(ShaderType, Clone, Copy, Debug)]
 pub struct RadianceSparkleUniform {
-    /// Per sparkle: xy = anchor world px, z = animation clock offset s
-    /// (0 primary, [`MIRROR_OFFSET_S`] mirror), w = strength (0 = off).
-    pub sparkles: [Vec4; 2],
-    /// Per sparkle: rgb = linear-HDR rainbow color, w unused.
-    pub colors: [Vec4; 2],
+    /// Per mote: xy = anchor world px, z = twinkle phase `0..1`,
+    /// w = strength (0 = off).
+    pub sparkles: [Vec4; MAX_SPARKLES],
+    /// Per mote: rgb = linear-HDR body tint, w = crest-glint gain.
+    pub colors: [Vec4; MAX_SPARKLES],
     /// x = master intensity, y = elapsed seconds, z = twinkle period s,
     /// w reserved.
     pub params: Vec4,
 }
 
 impl Default for RadianceSparkleUniform {
-    /// Both sparkles off, canonical period, master 0.
+    /// All motes off, canonical period, master 0.
     fn default() -> Self {
         Self {
-            sparkles: [Vec4::ZERO; 2],
-            colors: [Vec4::ZERO; 2],
+            sparkles: [Vec4::ZERO; MAX_SPARKLES],
+            colors: [Vec4::ZERO; MAX_SPARKLES],
             params: Vec4::new(0.0, 0.0, TWINKLE_PERIOD_S, 0.0),
         }
     }
 }
 
-/// Fullscreen additive material drawing the two star-glints (fragment-only;
-/// the default `Material2d` vertex shader supplies world position).
+/// Fullscreen additive material drawing the mote constellation
+/// (fragment-only; the default `Material2d` vertex shader supplies world
+/// position).
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone, Default)]
 pub struct RadianceSparkleMaterial {
-    /// The packed sparkle state for this frame.
+    /// The packed mote state for this frame.
     #[uniform(0)]
     pub sparkles: RadianceSparkleUniform,
 }
@@ -191,7 +338,7 @@ impl Material2d for RadianceSparkleMaterial {
     }
 
     /// Override the color-target blend to pure additive `(One, One)` so the
-    /// glints accumulate HDR light into bloom instead of alpha-occluding.
+    /// motes accumulate HDR light into bloom instead of alpha-occluding.
     fn specialize(
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
@@ -217,7 +364,7 @@ impl Material2d for RadianceSparkleMaterial {
     }
 }
 
-// ── Pure tracker steps ──────────────────────────────────────────────────────
+// ── Pure helpers ────────────────────────────────────────────────────────────
 
 /// One Schmitt-trigger step: the sign only changes when `v` crosses the
 /// hysteresis band, and `0` (unarmed, the initial state) arms without
@@ -250,8 +397,8 @@ pub fn body_com_uv(body: &TrackedBody) -> Option<Vec2> {
     }
 }
 
-/// Whether a candidate may carry a sparkle this frame: visible, and far
-/// enough from the centre of mass.
+/// Whether a candidate may carry motes this frame: visible, and far enough
+/// from the centre of mass.
 #[must_use]
 pub fn candidate_eligible(body: &TrackedBody, candidate: usize, com: Option<Vec2>) -> bool {
     let landmark = body.landmarks[CANDIDATE_LANDMARKS[candidate]];
@@ -259,62 +406,6 @@ pub fn candidate_eligible(body: &TrackedBody, candidate: usize, com: Option<Vec2
         return false;
     }
     com.is_none_or(|c| landmark.pos.truncate().distance(c) >= MIN_COM_DIST_UV)
-}
-
-impl RadianceSparkles {
-    /// Advance the oscillation scores by one frame: decay every score toward
-    /// zero, then count hysteretic velocity-direction flips on both axes
-    /// into the flipping candidate's score. A limb oscillating at `f` Hz on
-    /// one axis converges to a score of `2f` (two flips per cycle); the
-    /// ranking only needs relative order.
-    pub fn step_scores(&mut self, body: &TrackedBody, dt: f32) {
-        let decay = (-dt / SCORE_TAU_S).exp();
-        for (i, &landmark) in CANDIDATE_LANDMARKS.iter().enumerate() {
-            self.score[i] *= decay;
-            let v = body.velocities[landmark];
-            let nx = schmitt_step(self.sign_x[i], v.x);
-            let ny = schmitt_step(self.sign_y[i], v.y);
-            let mut flips = 0.0_f32;
-            if self.sign_x[i] != 0 && nx != self.sign_x[i] {
-                flips += 1.0;
-            }
-            if self.sign_y[i] != 0 && ny != self.sign_y[i] {
-                flips += 1.0;
-            }
-            self.sign_x[i] = nx;
-            self.sign_y[i] = ny;
-            // Impulse-train EMA: converges to the flip rate in flips/s.
-            self.score[i] += flips / SCORE_TAU_S;
-        }
-    }
-
-    /// Re-select the prioritized candidate with switch hysteresis: the
-    /// incumbent keeps the sparkle unless it becomes ineligible or a
-    /// challenger beats it by [`SWITCH_RATIO`] (plus [`SWITCH_FLOOR`]).
-    pub fn select(&mut self, body: &TrackedBody) {
-        let com = body_com_uv(body);
-        let incumbent = self.current.filter(|&c| candidate_eligible(body, c, com));
-        let mut best: Option<usize> = None;
-        for i in 0..CANDIDATE_LANDMARKS.len() {
-            if !candidate_eligible(body, i, com) {
-                continue;
-            }
-            if best.is_none_or(|b| self.score[i] > self.score[b]) {
-                best = Some(i);
-            }
-        }
-        self.current = match (incumbent, best) {
-            (None, b) => b.filter(|&b| self.score[b] > SWITCH_FLOOR),
-            (Some(inc), Some(b)) if b != inc => {
-                if self.score[b] > self.score[inc] * SWITCH_RATIO + SWITCH_FLOOR {
-                    Some(b)
-                } else {
-                    Some(inc)
-                }
-            }
-            (Some(inc), _) => Some(inc),
-        };
-    }
 }
 
 /// One strength-envelope step toward `target` (asymmetric attack/release,
@@ -329,29 +420,99 @@ pub fn step_env(env: f32, target: f32, dt: f32) -> f32 {
     (env + (target - env) * (rate * dt).min(1.0)).clamp(0.0, 1.0)
 }
 
-/// The rainbow wheel: a fully-saturated HDR color at `elapsed` seconds into
-/// the [`RAINBOW_PERIOD_S`] sweep (rotating pure HDR red keeps saturation
-/// and brightness constant around the whole wheel).
+/// Deterministic per-mote hash in `0..1` (golden-ratio stride: motes get
+/// well-spread constants without stored state).
 #[must_use]
-pub fn rainbow_color(elapsed: f32) -> Vec4 {
-    let phase = (elapsed / RAINBOW_PERIOD_S).rem_euclid(1.0);
-    rotate_hue(Vec4::new(SPARKLE_HDR, 0.0, 0.0, 1.0), phase)
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "mote index < 12, exact in f32"
+)]
+pub fn mote_hash(index: usize, salt: f32) -> f32 {
+    (index as f32 * 0.618_034 + salt).fract()
+}
+
+/// The mote's slow orbital drift offset around its limb anchor at time `t`
+/// (world px). Each mote gets its own radius, angular rate, and starting
+/// phase, so the constellation breathes instead of moving as a rigid body.
+#[must_use]
+pub fn mote_drift(index: usize, t: f32) -> Vec2 {
+    let radius = DRIFT_RADIUS_MIN_PX + DRIFT_RADIUS_SPAN_PX * mote_hash(index, 0.13);
+    let rate = 0.35 + 0.5 * mote_hash(index, 0.47);
+    let angle = std::f32::consts::TAU * (mote_hash(index, 0.79) + t * rate * 0.1);
+    Vec2::new(angle.cos(), angle.sin()) * radius
 }
 
 // ── Per-frame system ────────────────────────────────────────────────────────
 
+/// One frame's tracker outcome per slot, produced by [`advance_trackers`].
+#[derive(Clone, Copy, Debug, Default)]
+struct TrackerFrame {
+    /// Each present body's winning candidate index.
+    winners: [Option<usize>; MAX_TRACKED_BODIES],
+    /// Whether the winner's contralateral partner is visible.
+    partner_ok: [bool; MAX_TRACKED_BODIES],
+    /// Each occupied slot's fade envelope.
+    slot_fade: [f32; MAX_TRACKED_BODIES],
+}
+
+/// Advance each present body's oscillation tracker one frame and reset the
+/// trackers of emptied slots (a returning dancer starts clean).
+fn advance_trackers(
+    trackers: &mut [LimbOscillator; MAX_TRACKED_BODIES],
+    body: Option<&BodyTrackingState>,
+    dt: f32,
+) -> TrackerFrame {
+    let mut frame = TrackerFrame::default();
+    let mut occupied = [false; MAX_TRACKED_BODIES];
+    if let Some(bodies) = body {
+        for tracked in bodies.iter_bodies() {
+            let slot = tracked.slot;
+            if slot >= MAX_TRACKED_BODIES {
+                continue;
+            }
+            occupied[slot] = true;
+            frame.slot_fade[slot] = tracked.fade.clamp(0.0, 1.0);
+            if !tracked.present {
+                continue; // fading out: motes release via fade, tracker holds
+            }
+            let tracker = &mut trackers[slot];
+            tracker.step_scores(tracked, dt);
+            tracker.select(tracked);
+            frame.winners[slot] = tracker.current;
+            if let Some(current) = tracker.current {
+                let partner = tracked.landmarks[CANDIDATE_LANDMARKS[PARTNER[current]]];
+                frame.partner_ok[slot] = partner.visibility >= VISIBILITY_GATE;
+            }
+        }
+    }
+    for (tracker, occupied) in trackers.iter_mut().zip(occupied) {
+        if !occupied {
+            tracker.reset();
+        }
+    }
+    frame
+}
+
 /// `Update` (gated `in_state(AppState::Radiance)`, like the pulse driver):
-/// advance the oscillation tracker, pick the priority limb, anchor the
-/// mirrored pair, and pack the glint uniform.
+/// advance every present body's oscillation tracker, assign the shared mote
+/// pool, ease every envelope, and pack the constellation uniform.
 #[allow(
     clippy::too_many_arguments,
     reason = "Bevy system — each param is a distinct ECS resource/query the driver packs"
+)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "mote/slot indices are bounded (12 / 4), exact in f32"
 )]
 pub fn update_radiance_sparkles(
     time: Res<'_, Time>,
     window: Single<'_, '_, &Window>,
     settings: Res<'_, RadianceSettings>,
     fade: Res<'_, ScreensaverFade>,
+    state: Res<'_, super::systems::sim_params::RadianceState>,
     body: Option<Res<'_, BodyTrackingState>>,
     mut sparkles: ResMut<'_, RadianceSparkles>,
     quads: Query<
@@ -373,63 +534,79 @@ pub fn update_radiance_sparkles(
         Vec2::new(window.width().max(1.0), h)
     };
 
-    // Multi-body migration: the sparkles ride the PRIMARY (featured) body;
-    // a later radiance overhaul may fan the pair out per tracked body.
-    let tracked = body
-        .as_deref()
-        .and_then(BodyTrackingState::primary)
-        .filter(|b| b.present);
-    let mut primary_target = 0.0;
-    let mut mirror_target = 0.0;
-    if let Some(body) = tracked {
-        sparkles.step_scores(body, dt);
-        sparkles.select(body);
-        if let Some(current) = sparkles.current {
-            primary_target = 1.0;
-            let anchor = body.landmarks[CANDIDATE_LANDMARKS[current]];
-            sparkles.last_primary_world =
-                mask_uv_to_world(anchor.pos.truncate(), scale, settings.mirror);
-            // The "Y-axis reflection" anchors to the real contralateral
-            // limb, tracking it live — never a geometric mirror point.
-            let partner = body.landmarks[CANDIDATE_LANDMARKS[PARTNER[current]]];
-            if partner.visibility >= VISIBILITY_GATE {
-                mirror_target = 1.0;
-                sparkles.last_mirror_world =
-                    mask_uv_to_world(partner.pos.truncate(), scale, settings.mirror);
-            }
-        }
-    } else {
-        sparkles.current = None;
-    }
-    if settings.sparkle_intensity <= 0.0 {
-        primary_target = 0.0;
-        mirror_target = 0.0;
-    }
-    sparkles.primary_env = step_env(sparkles.primary_env, primary_target, dt);
-    sparkles.mirror_env = step_env(sparkles.mirror_env, mirror_target, dt);
+    let frame = advance_trackers(&mut sparkles.trackers, body.as_deref(), dt);
+    let TrackerFrame {
+        winners,
+        partner_ok,
+        slot_fade,
+    } = frame;
 
-    let master = settings.sparkle_intensity * (1.0 - fade.alpha());
-    let uniform = RadianceSparkleUniform {
-        sparkles: [
-            Vec4::new(
-                sparkles.last_primary_world.x,
-                sparkles.last_primary_world.y,
-                0.0,
-                sparkles.primary_env,
-            ),
-            Vec4::new(
-                sparkles.last_mirror_world.x,
-                sparkles.last_mirror_world.y,
-                MIRROR_OFFSET_S,
-                sparkles.mirror_env,
-            ),
-        ],
-        colors: [
-            rainbow_color(elapsed),
-            rainbow_color(elapsed - MIRROR_OFFSET_S),
-        ],
-        params: Vec4::new(master.max(0.0), elapsed, TWINKLE_PERIOD_S, 0.0),
+    // Assign the shared pool (budget = the setting, hard-capped at 12).
+    let budget = if settings.sparkle_intensity > 0.0 {
+        settings.sparkle_count.min(MAX_SPARKLES as u32) as usize
+    } else {
+        0
     };
+    let desired = assign_motes(winners, partner_ok, budget);
+
+    // Per-mote envelopes + anchors.
+    let mut uniform = RadianceSparkleUniform {
+        params: Vec4::new(
+            // Master: the setting, dimmed by the screensaver fade, lifted by
+            // the highs drive (mid/high lane per the spec).
+            (settings.sparkle_intensity * (1.0 - fade.alpha()) * (0.6 + 0.5 * state.sparkle))
+                .max(0.0),
+            elapsed,
+            // Highs speed the twinkle up (period shrinks toward ~40%).
+            TWINKLE_PERIOD_S / (1.0 + 1.3 * state.sparkle),
+            0.0,
+        ),
+        ..RadianceSparkleUniform::default()
+    };
+    let slot_colors = slot_identity_colors(
+        settings.palette,
+        state.hue_phase,
+        settings.hue_spread,
+        fade.alpha(),
+    );
+    // Split-borrow the resource so the mote loop can read the trackers.
+    let RadianceSparkles { trackers, motes } = &mut *sparkles;
+    for (i, mote) in motes.iter_mut().enumerate() {
+        let want = desired[i];
+        if mote.owner != want && mote.env > REASSIGN_ENV {
+            // Cross-fade: release at the held position before re-anchoring.
+            mote.env = step_env(mote.env, 0.0, dt);
+        } else {
+            if mote.owner != want {
+                mote.owner = want;
+            }
+            let mut target = 0.0;
+            if let (Some((slot, candidate)), Some(bodies)) = (mote.owner, body.as_deref()) {
+                if let Some(tracked) = bodies.bodies.get(slot).and_then(Option::as_ref) {
+                    let landmark = tracked.landmarks[CANDIDATE_LANDMARKS[candidate]];
+                    if landmark.visibility >= VISIBILITY_GATE {
+                        mote.pos =
+                            mask_uv_to_world(landmark.pos.truncate(), scale, settings.mirror)
+                                + mote_drift(i, elapsed);
+                        // Strength follows limb activity (score ramp) and the
+                        // body's tracking fade — nothing pops.
+                        let activity =
+                            (trackers[slot].score[candidate.min(3)] / 1.5).clamp(0.3, 1.0);
+                        target = activity * slot_fade[slot];
+                    }
+                }
+            }
+            mote.env = step_env(mote.env, target, dt);
+        }
+        if let Some((slot, _)) = mote.owner {
+            let color = slot_colors[slot.min(3)] * SPARKLE_HDR_GAIN;
+            // Crest-glint gain follows the envelope so the cross only shows
+            // on established, active motes.
+            uniform.colors[i] = Vec4::new(color.x, color.y, color.z, mote.env);
+        }
+        uniform.sparkles[i] = Vec4::new(mote.pos.x, mote.pos.y, mote_hash(i, 0.31), mote.env);
+    }
+
     for handle in &quads {
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.sparkles = uniform;
@@ -452,7 +629,7 @@ mod tests {
     use super::*;
     use wc_core::input::body::{BodyLandmark, BODY_LANDMARK_COUNT};
 
-    /// A visible primary body (slot 0, fully faded in) with all landmarks at
+    /// A visible present body (fully faded in) with all landmarks at
     /// UV (0.5, 0.5) and no motion.
     fn fixture_body() -> TrackedBody {
         let mut landmarks = [BodyLandmark::default(); BODY_LANDMARK_COUNT];
@@ -482,7 +659,7 @@ mod tests {
     /// Drive `body`'s landmark `idx` with a square-wave x velocity at `hz`
     /// for `seconds`, stepping the tracker at 60 fps.
     fn oscillate(
-        state: &mut RadianceSparkles,
+        state: &mut LimbOscillator,
         body: &mut TrackedBody,
         idx: usize,
         hz: f32,
@@ -503,7 +680,7 @@ mod tests {
     /// picks it.
     #[test]
     fn fastest_oscillator_wins_priority() {
-        let mut state = RadianceSparkles::default();
+        let mut state = LimbOscillator::default();
         let mut body = fixture_body();
         let dt = 1.0 / 60.0;
         let steps = (3.0 * 60.0) as usize;
@@ -529,7 +706,7 @@ mod tests {
     /// Sub-hysteresis jitter around zero never accumulates score.
     #[test]
     fn jitter_below_hysteresis_scores_nothing() {
-        let mut state = RadianceSparkles::default();
+        let mut state = LimbOscillator::default();
         let mut body = fixture_body();
         let dt = 1.0 / 60.0;
         for step in 0..600 {
@@ -548,7 +725,7 @@ mod tests {
     /// (switch hysteresis), but loses to a decisively better one.
     #[test]
     fn priority_switch_is_hysteretic() {
-        let mut state = RadianceSparkles::default();
+        let mut state = LimbOscillator::default();
         let mut body = fixture_body();
         oscillate(&mut state, &mut body, LEFT_WRIST, 2.0, 2.0);
         state.select(&body);
@@ -568,10 +745,10 @@ mod tests {
     }
 
     /// An occluded incumbent hands off; with every candidate occluded the
-    /// sparkle goes away entirely.
+    /// motes go away entirely.
     #[test]
     fn occlusion_releases_priority() {
-        let mut state = RadianceSparkles::default();
+        let mut state = LimbOscillator::default();
         let mut body = fixture_body();
         oscillate(&mut state, &mut body, LEFT_WRIST, 2.0, 2.0);
         state.select(&body);
@@ -587,7 +764,7 @@ mod tests {
             body.landmarks[lm].visibility = 0.0;
         }
         state.select(&body);
-        assert_eq!(state.current(), None, "no visible extremity, no sparkle");
+        assert_eq!(state.current(), None, "no visible extremity, no motes");
     }
 
     /// A wrist resting on the hip (inside the COM ring) is ineligible.
@@ -618,34 +795,60 @@ mod tests {
         assert_eq!(CANDIDATE_LANDMARKS[PARTNER[2]], RIGHT_ANKLE);
     }
 
-    /// The rainbow sweep returns to its start color after exactly one
-    /// period and keeps constant HDR value + full saturation on the way.
+    /// The shared budget splits evenly, capped per body: a solo dancer gets
+    /// the full constellation, a crowd spreads thinner, nobody exceeds 12.
     #[test]
-    fn rainbow_cycles_in_seven_seconds() {
-        let start = rainbow_color(0.0);
-        let looped = rainbow_color(RAINBOW_PERIOD_S);
-        assert!(
-            (start - looped).abs().max_element() < 1e-4,
-            "{start} vs {looped}"
+    fn quota_shares_the_budget() {
+        assert_eq!(per_body_quota(0, 10), 0);
+        assert_eq!(
+            per_body_quota(1, 10),
+            MAX_MOTES_PER_BODY,
+            "solo capped at 6"
         );
-        for i in 0..14_u16 {
-            let c = rainbow_color(f32::from(i) * 0.5);
-            let value = c.x.max(c.y).max(c.z);
-            let low = c.x.min(c.y).min(c.z);
-            assert!(
-                (value - SPARKLE_HDR).abs() < 1e-4,
-                "HDR value constant: {c}"
-            );
-            assert!(low.abs() < 1e-4, "full saturation: {c}");
-        }
-        // Halfway round the wheel from red lands on cyan (hue 180°).
-        let half = rainbow_color(RAINBOW_PERIOD_S / 2.0);
-        assert!(
-            half.x.abs() < 1e-3
-                && (half.y - SPARKLE_HDR).abs() < 1e-3
-                && (half.z - SPARKLE_HDR).abs() < 1e-3,
-            "{half}"
+        assert_eq!(per_body_quota(2, 10), 5, "duo: 5 each = 10 total");
+        assert_eq!(per_body_quota(3, 12), 4, "trio: 4 each = 12 total");
+        assert_eq!(per_body_quota(4, 12), 3, "quad: 3 each = 12 total");
+        assert_eq!(per_body_quota(2, 4), 2, "small budget honored");
+    }
+
+    /// Assignment: winner gets the larger half, partner the rest; an
+    /// ineligible partner hands its share to the winner; two bodies fill in
+    /// slot order and the pool never overflows.
+    #[test]
+    fn assignment_splits_winner_and_partner() {
+        let mut winners = [None; MAX_TRACKED_BODIES];
+        winners[0] = Some(0); // left wrist
+        let mut partner_ok = [false; MAX_TRACKED_BODIES];
+        partner_ok[0] = true;
+        let assigned = assign_motes(winners, partner_ok, 10);
+        let winner_motes = assigned.iter().filter(|m| **m == Some((0, 0))).count();
+        let partner_motes = assigned.iter().filter(|m| **m == Some((0, 1))).count();
+        assert_eq!(winner_motes, 3, "winner takes ceil(6/2)");
+        assert_eq!(partner_motes, 3, "partner takes the rest");
+        // Partner ineligible: the winner takes the whole quota.
+        let assigned = assign_motes(winners, [false; MAX_TRACKED_BODIES], 10);
+        assert_eq!(
+            assigned.iter().filter(|m| **m == Some((0, 0))).count(),
+            MAX_MOTES_PER_BODY
         );
+        // Duo: both bodies represented, in slot order, within the pool.
+        winners[2] = Some(3);
+        let mut duo_ok = [false; MAX_TRACKED_BODIES];
+        duo_ok[0] = true;
+        duo_ok[2] = true;
+        let assigned = assign_motes(winners, duo_ok, 12);
+        let body0 = assigned.iter().flatten().filter(|(s, _)| *s == 0).count();
+        let body2 = assigned.iter().flatten().filter(|(s, _)| *s == 2).count();
+        assert_eq!(body0, 6, "duo split");
+        assert_eq!(body2, 6, "duo split");
+        assert!(assigned.iter().flatten().count() <= MAX_SPARKLES);
+    }
+
+    /// No winners → an empty assignment (all motes release).
+    #[test]
+    fn assignment_empty_without_bodies() {
+        let assigned = assign_motes([None; MAX_TRACKED_BODIES], [false; MAX_TRACKED_BODIES], 12);
+        assert!(assigned.iter().all(Option::is_none));
     }
 
     /// Envelope eases both ways and clamps.
@@ -657,5 +860,22 @@ mod tests {
         assert!(down < 1.0 && down > 0.0);
         assert!((0.0..=1.0).contains(&step_env(0.5, 1.0, 100.0)));
         assert!((0.0..=1.0).contains(&step_env(0.5, 0.0, 100.0)));
+    }
+
+    /// Drift orbits are bounded and per-mote distinct.
+    #[test]
+    fn drift_is_bounded_and_distinct() {
+        for i in 0..MAX_SPARKLES {
+            let d = mote_drift(i, 3.7);
+            let r = d.length();
+            assert!(
+                (DRIFT_RADIUS_MIN_PX - 0.01..=DRIFT_RADIUS_MIN_PX + DRIFT_RADIUS_SPAN_PX + 0.01)
+                    .contains(&r),
+                "mote {i} radius {r}"
+            );
+        }
+        assert_ne!(mote_drift(0, 1.0), mote_drift(1, 1.0));
+        // The orbit actually moves over time.
+        assert_ne!(mote_drift(0, 1.0), mote_drift(0, 4.0));
     }
 }

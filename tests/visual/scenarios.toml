@@ -275,6 +275,30 @@ dt = 0.016666667
 [scenarios.radiance-synthetic.debug]
 FORCE_RADIANCE_SYNTHETIC_BODY = "1"
 
+# ── Radiance — two synthetic dancers (multi-body identity + fade-in) ────────
+# The duo toggle adds a second phantom dancer in slot 1 (offset pose/phase,
+# right side) that ENTERS at t = 2.0 s (frame 120) with a ramped fade —
+# exercising per-body color identity, the shared emission budget, the ignite
+# flare, and the fade-riding silhouette/pulse/sparkle paths. Frame spread:
+#    60 (t=1.0)  solo primary dancer, left of centre, its own hue
+#   126 (t=2.1)  partner just entered: faint igniting figure on the right
+#   150 (t=2.5)  partner mid-fade: second flame catching, distinct hue
+#   300 (t=5.0)  both settled: two distinct-colored flames, shared density
+#   480 (t=8.0)  later beat frames: both flames pulsing independently
+#
+# BASELINES: operator-seeded on the deployment machine (same policy as
+# radiance-synthetic).
+[scenarios.radiance-synthetic-duo]
+sketch = "radiance"
+provider = "off"
+config = "clean"
+frames = [60, 126, 150, 300, 480]
+dt = 0.016666667
+
+[scenarios.radiance-synthetic-duo.debug]
+FORCE_RADIANCE_SYNTHETIC_BODY = "1"
+FORCE_RADIANCE_SYNTHETIC_DUO = "1"
+
 # ── Radiance attract mode: the phantom performer + ember overrides ──────────
 # The synthetic-body toggle is set ONLY to suppress the hardware requests (the
 # dancer itself is gated to Active and stays inert here); the phantom owns

@@ -47,18 +47,19 @@ pub const BLOB_LEG_L: usize = 4;
 /// See [`BLOB_HEAD`].
 pub const BLOB_LEG_R: usize = 5;
 
-/// Build the pose at time `t` with the given sway/limb amplitudes.
-/// `sway_amp` ~0.05 reads as an idle drift; `limb_amp` ~0.09 as dancing.
+/// Build the pose at time `t` with the given sway/limb amplitudes around a
+/// horizontal centre `cx0`. `sway_amp` ~0.05 reads as an idle drift;
+/// `limb_amp` ~0.09 as dancing.
 #[must_use]
 #[allow(
     clippy::similar_names,
     reason = "arm_l_swing/arm_r_swing are the paired left/right limb swings; \
               renaming one hurts the symmetry the six-blob layout relies on"
 )]
-fn pose_at(t: f32, sway_amp: f32, limb_amp: f32) -> PhantomPose {
+fn pose_at(t: f32, sway_amp: f32, limb_amp: f32, cx0: f32) -> PhantomPose {
     let sway = (t * 0.35).sin() * sway_amp;
     let bob = (t * 0.9).sin() * 0.015;
-    let cx = 0.5 + sway;
+    let cx = cx0 + sway;
     let arm_l_swing = (t * 0.8).sin() * limb_amp;
     let arm_r_swing = (t * 0.8 + 2.1).sin() * limb_amp;
     let leg_shift = (t * 0.5).sin() * limb_amp * 0.4;
@@ -99,13 +100,45 @@ fn pose_at(t: f32, sway_amp: f32, limb_amp: f32) -> PhantomPose {
 /// The attract phantom: slow drift, small limb motion.
 #[must_use]
 pub fn phantom_pose(t: f32) -> PhantomPose {
-    pose_at(t, 0.05, 0.03)
+    pose_at(t, 0.05, 0.03, 0.5)
 }
 
 /// The capture dancer: bigger sway and limb swings (still deterministic).
+/// The tempo/amplitude pair is chosen so the wrist-tip velocities cross the
+/// sparkle tracker's ±[`crate::radiance::sparkle::FLIP_HYSTERESIS_UV_S`]
+/// band — captures exercise the limb-mote layer, not just the flame.
 #[must_use]
 pub fn dancing_pose(t: f32) -> PhantomPose {
-    pose_at(t * 1.6, 0.08, 0.09)
+    pose_at(t * 2.2, 0.06, 0.14, 0.5)
+}
+
+/// Virtual seconds at which the duo scenario's second dancer enters frame
+/// (frame 120 at the capture harness's fixed 1/60 s step).
+pub const DUO_ENTRY_T: f32 = 2.0;
+/// Seconds the second dancer's synthetic fade envelope takes to reach 1.
+pub const DUO_FADE_IN_S: f32 = 0.8;
+
+/// Duo mode's primary dancer (slot 0): the capture dancer shifted left so
+/// both figures fit side by side.
+#[must_use]
+pub fn duo_primary_pose(t: f32) -> PhantomPose {
+    pose_at(t * 1.6, 0.05, 0.09, 0.36)
+}
+
+/// Duo mode's second dancer (slot 1): offset phase + slightly different
+/// tempo on the right, so the pair never moves in lockstep.
+#[must_use]
+pub fn duo_partner_pose(t: f32) -> PhantomPose {
+    pose_at(t * 1.45 + 5.3, 0.05, 0.085, 0.66)
+}
+
+/// The second dancer's synthetic fade envelope at time `t`: 0 before
+/// [`DUO_ENTRY_T`], ramping to 1 over [`DUO_FADE_IN_S`] (a linear stand-in
+/// for the real tracker's attack envelope — enough to exercise the ignite
+/// flare and the fade-riding render paths in captures).
+#[must_use]
+pub fn duo_partner_fade(t: f32) -> f32 {
+    ((t - DUO_ENTRY_T) / DUO_FADE_IN_S).clamp(0.0, 1.0)
 }
 
 /// Approximate landmark UVs for the seven impulse landmarks (nose, wrists,
@@ -130,11 +163,11 @@ pub fn dancer_landmark_uv(pose: &PhantomPose) -> [Vec2; 7] {
     ]
 }
 
-/// Rasterize the pose's smooth-union coverage into the **slot-0 channel** of
-/// an RGBA-interleaved `MASK_BYTES` buffer (255 inside, 0 outside, a soft
-/// band at the boundary — matching the EMA-softened real mask). The other
-/// three slot channels are zeroed so a stale multi-body frame never ghosts
-/// behind the synthetic dancer. `out.len()` must be [`MASK_BYTES`].
+/// Rasterize up to four poses' smooth-union coverage into their slot
+/// channels of an RGBA-interleaved `MASK_BYTES` buffer (255 inside, 0
+/// outside, a soft band at the boundary — matching the EMA-softened real
+/// mask). Absent slots are zeroed so a stale multi-body frame never ghosts
+/// behind the synthetic dancers. `out.len()` must be [`MASK_BYTES`].
 #[allow(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
@@ -147,7 +180,7 @@ pub fn dancer_landmark_uv(pose: &PhantomPose) -> [Vec2; 7] {
     reason = "u/v/p/q/f/c mirror the field formula in the comment below \
               (f = |(p-c)/r|²) and the WGSL shader math it is the CPU twin of"
 )]
-pub fn rasterize_mask(pose: &PhantomPose, out: &mut [u8]) {
+pub fn rasterize_mask_slots(poses: [Option<&PhantomPose>; MASK_CHANNELS], out: &mut [u8]) {
     debug_assert_eq!(out.len(), MASK_BYTES);
     let inv = 1.0 / MASK_SIZE as f32;
     for y in 0..MASK_SIZE {
@@ -155,24 +188,32 @@ pub fn rasterize_mask(pose: &PhantomPose, out: &mut [u8]) {
         for x in 0..MASK_SIZE {
             let u = (x as f32 + 0.5) * inv;
             let p = Vec2::new(u, v);
-            // Max coverage over blobs; each blob's normalized squared field
-            // f = |(p-c)/r|² crosses 1 at the boundary; a smoothstep band
-            // (0.85..1.15) softens it.
-            let mut cov = 0.0_f32;
-            for blob in &pose.blobs {
-                let q = (p - blob.center) / blob.radii;
-                let f = q.length_squared();
-                let c = 1.0 - smoothstep(0.85, 1.15, f);
-                cov = cov.max(c);
-            }
-            // Slot 0 = channel R; the other slot channels stay dark.
             let base = (y * MASK_SIZE + x) * MASK_CHANNELS;
-            out[base] = (cov * 255.0) as u8;
-            out[base + 1] = 0;
-            out[base + 2] = 0;
-            out[base + 3] = 0;
+            for (channel, pose) in poses.iter().enumerate() {
+                let Some(pose) = pose else {
+                    out[base + channel] = 0;
+                    continue;
+                };
+                // Max coverage over blobs; each blob's normalized squared
+                // field f = |(p-c)/r|² crosses 1 at the boundary; a
+                // smoothstep band (0.85..1.15) softens it.
+                let mut cov = 0.0_f32;
+                for blob in &pose.blobs {
+                    let q = (p - blob.center) / blob.radii;
+                    let f = q.length_squared();
+                    let c = 1.0 - smoothstep(0.85, 1.15, f);
+                    cov = cov.max(c);
+                }
+                out[base + channel] = (cov * 255.0) as u8;
+            }
         }
     }
+}
+
+/// Single-body convenience: rasterize one pose into the **slot-0 channel**
+/// and zero the rest (the screensaver phantom's shape).
+pub fn rasterize_mask(pose: &PhantomPose, out: &mut [u8]) {
+    rasterize_mask_slots([Some(pose), None, None, None], out);
 }
 
 /// Scalar smoothstep (WGSL semantics).
@@ -186,9 +227,9 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 /// mask crossing.
 pub const EDGE_THRESHOLD: u8 = 128;
 
-/// Extract up to [`MAX_EDGE_POINTS`] `(position, outward normal)` pairs where
-/// the **slot-0 channel** of the RGBA mask crosses [`EDGE_THRESHOLD`], into
-/// `out` (cleared first; capacity is reused, never grown past the cap). Same
+/// Extract one channel's `(position, outward normal)` pairs where the RGBA
+/// mask crosses [`EDGE_THRESHOLD`], **appending** to `out` until the shared
+/// [`MAX_EDGE_POINTS`] cap. Returns the number of points appended. Same
 /// single-pass scan shape as Plan B's worker-side extractor: an inside pixel
 /// with any 4-neighbor outside is a boundary pixel; the outward normal is the
 /// negated central-difference gradient (the mask is high inside, so the
@@ -198,12 +239,12 @@ pub const EDGE_THRESHOLD: u8 = 128;
     clippy::cast_precision_loss,
     reason = "pixel index -> UV conversion on bounded 0..256 values"
 )]
-pub fn extract_edges(mask: &[u8], out: &mut Vec<EdgePoint>) {
+pub fn extract_edges_channel(mask: &[u8], channel: usize, out: &mut Vec<EdgePoint>) -> usize {
     debug_assert_eq!(mask.len(), MASK_BYTES);
-    out.clear();
+    debug_assert!(channel < MASK_CHANNELS);
+    let before = out.len();
     let inv = 1.0 / MASK_SIZE as f32;
-    // Channel R (slot 0) of the RGBA-interleaved buffer.
-    let at = |x: usize, y: usize| mask[(y * MASK_SIZE + x) * MASK_CHANNELS];
+    let at = |x: usize, y: usize| mask[(y * MASK_SIZE + x) * MASK_CHANNELS + channel];
     for y in 1..MASK_SIZE - 1 {
         for x in 1..MASK_SIZE - 1 {
             if at(x, y) < EDGE_THRESHOLD {
@@ -231,10 +272,33 @@ pub fn extract_edges(mask: &[u8], out: &mut Vec<EdgePoint>) {
                 normal,
             });
             if out.len() >= MAX_EDGE_POINTS {
-                return;
+                return out.len() - before;
             }
         }
     }
+    out.len() - before
+}
+
+/// Extract every channel's edges into the contract's slot-ordered
+/// concatenated layout: `out` is cleared, then each slot's boundary points
+/// are appended in ascending slot order (earlier slots fill first when the
+/// shared cap crowds out later ones) and `slot_counts` partitions the list.
+pub fn extract_edges_slots(
+    mask: &[u8],
+    out: &mut Vec<EdgePoint>,
+    slot_counts: &mut [usize; MASK_CHANNELS],
+) {
+    out.clear();
+    for (channel, count) in slot_counts.iter_mut().enumerate() {
+        *count = extract_edges_channel(mask, channel, out);
+    }
+}
+
+/// Single-body convenience: slot-0 edges only, clearing `out` first (the
+/// screensaver phantom's shape and the original single-dancer extractor).
+pub fn extract_edges(mask: &[u8], out: &mut Vec<EdgePoint>) {
+    out.clear();
+    extract_edges_channel(mask, 0, out);
 }
 
 /// Deterministic synthetic analysis frame for the capture dancer: a slow
@@ -256,6 +320,14 @@ pub fn synthetic_audio(t: f32) -> AudioAnalysis {
     } else {
         0.0
     };
+    // Beat confidence mirrors the real analysis lane's shape: snap to 1.0 on
+    // the beat and decay with a 0.3 s time constant. At 2 Hz it falls to
+    // ~0.19 between beats, so every synthetic beat produces exactly one
+    // rising edge through the pulse layer's 0.6 threshold — captures
+    // exercise the contour-wave layer. (The old constant 0.8 never re-armed
+    // the edge, so pulses were invisible in every capture.)
+    let since_beat = beat_phase / 2.0;
+    let beat_confidence = (-since_beat / 0.3).exp();
     let rms = 0.35 + 0.25 * bass;
     AudioAnalysis {
         rms,
@@ -271,7 +343,7 @@ pub fn synthetic_audio(t: f32) -> AudioAnalysis {
             high * 0.9,
         ],
         onset,
-        beat_confidence: 0.8,
+        beat_confidence,
         peak: (rms + onset * 0.5).min(1.2),
         active: true,
     }
@@ -373,6 +445,67 @@ mod tests {
             }
         }
         assert!(moved >= 4, "limbs must actually dance ({moved} moved)");
+    }
+
+    /// Duo mode: the two dancers land in channels R and G with disjoint
+    /// horizontal territories, and the slot extractor partitions the
+    /// concatenated edge list correctly.
+    #[test]
+    fn duo_masks_fill_separate_channels() {
+        let p0 = duo_primary_pose(3.0);
+        let p1 = duo_partner_pose(3.0);
+        let mut mask = vec![0u8; MASK_BYTES];
+        rasterize_mask_slots([Some(&p0), Some(&p1), None, None], &mut mask);
+        assert!(
+            mask.chunks_exact(MASK_CHANNELS)
+                .any(|t| t[0] >= EDGE_THRESHOLD),
+            "primary in channel R"
+        );
+        assert!(
+            mask.chunks_exact(MASK_CHANNELS)
+                .any(|t| t[1] >= EDGE_THRESHOLD),
+            "partner in channel G"
+        );
+        assert!(
+            mask.chunks_exact(MASK_CHANNELS)
+                .all(|t| t[2] == 0 && t[3] == 0),
+            "unused slot channels stay dark"
+        );
+
+        let mut points = Vec::with_capacity(MAX_EDGE_POINTS);
+        let mut counts = [0usize; MASK_CHANNELS];
+        extract_edges_slots(&mask, &mut points, &mut counts);
+        assert!(counts[0] > 100, "primary has a rim: {counts:?}");
+        assert!(counts[1] > 100, "partner has a rim: {counts:?}");
+        assert_eq!(counts[2], 0);
+        assert_eq!(points.len(), counts.iter().sum::<usize>());
+        // Slot ranges hold the right bodies: slot 0 (cx 0.36) sits left of
+        // slot 1 (cx 0.66) on average.
+        let mean_x = |range: std::ops::Range<usize>| {
+            let n = range.len().max(1);
+            #[allow(
+                clippy::as_conversions,
+                clippy::cast_precision_loss,
+                reason = "edge counts < 2048, exact in f32"
+            )]
+            let inv = 1.0 / n as f32;
+            points[range].iter().map(|e| e.pos.x).sum::<f32>() * inv
+        };
+        let x0 = mean_x(0..counts[0]);
+        let x1 = mean_x(counts[0]..counts[0] + counts[1]);
+        assert!(x0 < 0.5 && x1 > 0.5, "territories: {x0} vs {x1}");
+    }
+
+    /// The duo partner's synthetic fade: 0 before entry, ramping to 1 over
+    /// the fade-in window (the ignite-flare capture hook).
+    #[test]
+    fn duo_partner_fade_ramps_after_entry() {
+        assert!(duo_partner_fade(0.0).abs() < f32::EPSILON);
+        assert!(duo_partner_fade(DUO_ENTRY_T - 0.01).abs() < f32::EPSILON);
+        let mid = duo_partner_fade(DUO_ENTRY_T + DUO_FADE_IN_S * 0.5);
+        assert!((mid - 0.5).abs() < 1e-3, "{mid}");
+        assert!((duo_partner_fade(DUO_ENTRY_T + DUO_FADE_IN_S) - 1.0).abs() < f32::EPSILON);
+        assert!((duo_partner_fade(100.0) - 1.0).abs() < f32::EPSILON);
     }
 
     /// Synthetic audio is deterministic and periodically produces onsets.

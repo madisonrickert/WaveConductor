@@ -81,6 +81,7 @@ Scenarios defined today:
 | `cymatics-interacting` | `cymatics` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_CYMATICS_INTERACTION = "1"` |
 | `cymatics-screensaver` | `cymatics` | `mock` | `clean` | `[180, 360, 600, 1200]` | `FORCE_SCREENSAVER = "1"` |
 | `radiance-synthetic` | `radiance` | `off` | `clean` | `[60, 120, 240, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"` |
+| `radiance-synthetic-duo` | `radiance` | `off` | `clean` | `[60, 126, 150, 300, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"`, `FORCE_RADIANCE_SYNTHETIC_DUO = "1"` |
 | `radiance-screensaver` | `radiance` | `off` | `clean` | `[120, 360, 720, 1200]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"`, `FORCE_SCREENSAVER = "1"` |
 
 The `line-screensaver` scenario drives Line's attract mode: the "Wandering
@@ -111,15 +112,37 @@ collapse toward it, (d) whites stay bright white (not dim grey), and (e)
 stirred-up particles pick up a subtle cool tint (velocity color, attract-only),
 while calm regions keep the warm-white personality.
 
-Radiance review guidance (`radiance-synthetic`): (a) a dark glassy humanoid
-silhouette with a thin bright rim, mirrored, centered, limbs visibly swinging
-across frames; (b) particles emanate outward from the silhouette edge — never
-from empty space — rising with a flame-like drift; (c) frames after a
-synthetic beat (frame 120 lands just after one) show an outward burst;
-(d) `delta_prev` stays well above ~5 (continuous motion). For
-`radiance-screensaver`: a slower, thinner ember-toned aura around a gently
-drifting phantom; whites/hot tones read ember-orange, and the field is
-visibly sparser than the active scenario.
+Radiance review guidance (`radiance-synthetic`): the dancer must read as a
+**figure on fire**, not a fuzzy aura. Check: (a) a dark glassy humanoid
+silhouette stays legible inside the flame (torso/legs read as dark negative
+space with a thin per-body-colored rim); (b) the flame is *granular* —
+thousands of small hot grains hugging the silhouette edge, brightest
+(near-white) at the edge where particles are born, cooling through the
+palette hue into sparse dim embers at the plume fringe (temperature over
+lifetime); (c) a rising plume with licking-tongue structure above the head
+and shoulders (buoyancy + tongue noise), never a uniform isotropic halo;
+(d) fast **ejecta streaks** — velocity-stretched elongated sparks shooting
+radially off the silhouette, denser just after a synthetic beat (2 Hz;
+frames 120/240/480 all land on or near beats); (e) bright nested
+silhouette-contour ridges from the beat-pulse layer riding inside/around the
+flame; (f) the overall hue cycles slowly through the psychedelic wheel
+across frames (pink → gold → green at the default rate) while staying
+saturated; (g) `delta_prev` well above ~5 (continuous motion).
+
+For `radiance-synthetic-duo`: frame 60 = ONE flame (solo, palette hue,
+slightly right of center under the default mirror); frame 126 = a second,
+*sparser* figure of sparks igniting on the LEFT in a visibly different hue
+(the hue-spread identity, ~47° around the wheel) while the first keeps
+burning; frame 150 = the second flame catching (ignite flare — its share of
+the spawn budget is boosted while it fades in); frames 300/480 = two
+settled flames with distinct hues and roughly equal density, each *thinner*
+than the solo scenario's flame (the particle budget is shared, not
+multiplied). Nothing may pop: the second figure's fill, rim, and flame all
+ease in over ~0.8 s.
+
+For `radiance-screensaver`: a slower, much sparser ember-orange aura of
+drifting grains around a gently swaying phantom; no pulses, no ejecta
+density, and the field visibly thinner than the active scenario.
 
 Schema:
 

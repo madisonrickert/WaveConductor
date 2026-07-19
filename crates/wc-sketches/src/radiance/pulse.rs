@@ -16,9 +16,11 @@
 //! dancer's outline and travels outward *keeping the body's shape* — nested
 //! silhouettes of light, not circles around a point. At age 0 the band sits
 //! at distance 0: the body itself flashes on the beat, then the contour
-//! peels off and radiates. Wave color samples the current (hue-rotated)
-//! palette gradient at the live `palette_shift`, so consecutive waves drift
-//! through the palette.
+//! peels off and radiates. Wave strength is **bass-weighted** (the beat lane
+//! times the wave, the bass drive weights it), wave color is the
+//! fade-weighted blend of the present bodies' identity colors, and the
+//! master brightness rides the union presence fade so a wave can never
+//! outlive the last figure (see [`union_fade`]).
 //!
 //! ## Hot-path invariants
 //!
@@ -37,11 +39,11 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
 use wc_core::audio::input::AudioAnalysis;
-use wc_core::input::body::MASK_SIZE;
+use wc_core::input::body::{BodyTrackingState, MASK_SIZE};
 use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
 use super::distance_field::DIST_MAX_TEXELS;
-use super::render::rotate_hue;
+use super::render::slot_identity_colors;
 use super::settings::RadianceSettings;
 use super::systems::sim_params::RadianceState;
 use super::systems::spawn::RadianceRoot;
@@ -193,6 +195,44 @@ pub fn gradient_sample(stops: &[Vec4; 3], t: f32) -> Vec4 {
     }
 }
 
+/// Raw per-slot fade vector — **no** phantom fallback (unlike
+/// `render::slot_fades`): unoccupied slots are 0, so the union below reads
+/// exactly "how present is anybody".
+#[must_use]
+pub fn raw_slot_fades(body: Option<&BodyTrackingState>) -> Vec4 {
+    let mut fades = Vec4::ZERO;
+    if let Some(state) = body {
+        for b in state.iter_bodies() {
+            if b.slot < 4 {
+                fades[b.slot] = b.fade.clamp(0.0, 1.0);
+            }
+        }
+    }
+    fades
+}
+
+/// The union presence envelope: the maximum fade across occupied slots. The
+/// pulse master rides it so beat waves can never outlive the last figure —
+/// when the final dancer's fade releases, the residual waves dim with it,
+/// and an empty room's stale distance field can never flash ghost contours.
+#[must_use]
+pub fn union_fade(fades: Vec4) -> f32 {
+    fades.x.max(fades.y).max(fades.z).max(fades.w)
+}
+
+/// Fade-weighted blend of the present bodies' identity colors — the wave
+/// color of a mixed floor is the palette blend of everyone dancing. Falls
+/// back to `fallback` when nobody carries fade (the wave then rides the
+/// plain palette, e.g. the synthetic/phantom writers).
+#[must_use]
+pub fn blend_present_colors(colors: [Vec4; 4], fades: Vec4, fallback: Vec4) -> Vec4 {
+    let sum = fades.x + fades.y + fades.z + fades.w;
+    if sum <= f32::EPSILON {
+        return fallback;
+    }
+    (colors[0] * fades.x + colors[1] * fades.y + colors[2] * fades.z + colors[3] * fades.w) / sum
+}
+
 /// Advance every slot by `dt` and spawn one wave on a rising beat edge.
 /// Returns `true` when a wave was spawned. Pure over its inputs so the
 /// beat-edge/round-robin behavior is unit-testable without an app.
@@ -271,6 +311,7 @@ pub fn update_radiance_pulses(
     state: Res<'_, RadianceState>,
     fade: Res<'_, ScreensaverFade>,
     audio: Option<Res<'_, AudioAnalysis>>,
+    body: Option<Res<'_, BodyTrackingState>>,
     mut pulses: ResMut<'_, RadiancePulses>,
     quads: Query<
         '_,
@@ -283,16 +324,22 @@ pub fn update_radiance_pulses(
     let dt = time.delta_secs().min(PULSE_DT_CAP);
     let audio_frame = audio.map_or_else(AudioAnalysis::neutral, |a| *a);
 
-    // Wave color: the current hue-rotated palette sampled at the live
-    // gradient shift — consecutive waves drift through the palette.
-    let stops = settings
-        .palette
-        .stops()
-        .map(|c| rotate_hue(c, state.hue_phase));
-    let color = gradient_sample(&stops, state.palette_shift);
+    // Wave color: the fade-weighted palette blend of the present bodies'
+    // identity colors (one dancer = their color; a mixed floor = the blend),
+    // falling back to slot 0's identity for the body-less writers.
+    let slot_colors = slot_identity_colors(
+        settings.palette,
+        state.hue_phase,
+        settings.hue_spread,
+        fade.alpha(),
+    );
+    let fades = raw_slot_fades(body.as_deref());
+    let color = blend_present_colors(slot_colors, fades, slot_colors[0]);
 
-    // Stronger onsets flash brighter; the 0.5 floor keeps soft beats visible.
-    let strength = (audio_frame.onset / 3.0).clamp(0.5, 1.0);
+    // Strength is bass-weighted (the spec's "big pulses follow the beat" —
+    // beat timing from the confidence edge, wave WEIGHT from the bass body);
+    // the 0.35 floor keeps soft beats visible.
+    let strength = (0.35 + 0.65 * state.bass_drive).clamp(0.0, 1.0);
     let spawn_enabled =
         settings.pulse_intensity > 0.0 && audio_frame.active && settings.audio_sensitivity > 0.0;
     step_pulses(
@@ -319,7 +366,9 @@ pub fn update_radiance_pulses(
     )]
     let px_per_texel = h / MASK_SIZE as f32;
 
-    let master = settings.pulse_intensity * (1.0 - fade.alpha());
+    // Master rides the screensaver dim AND the union presence fade: waves
+    // never outlive the last figure (see `union_fade`).
+    let master = settings.pulse_intensity * (1.0 - fade.alpha()) * union_fade(fades);
     let uniform = pack_pulse_uniform(&pulses, master, settings.mirror, fit_aspect, px_per_texel);
     for handle in &quads {
         if let Some(mut material) = materials.get_mut(&handle.0) {
@@ -439,6 +488,51 @@ mod tests {
             packed.pulses[0].y.abs() < f32::EPSILON,
             "expired slot packs dead"
         );
+    }
+
+    /// Union fade is the max across occupied slots; raw fades carry no
+    /// phantom fallback (empty state = 0 — the ghost-wave suppressor).
+    #[test]
+    fn union_fade_tracks_occupied_slots_only() {
+        use wc_core::input::body::{BodyTrackingState, TrackedBody};
+        assert!(union_fade(raw_slot_fades(None)).abs() < f32::EPSILON);
+        let empty = BodyTrackingState::default();
+        assert!(
+            union_fade(raw_slot_fades(Some(&empty))).abs() < f32::EPSILON,
+            "no bodies -> no pulse master (unlike the fill's phantom fallback)"
+        );
+        let mut state = BodyTrackingState::default();
+        state.bodies[2] = Some(TrackedBody {
+            slot: 2,
+            present: false, // fading out
+            fade: 0.4,
+            ..TrackedBody::default()
+        });
+        let fades = raw_slot_fades(Some(&state));
+        assert_eq!(fades, Vec4::new(0.0, 0.0, 0.4, 0.0));
+        assert!((union_fade(fades) - 0.4).abs() < f32::EPSILON);
+    }
+
+    /// Wave color is the fade-weighted blend of present identities; nobody
+    /// present falls back to the given color.
+    #[test]
+    fn blend_present_colors_weights_by_fade() {
+        let colors = [
+            Vec4::new(1.0, 0.0, 0.0, 1.0),
+            Vec4::new(0.0, 1.0, 0.0, 1.0),
+            Vec4::ZERO,
+            Vec4::ZERO,
+        ];
+        let fallback = Vec4::new(0.5, 0.5, 0.5, 1.0);
+        assert_eq!(
+            blend_present_colors(colors, Vec4::ZERO, fallback),
+            fallback,
+            "nobody present -> fallback"
+        );
+        let blended = blend_present_colors(colors, Vec4::new(1.0, 1.0, 0.0, 0.0), fallback);
+        assert!((blended.x - 0.5).abs() < 1e-6 && (blended.y - 0.5).abs() < 1e-6);
+        let solo = blend_present_colors(colors, Vec4::new(0.3, 0.0, 0.0, 0.0), fallback);
+        assert_eq!(solo, colors[0], "solo dancer keeps their exact identity");
     }
 
     /// Gradient sampling hits the stops at 0 / 0.5 / 1 and clamps outside.

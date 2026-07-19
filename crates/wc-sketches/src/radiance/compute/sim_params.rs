@@ -29,19 +29,16 @@ pub struct RadianceParticle {
     /// Seconds this particle lives; kernel-assigned at respawn from a hash in
     /// `[lifespan_min, lifespan_max]` so deaths stagger instead of pulsing.
     pub lifespan: f32,
-    /// Deterministic per-respawn hash in `0..=1`: the render shader's gradient
-    /// coordinate and sparkle phase.
+    /// Deterministic per-respawn hash in `0..=1`: the render shader's flicker
+    /// phase and per-particle variation seed.
     pub seed: f32,
-    /// Padding to round the struct up to a multiple of its own 8-byte
-    /// alignment (the `vec2<f32>` members set that alignment) — the WGSL
-    /// array-stride rule for `array<Particle>` in the storage address space.
-    /// Unlike the uniform address space, storage arrays don't additionally
-    /// require a 16-byte-multiple stride.
-    #[allow(
-        clippy::pub_underscore_fields,
-        reason = "GPU struct layout padding must be pub for bytemuck"
-    )]
-    pub _pad: f32,
+    /// Body slot index (`0..4`) this particle spawned from, stored as `f32`
+    /// (the struct is homogeneous f32; the render shader rounds it back to an
+    /// index into the per-slot color array). Doubles as the layout padding
+    /// that rounds the struct to a multiple of its 8-byte alignment (the WGSL
+    /// storage-address-space array-stride rule); a zeroed buffer reads slot 0,
+    /// which is harmless because zeroed particles are dead.
+    pub slot: f32,
 }
 
 /// One limb impulse slot — the fixed-slot idiom of the shared particle
@@ -78,9 +75,9 @@ pub const MAX_IMPULSES: usize = 8;
 ///
 /// Field order matches the WGSL `struct SimParams` in `simulate.wgsl`
 /// exactly; the layout is `#[repr(C)]` so `bytemuck::bytes_of` produces the
-/// correct byte sequence. The scalar header totals 80 bytes — a 16-byte
+/// correct byte sequence. The scalar header totals 144 bytes — a 16-byte
 /// multiple — so the `impulses` array (16-byte-aligned per WGSL uniform
-/// rules, 32-byte stride) begins aligned at offset 80. Total size 336.
+/// rules, 32-byte stride) begins aligned at offset 144. Total size 400.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct RadianceSimParamsGpu {
@@ -133,10 +130,34 @@ pub struct RadianceSimParamsGpu {
     /// re-rolls fresh every frame. Replaces the shader's old
     /// `u32(time * 60.0)` derivation, which aliased whenever two bakes landed
     /// in the same 1/60 s virtual-time bucket (or when `time` was pinned, e.g.
-    /// the screensaver clock). Also keeps the scalar header at 80 bytes
-    /// (16-multiple) so the `impulses` array stays aligned — it repurposes the
-    /// former `_pad0` filler slot at offset 76.
+    /// the screensaver clock).
     pub frame: u32,
+    /// Per-slot start offset into the edge storage buffer (`SilhouetteEdges`
+    /// concatenates slots in ascending order; these are the prefix sums of
+    /// `slot_counts`). WGSL mirrors this as a `vec4<u32>`.
+    pub slot_start: [u32; 4],
+    /// Per-slot live edge count (`SilhouetteEdges::slot_counts`, clamped so
+    /// `start + count` never exceeds `edge_count`). WGSL `vec4<u32>`.
+    pub slot_count: [u32; 4],
+    /// Per-slot emission CDF over the fade-weighted spawn shares (see
+    /// `systems::sim_params::emission_slot_weights`): monotone, last live
+    /// entry 1.0. All-zero = no live slot → the kernel spawns nothing. The
+    /// kernel picks the spawn slot as the first `i` with `rand < cdf[i]`, so
+    /// the shared particle budget is apportioned by fade — density stays
+    /// constant as dancers come and go. WGSL `vec4<f32>`.
+    pub slot_cdf: [f32; 4],
+    /// Probability that a spawn becomes a fast "ejecta" streak this frame
+    /// (onset-driven; see the baker). `0..=1`.
+    pub ejecta_prob: f32,
+    /// Outward launch speed of ejecta spawns, world px/s.
+    pub ejecta_speed: f32,
+    /// Flame-tongue amplitude: buoyancy varies by `±tongue_amp` with a
+    /// two-sine noise along world x (tongues of rising flame instead of a
+    /// uniform sheet). `0..~1.2`.
+    pub tongue_amp: f32,
+    /// Tongue spatial frequency, radians per world px (~300 px wavelength at
+    /// the default).
+    pub tongue_freq: f32,
     /// Impulse slots; entries past `impulse_count` are zero-gain and ignored.
     pub impulses: [RadianceImpulse; MAX_IMPULSES],
 }
@@ -173,7 +194,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(RadianceParticle, age), 16);
         assert_eq!(std::mem::offset_of!(RadianceParticle, lifespan), 20);
         assert_eq!(std::mem::offset_of!(RadianceParticle, seed), 24);
-        assert_eq!(std::mem::offset_of!(RadianceParticle, _pad), 28);
+        assert_eq!(std::mem::offset_of!(RadianceParticle, slot), 28);
         assert_eq!(std::mem::size_of::<RadianceParticle>(), 32);
     }
 
@@ -229,14 +250,24 @@ mod tests {
             72
         );
         assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, frame), 76);
-        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, impulses), 80);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, slot_start), 80);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, slot_count), 96);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, slot_cdf), 112);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, ejecta_prob), 128);
+        assert_eq!(
+            std::mem::offset_of!(RadianceSimParamsGpu, ejecta_speed),
+            132
+        );
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, tongue_amp), 136);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, tongue_freq), 140);
+        assert_eq!(std::mem::offset_of!(RadianceSimParamsGpu, impulses), 144);
     }
 
-    /// Locks the "header 80 bytes, total 336" claim to the real const, so a
+    /// Locks the "header 144 bytes, total 400" claim to the real const, so a
     /// change to `MAX_IMPULSES` cannot silently shift the size expectations.
     #[test]
     fn sim_params_size_tracks_max_impulses() {
-        const HEADER_BYTES: usize = 80;
+        const HEADER_BYTES: usize = 144;
         const IMPULSE_STRIDE: usize = 32;
         assert_eq!(
             std::mem::size_of::<RadianceSimParamsGpu>(),

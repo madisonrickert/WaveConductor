@@ -8,15 +8,19 @@
 //! `AlphaMode2d::Blend` routes the draw into `Transparent2d`, and
 //! [`RadianceMaterial::specialize`] overrides the color target to pure
 //! additive `(One, One)` — flame's recipe, per-material-pipeline so it never
-//! leaks into the other sketches' blends. Gradient stops are linear HDR (may
-//! exceed 1.0) so cores clear the tonemapper's white knee and bloom.
+//! leaks into the other sketches' blends. The per-slot identity colors are
+//! linear HDR (may exceed 1.0) so flame cores clear the tonemapper's white
+//! knee and bloom; the temperature-over-lifetime ramp (white-hot birth →
+//! body hue → deep ember) lives in `render.wgsl`'s `flame_color`.
 //!
 //! ## Silhouette fill
 //!
 //! `RadianceSilhouetteMaterial` stays ordinary `AlphaMode2d::Blend` (no
 //! `specialize` override): the fill occludes via normal alpha, and only its
-//! rim rides HDR magnitude into bloom. It is drawn under the particles
-//! (spawned at z 0.0 vs the billboards' z 1.0 — Task 9).
+//! per-slot rims ride HDR magnitude into bloom. It is drawn under the
+//! particles (spawned at z 0.0 vs the billboards' z 1.0 — Task 9). All four
+//! mask channels render simultaneously; fill alpha and rim brightness ride
+//! each body's fade envelope so figures ease in and out.
 //!
 //! The material, `particle_material_params`, and `drive_radiance_materials`
 //! are gated behind `body-tracking-mediapipe`: they consume
@@ -33,17 +37,53 @@ use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
-    SpecializedMeshPipelineError,
+    ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
 
-/// Billboard half-size in world px (Camera2d: 1 unit = 1 px), passed to the
-/// shader via `params_a.y`.
-pub const QUAD_HALF_PX: f32 = 6.0;
+use crate::radiance::settings::RadiancePalette;
 
-/// The additive soft-disc billboard material for the aura particles.
+/// Billboard half-size in world px (Camera2d: 1 unit = 1 px), passed to the
+/// shader via `params.y`.
+pub const QUAD_HALF_PX: f32 = 4.0;
+
+/// Master brightness scale on the additive aura (folded into `params.x`).
+/// The flame is tens of thousands of overlapping additive HDR quads — an
+/// unscaled `state.intensity` saturates the whole frame to white, so this
+/// brings one particle's contribution down to ember scale and lets the
+/// *density* (emission, overlap) paint the heat gradient.
+pub const AURA_BRIGHTNESS: f32 = 0.24;
+
+/// Per-slot hue offsets are `slot × hue_spread` full turns; this array names
+/// the slot multipliers so the derivation reads as intent (slot 0 keeps the
+/// palette hue verbatim — the solo dancer always gets the authored palette).
+pub const SLOT_HUE_STEPS: [f32; 4] = [0.0, 1.0, 2.0, 3.0];
+
+/// The uniform block the aura billboard shader consumes.
+///
+/// Struct parity: mirrors `AuraUniform` in `shaders/radiance/render.wgsl`.
+#[derive(ShaderType, Clone, Copy, Debug)]
+pub struct RadianceAuraUniform {
+    /// x = master intensity (HDR, audio-lifted), y = quad half px,
+    /// z = highs sparkle `0..1`, w = elapsed seconds (flicker phase).
+    pub params: Vec4,
+    /// Per-body-slot linear-HDR color identity (see [`slot_identity_colors`]).
+    pub slot_colors: [Vec4; 4],
+}
+
+impl Default for RadianceAuraUniform {
+    /// Neutral: zero intensity, base quad size, palette-less white identity.
+    fn default() -> Self {
+        Self {
+            params: Vec4::new(0.0, QUAD_HALF_PX, 0.0, 0.0),
+            slot_colors: [Vec4::ONE; 4],
+        }
+    }
+}
+
+/// The additive velocity-stretched billboard material for the flame aura.
 ///
 /// Shares the particle `ShaderBuffer` handle with
 /// [`crate::radiance::compute::sim_params::RadianceSimParams`] (compute
@@ -53,22 +93,9 @@ pub struct RadianceMaterial {
     /// Particle storage buffer, read-only from the vertex shader.
     #[storage(0, read_only)]
     pub particles: Handle<ShaderBuffer>,
-    /// x = master intensity (HDR, audio-lifted), y = quad half px,
-    /// z = palette shift `0..1`, w = sparkle `0..1`.
+    /// Packed per-frame params + per-slot flame colors.
     #[uniform(1)]
-    pub params_a: Vec4,
-    /// Gradient stop A (linear HDR).
-    #[uniform(2)]
-    pub color_a: Vec4,
-    /// Gradient stop B.
-    #[uniform(3)]
-    pub color_b: Vec4,
-    /// Gradient stop C.
-    #[uniform(4)]
-    pub color_c: Vec4,
-    /// x = elapsed seconds (sparkle phase), y/z/w reserved (zero).
-    #[uniform(5)]
-    pub params_b: Vec4,
+    pub aura: RadianceAuraUniform,
 }
 
 impl Material2d for RadianceMaterial {
@@ -117,16 +144,41 @@ impl Material2d for RadianceMaterial {
 use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
 #[cfg(feature = "body-tracking-mediapipe")]
-use crate::radiance::settings::{RadiancePalette, RadianceSettings};
+use crate::radiance::settings::RadianceSettings;
 #[cfg(feature = "body-tracking-mediapipe")]
 use crate::radiance::systems::sim_params::RadianceState;
 #[cfg(feature = "body-tracking-mediapipe")]
 use crate::radiance::systems::spawn::RadianceRoot;
 
+/// Per-slot silhouette identity: rim color + fade for each body slot.
+///
+/// Struct parity: mirrors `SilhouetteSlots` in
+/// `shaders/radiance/silhouette.wgsl`.
+#[derive(ShaderType, Clone, Copy, Debug)]
+pub struct RadianceSilhouetteSlots {
+    /// Per-slot emissive rim color (linear HDR, the body's identity color).
+    pub rim_colors: [Vec4; 4],
+    /// Per-slot fade envelope (`TrackedBody::fade`); fill alpha and rim
+    /// brightness both ride it so figures ease in/out.
+    pub fades: Vec4,
+}
+
+impl Default for RadianceSilhouetteSlots {
+    /// Slot 0 fully faded in (the synthetic/phantom writers' slot — also the
+    /// pre-first-frame state before the driver retargets it), others off.
+    fn default() -> Self {
+        Self {
+            rim_colors: [Vec4::ONE; 4],
+            fades: Vec4::new(1.0, 0.0, 0.0, 0.0),
+        }
+    }
+}
+
 /// The window-filling silhouette material sampling the person mask.
 ///
 /// Drawn under the particles (spawned at z 0.0 vs the billboards' z 1.0) via
-/// ordinary alpha blending; only the rim is HDR-emissive.
+/// ordinary alpha blending; only the rims are HDR-emissive. All four mask
+/// channels render simultaneously with per-slot color + fade.
 #[cfg(feature = "body-tracking-mediapipe")]
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct RadianceSilhouetteMaterial {
@@ -146,29 +198,9 @@ pub struct RadianceSilhouetteMaterial {
     /// Deep glassy base color (linear).
     #[uniform(4)]
     pub fill_color: Vec4,
-    /// Emissive rim color (linear HDR).
+    /// Per-slot rim colors + fades.
     #[uniform(5)]
-    pub rim_color: Vec4,
-    /// One-hot slot-channel selector: the shader samples the mask as
-    /// `dot(textureSample(...), channel_select)`, so this picks WHICH body's
-    /// channel renders (currently the primary slot; see
-    /// [`channel_select_for_slot`]).
-    #[uniform(6)]
-    pub channel_select: Vec4,
-}
-
-/// One-hot channel-select vector for a body slot (slot 0 → R … slot 3 → A),
-/// the `dot(mask_sample, channel_select)` idiom of the pinned mask channel
-/// convention. Out-of-range slots clamp to slot 0.
-#[cfg(feature = "body-tracking-mediapipe")]
-#[must_use]
-pub fn channel_select_for_slot(slot: usize) -> Vec4 {
-    match slot {
-        1 => Vec4::new(0.0, 1.0, 0.0, 0.0),
-        2 => Vec4::new(0.0, 0.0, 1.0, 0.0),
-        3 => Vec4::new(0.0, 0.0, 0.0, 1.0),
-        _ => Vec4::new(1.0, 0.0, 0.0, 0.0),
-    }
+    pub slots: RadianceSilhouetteSlots,
 }
 
 #[cfg(feature = "body-tracking-mediapipe")]
@@ -240,36 +272,78 @@ pub fn rotate_hue(color: Vec4, phase: f32) -> Vec4 {
     Vec4::new(red + low, green + low, blue + low, color.w)
 }
 
-/// Pack the particle-material params + palette stops for one frame:
-/// hue-rotated by the psychedelic cycle phase, then ember-blended by the
+/// Derive the four body-slot color identities for one frame: the palette's
+/// saturated mid stop, hue-rotated by the psychedelic cycle phase plus
+/// `slot × hue_spread` (see [`SLOT_HUE_STEPS`]), then ember-blended by the
 /// screensaver fade envelope (the attract ember keeps its authored warmth —
-/// only the user palette rotates). Pure for testability.
+/// only the user identity rotates). Pure for testability.
 ///
-/// Returns `(params_a, [color_a, color_b, color_c])`.
+/// The mid stop is the identity anchor because the flame's temperature ramp
+/// (render.wgsl `flame_color`) supplies the white-hot and ember extremes
+/// itself — one saturated hue per dancer keeps the multi-body look coherent.
+#[must_use]
+pub fn slot_identity_colors(
+    palette: RadiancePalette,
+    hue_phase: f32,
+    hue_spread: f32,
+    ember_alpha: f32,
+) -> [Vec4; 4] {
+    let a = ember_alpha.clamp(0.0, 1.0);
+    let base = palette.stops()[1];
+    let ember = RadiancePalette::Ember.stops()[1];
+    SLOT_HUE_STEPS.map(|step| rotate_hue(base, hue_phase + step * hue_spread).lerp(ember, a))
+}
+
+/// Pack the aura uniform for one frame from the smoothed audio state and the
+/// per-slot identity colors. Pure for testability.
 #[cfg(feature = "body-tracking-mediapipe")]
 #[must_use]
 pub fn particle_material_params(
     state: &RadianceState,
-    palette: RadiancePalette,
+    slot_colors: [Vec4; 4],
     fade_alpha: f32,
-) -> (Vec4, [Vec4; 3]) {
+    elapsed: f32,
+) -> RadianceAuraUniform {
     let a = fade_alpha.clamp(0.0, 1.0);
     // Attract mode dims toward the ember: intensity eases to 70%.
-    let intensity = state.intensity * (1.0 - a * 0.3);
-    // Audio-swelled billboard size: the aura visibly breathes with the music
-    // (intensity term) and jumps on onsets. Clamped at 1.5x — fill cost
-    // scales with the square of this factor, so the ceiling bounds the
-    // worst-case raster load at ~2.25x for onset instants only.
-    let quad_half = QUAD_HALF_PX * (0.85 + 0.25 * state.intensity + 0.3 * state.onset_env).min(1.5);
-    let params_a = Vec4::new(intensity, quad_half, state.palette_shift, state.sparkle);
-    let user = palette.stops().map(|c| rotate_hue(c, state.hue_phase));
-    let ember = RadiancePalette::Ember.stops();
-    let colors = [
-        user[0].lerp(ember[0], a),
-        user[1].lerp(ember[1], a),
-        user[2].lerp(ember[2], a),
-    ];
-    (params_a, colors)
+    let intensity = state.intensity * AURA_BRIGHTNESS * (1.0 - a * 0.3);
+    // Audio-swelled billboard size: the flame visibly breathes with the music
+    // (intensity term) and swells on the beat-weighted bass drive. Clamped at
+    // 1.5x — fill cost scales with the square of this factor, so the ceiling
+    // bounds the worst-case raster load at ~2.25x for beat instants only.
+    let quad_half =
+        QUAD_HALF_PX * (0.85 + 0.2 * state.intensity + 0.35 * state.bass_drive).min(1.5);
+    RadianceAuraUniform {
+        params: Vec4::new(intensity, quad_half, state.sparkle, elapsed),
+        slot_colors,
+    }
+}
+
+/// Per-slot fade vector from the tracking state, with the phantom fallback:
+/// when no slot is occupied at all (the attract phantom and the
+/// pre-tracking spawn frame write mask/edges without a `TrackedBody`),
+/// slot 0 gets full fade so those single-body writers keep rendering.
+/// Occupied slots ride their real envelope — including fading-out bodies,
+/// which is exactly what keeps a leaving dancer's figure easing away.
+#[cfg(feature = "body-tracking-mediapipe")]
+#[must_use]
+pub fn slot_fades(body: Option<&wc_core::input::body::BodyTrackingState>) -> Vec4 {
+    let Some(state) = body else {
+        return Vec4::new(1.0, 0.0, 0.0, 0.0);
+    };
+    let mut fades = Vec4::ZERO;
+    let mut any = false;
+    for b in state.iter_bodies() {
+        if b.slot < 4 {
+            fades[b.slot] = b.fade.clamp(0.0, 1.0);
+            any = true;
+        }
+    }
+    if any {
+        fades
+    } else {
+        Vec4::new(1.0, 0.0, 0.0, 0.0)
+    }
 }
 
 /// `Update` (gated `in_state(AppState::Radiance)` — runs through Idle and
@@ -304,23 +378,25 @@ pub fn drive_radiance_materials(
     mut particle_materials: ResMut<'_, Assets<RadianceMaterial>>,
     mut silhouette_materials: ResMut<'_, Assets<RadianceSilhouetteMaterial>>,
 ) {
-    let (params_a, colors) = particle_material_params(&state, settings.palette, fade.alpha());
-    let params_b = Vec4::new(time.elapsed_secs(), 0.0, 0.0, 0.0);
+    // One derivation feeds every layer (particles, rims, and — via the same
+    // helper — pulses and sparkles), so the per-body identity can never
+    // drift between draws.
+    let slot_colors = slot_identity_colors(
+        settings.palette,
+        state.hue_phase,
+        settings.hue_spread,
+        fade.alpha(),
+    );
+    let aura = particle_material_params(&state, slot_colors, fade.alpha(), time.elapsed_secs());
     for handle in &particle_roots {
         if let Some(mut material) = particle_materials.get_mut(&handle.0) {
-            material.params_a = params_a;
-            material.color_a = colors[0];
-            material.color_b = colors[1];
-            material.color_c = colors[2];
-            material.params_b = params_b;
+            material.aura = aura;
         }
     }
-    // Rim takes the palette's hottest stop (ember-blended like the
-    // particles); the debug lane routes the raw-mask overlay. The rim's
-    // brightness rides the audio: the dancer's outline glows with the level
-    // and flashes on every onset — the single most legible reactive lane on
-    // a busy floor.
-    let rim = colors[2];
+    // Rim brightness rides the audio: every dancer's outline glows with the
+    // level and flashes on every onset — the single most legible reactive
+    // lane on a busy floor. Per-slot rim colors are the identity colors with
+    // HDR headroom so the rims bloom.
     let rim_drive = (0.7 + 0.35 * state.intensity + 0.6 * state.onset_env).min(2.2);
     let fill_params = Vec4::new(
         settings.silhouette_fill,
@@ -344,19 +420,16 @@ pub fn drive_radiance_materials(
         f32::from(u8::from(settings.mask_debug_overlay)),
         fit_aspect,
     );
-    // The silhouette renders the PRIMARY body's mask channel (slot 0 when
-    // nobody is tracked — also the synthetic/phantom writers' slot, so the
-    // capture and attract paths keep their single-body look). A later
-    // radiance overhaul can draw all four channels with per-body colors.
-    let primary_slot = body.as_ref().and_then(|b| b.primary).unwrap_or(0);
-    let channel_select = channel_select_for_slot(primary_slot);
+    let slots = RadianceSilhouetteSlots {
+        rim_colors: slot_colors.map(|c| (c * 1.3).with_w(1.0)),
+        fades: slot_fades(body.as_deref()),
+    };
     for handle in &silhouette_roots {
         if let Some(mut material) = silhouette_materials.get_mut(&handle.0) {
             material.fill_params = fill_params;
             material.effect_params = effect_params;
             material.fill_color = silhouette_fill_color();
-            material.rim_color = rim;
-            material.channel_select = channel_select;
+            material.slots = slots;
         }
     }
 }
@@ -365,54 +438,60 @@ pub fn drive_radiance_materials(
 mod tests {
     use super::*;
 
-    /// Fade 0 (Active) uses the user palette verbatim; fade 1 lands on the
-    /// ember stops with intensity eased to 70%.
+    /// Fade 0 (Active) uses the palette identity verbatim; fade 1 lands on
+    /// the ember identity with intensity eased to 70%.
     #[test]
     fn particle_params_blend_to_ember_on_fade() {
         let state = RadianceState {
             onset_env: 0.0,
             intensity: 1.0,
             sparkle: 0.4,
-            palette_shift: 0.25,
             ..RadianceState::default()
         };
-        let (pa0, c0) = particle_material_params(&state, RadiancePalette::Prism, 0.0);
-        assert!((pa0.x - 1.0).abs() < 1e-6);
-        assert!((pa0.z - 0.25).abs() < 1e-6);
-        assert_eq!(c0, RadiancePalette::Prism.stops());
-        let (pa1, c1) = particle_material_params(&state, RadiancePalette::Prism, 1.0);
-        assert!((pa1.x - 0.7).abs() < 1e-6, "ember intensity ease");
-        assert_eq!(c1, RadiancePalette::Ember.stops());
+        let c0 = slot_identity_colors(RadiancePalette::Prism, 0.0, 0.0, 0.0);
+        let a0 = particle_material_params(&state, c0, 0.0, 3.0);
+        assert!((a0.params.x - AURA_BRIGHTNESS).abs() < 1e-6);
+        assert!((a0.params.z - 0.4).abs() < 1e-6, "sparkle lane");
+        assert!((a0.params.w - 3.0).abs() < 1e-6, "elapsed lane");
+        assert_eq!(c0[0], RadiancePalette::Prism.stops()[1]);
+        let c1 = slot_identity_colors(RadiancePalette::Prism, 0.0, 0.0, 1.0);
+        let a1 = particle_material_params(&state, c1, 1.0, 3.0);
+        assert!(
+            (a1.params.x - 0.7 * AURA_BRIGHTNESS).abs() < 1e-6,
+            "ember intensity ease"
+        );
+        assert_eq!(c1[0], RadiancePalette::Ember.stops()[1]);
     }
 
-    /// The quad half-size lane swells with intensity + onset and clamps at
-    /// 1.5x the base constant.
+    /// The quad half-size lane swells with intensity + the bass drive and
+    /// clamps at 1.5x the base constant.
     #[test]
     fn particle_params_swell_quad_half_with_audio() {
+        let colors = [Vec4::ONE; 4];
         let quiet = RadianceState::default();
-        let (pa, _) = particle_material_params(&quiet, RadiancePalette::Ocean, 0.0);
+        let a = particle_material_params(&quiet, colors, 0.0, 0.0);
         assert!(
-            (pa.y - QUAD_HALF_PX * 0.85).abs() < 1e-5,
+            (a.params.y - QUAD_HALF_PX * 0.85).abs() < 1e-5,
             "quiet floor: {}",
-            pa.y
+            a.params.y
         );
         let loud = RadianceState {
             intensity: 1.0,
-            onset_env: 1.0,
+            bass_drive: 1.0,
             ..RadianceState::default()
         };
-        let (pa_loud, _) = particle_material_params(&loud, RadiancePalette::Ocean, 0.0);
-        assert!(pa_loud.y > pa.y, "audio must swell the billboards");
+        let a_loud = particle_material_params(&loud, colors, 0.0, 0.0);
+        assert!(a_loud.params.y > a.params.y, "audio must swell the flame");
         let slammed = RadianceState {
-            intensity: 2.0,
-            onset_env: 2.0,
+            intensity: 2.5,
+            bass_drive: 1.0,
             ..RadianceState::default()
         };
-        let (pa_max, _) = particle_material_params(&slammed, RadiancePalette::Ocean, 0.0);
+        let a_max = particle_material_params(&slammed, colors, 0.0, 0.0);
         assert!(
-            (pa_max.y - QUAD_HALF_PX * 1.5).abs() < 1e-5,
+            (a_max.params.y - QUAD_HALF_PX * 1.5).abs() < 1e-5,
             "swell clamps at 1.5x: {}",
-            pa_max.y
+            a_max.params.y
         );
     }
 
@@ -452,16 +531,62 @@ mod tests {
         assert!((rotated.w - 1.0).abs() < f32::EPSILON, "alpha untouched");
     }
 
-    /// A rotated palette feeds through to the packed stops (fade 0).
+    /// Slot identities: slot 0 is the palette hue verbatim; the spread
+    /// rotates each further slot by `slot × spread` turns; every slot keeps
+    /// the same HDR value (distinct but equally vivid dancers); spread 0
+    /// collapses to one shared identity.
     #[test]
-    fn particle_params_apply_hue_phase() {
-        let state = RadianceState {
-            intensity: 1.0,
-            hue_phase: 0.5,
-            ..RadianceState::default()
-        };
-        let (_, colors) = particle_material_params(&state, RadiancePalette::Prism, 0.0);
-        let expected = RadiancePalette::Prism.stops().map(|c| rotate_hue(c, 0.5));
-        assert_eq!(colors, expected);
+    fn slot_identities_spread_harmoniously() {
+        let spread = 0.13;
+        let colors = slot_identity_colors(RadiancePalette::Prism, 0.2, spread, 0.0);
+        let base = RadiancePalette::Prism.stops()[1];
+        for (slot, c) in colors.iter().enumerate() {
+            #[allow(
+                clippy::as_conversions,
+                clippy::cast_precision_loss,
+                reason = "slot index 0..4, exact in f32"
+            )]
+            let expect = rotate_hue(base, 0.2 + slot as f32 * spread);
+            assert_eq!(*c, expect, "slot {slot}");
+            let value = c.x.max(c.y).max(c.z);
+            let expect_value = base.x.max(base.y).max(base.z);
+            assert!(
+                (value - expect_value).abs() < 1e-5,
+                "equal vividness: slot {slot} {c}"
+            );
+        }
+        assert_ne!(colors[0], colors[1], "spread separates identities");
+        let flat = slot_identity_colors(RadiancePalette::Prism, 0.2, 0.0, 0.0);
+        assert_eq!(flat[0], flat[3], "zero spread collapses to one identity");
+    }
+
+    /// The fade vector mirrors occupied slots' envelopes (including
+    /// fading-out bodies) and falls back to slot 0 when nothing is tracked
+    /// (the phantom/synthetic single-body writers).
+    #[test]
+    fn slot_fades_ride_envelopes_with_phantom_fallback() {
+        use wc_core::input::body::{BodyTrackingState, TrackedBody};
+        assert_eq!(slot_fades(None), Vec4::new(1.0, 0.0, 0.0, 0.0));
+        let empty = BodyTrackingState::default();
+        assert_eq!(
+            slot_fades(Some(&empty)),
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            "no occupied slot -> phantom fallback"
+        );
+        let mut state = BodyTrackingState::default();
+        state.bodies[1] = Some(TrackedBody {
+            slot: 1,
+            present: true,
+            fade: 0.6,
+            ..TrackedBody::default()
+        });
+        state.bodies[2] = Some(TrackedBody {
+            slot: 2,
+            present: false, // fading out
+            fade: 0.25,
+            ..TrackedBody::default()
+        });
+        let fades = slot_fades(Some(&state));
+        assert_eq!(fades, Vec4::new(0.0, 0.6, 0.25, 0.0));
     }
 }

@@ -606,6 +606,7 @@ mod tests {
             force_flame_warp: false,
             force_flame_camera_pose: false,
             force_radiance_synthetic_body: false,
+            force_radiance_synthetic_duo: false,
         };
         assert_eq!(effective_tier(&thermal, Some(&forced)), ThermalTier::Hot);
         assert_eq!(effective_tier(&thermal, None), ThermalTier::Cool);

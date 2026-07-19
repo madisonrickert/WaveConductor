@@ -452,6 +452,7 @@ mod tests {
             force_flame_warp: false,
             force_flame_camera_pose: false,
             force_radiance_synthetic_body: false,
+            force_radiance_synthetic_duo: false,
         };
         // No toggles set → node registered.
         assert!(should_register_explode(None));

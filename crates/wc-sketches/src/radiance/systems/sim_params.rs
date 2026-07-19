@@ -15,7 +15,9 @@ use wc_core::audio::input::AudioAnalysis;
 use wc_core::input::body::landmark_index::{
     LEFT_ANKLE, LEFT_HIP, LEFT_WRIST, NOSE, RIGHT_ANKLE, RIGHT_HIP, RIGHT_WRIST,
 };
-use wc_core::input::body::{BodyTrackingState, SilhouetteEdges, TrackedBody, MAX_EDGE_POINTS};
+use wc_core::input::body::{
+    BodyTrackingState, SilhouetteEdges, MAX_EDGE_POINTS, MAX_TRACKED_BODIES,
+};
 
 use crate::radiance::compute::sim_params::{
     RadianceImpulse, RadianceSimParams, RadianceSimParamsGpu, MAX_IMPULSES,
@@ -41,25 +43,46 @@ pub const IMPULSE_LANDMARKS: [usize; 7] = [
 pub const DT_CAP: f32 = 0.05;
 /// Per-dead-particle respawn attempts per second at `emission_rate == 1.0`
 /// and neutral audio. The baker multiplies by the bass drive and `dt`.
-pub const EMISSION_BASE_HZ: f32 = 2.5;
+pub const EMISSION_BASE_HZ: f32 = 0.2;
 /// Onset envelope exponential release time constant, seconds.
 pub const ONSET_DECAY_SECS: f32 = 0.18;
 /// Onset envelope clamp (spectral flux is unbounded above).
 pub const ONSET_MAX: f32 = 2.0;
-/// Outward burst speed at full onset envelope, world px/s.
-pub const BURST_SPEED: f32 = 260.0;
+/// Outward burst speed at full onset envelope, world px/s. A gentle global
+/// push — the drama of a hit lives in the ejecta layer (see
+/// [`EJECTA_SPEED`]), so this stays small enough that the flame body swells
+/// rather than detaching wholesale.
+pub const BURST_SPEED: f32 = 90.0;
 /// Spawn offset along the outward normal, world px.
 pub const SPAWN_OFFSET: f32 = 4.0;
 /// Baseline spawn speed along the outward normal, world px/s.
 pub const SPAWN_SPEED: f32 = 70.0;
 /// Particle lifespan range, seconds.
-pub const LIFESPAN_MIN: f32 = 1.2;
+pub const LIFESPAN_MIN: f32 = 0.8;
 /// See [`LIFESPAN_MIN`].
-pub const LIFESPAN_MAX: f32 = 3.4;
+pub const LIFESPAN_MAX: f32 = 2.2;
+/// Ejecta launch speed at neutral intensity, world px/s (the "shooting
+/// particles" of an onset hit; the render shader streaks anything this fast).
+pub const EJECTA_SPEED: f32 = 480.0;
+/// Baseline fraction of spawns that are ejecta with **zero** onset — a few
+/// stray sparks keep the flame alive-looking between hits.
+pub const EJECTA_BASE_FRACTION: f32 = 0.01;
+/// Extra ejecta fraction at full onset envelope (scaled by the
+/// `ejecta_amount` setting).
+pub const EJECTA_ONSET_FRACTION: f32 = 0.35;
+/// Flame-tongue spatial frequency, radians per world px (~300 px wavelength:
+/// two to three licking tongues across a standing figure).
+pub const TONGUE_FREQ: f32 = 0.017;
+/// Emission-share boost for an igniting body (fade rising through the low
+/// range): the appearing dancer's flame catches with a visible flare while
+/// the *total* budget stays constant (weights are normalized).
+pub const IGNITE_BOOST: f32 = 2.5;
+/// Fade ceiling below which a rising body still counts as igniting.
+pub const IGNITE_FADE_CEIL: f32 = 0.7;
 /// Velocity fraction remaining after one second of drag.
 pub const DRAG_PER_SECOND: f32 = 0.25;
 /// Curl spatial frequency, radians per world px (~785 px swirl wavelength).
-pub const CURL_SCALE: f32 = 0.008;
+pub const CURL_SCALE: f32 = 0.012;
 /// Limb impulse influence radius, world px.
 pub const IMPULSE_RADIUS: f32 = 140.0;
 /// Limb speed (world px/s) that maps to impulse gain 1.0.
@@ -100,6 +123,14 @@ pub struct RadianceState {
     /// Palette hue-rotation phase in `0..1` (wraps; 1 = one full spectrum
     /// rotation). Advanced by `hue_cycle_speed`, accelerated by bass.
     pub hue_phase: f32,
+    /// Smoothed bass drive (`0..1`, the [`band_drive`]-normalized bass lane):
+    /// the beat-weighted "flame swell" signal shared by the billboard-size
+    /// breathing and the beat-pulse strength.
+    pub bass_drive: f32,
+    /// Previous frame's per-slot fade envelopes — the ignite detector
+    /// compares against these to spot a body fading *in* (see
+    /// [`emission_slot_weights`]).
+    pub slot_fade_prev: [f32; MAX_TRACKED_BODIES],
 }
 
 /// The neutral [`AudioAnalysis`] used when the resource is absent (headless
@@ -147,6 +178,9 @@ pub struct AudioDrive {
     pub intensity: f32,
     /// Raw onset strength this frame, sensitivity-scaled and clamped.
     pub onset: f32,
+    /// Normalized bass drive `0..1` (the [`band_drive`] lane the multipliers
+    /// above are built from), exposed for the tongue/swell/pulse consumers.
+    pub bass: f32,
 }
 
 /// Contrast-expanded, room-adaptive band drive: `value` relative to its own
@@ -194,6 +228,7 @@ pub fn audio_drive(
         // intensity ~0.63..0.89 before the beat term).
         intensity: 0.5 + (1.7 * audio.rms + 0.3 * audio.beat_confidence) * s,
         onset: (audio.onset * s).clamp(0.0, ONSET_MAX),
+        bass: (bass_n * s).clamp(0.0, 1.0),
     }
 }
 
@@ -206,13 +241,81 @@ pub fn band_aggregates(audio: &AudioAnalysis) -> (f32, f32) {
     (bass, highs)
 }
 
+/// Apportion the **shared** particle budget across body slots: normalized
+/// fade-weighted spawn shares (density stays constant as dancers come and
+/// go — four dancers each get a quarter of the flame, not four flames).
+///
+/// - A slot with no edge points this frame gets zero share (nothing to
+///   spawn on).
+/// - An *igniting* slot (fade rising through the low range — a dancer
+///   appearing) gets an [`IGNITE_BOOST`]× share so its flame catches with a
+///   visible flare; the boost shifts share, never raises the total.
+/// - When **no** slot carries fade (the attract phantom and the synthetic
+///   writers publish mask/edges without `TrackedBody` entries), shares fall
+///   back to each slot's edge-count proportion so those single-body paths
+///   keep their flame.
+/// - All-zero output (no edges anywhere) means "spawn nothing".
+#[must_use]
+pub fn emission_slot_weights(
+    fades: [f32; MAX_TRACKED_BODIES],
+    igniting: [bool; MAX_TRACKED_BODIES],
+    counts: [usize; MAX_TRACKED_BODIES],
+) -> [f32; MAX_TRACKED_BODIES] {
+    let mut weights = [0.0_f32; MAX_TRACKED_BODIES];
+    let mut sum = 0.0_f32;
+    for i in 0..MAX_TRACKED_BODIES {
+        if counts[i] == 0 {
+            continue;
+        }
+        let boost = if igniting[i] { IGNITE_BOOST } else { 1.0 };
+        weights[i] = fades[i].clamp(0.0, 1.0) * boost;
+        sum += weights[i];
+    }
+    if sum <= f32::EPSILON {
+        // Phantom/synthetic fallback: no tracked fades but edges exist.
+        let total: usize = counts.iter().sum();
+        if total == 0 {
+            return [0.0; MAX_TRACKED_BODIES];
+        }
+        #[allow(
+            clippy::as_conversions,
+            clippy::cast_precision_loss,
+            reason = "edge counts are bounded by MAX_EDGE_POINTS (2048), exact in f32"
+        )]
+        for (w, &c) in weights.iter_mut().zip(counts.iter()) {
+            *w = c as f32 / total as f32;
+        }
+        return weights;
+    }
+    for w in &mut weights {
+        *w /= sum;
+    }
+    weights
+}
+
+/// Fold normalized weights into the monotone CDF the kernel samples
+/// (`pick_slot`: first `i` with `rand < cdf[i]`). All-zero weights stay an
+/// all-zero CDF, which the kernel reads as "no live slot".
+#[must_use]
+pub fn weights_to_cdf(weights: [f32; MAX_TRACKED_BODIES]) -> [f32; MAX_TRACKED_BODIES] {
+    let mut cdf = [0.0_f32; MAX_TRACKED_BODIES];
+    let mut acc = 0.0_f32;
+    for (c, w) in cdf.iter_mut().zip(weights.iter()) {
+        acc += w;
+        *c = acc;
+    }
+    cdf
+}
+
 /// One baker, two writers (live + screensaver) — flame's Condition A1.
 ///
 /// Advances the [`RadianceState`] envelopes (onset attack/release, smoothed
-/// intensity/sparkle, palette shift), then writes every field of the kernel
-/// uniform: audio-scaled emission/buoyancy/turbulence, the onset burst, the
-/// mask-UV→world transform for the current window + mirror setting, and up to
-/// [`MAX_IMPULSES`] limb impulse slots from the smoothed landmark velocities.
+/// intensity/sparkle/bass, palette shift), then writes every field of the
+/// kernel uniform: audio-scaled emission/buoyancy/turbulence, the
+/// beat-weighted swell, the onset ejecta lane, the per-slot edge ranges +
+/// fade-weighted emission CDF (multi-body budget apportioning), the
+/// mask-UV→world transform for the current window + mirror setting, and up
+/// to [`MAX_IMPULSES`] limb impulse slots fanned across every present body.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::as_conversions,
@@ -229,8 +332,8 @@ pub fn band_aggregates(audio: &AudioAnalysis) -> (f32, f32) {
 pub fn bake_radiance_sim(
     settings: &RadianceSettings,
     audio: &AudioAnalysis,
-    body: Option<&TrackedBody>,
-    edge_count: usize,
+    bodies: Option<&BodyTrackingState>,
+    slot_counts: [usize; MAX_TRACKED_BODIES],
     window_size: Vec2,
     dt: f32,
     elapsed: f32,
@@ -238,36 +341,41 @@ pub fn bake_radiance_sim(
     out: &mut RadianceSimParamsGpu,
 ) {
     let dt = dt.min(DT_CAP);
+    let sensitivity = settings.audio_sensitivity.max(0.0);
     // Advance the slow per-aggregate running means the band drives are
     // normalized by (room-adaptive contrast expansion — see `band_drive`).
     let (bass_raw, highs_raw) = band_aggregates(audio);
     let kn = 1.0 - (-dt / BAND_NORM_TAU_S).exp();
     state.bass_avg += (bass_raw - state.bass_avg) * kn;
     state.highs_avg += (highs_raw - state.highs_avg) * kn;
-    let drive = audio_drive(
-        audio,
-        settings.audio_sensitivity,
-        state.bass_avg,
-        state.highs_avg,
-    );
+    let drive = audio_drive(audio, sensitivity, state.bass_avg, state.highs_avg);
 
     // Onset envelope: instant attack to the incoming strength, exponential
     // release — so one drum hit reads as one burst, not a sustained gale.
     let released = state.onset_env * (-dt / ONSET_DECAY_SECS).exp();
     state.onset_env = released.max(drive.onset);
-    // Smoothed intensity/sparkle (one-pole toward the drive targets).
+    // Smoothed intensity/sparkle/bass (one-pole toward the drive targets).
     let k = 1.0 - (-dt / ENVELOPE_SMOOTH_SECS).exp();
     state.intensity += (drive.intensity - state.intensity) * k;
     state.sparkle += (drive.sparkle - state.sparkle) * k;
+    state.bass_drive += (drive.bass - state.bass_drive) * k;
     // Palette drifts slowly, faster under bass (audio-shifted gradient).
     state.palette_shift =
         (state.palette_shift + dt * (0.02 + 0.10 * (drive.emission_mul - 1.0))).fract();
     // Hue rotation phase: the psychedelic full-spectrum drift. Base rate from
     // the setting, accelerated up to ~2.8x by the bass drive so heavy
-    // sections push the whole palette around the wheel.
+    // sections push the whole palette around the wheel. The mid/high lane
+    // adds a subtle shimmer-rate term (spec: highs drive color shimmer,
+    // never the big pulses).
     state.hue_phase = (state.hue_phase
-        + dt * settings.hue_cycle_speed * (1.0 + 1.2 * (drive.emission_mul - 1.0)))
+        + dt * settings.hue_cycle_speed
+            * (1.0 + 0.6 * (drive.emission_mul - 1.0) + 0.4 * state.sparkle))
         .fract();
+
+    // Beat swell: the debounced beat lane pumps emission + buoyancy so the
+    // whole flame visibly SWELLS on the beat (bass-weighted per the spec —
+    // this multiplies the bass-derived drive, it does not replace it).
+    let beat_swell = 1.0 + 0.5 * audio.beat_confidence * sensitivity.min(1.5);
 
     out.dt = dt;
     out.time = elapsed;
@@ -277,12 +385,12 @@ pub fn bake_radiance_sim(
     // same 1/60 s bucket.
     out.frame = out.frame.wrapping_add(1);
     out.emission_prob =
-        (settings.emission_rate * drive.emission_mul * EMISSION_BASE_HZ * dt).clamp(0.0, 1.0);
-    out.edge_count = edge_count.min(MAX_EDGE_POINTS) as u32;
+        (settings.emission_rate * drive.emission_mul * beat_swell * EMISSION_BASE_HZ * dt)
+            .clamp(0.0, 1.0);
     out.spawn_offset = SPAWN_OFFSET;
     out.spawn_speed = SPAWN_SPEED * (0.6 + 0.4 * state.intensity);
     out.burst_speed = state.onset_env * BURST_SPEED;
-    out.buoyancy = settings.buoyancy * drive.buoyancy_mul;
+    out.buoyancy = settings.buoyancy * drive.buoyancy_mul * beat_swell;
     out.flow_strength = settings.flow_strength * drive.turbulence_mul;
     out.curl_scale = CURL_SCALE;
     out.curl_octaves = settings.curl_octaves.clamp(1, 3);
@@ -290,6 +398,50 @@ pub fn bake_radiance_sim(
     out.lifespan_min = LIFESPAN_MIN;
     out.lifespan_max = LIFESPAN_MAX;
     out.mirror = u32::from(settings.mirror);
+
+    // Ejecta lane: onsets convert a fraction of spawns into fast shooting
+    // sparks (the kernel rolls per spawn; render streaks them by velocity).
+    out.ejecta_prob = (settings.ejecta_amount
+        * (EJECTA_BASE_FRACTION + EJECTA_ONSET_FRACTION * (state.onset_env / ONSET_MAX)))
+        .clamp(0.0, 1.0);
+    out.ejecta_speed = EJECTA_SPEED * (0.8 + 0.4 * state.intensity);
+    // Flame tongues: buoyancy noise amplitude breathes with the bass drive
+    // (the tongue multiplier can dip briefly ~zero at full strength + full
+    // bass — a transient local downdraft reads as organic flicker).
+    out.tongue_amp = settings.tongue_strength * (0.55 + 0.5 * state.bass_drive);
+    out.tongue_freq = TONGUE_FREQ;
+
+    // Per-slot edge ranges: `SilhouetteEdges` concatenates slots ascending,
+    // so starts are the prefix sums; counts clamp so `start + count` stays
+    // inside the uploaded MAX_EDGE_POINTS prefix.
+    let mut start = 0_usize;
+    let mut fades = [0.0_f32; MAX_TRACKED_BODIES];
+    let mut igniting = [false; MAX_TRACKED_BODIES];
+    let mut clamped_counts = [0_usize; MAX_TRACKED_BODIES];
+    for i in 0..MAX_TRACKED_BODIES {
+        let clamped = slot_counts[i].min(MAX_EDGE_POINTS.saturating_sub(start));
+        out.slot_start[i] = start as u32;
+        out.slot_count[i] = clamped as u32;
+        clamped_counts[i] = clamped;
+        start += clamped;
+    }
+    out.edge_count = start as u32;
+
+    // Per-slot fades + the ignite detector (fade rising through the low
+    // range = a dancer appearing; their flame catches with a flare).
+    if let Some(bodies) = bodies {
+        for body in bodies.iter_bodies() {
+            if body.slot < MAX_TRACKED_BODIES {
+                let fade = body.fade.clamp(0.0, 1.0);
+                fades[body.slot] = fade;
+                igniting[body.slot] =
+                    fade > state.slot_fade_prev[body.slot] + 1e-4 && fade < IGNITE_FADE_CEIL;
+            }
+        }
+    }
+    out.slot_cdf = weights_to_cdf(emission_slot_weights(fades, igniting, clamped_counts));
+    state.slot_fade_prev = fades;
+
     // Mask → world scale. The mask is square; the `fit_to_height` setting maps
     // it to a centred height×height square so the dancer keeps its proportions
     // on non-square displays (portrait installs — a 9:16 screen otherwise
@@ -305,13 +457,30 @@ pub fn bake_radiance_sim(
     };
 
     // Limb impulses from the smoothed landmark velocities.
+    bake_impulses(bodies, settings.mirror, out);
+    // particle_count is owned by spawn (buffer size); the baker leaves it.
+}
+
+/// Fan the limb impulses across EVERY present body in slot order until the
+/// eight [`MAX_IMPULSES`] slots fill (one dancer uses at most seven, so a
+/// duo always gets at least one slot). Stale slots past the live count are
+/// zeroed so a limb dropping out of frame cannot leave a ghost impulse.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::as_conversions,
+    reason = "impulse count <= MAX_IMPULSES (8); usize -> u32 is exact"
+)]
+fn bake_impulses(bodies: Option<&BodyTrackingState>, mirror: bool, out: &mut RadianceSimParamsGpu) {
     let scale = Vec2::new(out.uv_to_world[0], out.uv_to_world[1]);
     let mut n = 0usize;
-    if let Some(body) = body {
-        if body.present {
+    if let Some(bodies) = bodies {
+        'bodies: for body in bodies.iter_bodies() {
+            if !body.present {
+                continue;
+            }
             for &lm in &IMPULSE_LANDMARKS {
                 if n >= MAX_IMPULSES {
-                    break;
+                    break 'bodies;
                 }
                 let landmark = body.landmarks[lm];
                 if landmark.visibility < 0.5 {
@@ -320,17 +489,14 @@ pub fn bake_radiance_sim(
                 let vel = mask_dir_to_world(
                     Vec2::new(body.velocities[lm].x, body.velocities[lm].y),
                     scale,
-                    settings.mirror,
+                    mirror,
                 );
                 let gain = (vel.length() / IMPULSE_FULL_SPEED).clamp(0.0, 1.0);
                 if gain < 0.05 {
                     continue; // resting limbs shed nothing
                 }
-                let pos = mask_uv_to_world(
-                    Vec2::new(landmark.pos.x, landmark.pos.y),
-                    scale,
-                    settings.mirror,
-                );
+                let pos =
+                    mask_uv_to_world(Vec2::new(landmark.pos.x, landmark.pos.y), scale, mirror);
                 out.impulses[n] = RadianceImpulse {
                     position: pos.into(),
                     velocity: vel.into(),
@@ -342,13 +508,10 @@ pub fn bake_radiance_sim(
             }
         }
     }
-    // Zero stale slots past the live count so a limb dropping out of frame
-    // cannot leave a ghost impulse.
     for slot in out.impulses.iter_mut().skip(n) {
         *slot = RadianceImpulse::default();
     }
     out.impulse_count = n as u32;
-    // particle_count is owned by spawn (buffer size); the baker leaves it.
 }
 
 /// `Update` (gated `sketch_active(AppState::Radiance)`): the live writer.
@@ -365,16 +528,13 @@ pub fn update_radiance_sim(
     mut sim: ResMut<'_, RadianceSimParams>,
 ) {
     let audio_frame = audio.map_or_else(neutral_audio, |a| *a);
-    let edge_count = edges.map_or(0, |e| e.points.len());
+    let slot_counts = edges.map_or([0; MAX_TRACKED_BODIES], |e| e.slot_counts);
     let window_size = Vec2::new(window.width(), window.height());
-    // Multi-body migration: limb impulses ride the PRIMARY (featured) body;
-    // a later radiance overhaul may fan impulses out across all slots.
-    let primary = body.as_deref().and_then(BodyTrackingState::primary);
     bake_radiance_sim(
         &settings,
         &audio_frame,
-        primary,
-        edge_count,
+        body.as_deref(),
+        slot_counts,
         window_size,
         time.delta_secs(),
         time.elapsed_secs(),
@@ -390,13 +550,14 @@ pub fn update_radiance_sim(
 pub fn freeze_radiance_emission(mut sim: ResMut<'_, RadianceSimParams>) {
     sim.params.emission_prob = 0.0;
     sim.params.burst_speed = 0.0;
+    sim.params.ejecta_prob = 0.0;
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
-    use wc_core::input::body::{BodyLandmark, BODY_LANDMARK_COUNT};
+    use wc_core::input::body::{BodyLandmark, TrackedBody, BODY_LANDMARK_COUNT};
 
     fn fixture_audio(bands: [f32; 8], rms: f32, onset: f32) -> AudioAnalysis {
         AudioAnalysis {
@@ -434,10 +595,20 @@ mod tests {
         }
     }
 
+    /// Wrap a single body (in its own slot) into the tracking-state shape
+    /// the baker consumes.
+    fn tracking_state(body: TrackedBody) -> BodyTrackingState {
+        let mut state = BodyTrackingState::default();
+        let slot = body.slot.min(MAX_TRACKED_BODIES - 1);
+        state.primary = body.present.then_some(slot);
+        state.bodies[slot] = Some(body);
+        state
+    }
+
     fn bake(
         settings: &RadianceSettings,
         audio: &AudioAnalysis,
-        body: Option<&TrackedBody>,
+        bodies: Option<&BodyTrackingState>,
         edge_count: usize,
     ) -> (RadianceState, RadianceSimParamsGpu) {
         let mut state = RadianceState::default();
@@ -445,8 +616,8 @@ mod tests {
         bake_radiance_sim(
             settings,
             audio,
-            body,
-            edge_count,
+            bodies,
+            [edge_count, 0, 0, 0],
             Vec2::new(1920.0, 1080.0),
             1.0 / 60.0,
             10.0,
@@ -560,7 +731,7 @@ mod tests {
                 &settings,
                 &sustained,
                 None,
-                100,
+                [100, 0, 0, 0],
                 win,
                 1.0 / 60.0,
                 0.0,
@@ -611,7 +782,7 @@ mod tests {
             &settings,
             &hit,
             None,
-            100,
+            [100, 0, 0, 0],
             win,
             1.0 / 60.0,
             0.0,
@@ -625,7 +796,7 @@ mod tests {
                 &settings,
                 &silence,
                 None,
-                100,
+                [100, 0, 0, 0],
                 win,
                 1.0 / 60.0,
                 0.0,
@@ -645,7 +816,7 @@ mod tests {
     #[test]
     fn bake_bakes_wrist_impulse_with_mirror_mapping() {
         let settings = RadianceSettings::default(); // mirror = true
-        let body = fixture_body(Vec3::new(0.8, 0.0, 0.0)); // fast +u sweep
+        let body = tracking_state(fixture_body(Vec3::new(0.8, 0.0, 0.0))); // fast +u sweep
         let (_, out) = bake(&settings, &neutral_audio(), Some(&body), 500);
         assert_eq!(out.impulse_count, 1, "one moving limb -> one slot");
         let imp = out.impulses[0];
@@ -673,7 +844,7 @@ mod tests {
         let settings = RadianceSettings::default();
         let (_, out) = bake(&settings, &neutral_audio(), None, 500);
         assert_eq!(out.impulse_count, 0);
-        let still = fixture_body(Vec3::ZERO);
+        let still = tracking_state(fixture_body(Vec3::ZERO));
         let (_, out) = bake(&settings, &neutral_audio(), Some(&still), 500);
         assert_eq!(out.impulse_count, 0, "resting limbs shed nothing");
     }
@@ -687,6 +858,155 @@ mod tests {
             out.edge_count,
             u32::try_from(MAX_EDGE_POINTS).expect("fits")
         );
+    }
+
+    /// Fade-weighted apportioning: shares are normalized (constant total
+    /// density), zero-edge slots get nothing, and an igniting slot's share
+    /// is boosted at its sibling's expense — never the total's.
+    #[test]
+    fn emission_weights_apportion_by_fade() {
+        // Two full-fade bodies with edges split the budget evenly.
+        let w = emission_slot_weights([1.0, 1.0, 0.0, 0.0], [false; 4], [300, 300, 0, 0]);
+        assert!((w[0] - 0.5).abs() < 1e-6 && (w[1] - 0.5).abs() < 1e-6);
+        // A half-faded second body takes a third of the budget.
+        let w = emission_slot_weights([1.0, 0.5, 0.0, 0.0], [false; 4], [300, 300, 0, 0]);
+        assert!((w[0] - 2.0 / 3.0).abs() < 1e-6 && (w[1] - 1.0 / 3.0).abs() < 1e-6);
+        // A slot with fade but no edges spawns nothing.
+        let w = emission_slot_weights([1.0, 1.0, 0.0, 0.0], [false; 4], [300, 0, 0, 0]);
+        assert!((w[0] - 1.0).abs() < 1e-6 && w[1].abs() < f32::EPSILON);
+        // Ignite boost shifts share toward the appearing body; sum stays 1.
+        let w = emission_slot_weights(
+            [1.0, 0.3, 0.0, 0.0],
+            [false, true, false, false],
+            [300, 300, 0, 0],
+        );
+        let boosted = 0.3 * IGNITE_BOOST;
+        assert!((w[1] - boosted / (1.0 + boosted)).abs() < 1e-6, "{w:?}");
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    /// Phantom fallback: no fades at all but edges present → edge-count
+    /// shares; no edges anywhere → all-zero (spawn nothing).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "exact zero sentinel comparison")]
+    fn emission_weights_phantom_fallback() {
+        let w = emission_slot_weights([0.0; 4], [false; 4], [400, 100, 0, 0]);
+        assert!((w[0] - 0.8).abs() < 1e-6 && (w[1] - 0.2).abs() < 1e-6);
+        let w = emission_slot_weights([0.0; 4], [false; 4], [0; 4]);
+        assert_eq!(w, [0.0; 4]);
+    }
+
+    /// The CDF is the running sum; all-zero weights stay all-zero (the
+    /// kernel's "no live slot" sentinel).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "exact zero sentinel comparison")]
+    fn weights_fold_to_monotone_cdf() {
+        let cdf = weights_to_cdf([0.25, 0.25, 0.0, 0.5]);
+        assert!((cdf[0] - 0.25).abs() < 1e-6);
+        assert!((cdf[1] - 0.5).abs() < 1e-6);
+        assert!((cdf[2] - 0.5).abs() < 1e-6);
+        assert!((cdf[3] - 1.0).abs() < 1e-6);
+        assert_eq!(weights_to_cdf([0.0; 4]), [0.0; 4]);
+    }
+
+    /// The baker writes the per-slot ranges and a fade-weighted CDF, clamped
+    /// into the uploaded edge prefix.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "fades pass through the baker unmodified")]
+    fn bake_packs_slot_ranges_and_cdf() {
+        let settings = RadianceSettings::default();
+        let mut state = RadianceState {
+            // Pre-seed the previous fades so neither body reads as *rising*
+            // (igniting) — this test checks the steady-state shares; the
+            // ignite boost has its own test in `emission_weights_apportion_by_fade`.
+            slot_fade_prev: [1.0, 0.5, 0.0, 0.0],
+            ..RadianceState::default()
+        };
+        let mut out = RadianceSimParamsGpu::default();
+        let mut bodies = BodyTrackingState::default();
+        bodies.bodies[0] = Some(TrackedBody {
+            slot: 0,
+            present: true,
+            fade: 1.0,
+            ..TrackedBody::default()
+        });
+        bodies.bodies[1] = Some(TrackedBody {
+            slot: 1,
+            present: true,
+            fade: 0.5,
+            ..TrackedBody::default()
+        });
+        bake_radiance_sim(
+            &settings,
+            &neutral_audio(),
+            Some(&bodies),
+            [200, 300, 0, 0],
+            Vec2::new(1920.0, 1080.0),
+            1.0 / 60.0,
+            0.0,
+            &mut state,
+            &mut out,
+        );
+        assert_eq!(out.slot_start, [0, 200, 500, 500]);
+        assert_eq!(out.slot_count, [200, 300, 0, 0]);
+        assert_eq!(out.edge_count, 500);
+        // Fades 1.0 / 0.5 → shares 2/3, 1/3 → CDF [2/3, 1, 1, 1].
+        assert!(
+            (out.slot_cdf[0] - 2.0 / 3.0).abs() < 1e-5,
+            "{:?}",
+            out.slot_cdf
+        );
+        assert!((out.slot_cdf[3] - 1.0).abs() < 1e-5);
+        assert_eq!(state.slot_fade_prev, [1.0, 0.5, 0.0, 0.0]);
+    }
+
+    /// A beat pumps emission + buoyancy over the identical no-beat frame
+    /// (the "flame swells on the beat" lane).
+    #[test]
+    fn bake_beat_swells_emission_and_buoyancy() {
+        let settings = RadianceSettings::default();
+        let base = fixture_audio([0.2; 8], 0.2, 0.0);
+        let mut on_beat = base;
+        on_beat.beat_confidence = 1.0;
+        let (_, quiet) = bake(&settings, &base, None, 500);
+        let (_, thump) = bake(&settings, &on_beat, None, 500);
+        assert!(thump.emission_prob > quiet.emission_prob * 1.3);
+        assert!(thump.buoyancy > quiet.buoyancy * 1.3);
+    }
+
+    /// Onsets raise the ejecta fraction; silence keeps the stray-spark floor;
+    /// `ejecta_amount = 0` disables the lane entirely.
+    #[test]
+    fn bake_onset_drives_ejecta() {
+        let settings = RadianceSettings::default();
+        let (_, calm) = bake(&settings, &neutral_audio(), None, 500);
+        let expect_floor = settings.ejecta_amount * EJECTA_BASE_FRACTION;
+        assert!((calm.ejecta_prob - expect_floor).abs() < 1e-6);
+        let hit = fixture_audio([0.3; 8], 0.3, 2.0);
+        let (_, driven) = bake(&settings, &hit, None, 500);
+        assert!(
+            driven.ejecta_prob > calm.ejecta_prob * 4.0,
+            "{}",
+            driven.ejecta_prob
+        );
+        assert!(driven.ejecta_speed > 0.0);
+        let mut off = settings.clone();
+        off.ejecta_amount = 0.0;
+        let (_, none) = bake(&off, &hit, None, 500);
+        assert!(none.ejecta_prob.abs() < f32::EPSILON);
+    }
+
+    /// Tongue amplitude follows the setting and breathes with bass; zero
+    /// setting pins it off (uniform buoyancy).
+    #[test]
+    fn bake_bakes_tongue_noise() {
+        let settings = RadianceSettings::default();
+        let (_, out) = bake(&settings, &neutral_audio(), None, 500);
+        assert!(out.tongue_amp > 0.0 && (out.tongue_freq - TONGUE_FREQ).abs() < f32::EPSILON);
+        let mut flat = settings.clone();
+        flat.tongue_strength = 0.0;
+        let (_, out) = bake(&flat, &neutral_audio(), None, 500);
+        assert!(out.tongue_amp.abs() < f32::EPSILON);
     }
 
     /// The per-bake frame counter advances every call (it salts the kernel's
@@ -703,7 +1023,7 @@ mod tests {
                 &settings,
                 &neutral_audio(),
                 None,
-                100,
+                [100, 0, 0, 0],
                 Vec2::new(1920.0, 1080.0),
                 1.0 / 60.0,
                 7.0, // pinned elapsed: the old time-based salt would not advance
@@ -730,6 +1050,7 @@ mod tests {
         let sim = world.resource::<RadianceSimParams>();
         assert!(sim.params.emission_prob.abs() < f32::EPSILON);
         assert!(sim.params.burst_speed.abs() < f32::EPSILON);
+        assert!(sim.params.ejecta_prob.abs() < f32::EPSILON);
         assert!(
             sim.params.flow_strength > 0.0,
             "flow untouched (fade-out drifts)"

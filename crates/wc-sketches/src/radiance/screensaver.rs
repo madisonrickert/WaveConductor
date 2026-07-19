@@ -119,14 +119,18 @@ pub fn drive_radiance_attract_sim(
     mut state: ResMut<'_, RadianceState>,
     mut sim: ResMut<'_, RadianceSimParams>,
 ) {
-    let edge_count = edges.map_or(0, |e| e.points.len());
+    // The phantom writes slot 0's edges; the baker's phantom fallback gives
+    // that slot the whole (ember-scaled) emission share.
+    let slot_counts = edges.map_or([0; wc_core::input::body::MAX_TRACKED_BODIES], |e| {
+        e.slot_counts
+    });
     let window_size = Vec2::new(window.width(), window.height());
     let quiet = neutral_audio();
     bake_radiance_sim(
         &settings,
         &quiet,
         None,
-        edge_count,
+        slot_counts,
         window_size,
         time.delta_secs(),
         time.elapsed_secs(),
