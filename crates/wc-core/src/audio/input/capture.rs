@@ -173,10 +173,16 @@ pub(crate) enum CaptureAction {
     clippy::struct_excessive_bools,
     reason = "each bool is a distinct, independently-observed driver input \
               (stream liveness, pause state, error flag, failure state, retry \
-              cooldown) feeding one decision table, not a state-machine flag \
-              set that would collapse into an enum"
+              cooldown, the file-drive override) feeding one decision table, \
+              not a state-machine flag set that would collapse into an enum"
 )]
 pub(crate) struct CaptureInputs<'a> {
+    /// Whether `super::FileDriveActive` (`WC_AUDIO_FILE`) is in the world.
+    /// Short-circuits [`decide`] to never build a real mic stream — see
+    /// `super::file_drive`'s module docs ("Why the mic is suppressed, not
+    /// paused") for the full seam. Fixed for the process's lifetime, so
+    /// this is the first check, ahead of every other input.
+    pub file_drive_active: bool,
     /// The current `AudioCaptureRequest`, if inserted.
     pub requested: Option<&'a AudioCaptureRequest>,
     /// Whether an `AudioInputStream` non-send resource is live.
@@ -195,6 +201,14 @@ pub(crate) struct CaptureInputs<'a> {
 
 /// The capture driver's policy, as a pure function of [`CaptureInputs`].
 pub(crate) fn decide(i: &CaptureInputs<'_>) -> CaptureAction {
+    if i.file_drive_active {
+        // WC_AUDIO_FILE is driving analysis instead of the mic (see
+        // `super::file_drive`). A real capture stream is never built while
+        // it's active, so `stream_alive`/`failed` can never be true here
+        // either — the flag is read once at plugin build and fixed for the
+        // process's lifetime, so there is nothing to ever tear down.
+        return CaptureAction::None;
+    }
     let Some(req) = i.requested else {
         // Nothing wanted: clear a live stream or a stale failure marker.
         return if i.stream_alive || i.failed {
@@ -255,6 +269,7 @@ pub fn drive_capture(world: &mut World) {
     let action = {
         let runtime = world.resource::<CaptureRuntime>();
         decide(&CaptureInputs {
+            file_drive_active: world.get_resource::<super::FileDriveActive>().is_some(),
             requested: world.get_resource::<AudioCaptureRequest>(),
             stream_alive: world.get_non_send::<AudioInputStream>().is_some(),
             current_device: runtime.current_device.as_deref(),
@@ -548,6 +563,7 @@ mod tests {
 
     fn inputs(req: Option<&AudioCaptureRequest>) -> CaptureInputs<'_> {
         CaptureInputs {
+            file_drive_active: false,
             requested: req,
             stream_alive: false,
             current_device: None,
@@ -626,6 +642,33 @@ mod tests {
         i.stream_alive = true;
         i.stream_paused = true;
         assert_eq!(decide(&i), CaptureAction::Resume);
+    }
+
+    #[test]
+    fn file_drive_active_suppresses_mic_capture_regardless_of_request() {
+        // Even a fresh request that would normally Build, and a request
+        // that would normally Rebuild on a device change, must both
+        // collapse to None while WC_AUDIO_FILE is active — the whole point
+        // of the seam (see `decide`'s file_drive_active short-circuit).
+        let req = request(Some("USB Interface"), false);
+        let mut i = inputs(Some(&req));
+        i.file_drive_active = true;
+        assert_eq!(decide(&i), CaptureAction::None);
+
+        i.stream_alive = true;
+        i.current_device = Some("Built-in Microphone");
+        assert_eq!(
+            decide(&i),
+            CaptureAction::None,
+            "a device change must not rebuild while file-drive is active"
+        );
+
+        i.error_fired = true;
+        assert_eq!(
+            decide(&i),
+            CaptureAction::None,
+            "a stream error must not rebuild while file-drive is active"
+        );
     }
 
     #[test]

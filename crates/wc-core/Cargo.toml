@@ -87,10 +87,22 @@ thermal-sensor-windows = ["dep:windows"]
 # the spawn-template picker. Native-only (uses `rfd`/`image`); mirrors the
 # `hand-tracking-mediapipe` pattern of a feature that pulls optional native deps.
 templates = ["dep:image", "dep:blake3"]
+# Programmatic control of an OBSBOT camera (Tiny 2 Lite at the last
+# deployment) over the vendored libdev C++ SDK (`vendor/libdev`): disables the
+# camera's on-device AI tracking + gesture control so it stops fighting the
+# app's own MediaPipe tracking, recenters the gimbal, selects the widest FOV,
+# and re-asserts auto exposure; restores the factory behavior on shutdown.
+# Real device IO is Windows-only (build.rs compiles the extern "C" shim and
+# links libdev.lib under cfg(windows) only); on other platforms the module is
+# a documented no-op facade, so CI's `--all-features` stays green on every
+# runner without a C++ toolchain or libdev binary. No Rust deps: the worker
+# uses std::thread + std::sync::mpsc.
+obsbot-camera-control = []
 
 [dependencies]
 bevy = { workspace = true }
 bitflags = { workspace = true }
+claxon = { workspace = true }
 cpal = { workspace = true }
 fundsp = { workspace = true }
 rtrb = { workspace = true }
@@ -211,6 +223,14 @@ windows = { version = "0.62", optional = true, features = [
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+# Compiles the extern "C" shim over the vendored OBSBOT libdev C++ SDK
+# (vendor/libdev/shim) when the `obsbot-camera-control` feature is on.
+# Windows-target-only table + a CARGO_FEATURE_* check in build.rs, so
+# macOS/Linux `--all-features` builds never need a C++ toolchain or a libdev
+# binary for this. Already in the workspace graph transitively (ort, blake3).
+cc = "1"
 
 [[example]]
 name = "leap_pause_probe"

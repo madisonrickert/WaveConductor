@@ -121,6 +121,12 @@ rtrb = "0.3"
 # We pull only the codecs we actually need so the dependency footprint stays
 # narrow; if other sketches need WAV/FLAC/MP3, extend the feature list here.
 symphonia = { version = "0.5", default-features = false, features = ["vorbis", "ogg"] }
+# Debug-only WC_AUDIO_FILE test-track decode (wc-core's `audio::input::file_drive`,
+# #[cfg(debug_assertions)]-gated — never in a release build): a small, pure-Rust
+# FLAC decoder. Kept separate from the symphonia allowlist above because this
+# path is a developer tool for driving audio-reactive sketches from a mastered
+# test track instead of the live mic, not a shipped codec. Apache-2.0.
+claxon = "0.4"
 # Serde stack (used by settings persistence in Plan 2)
 serde = { version = "1", features = ["derive"] }
 toml = "1"

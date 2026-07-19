@@ -40,6 +40,8 @@
 pub mod analysis;
 pub mod capture;
 pub mod devices;
+#[cfg(debug_assertions)]
+mod file_drive;
 
 use bevy::prelude::*;
 
@@ -98,6 +100,18 @@ impl Default for AudioAnalysis {
     }
 }
 
+/// Marker resource: present for the whole process lifetime whenever
+/// `WC_AUDIO_FILE` is set (`file_drive`, debug-only — see its module docs
+/// for the full seam). Read by `capture::decide` to permanently refuse to
+/// build a real mic stream: the file-drive output callback and the mic's
+/// input callback would otherwise race to fill the same
+/// [`capture::AudioInputRing`]. Not gated behind `#[cfg(debug_assertions)]`
+/// itself (unlike `file_drive`) so `capture.rs` can read it unconditionally
+/// — in a release build it is simply never inserted, so `Option<Res<_>>`
+/// reads of it are always `None` at zero extra cost.
+#[derive(Resource)]
+pub struct FileDriveActive;
+
 /// Activation contract: INSERT this resource to start capture; REMOVE it to
 /// stop. Sketch-agnostic — Plan C inserts it `OnEnter(AppState::Radiance)`
 /// and removes it `OnExit`.
@@ -144,6 +158,19 @@ impl Plugin for AudioInputPlugin {
         if std::env::var_os("WC_AUDIO_INPUT_SMOKE").is_some() {
             app.add_systems(Startup, smoke::insert_smoke_request)
                 .add_systems(Update, smoke::log_analysis);
+        }
+
+        // Debug-only file-driven analysis: WC_AUDIO_FILE=<path to .flac>
+        // decodes and loops a test track instead of the live mic, driving
+        // the same AnalysisEngine/AudioAnalysis pipeline while playing the
+        // track audibly. Checked once, at plugin build, like the smoke
+        // harness above; see `file_drive`'s module docs for the full data
+        // flow and why the mic is suppressed rather than paused.
+        #[cfg(debug_assertions)]
+        if let Some(path) = std::env::var_os("WC_AUDIO_FILE") {
+            app.insert_resource(FileDriveActive)
+                .insert_resource(file_drive::FileDrivePath(std::path::PathBuf::from(path)))
+                .add_systems(Startup, file_drive::start_file_drive);
         }
     }
 }
