@@ -1,11 +1,15 @@
 //! Sketch reload fade-overlay state machine.
 //!
 //! When a sketch needs to restart (e.g., `particle_density` or `dot_spacing`
-//! changed via the settings panel, or a settled window resize), this module
+//! changed via the settings panel, or a settled window resize), or when the
+//! user navigates from one sketch to another (or to/from `Home`), this module
 //! mediates the `sketch → Home → sketch` round-trip so the picker page is never
-//! visible. The [`ReloadReason`] passed to `begin_fade_out` selects the fade
-//! profile: a settings restart blacks out over [`FADE_DURATION`] with a smooth
-//! audio fade; a window resize is instant and silent (see the private
+//! visible mid-transition and the swap itself is masked by a moment of black.
+//! The [`ReloadReason`] passed to `begin_fade_out` selects the fade profile: a
+//! settings restart blacks out over [`FADE_DURATION`] with a smooth audio
+//! fade; a sketch-to-sketch switch blacks out over the longer
+//! [`SKETCH_SWITCH_FADE_DURATION`], also with an audio fade; a window resize
+//! or an audio-device reconnect is instant and silent (see the private
 //! `fade_duration` / `fades_audio` mappings in this module). The sketch to
 //! return to is carried in
 //! [`SketchReloadState::return_state`], so any sketch (not just Line) can drive it.
@@ -13,18 +17,37 @@
 //! ## Phases
 //!
 //! ```text
-//!  Idle ──► FadeOut (0 or FADE_DURATION) ──► Switch (1 frame) ──► FadeIn (0 or FADE_DURATION) ──► Idle
+//!  Idle ──► FadeOut (0, FADE_DURATION, or SKETCH_SWITCH_FADE_DURATION) ──► Switch (1 frame) ──► FadeIn (same duration as FadeOut) ──► Idle
 //! ```
 //!
 //! - **Idle**: overlay alpha = 0; no effect on sketch or picker.
 //! - **`FadeOut`**: visual alpha lerps 0 → 1 over the reason's fade duration;
 //!   audio volume 1 → 0 each frame via `AudioCommand::SetMasterVolume` when the
 //!   reason fades audio. Once the leg elapses the caller triggers
-//!   `NextState::set(Home)` and advances to `Switch`.
-//! - **Switch**: one frame in `Home` state. The picker is hidden (gated on
-//!   `phase == Idle`). The driver triggers `NextState::set(return_state)` (the
-//!   sketch that requested the restart) and advances to `FadeIn`, recording a
-//!   fresh `started_at`.
+//!   `NextState::set(Home)` and advances to `Switch` — **unless the app is
+//!   already at `Home`** (e.g. a picker click or a number-key select made
+//!   while sitting on the picker page), in which case the `Home` hop is
+//!   skipped: we are already where the hop would have taken us, and
+//!   `NextState::set` on the *same* state Bevy is already in still re-fires
+//!   `OnExit`/`OnEnter` (see the note on `Switch` below), so writing it
+//!   unconditionally would burn a redundant `Home` teardown/rebuild for no
+//!   visible effect.
+//! - **Switch**: one frame in `Home` state (or zero additional frames, per the
+//!   note above, when the reload started at `Home`). The picker is hidden
+//!   (gated on `phase == Idle`). The driver triggers
+//!   `NextState::set(return_state)` (the sketch, or `Home`, that the caller
+//!   asked to land on) and advances to `FadeIn`, recording a fresh
+//!   `started_at` — again **unless `return_state` is where the app already
+//!   is** (the symmetric case: `NavigateHome` pressed from a sketch already
+//!   delivered us to `Home` via the `FadeOut` hop above, so re-arming
+//!   `NextState::set(Home)` here would double-fire `Home`'s `OnExit`/`OnEnter`).
+//!   Bevy's `NextState::set` always uses the `Pending` variant, which sets
+//!   `allow_same_state_transitions = true` — unlike `set_if_neq`, it does
+//!   **not** skip `OnExit`/`OnEnter` on its own when entered == exited, which
+//!   is exactly why the two guards above exist: this module has to do that
+//!   bookkeeping itself, by comparing against `Res<State<AppState>>` at each
+//!   phase-completion instant, rather than relying on Bevy to no-op a
+//!   same-state `.set()`.
 //! - **`FadeIn`**: visual alpha lerps 1 → 0 over the reason's fade duration;
 //!   audio volume 0 → 1 each frame when the reason fades audio. Once the leg
 //!   elapses, phase returns to `Idle` and volume is restored to
@@ -39,6 +62,14 @@
 //!   — stores the current master volume, the sketch to return to, and the
 //!   [`ReloadReason`], and starts the `FadeOut` phase. The `drive_reload_state`
 //!   system drives all subsequent phase transitions.
+//!
+//! `nav::handle_navigation_actions` (keyboard select / Next / Prev / Home) and
+//! `ui::picker::draw_sketch_picker` (mouse click on a picker tile) call the
+//! same `begin_fade_out` with [`ReloadReason::SketchSwitch`] instead of
+//! writing `NextState<AppState>` directly, so every sketch-to-sketch hop —
+//! not just a settings restart — dips to black. `soak::system::drive_soak`'s
+//! cycle timer does the same, so an unattended soak run exercises the
+//! graceful path too.
 //!
 //! `drive_reload_state` (registered by `ReloadOverlayPlugin`):
 //! - Runs each `Update` frame.
@@ -55,8 +86,21 @@ use bevy::prelude::*;
 
 use super::state::AppState;
 
-/// Duration of each fade leg (`FadeOut` and `FadeIn`).
+/// Duration of each fade leg (`FadeOut` and `FadeIn`) for [`ReloadReason::SettingsRestart`].
 pub const FADE_DURATION: Duration = Duration::from_millis(200);
+
+/// Duration of each fade leg (`FadeOut` and `FadeIn`) for
+/// [`ReloadReason::SketchSwitch`].
+///
+/// Deliberately longer than [`FADE_DURATION`]: a settings restart re-runs the
+/// *same* sketch's spawn path (the visual continuity is high — same sketch,
+/// tweaked knob), where a snappy 200 ms reads as a quick flash. A
+/// sketch-to-sketch switch tears down and rebuilds an entirely different
+/// render graph and synth voice, so a slightly more deliberate 400 ms dip
+/// reads as an intentional scene change rather than a glitch, while staying
+/// well under the ~1 s threshold at which a transition starts to feel
+/// sluggish on a kiosk a visitor is actively driving.
+pub const SKETCH_SWITCH_FADE_DURATION: Duration = Duration::from_millis(400);
 
 /// Why a reload was requested. Selects the fade profile.
 ///
@@ -81,6 +125,20 @@ pub enum ReloadReason {
     /// fade out, audio dip to silence, one `Home` frame, 200 ms fade in.
     #[default]
     SettingsRestart,
+    /// A user-initiated sketch-to-sketch switch: a picker tile click, a
+    /// number-key select, Next/Prev, or `NavigateHome` — anything that used
+    /// to write `NextState<AppState>` directly and cut instantly to the new
+    /// sketch. 400 ms fade out, audio dip to silence, one `Home` frame (or
+    /// zero, when the switch already started at or ends at `Home` — see the
+    /// module doc's note on the `Switch` phase), 400 ms fade in.
+    ///
+    /// ## Why this needs its own reason, not `SettingsRestart`
+    ///
+    /// `SettingsRestart` masks a same-sketch respawn — 200 ms reads as a
+    /// quick flash appropriate to "you tweaked a knob". A sketch switch
+    /// swaps the entire scene and synth voice; see [`SKETCH_SWITCH_FADE_DURATION`]
+    /// for why that gets a longer, more deliberate fade.
+    SketchSwitch,
     /// A settled window resize (F11, monitor re-enumeration, startup scale
     /// settle). Instant and silent.
     WindowResize,
@@ -126,6 +184,7 @@ pub enum ReloadReason {
 fn fade_duration(reason: ReloadReason) -> Duration {
     match reason {
         ReloadReason::SettingsRestart => FADE_DURATION,
+        ReloadReason::SketchSwitch => SKETCH_SWITCH_FADE_DURATION,
         ReloadReason::WindowResize | ReloadReason::AudioDeviceReconnect => Duration::ZERO,
     }
 }
@@ -136,7 +195,7 @@ fn fade_duration(reason: ReloadReason) -> Duration {
 /// touch audio. Pure so the mapping is unit-testable without an app.
 fn fades_audio(reason: ReloadReason) -> bool {
     match reason {
-        ReloadReason::SettingsRestart => true,
+        ReloadReason::SettingsRestart | ReloadReason::SketchSwitch => true,
         ReloadReason::WindowResize | ReloadReason::AudioDeviceReconnect => false,
     }
 }
@@ -255,6 +314,7 @@ impl SketchReloadState {
 pub fn drive_reload_state(
     mut state: ResMut<'_, SketchReloadState>,
     time: Res<'_, Time>,
+    current: Res<'_, State<super::state::AppState>>,
     mut next_app: ResMut<'_, NextState<super::state::AppState>>,
     mut audio_cmd: Option<
         bevy::ecs::system::NonSendMut<'_, crate::audio::ring::AudioCommandSender>,
@@ -284,17 +344,37 @@ pub fn drive_reload_state(
         }
         ReloadPhase::FadeOut => {
             if now.saturating_sub(state.started_at) >= fade {
-                // FadeOut complete — switch to Home so the sketch exits cleanly.
-                next_app.set(super::state::AppState::Home);
+                // FadeOut complete — switch to Home so the sketch exits
+                // cleanly. Skipped when we are already at Home (a reload that
+                // began at Home, e.g. a picker click or number-key select
+                // made from the picker page): `NextState::set` always uses
+                // the `Pending` variant, which Bevy runs with
+                // `allow_same_state_transitions = true` — unlike
+                // `set_if_neq`, a same-state `.set()` does NOT no-op on its
+                // own, so writing it here unconditionally would re-fire
+                // `OnExit(Home)`/`OnEnter(Home)` for a hop we never actually
+                // needed. See the module doc's `Switch` phase note.
+                if *current.get() != super::state::AppState::Home {
+                    next_app.set(super::state::AppState::Home);
+                }
                 state.phase = ReloadPhase::Switch;
                 tracing::debug!("reload overlay: FadeOut complete → Switch (Home)");
             }
         }
         ReloadPhase::Switch => {
-            // One frame in Home; arm the re-entry into the sketch that
-            // triggered the reload (set by `begin_fade_out`).
+            // One frame in Home (or zero additional frames, per the FadeOut
+            // guard above); arm the re-entry into the sketch — or Home
+            // itself — that the caller asked to land on (set by
+            // `begin_fade_out`). Symmetric guard to the one in `FadeOut`:
+            // when `return_state` is Home and the FadeOut leg's hop already
+            // delivered us there (or we started there and skipped the hop),
+            // `*current.get()` already equals `return_to`, so writing
+            // `NextState::set(return_to)` again would double-fire
+            // `Home`'s `OnExit`/`OnEnter` for the same reason described above.
             let return_to = state.return_state;
-            next_app.set(return_to);
+            if return_to != *current.get() {
+                next_app.set(return_to);
+            }
             state.phase = ReloadPhase::FadeIn;
             state.started_at = now;
             tracing::debug!("reload overlay: Switch → FadeIn ({:?})", return_to);
@@ -603,6 +683,453 @@ mod tests {
         assert_eq!(
             app.world().resource::<SketchReloadState>().phase,
             ReloadPhase::Idle
+        );
+    }
+
+    #[test]
+    fn sketch_switch_fades_over_the_full_duration_and_dips_audio() {
+        assert_eq!(
+            fade_duration(ReloadReason::SketchSwitch),
+            SKETCH_SWITCH_FADE_DURATION
+        );
+        assert!(fades_audio(ReloadReason::SketchSwitch));
+        // Pins the deliberate-vs-quick relationship documented on
+        // `SKETCH_SWITCH_FADE_DURATION`: a full scene swap gets a longer fade
+        // than a same-sketch settings restart.
+        assert!(
+            SKETCH_SWITCH_FADE_DURATION > FADE_DURATION,
+            "a sketch-to-sketch switch must fade more deliberately than a \
+             same-sketch settings restart"
+        );
+    }
+
+    /// Regression guard against `SketchSwitch` silently falling back to
+    /// [`FADE_DURATION`] (e.g. a copy-pasted match arm): at the settings-restart
+    /// duration the sketch-switch fade must still be mid-ramp, not already
+    /// opaque, and it must only reach full opacity at its own, longer duration.
+    #[test]
+    fn sketch_switch_fade_out_ramps_over_its_own_longer_duration() {
+        let mut s = SketchReloadState::default();
+        s.begin_fade_out(
+            Duration::ZERO,
+            1.0,
+            AppState::Flame,
+            ReloadReason::SketchSwitch,
+        );
+        assert!(s.overlay_alpha(Duration::ZERO) < 0.01);
+        assert!(
+            s.overlay_alpha(FADE_DURATION) < 0.99,
+            "at the settings-restart duration (200 ms) a sketch-switch fade \
+             (400 ms) must still be ramping, not already opaque"
+        );
+        assert!(s.overlay_alpha(SKETCH_SWITCH_FADE_DURATION) >= 1.0);
+    }
+
+    /// A graceful sketch-to-sketch switch (e.g. Next/Prev, a picker click, a
+    /// number-key select) between two *different* sketches must walk the same
+    /// `FadeOut -> Switch -> FadeIn` phases as `SettingsRestart`/`WindowResize`,
+    /// hopping through exactly one `Home` frame so both sketches' `OnExit`/
+    /// `OnEnter` fire exactly once each, in the right order.
+    ///
+    /// Uses a 500 ms manual time step (comfortably past
+    /// `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) so each fade leg resolves in a
+    /// single `app.update()`, mirroring the zero-duration `WindowResize` test
+    /// above but for a reason with a *real* fade duration.
+    #[test]
+    fn sketch_switch_reload_hops_through_home_between_two_different_sketches() {
+        use bevy::state::app::StatesPlugin;
+        use bevy::time::{TimeUpdateStrategy, Virtual};
+
+        /// Records `OnEnter`/`OnExit` firings in order, across every tracked
+        /// state, so the whole walk's transition sequence can be asserted in
+        /// one place.
+        #[derive(Resource, Default)]
+        struct TransitionLog(Vec<&'static str>);
+
+        fn log_enter_home(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Home");
+        }
+        fn log_exit_home(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Home");
+        }
+        fn log_enter_line(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Line");
+        }
+        fn log_exit_line(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Line");
+        }
+        fn log_enter_flame(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Flame");
+        }
+        fn log_exit_flame(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Flame");
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<SketchReloadState>();
+        app.init_resource::<TransitionLog>();
+        app.add_systems(OnEnter(AppState::Home), log_enter_home);
+        app.add_systems(OnExit(AppState::Home), log_exit_home);
+        app.add_systems(OnEnter(AppState::Line), log_enter_line);
+        app.add_systems(OnExit(AppState::Line), log_exit_line);
+        app.add_systems(OnEnter(AppState::Flame), log_enter_flame);
+        app.add_systems(OnExit(AppState::Flame), log_exit_flame);
+        app.add_systems(Update, drive_reload_state);
+
+        // Settle into Line first, outside the reload machine, then clear the
+        // log so only events from the SketchSwitch reload itself are asserted.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Line);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line,
+            "precondition: must be in Line before the reload starts"
+        );
+        app.world_mut().resource_mut::<TransitionLog>().0.clear();
+
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            500,
+        )));
+        // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise
+        // silently clamp the 500 ms manual step below
+        // `SKETCH_SWITCH_FADE_DURATION`'s 400 ms, stalling the fade forever.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(1));
+
+        // Begin a graceful SketchSwitch reload from Line to Flame.
+        {
+            let now = app.world().resource::<Time>().elapsed();
+            let mut reload_state = app.world_mut().resource_mut::<SketchReloadState>();
+            reload_state.begin_fade_out(now, 1.0, AppState::Flame, ReloadReason::SketchSwitch);
+        }
+
+        // Frame 1: FadeOut's 400 ms leg is comfortably covered by the 500 ms
+        // step, so it completes this Update; current is not Home (Line), so
+        // `NextState(Home)` is queued and phase advances to Switch.
+        app.update();
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Switch
+        );
+
+        // Frame 2: StateTransition applies Line -> Home (exit:Line, enter:Home).
+        // Switch phase then runs: return_to (Flame) != current (Home), so
+        // NextState(Flame) is queued and phase advances to FadeIn.
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home
+        );
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::FadeIn
+        );
+
+        // Frame 3: StateTransition applies Home -> Flame (exit:Home, enter:Flame).
+        // FadeIn's 400 ms leg is again covered by the 500 ms step, so it
+        // completes this Update, returning phase to Idle.
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Flame
+        );
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle
+        );
+
+        assert_eq!(
+            app.world().resource::<TransitionLog>().0,
+            vec!["exit:Line", "enter:Home", "exit:Home", "enter:Flame"],
+            "a sketch-to-sketch switch must hop through exactly one Home \
+             frame, firing each OnExit/OnEnter exactly once, in order"
+        );
+    }
+
+    /// The "clean Home hop" guarantee described in the module doc's `Switch`
+    /// phase note: a `SketchSwitch` reload whose destination IS `Home`
+    /// (`NavigateHome` pressed from a sketch) must fire `Home`'s
+    /// `OnEnter`/`OnExit` exactly once — via the `FadeOut` leg's hop — and must
+    /// NOT re-fire it a second time when the `Switch` phase's
+    /// `NextState::set(return_state)` targets the same `Home` we already
+    /// reached. Without the `current`-aware guard in `drive_reload_state`, this
+    /// would double-fire because Bevy's `NextState::set` uses
+    /// `allow_same_state_transitions = true` and does not no-op a same-state
+    /// transition on its own.
+    #[test]
+    fn navigating_to_home_does_not_double_fire_homes_transition() {
+        use bevy::state::app::StatesPlugin;
+        use bevy::time::{TimeUpdateStrategy, Virtual};
+
+        #[derive(Resource, Default)]
+        struct TransitionLog(Vec<&'static str>);
+
+        fn log_enter_home(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Home");
+        }
+        fn log_exit_home(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Home");
+        }
+        fn log_enter_line(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Line");
+        }
+        fn log_exit_line(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Line");
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<SketchReloadState>();
+        app.init_resource::<TransitionLog>();
+        app.add_systems(OnEnter(AppState::Home), log_enter_home);
+        app.add_systems(OnExit(AppState::Home), log_exit_home);
+        app.add_systems(OnEnter(AppState::Line), log_enter_line);
+        app.add_systems(OnExit(AppState::Line), log_exit_line);
+        app.add_systems(Update, drive_reload_state);
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Line);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line
+        );
+        app.world_mut().resource_mut::<TransitionLog>().0.clear();
+
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            500,
+        )));
+        // See the max_delta comment in the phase-walk test above.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(1));
+
+        // Begin a graceful SketchSwitch reload from Line to Home.
+        {
+            let now = app.world().resource::<Time>().elapsed();
+            let mut reload_state = app.world_mut().resource_mut::<SketchReloadState>();
+            reload_state.begin_fade_out(now, 1.0, AppState::Home, ReloadReason::SketchSwitch);
+        }
+
+        app.update(); // FadeOut completes: current (Line) != Home -> NextState(Home) queued -> Switch
+        app.update(); // StateTransition: Line -> Home (exit:Line, enter:Home). Switch: return_to == current (Home) -> skipped -> FadeIn
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home
+        );
+        app.update(); // No pending transition (Switch skipped it); FadeIn completes -> Idle
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home
+        );
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle
+        );
+
+        assert_eq!(
+            app.world().resource::<TransitionLog>().0,
+            vec!["exit:Line", "enter:Home"],
+            "Home's OnEnter must fire exactly once, not twice, when a \
+             SketchSwitch reload's destination is Home"
+        );
+    }
+
+    /// Symmetric to [`navigating_to_home_does_not_double_fire_homes_transition`]:
+    /// a `SketchSwitch` reload that *begins* at `Home` (a picker click or a
+    /// number-key select made from the picker page) must not re-fire `Home`'s
+    /// `OnExit`/`OnEnter` via the `FadeOut` leg's hop, because we are already
+    /// there — the guard in `drive_reload_state`'s `FadeOut` arm skips
+    /// `NextState::set(Home)` when `current == Home` already.
+    #[test]
+    fn navigating_from_home_does_not_double_fire_homes_transition() {
+        use bevy::state::app::StatesPlugin;
+        use bevy::time::{TimeUpdateStrategy, Virtual};
+
+        #[derive(Resource, Default)]
+        struct TransitionLog(Vec<&'static str>);
+
+        fn log_enter_home(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Home");
+        }
+        fn log_exit_home(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Home");
+        }
+        fn log_enter_line(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("enter:Line");
+        }
+        fn log_exit_line(mut log: ResMut<'_, TransitionLog>) {
+            log.0.push("exit:Line");
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<SketchReloadState>();
+        app.init_resource::<TransitionLog>();
+        app.add_systems(OnEnter(AppState::Home), log_enter_home);
+        app.add_systems(OnExit(AppState::Home), log_exit_home);
+        app.add_systems(OnEnter(AppState::Line), log_enter_line);
+        app.add_systems(OnExit(AppState::Line), log_exit_line);
+        app.add_systems(Update, drive_reload_state);
+
+        // Settle at the default Home state, then clear whatever the initial
+        // state-machine bring-up logged.
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home
+        );
+        app.world_mut().resource_mut::<TransitionLog>().0.clear();
+
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            500,
+        )));
+        // See the max_delta comment in the phase-walk test above.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(1));
+
+        // Begin a graceful SketchSwitch reload from Home to Line (a picker
+        // click or number-key select made while sitting on the picker page).
+        {
+            let now = app.world().resource::<Time>().elapsed();
+            let mut reload_state = app.world_mut().resource_mut::<SketchReloadState>();
+            reload_state.begin_fade_out(now, 1.0, AppState::Line, ReloadReason::SketchSwitch);
+        }
+
+        app.update(); // FadeOut completes: current is already Home -> hop skipped -> Switch
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Switch
+        );
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home,
+            "we never left Home, so no transition should have run yet"
+        );
+        app.update(); // No pending transition from the skipped hop; Switch: return_to (Line) != current (Home) -> NextState(Line) queued -> FadeIn
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home,
+            "the Line transition is queued this frame but not applied until the next"
+        );
+        app.update(); // StateTransition: Home -> Line (exit:Home, enter:Line); FadeIn completes -> Idle
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line
+        );
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle
+        );
+
+        assert_eq!(
+            app.world().resource::<TransitionLog>().0,
+            vec!["exit:Home", "enter:Line"],
+            "Home's OnExit must fire exactly once, not twice, when a \
+             SketchSwitch reload begins at Home"
+        );
+    }
+
+    /// End-to-end audio-dip-and-restore assertion for [`ReloadReason::SketchSwitch`]:
+    /// the `FadeOut` leg must push at least one `SetMasterVolume` command well
+    /// below the starting volume, and the very last command pushed by the whole
+    /// walk must restore `pre_fade_volume` exactly (the `FadeIn` completion's
+    /// explicit restore, which runs after that leg's final ramp-driven push —
+    /// see `drive_reload_state`'s `FadeIn` arm).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "test code with locally-constructed values; a panic here is the test failing, \
+                  and the panic/expect messages carry the diagnostic detail"
+    )]
+    fn sketch_switch_reload_dips_and_restores_master_volume() {
+        use bevy::state::app::StatesPlugin;
+        use bevy::time::{TimeUpdateStrategy, Virtual};
+
+        let (producer, mut consumer) = rtrb::RingBuffer::<crate::audio::command::AudioCommand>::new(
+            crate::audio::ring::RING_CAPACITY,
+        );
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<SketchReloadState>();
+        app.insert_non_send(crate::audio::ring::AudioCommandSender::new(producer));
+        app.add_systems(Update, drive_reload_state);
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Line);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line
+        );
+
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            500,
+        )));
+        // See the max_delta comment in the phase-walk test above.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(1));
+
+        let pre_fade_volume = 0.8_f32;
+        {
+            let now = app.world().resource::<Time>().elapsed();
+            let mut reload_state = app.world_mut().resource_mut::<SketchReloadState>();
+            reload_state.begin_fade_out(
+                now,
+                pre_fade_volume,
+                AppState::Flame,
+                ReloadReason::SketchSwitch,
+            );
+        }
+
+        // Walk the full FadeOut -> Switch -> FadeIn -> Idle cycle.
+        app.update();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<SketchReloadState>().phase,
+            ReloadPhase::Idle
+        );
+
+        let volumes: Vec<f32> = std::iter::from_fn(|| consumer.pop().ok())
+            .map(|c| match c {
+                crate::audio::command::AudioCommand::SetMasterVolume(v) => v,
+                other => panic!("unexpected audio command during reload: {other:?}"),
+            })
+            .collect();
+
+        assert!(
+            !volumes.is_empty(),
+            "a SketchSwitch reload must push at least one SetMasterVolume command"
+        );
+        assert!(
+            volumes.iter().any(|v| *v < 0.5),
+            "the FadeOut leg must dip the master volume well below its \
+             starting point: {volumes:?}"
+        );
+        let restored = *volumes.last().expect("at least one volume command");
+        assert!(
+            (restored - pre_fade_volume).abs() < 1e-3,
+            "the final SetMasterVolume command must restore pre_fade_volume \
+             ({pre_fade_volume}), got {restored} (all: {volumes:?})"
         );
     }
 }

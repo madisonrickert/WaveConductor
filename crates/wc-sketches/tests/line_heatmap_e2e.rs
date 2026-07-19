@@ -22,14 +22,41 @@ use wc_core::lifecycle::state::AppState;
 use wc_sketches::line::settings::LineSettings;
 use wc_sketches::particles::sim_cpu::CpuMirror;
 
-/// Mirror of `line_input.rs::enter_line` — three updates suffice (one fold,
-/// one nav handler, one `OnEnter`). Inlined here rather than imported because
+/// Mirror of `line_input.rs::enter_line` — see that function's doc for why
+/// the settle needs `TimeUpdateStrategy::ManualDuration` now that `Digit1`
+/// begins a graceful `ReloadReason::SketchSwitch` reload rather than an
+/// instant `NextState` write. Inlined here rather than imported because
 /// `line_input.rs` is a sibling integration-test binary, not a library module.
 fn enter_line(app: &mut App) {
+    use bevy::time::{TimeUpdateStrategy, Virtual};
+
+    // Save/restore the caller's time configuration rather than assuming
+    // Automatic/250 ms — see `line_lifecycle.rs`'s `enter_line` doc.
+    let restore_strategy = match app.world().resource::<TimeUpdateStrategy>() {
+        TimeUpdateStrategy::Automatic => TimeUpdateStrategy::Automatic,
+        TimeUpdateStrategy::ManualInstant(i) => TimeUpdateStrategy::ManualInstant(*i),
+        TimeUpdateStrategy::ManualDuration(d) => TimeUpdateStrategy::ManualDuration(*d),
+        TimeUpdateStrategy::FixedTimesteps(f) => TimeUpdateStrategy::FixedTimesteps(*f),
+    };
+    let restore_max_delta = app.world().resource::<Time<Virtual>>().max_delta();
+
     tap_key(app, KeyCode::Digit1);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(500),
+    ));
+    // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+    // clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s
+    // 400 ms, stalling the fade forever.
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(std::time::Duration::from_secs(1));
     for _ in 0..3 {
         app.update();
     }
+    app.insert_resource(restore_strategy);
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(restore_max_delta);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,

@@ -1,6 +1,34 @@
 //! Translates [`WaveConductorAction`] presses into [`AppState`] transitions and
 //! window-level effects (fullscreen toggle).
 //!
+//! ## Sketch-to-sketch transitions are graceful, not instant
+//!
+//! A sketch-select key, `NavigateHome`, `NavigateNext`, or `NavigatePrev` no
+//! longer writes `NextState<AppState>` directly. Instead it calls
+//! [`SketchReloadState::begin_fade_out`] with the destination state as
+//! `return_state` and [`ReloadReason::SketchSwitch`], reusing the same
+//! `FadeOut → Switch → FadeIn` machine that a settings restart or a settled
+//! window resize already drive (see `crate::lifecycle::reload`'s module doc).
+//! `drive_reload_state` (registered alongside this system in
+//! `LifecyclePlugin`, immediately after it in the same `Update` chain) owns
+//! every subsequent phase transition and `NextState` write. The practical
+//! effect: pressing a sketch-select key dips the screen to black, dips the
+//! master volume, hops through `Home`, and fades back in on the destination —
+//! rather than cutting instantly, which used to expose a one-frame flash of
+//! the outgoing sketch's teardown and the incoming sketch's cold-start.
+//!
+//! Two edge cases, both deliberate:
+//! - **Navigating to the state already active** is a no-op, exactly as before
+//!   (`*current.get() != target` still gates the whole block).
+//! - **Navigating while a reload is already in flight** is *ignored*, not
+//!   retargeted. A second key press landing mid-fade (rapid double-tap, or a
+//!   nav key racing a settings-restart/resize reload that happened to be
+//!   in-flight already) is simply dropped; the in-flight reload completes on
+//!   its original destination. Retargeting mid-fade would mean deciding which
+//!   phase to resume from and risks a visible audio/alpha discontinuity, for
+//!   a scenario (a sub-second-long window) a user is very unlikely to
+//!   deliberately hit twice.
+//!
 //! The fullscreen toggle flips the **session-only** `FullscreenOverride`
 //! (`crate::settings::FullscreenOverride`); it writes neither `Window` nor the
 //! persisted `DisplaySettings`. `crate::lifecycle::display::apply_display_mode`
@@ -19,7 +47,9 @@ use bevy::prelude::*;
 
 use super::action_map::{ActionInput, ActionPhase};
 use super::actions::WaveConductorAction;
+use super::reload::{ReloadReason, SketchReloadState};
 use super::state::AppState;
+use crate::audio::state::AudioState;
 
 /// Reads `MessageReader<ActionInput>` and translates `Pressed` edges into
 /// navigation transitions and window-level effects (fullscreen toggle).
@@ -31,7 +61,9 @@ use super::state::AppState;
 pub(crate) fn handle_navigation_actions(
     mut actions: MessageReader<'_, '_, ActionInput>,
     current: Res<'_, State<AppState>>,
-    mut next: ResMut<'_, NextState<AppState>>,
+    time: Res<'_, Time>,
+    mut reload_state: ResMut<'_, SketchReloadState>,
+    audio_state: Option<Res<'_, AudioState>>,
     display_settings: Res<'_, crate::settings::DisplaySettings>,
     mut fullscreen_override: ResMut<'_, crate::settings::FullscreenOverride>,
 ) {
@@ -69,8 +101,24 @@ pub(crate) fn handle_navigation_actions(
 
     if let Some(target) = transition_to {
         if *current.get() != target {
-            tracing::info!(?target, "navigate");
-            next.set(target);
+            if reload_state.is_idle() {
+                // Fall back to full volume (1.0) when the audio engine hasn't
+                // started — headless tests and early startup before the cpal
+                // stream is active. Mirrors `restart_on_settings_change` /
+                // `reload_on_resize_settled` in `crate::sketch::lifecycle`.
+                let pre_fade_volume = audio_state.as_ref().map_or(1.0, |s| s.volume);
+                tracing::info!(?target, "navigate (graceful sketch switch)");
+                reload_state.begin_fade_out(
+                    time.elapsed(),
+                    pre_fade_volume,
+                    target,
+                    ReloadReason::SketchSwitch,
+                );
+            } else {
+                // A reload is already in flight — ignored, not retargeted.
+                // See the module doc for why.
+                tracing::debug!(?target, "navigate ignored: a reload is already in flight");
+            }
         }
     }
 
@@ -226,6 +274,124 @@ mod tests {
         assert_eq!(
             *app.world().resource::<FullscreenOverride>(),
             FullscreenOverride(Some(persisted.start_fullscreen)),
+        );
+    }
+
+    /// A sketch-select key must begin a graceful [`ReloadReason::SketchSwitch`]
+    /// reload rather than writing `NextState<AppState>` directly — the whole
+    /// point of this change (see the module doc). `AppState` must NOT have
+    /// moved yet by the same frame's end: the transition only lands once
+    /// `drive_reload_state` walks `FadeOut -> Switch -> FadeIn` to completion.
+    #[test]
+    fn selecting_a_sketch_begins_a_graceful_reload_instead_of_an_instant_transition() {
+        use bevy::time::TimeUpdateStrategy;
+
+        let mut app = test_app();
+        // Freeze the clock at zero elapsed-per-tick so the FadeOut-still-mid-fade
+        // assertion below is deterministic rather than depending on real
+        // wall-clock time staying under SKETCH_SWITCH_FADE_DURATION (400 ms)
+        // between two `app.update()` calls.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::ZERO,
+        ));
+        app.update();
+
+        press(&mut app, WaveConductorAction::SelectLine);
+
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Home,
+            "AppState must not move instantly — the reload machine hasn't \
+             finished its FadeOut leg yet"
+        );
+        let reload = app.world().resource::<SketchReloadState>();
+        assert_eq!(reload.phase, crate::lifecycle::reload::ReloadPhase::FadeOut);
+        assert_eq!(reload.return_state, AppState::Line);
+        assert_eq!(reload.reason, ReloadReason::SketchSwitch);
+    }
+
+    /// The already-in-flight edge case documented on the module: a nav key
+    /// pressed while a reload is mid-fade is ignored outright, not retargeted.
+    /// Simulates "already in flight" by hand-arming `SketchReloadState` (stands
+    /// in for either a rapid double-tap or a settings-restart/resize reload
+    /// that happened to be running already) rather than needing a second real
+    /// key press to land inside the fade window.
+    #[test]
+    fn navigating_while_a_reload_is_in_flight_is_ignored() {
+        use bevy::time::TimeUpdateStrategy;
+
+        let mut app = test_app();
+        // Freeze the clock (see the comment in the test above) so the
+        // hand-armed reload is still genuinely in-flight by the time the
+        // second `press` runs, regardless of real wall-clock speed.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::ZERO,
+        ));
+        app.update();
+
+        // Hand-arm an in-flight reload bound for Dots, as if some other
+        // trigger had already begun one.
+        {
+            let now = app.world().resource::<Time>().elapsed();
+            let mut reload = app.world_mut().resource_mut::<SketchReloadState>();
+            reload.begin_fade_out(now, 1.0, AppState::Dots, ReloadReason::SettingsRestart);
+        }
+
+        press(&mut app, WaveConductorAction::SelectLine);
+
+        let reload = app.world().resource::<SketchReloadState>();
+        assert_eq!(
+            reload.return_state,
+            AppState::Dots,
+            "a nav key pressed mid-fade must not retarget the in-flight reload"
+        );
+        assert_eq!(
+            reload.reason,
+            ReloadReason::SettingsRestart,
+            "the original reload's reason must survive untouched"
+        );
+    }
+
+    /// Navigating to the state that is already active is a no-op: it must not
+    /// arm a reload at all. Reaches `AppState::Line` first via the graceful
+    /// path (mirroring `select_line_transitions_into_line_state` in
+    /// `tests/lifecycle.rs`), then presses `SelectLine` again.
+    #[test]
+    fn navigating_to_the_already_active_state_does_not_arm_a_reload() {
+        use bevy::time::{TimeUpdateStrategy, Virtual};
+
+        let mut app = test_app();
+        app.update();
+
+        press(&mut app, WaveConductorAction::SelectLine);
+        // Settle the graceful reload: a 500 ms manual step comfortably
+        // covers `SKETCH_SWITCH_FADE_DURATION` (400 ms) per leg, so three
+        // updates walk FadeOut -> Switch -> FadeIn -> Idle, exactly as the
+        // phase-walk tests in `lifecycle/reload.rs` do. `Time<Virtual>`'s
+        // default `max_delta` (250 ms) would otherwise silently clamp the
+        // 500 ms step below the 400 ms fade, stalling it forever.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(500),
+        ));
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(std::time::Duration::from_secs(1));
+        app.update();
+        app.update();
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Line,
+            "precondition: must have settled into Line"
+        );
+        assert!(app.world().resource::<SketchReloadState>().is_idle());
+
+        press(&mut app, WaveConductorAction::SelectLine);
+
+        assert!(
+            app.world().resource::<SketchReloadState>().is_idle(),
+            "pressing the select key for the already-active sketch must not \
+             arm a reload"
         );
     }
 }

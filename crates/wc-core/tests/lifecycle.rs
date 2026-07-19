@@ -29,6 +29,54 @@ fn press_key(app: &mut App, key: KeyCode) {
     send_release(app, key);
 }
 
+/// Step the app's clock past a graceful `SketchSwitch` reload's fade legs and
+/// resolve the pending `AppState` transitions.
+///
+/// A sketch-select key, `NavigateHome`, `NavigateNext`, or `NavigatePrev` now
+/// begins a graceful `wc_core::lifecycle::reload::ReloadReason::SketchSwitch`
+/// reload (see `nav::handle_navigation_actions`'s module doc) instead of
+/// writing `NextState<AppState>` directly — the destination only becomes the
+/// live `AppState` once `FadeOut -> Switch -> FadeIn` resolves. Installs
+/// `TimeUpdateStrategy::ManualDuration` with a 500 ms step (comfortably past
+/// `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) and drives three updates — the
+/// same three-tick walk `reload.rs`'s own phase-walk tests use — so each leg
+/// resolves in a single tick regardless of real wall-clock speed.
+///
+/// Call once per key press before asserting the destination `AppState`; a
+/// second press made *before* calling this would be ignored outright (a
+/// reload already in flight — see the module doc's already-in-flight edge
+/// case), so tests that press multiple nav keys in sequence must settle
+/// between each one.
+///
+/// `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+/// clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s 400 ms,
+/// stalling the fade forever (the same trap `shift_s_chord_arms_screensaver_skip_and_rewinds_timer`
+/// below already works around by raising it before a big manual jump), so
+/// this raises it for the walk and restores the 250 ms default afterward.
+///
+/// Restores `TimeUpdateStrategy::Automatic` before returning, so a test that
+/// depends on the real wall clock afterward (e.g.
+/// `shift_s_targets_screensaver_within_first_60s`, which deliberately keeps
+/// `Time::elapsed()` in the low-millisecond range) is not left on a manual
+/// clock it never asked for.
+fn settle_sketch_switch(app: &mut App) {
+    use bevy::time::{TimeUpdateStrategy, Virtual};
+
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(500),
+    ));
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(std::time::Duration::from_secs(1));
+    app.update(); // FadeOut completes -> Switch (NextState(Home) queued, unless already Home)
+    app.update(); // StateTransition resolves; Switch -> FadeIn (NextState(target) queued, unless already there)
+    app.update(); // StateTransition resolves; FadeIn completes -> Idle
+    app.insert_resource(TimeUpdateStrategy::Automatic);
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(std::time::Duration::from_millis(250)); // Bevy's own default
+}
+
 #[test]
 fn defaults_to_home_state() {
     let mut app = lifecycle_test_app();
@@ -44,8 +92,9 @@ fn select_line_transitions_into_line_state() {
     let mut app = lifecycle_test_app();
     app.update();
     press_key(&mut app, KeyCode::Digit1);
-    // Pending transitions resolve on the next update tick.
-    app.update();
+    // Digit1 begins a graceful SketchSwitch reload rather than an instant
+    // transition; settle it before asserting the destination.
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line
@@ -57,13 +106,13 @@ fn navigate_home_returns_to_home() {
     let mut app = lifecycle_test_app();
     app.update();
     press_key(&mut app, KeyCode::Digit3); // Select Dots
-    app.update();
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Dots
     );
     press_key(&mut app, KeyCode::Escape); // Navigate Home
-    app.update();
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Home
@@ -76,31 +125,33 @@ fn next_and_prev_cycle_through_sketches() {
     app.update();
     // Home → next (X key) → Line
     press_key(&mut app, KeyCode::KeyX);
-    app.update();
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line
     );
     // Line → next → Flame
     press_key(&mut app, KeyCode::KeyX);
-    app.update();
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Flame
     );
     // Flame → next → Dots
     press_key(&mut app, KeyCode::KeyX);
-    app.update();
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Dots
     );
     // Wrap around: SKETCH_ORDER has 5 entries (Line, Flame, Dots, Cymatics,
     // Radiance — Waves is a de-routed seam, AUDIT.md T5), so 5 nexts from
-    // Dots should land back on Dots.
+    // Dots should land back on Dots. Each press must settle before the next
+    // one, or it would be ignored as a reload-already-in-flight (see
+    // `settle_sketch_switch`'s doc).
     for _ in 0..5 {
         press_key(&mut app, KeyCode::KeyX);
-        app.update();
+        settle_sketch_switch(&mut app);
     }
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
@@ -108,7 +159,7 @@ fn next_and_prev_cycle_through_sketches() {
     );
     // Prev from Dots → Flame (Z key)
     press_key(&mut app, KeyCode::KeyZ);
-    app.update();
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Flame
@@ -119,10 +170,12 @@ fn next_and_prev_cycle_through_sketches() {
 fn idle_transitions_after_threshold() {
     let mut app = lifecycle_test_app();
 
-    // Navigate to Line sketch so SketchActivity sub-state activates.
+    // Navigate to Line sketch so SketchActivity sub-state activates. Digit1
+    // begins a graceful SketchSwitch reload rather than an instant
+    // transition; settle it before asserting the destination.
     app.update();
     press_key(&mut app, KeyCode::Digit1);
-    app.update(); // StateTransition resolves → AppState::Line, SketchActivity::Active
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line
@@ -391,10 +444,15 @@ fn shift_s_chord_arms_screensaver_skip_and_rewinds_timer() {
 /// had been up a full minute. The flag set by the rewind now carries
 /// `advance_activity` into `Screensaver` at any uptime.
 ///
-/// This runs on the real clock (no `TimeUpdateStrategy`), so `Time::elapsed()`
-/// stays in the low-millisecond range — squarely inside the previously-broken
-/// `< 60 s` window the older `direct_action_input` / `shift_s_chord` tests
-/// deliberately stepped past (they advance the clock to ~61 s+ first).
+/// This runs on the real clock, so `Time::elapsed()` stays low — squarely
+/// inside the previously-broken `< 60 s` window the older
+/// `direct_action_input` / `shift_s_chord` tests deliberately stepped past
+/// (they advance the clock to ~61 s+ first). The Digit1 press that reaches
+/// `AppState::Line` now settles a graceful `SketchSwitch` reload via
+/// `settle_sketch_switch`, which advances the clock by ~1.5 s (three legs at
+/// a 500 ms manual step) before restoring `TimeUpdateStrategy::Automatic` —
+/// still comfortably inside the 60 s window this test is named for, just no
+/// longer sub-millisecond by the time the chord fires.
 ///
 /// The assertion reads the `NextState<SketchActivity>` that `advance_activity`
 /// queues in the chord frame rather than resolving the transition: actually
@@ -407,9 +465,13 @@ fn shift_s_targets_screensaver_within_first_60s() {
     let mut app = lifecycle_test_app();
     app.update();
 
-    // Navigate to a sketch so the `SketchActivity` sub-state exists.
+    // Navigate to a sketch so the `SketchActivity` sub-state exists. Digit1
+    // begins a graceful SketchSwitch reload; settle it (restores the real
+    // clock afterward — see `settle_sketch_switch`'s doc — so the elapsed-time
+    // assertions below still exercise the low-uptime `< 60 s` window this
+    // test is named for).
     press_key(&mut app, KeyCode::Digit1);
-    app.update(); // resolve → AppState::Line, SketchActivity::Active
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<SketchActivity>>().get(),
         SketchActivity::Active,
@@ -575,11 +637,11 @@ fn select_precedence_lower_sketch_wins_when_keys_same_frame() {
     // Both keys pressed before the update — same PreUpdate tick.
     send_press(&mut app, KeyCode::Digit1);
     send_press(&mut app, KeyCode::Digit3);
-    app.update(); // PreUpdate: both ActionInputs emitted; Update: NextState set
+    app.update(); // PreUpdate: both ActionInputs emitted; Update: graceful reload armed for Line
     send_release(&mut app, KeyCode::Digit1);
     send_release(&mut app, KeyCode::Digit3);
-    // Pending transition resolves on the next update tick.
-    app.update();
+    // Settle the graceful reload before asserting the destination.
+    settle_sketch_switch(&mut app);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,

@@ -315,16 +315,53 @@ fn settings_restart_cycles_back_to_line() {
 /// Transition to `AppState::Line` in a test app.
 ///
 /// Uses Digit1 keyboard nav — the same binding exercised in `line_input.rs`.
-/// Three updates are sufficient: one folds the synthetic `KeyboardInput` into
-/// `ButtonInput<KeyCode>` and `emit_action_input` emits `ActionInput`, one
-/// runs `handle_navigation_actions` to set `NextState`, one runs the
-/// `OnEnter(AppState::Line)` schedule.
+/// `nav::handle_navigation_actions` now begins a graceful
+/// `ReloadReason::SketchSwitch` reload (`FadeOut -> Switch -> FadeIn`, see
+/// `wc_core::lifecycle::reload`'s module doc) instead of setting `NextState`
+/// directly, so the destination only becomes current once that machine
+/// settles. `TimeUpdateStrategy::ManualDuration` at 500 ms (comfortably past
+/// `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) makes each leg resolve in a single
+/// tick; the same three-update count that used to be enough for the instant
+/// transition now resolves the full walk: `FadeOut` completes, `StateTransition`
+/// hops through `Home` and arms `FadeIn`, `StateTransition` lands on Line and
+/// `FadeIn` completes.
+///
+/// Saves and restores the caller's `TimeUpdateStrategy` and
+/// `Time<Virtual>::max_delta` rather than assuming `Automatic`/the 250 ms
+/// default: `particle_stats_rise_on_press_and_decay_on_release` below arms its
+/// own `ManualDuration(16ms)` *before* calling `enter_line` so its later
+/// 60-frame press simulation accumulates a full simulated second, and a blind
+/// reset to `Automatic` would silently strand that loop on near-zero
+/// real-wall-clock deltas.
 fn enter_line(app: &mut App) {
     use bevy::input::keyboard::KeyCode;
+    use bevy::time::{TimeUpdateStrategy, Virtual};
+
+    let restore_strategy = match app.world().resource::<TimeUpdateStrategy>() {
+        TimeUpdateStrategy::Automatic => TimeUpdateStrategy::Automatic,
+        TimeUpdateStrategy::ManualInstant(i) => TimeUpdateStrategy::ManualInstant(*i),
+        TimeUpdateStrategy::ManualDuration(d) => TimeUpdateStrategy::ManualDuration(*d),
+        TimeUpdateStrategy::FixedTimesteps(f) => TimeUpdateStrategy::FixedTimesteps(*f),
+    };
+    let restore_max_delta = app.world().resource::<Time<Virtual>>().max_delta();
+
     common::input::tap_key(app, KeyCode::Digit1);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(500),
+    ));
+    // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+    // clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s
+    // 400 ms, stalling the fade forever.
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(std::time::Duration::from_secs(1));
     for _ in 0..3 {
         app.update();
     }
+    app.insert_resource(restore_strategy);
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(restore_max_delta);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,

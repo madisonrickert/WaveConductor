@@ -7,7 +7,7 @@
 //!
 //! - **Registered** sketch → `render_active_tile`: screenshot background
 //!   via `EguiUserTextures`, Orbitron name overlay with gradient fade,
-//!   sheen-on-hover sweep. Clickable; sets `NextState<AppState>` to the
+//!   sheen-on-hover sweep. Clickable; begins a graceful reload into the
 //!   entry's target state.
 //! - **Unregistered** sketch → `render_placeholder_tile`: dark fill,
 //!   greyed sketch name in Orbitron, "Coming soon" subtitle. Inert.
@@ -20,15 +20,22 @@
 //! on [`AppState::Home`]. It reads [`SketchManifest`] (optional — absent
 //! before any sketch plugin registers itself), registers each entry's
 //! screenshot handle with [`bevy_egui::EguiUserTextures`] to obtain an
-//! [`egui::TextureId`], and on tile click sets [`NextState<AppState>`] to
-//! the entry's target state.
+//! [`egui::TextureId`], and on tile click calls
+//! [`SketchReloadState::begin_fade_out`] with
+//! [`crate::lifecycle::reload::ReloadReason::SketchSwitch`] — the same
+//! graceful dip-to-black `nav::handle_navigation_actions` drives for a
+//! keyboard select (see that module's doc) — instead of writing
+//! [`NextState<AppState>`] directly. The `picker_not_reloading` run condition
+//! already guarantees no reload is in flight whenever this system runs, so
+//! the click handler does not need its own `is_idle` check.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 
 use super::style::OverlayStyle;
 use super::text::letter_spaced_label;
-use crate::lifecycle::reload::SketchReloadState;
+use crate::audio::state::AudioState;
+use crate::lifecycle::reload::{ReloadReason, SketchReloadState};
 use crate::lifecycle::state::AppState;
 use crate::sketch::SketchManifest;
 
@@ -180,8 +187,16 @@ pub fn draw_sketch_picker(world: &mut World) {
         });
 
     if let Some(target) = clicked_state {
-        if let Some(mut next) = world.get_resource_mut::<NextState<AppState>>() {
-            next.set(target);
+        // Graceful dip-to-black instead of an instant `NextState` write —
+        // same `ReloadReason::SketchSwitch` path as a keyboard sketch-select
+        // (see `nav::handle_navigation_actions`'s module doc). Safe to begin
+        // unconditionally: `picker_not_reloading` already gates this whole
+        // system on `SketchReloadState::is_idle()`, so no reload can be in
+        // flight when a click lands.
+        let now = world.resource::<Time>().elapsed();
+        let pre_fade_volume = world.get_resource::<AudioState>().map_or(1.0, |s| s.volume);
+        if let Some(mut reload_state) = world.get_resource_mut::<SketchReloadState>() {
+            reload_state.begin_fade_out(now, pre_fade_volume, target, ReloadReason::SketchSwitch);
         }
     }
 }

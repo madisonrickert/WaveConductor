@@ -30,6 +30,24 @@
 //! by its parent. Under an active soak the snapshot is formatted into a scratch
 //! `String` owned by [`SoakRuntime`] and `clear()`ed each time, so the 8-hour
 //! steady state performs no growing allocation.
+//!
+//! ## Sketch cycling is a graceful reload, not an instant `NextState` write
+//!
+//! The cycle timer routes through [`SketchReloadState::begin_fade_out`] with
+//! [`ReloadReason::SketchSwitch`] — the same machine `nav::handle_navigation_actions`
+//! drives for a live keypress (see `crate::lifecycle::nav`'s module doc) —
+//! rather than calling `NextState::set` directly. Two reasons: it keeps an
+//! unattended soak run's sketch transitions representative of what a real
+//! visitor sees (dip to black, not an instant cut), and it exercises the
+//! *graceful* teardown/rebuild path for the multi-hour duration this harness
+//! exists to stress, rather than only ever testing the instant one. If a
+//! reload is already in flight when a cycle comes due (a settings-restart or
+//! resize reload racing the cycle timer — vanishingly unlikely at the default
+//! 5-minute cycle interval, but not impossible), the cycle is skipped for
+//! this tick rather than retargeting the in-flight reload, mirroring
+//! `nav::handle_navigation_actions`'s same choice; the schedule still
+//! advances by a full interval either way so a stuck reload cannot wedge the
+//! cycle timer into firing every frame.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -41,7 +59,9 @@ use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 
 use super::config::{SoakActivity, SoakConfig};
+use crate::audio::state::AudioState;
 use crate::lifecycle::idle::InteractionTimer;
+use crate::lifecycle::reload::{ReloadReason, SketchReloadState};
 use crate::lifecycle::state::{AppState, SketchActivity};
 use crate::lifecycle::thermal::ThermalState;
 
@@ -135,17 +155,19 @@ pub struct HealthSnapshot {
 #[allow(
     clippy::too_many_arguments,
     reason = "a Bevy system's arguments are its dependency list; splitting this \
-              across systems would duplicate the same six reads three times"
+              across systems would duplicate the same resource reads across systems"
 )]
 pub fn drive_soak(
     config: Option<Res<'_, SoakConfig>>,
     runtime: Option<ResMut<'_, SoakRuntime>>,
     time: Res<'_, Time<Real>>,
+    reload_clock: Res<'_, Time>,
     diagnostics: Option<Res<'_, DiagnosticsStore>>,
     thermal: Option<Res<'_, ThermalState>>,
     app_state: Option<Res<'_, State<AppState>>>,
     activity: Option<Res<'_, State<SketchActivity>>>,
-    mut next_state: ResMut<'_, NextState<AppState>>,
+    reload_state: Option<ResMut<'_, SketchReloadState>>,
+    audio_state: Option<Res<'_, AudioState>>,
     mut exit: MessageWriter<'_, AppExit>,
 ) {
     let (Some(config), Some(mut runtime)) = (config, runtime) else {
@@ -188,11 +210,26 @@ pub fn drive_soak(
 
     if let Some(cycle) = config.cycle {
         if elapsed >= runtime.next_cycle {
-            if let Some(current) = app_state.as_deref() {
-                let next = current.get().next_sketch();
-                tracing::info!(?next, "soak: cycling sketch");
-                next_state.set(next);
-                runtime.cycles += 1;
+            if let (Some(current), Some(mut reload_state)) = (app_state.as_deref(), reload_state) {
+                if reload_state.is_idle() {
+                    let next = current.get().next_sketch();
+                    tracing::info!(?next, "soak: cycling sketch");
+                    let pre_fade_volume = audio_state.as_deref().map_or(1.0, |s| s.volume);
+                    reload_state.begin_fade_out(
+                        reload_clock.elapsed(),
+                        pre_fade_volume,
+                        next,
+                        ReloadReason::SketchSwitch,
+                    );
+                    runtime.cycles += 1;
+                } else {
+                    // A reload was already in flight when the cycle came due
+                    // (see the module doc) — skip this tick rather than
+                    // retargeting it.
+                    tracing::debug!(
+                        "soak: cycle due but a reload is already in flight; skipping this tick"
+                    );
+                }
             }
             runtime.next_cycle = (runtime.next_cycle + cycle).max(elapsed);
         }

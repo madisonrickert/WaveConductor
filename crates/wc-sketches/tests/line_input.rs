@@ -39,17 +39,53 @@ use wc_sketches::particles::compute::ParticleSimParams;
 /// `crates/wc-core/src/lifecycle/actions.rs::default_input_map()` — `Digit1`
 /// maps to `WaveConductorAction::SelectLine`. If that binding changes, the
 /// `AppState::Line` assertion below will fail with a clear message.
+///
+/// `nav::handle_navigation_actions` no longer sets `NextState` directly on a
+/// select key — it begins a graceful `ReloadReason::SketchSwitch` reload
+/// (`FadeOut -> Switch -> FadeIn`, see `wc_core::lifecycle::reload`'s module
+/// doc) instead, so `Digit1` alone no longer lands on `AppState::Line` within
+/// a few frames of real time. `TimeUpdateStrategy::ManualDuration` at 500 ms
+/// (comfortably past `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) makes each leg
+/// resolve in a single tick, so the same three-update count that used to be
+/// enough for the instant transition (was four; trimmed in Plan 10 Phase 0)
+/// now resolves the full graceful walk instead: `FadeOut` completes,
+/// `StateTransition` hops through `Home` and arms `FadeIn`, `StateTransition`
+/// lands on Line and `FadeIn` completes.
+///
+/// Saves and restores the caller's `TimeUpdateStrategy` and
+/// `Time<Virtual>::max_delta` rather than assuming `Automatic`/the 250 ms
+/// default, so a caller that arms its own manual clock before calling
+/// `enter_line` for a later frame-accurate simulation isn't silently
+/// stranded on it afterward (see the analogous note on `line_lifecycle.rs`'s
+/// `enter_line`).
 fn enter_line(app: &mut App) {
+    use bevy::time::{TimeUpdateStrategy, Virtual};
+
+    let restore_strategy = match app.world().resource::<TimeUpdateStrategy>() {
+        TimeUpdateStrategy::Automatic => TimeUpdateStrategy::Automatic,
+        TimeUpdateStrategy::ManualInstant(i) => TimeUpdateStrategy::ManualInstant(*i),
+        TimeUpdateStrategy::ManualDuration(d) => TimeUpdateStrategy::ManualDuration(*d),
+        TimeUpdateStrategy::FixedTimesteps(f) => TimeUpdateStrategy::FixedTimesteps(*f),
+    };
+    let restore_max_delta = app.world().resource::<Time<Virtual>>().max_delta();
+
     tap_key(app, KeyCode::Digit1);
-    // `KeyboardInput` → `ButtonInput<KeyCode>` → `emit_action_input` emits
-    // `ActionInput` → `NextState` takes a few frames: one to fold the synthetic
-    // key into `ButtonInput<KeyCode>` and let `emit_action_input` emit the
-    // action, one for `nav::handle_navigation_actions` to set `NextState`, and
-    // one for the `OnEnter(AppState::Line)` schedule to fire. Three updates is
-    // sufficient (was four; trimmed in Plan 10 Phase 0).
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        500,
+    )));
+    // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+    // clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s
+    // 400 ms, stalling the fade forever.
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(Duration::from_secs(1));
     for _ in 0..3 {
         app.update();
     }
+    app.insert_resource(restore_strategy);
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(restore_max_delta);
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,

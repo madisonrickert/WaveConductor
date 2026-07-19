@@ -82,13 +82,28 @@ fn line_soak_8h() {
     let mut app = sketches_test_app();
     app.update();
 
-    // Enter Line via Digit1 keyboard nav. Three updates is the minimum for
-    // `KeyboardInput` → `ButtonInput<KeyCode>` → `emit_action_input` emits
-    // `ActionInput` → `NextState` to settle (see `line_input.rs::enter_line`).
+    // Enter Line via Digit1 keyboard nav. `nav::handle_navigation_actions`
+    // begins a graceful `ReloadReason::SketchSwitch` reload rather than an
+    // instant `NextState` write, so `TimeUpdateStrategy::ManualDuration` at
+    // 500 ms (past `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) makes the same
+    // three-update settle resolve the full walk (see `line_input.rs::enter_line`).
     tap_key(&mut app, KeyCode::Digit1);
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(500),
+    ));
+    // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+    // clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s
+    // 400 ms, stalling the fade forever.
+    app.world_mut()
+        .resource_mut::<Time<bevy::time::Virtual>>()
+        .set_max_delta(std::time::Duration::from_secs(1));
     for _ in 0..3 {
         app.update();
     }
+    app.insert_resource(bevy::time::TimeUpdateStrategy::Automatic);
+    app.world_mut()
+        .resource_mut::<Time<bevy::time::Virtual>>()
+        .set_max_delta(std::time::Duration::from_millis(250)); // Bevy's own default
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,
@@ -172,11 +187,28 @@ fn line_soak_with_overlay_ui() {
     app.add_plugins(WaveConductorUiPlugin);
     app.update();
 
-    // Enter Line via Digit1 keyboard nav.
+    // Enter Line via Digit1 keyboard nav. `nav::handle_navigation_actions`
+    // begins a graceful `ReloadReason::SketchSwitch` reload rather than an
+    // instant `NextState` write, so `TimeUpdateStrategy::ManualDuration` at
+    // 500 ms (past `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) makes the same
+    // three-update settle resolve the full walk (see `line_input.rs::enter_line`).
     tap_key(&mut app, KeyCode::Digit1);
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(500),
+    ));
+    // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+    // clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s
+    // 400 ms, stalling the fade forever.
+    app.world_mut()
+        .resource_mut::<Time<bevy::time::Virtual>>()
+        .set_max_delta(std::time::Duration::from_secs(1));
     for _ in 0..3 {
         app.update();
     }
+    app.insert_resource(bevy::time::TimeUpdateStrategy::Automatic);
+    app.world_mut()
+        .resource_mut::<Time<bevy::time::Virtual>>()
+        .set_max_delta(std::time::Duration::from_millis(250)); // Bevy's own default
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,

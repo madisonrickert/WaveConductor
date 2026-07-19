@@ -87,10 +87,28 @@ fn leap_path_entity_count_stays_bounded() {
     app.update();
 
     // Enter Line so the per-hand LineHandAttractor reconcile system runs.
+    // `nav::handle_navigation_actions` begins a graceful
+    // `ReloadReason::SketchSwitch` reload rather than an instant `NextState`
+    // write, so `TimeUpdateStrategy::ManualDuration` at 500 ms (past
+    // `SKETCH_SWITCH_FADE_DURATION`'s 400 ms) makes the same three-update
+    // settle resolve the full walk (see `line_input.rs::enter_line`).
     tap_key(&mut app, KeyCode::Digit1);
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_millis(500),
+    ));
+    // `Time<Virtual>`'s default `max_delta` (250 ms) would otherwise silently
+    // clamp the 500 ms manual step below `SKETCH_SWITCH_FADE_DURATION`'s
+    // 400 ms, stalling the fade forever.
+    app.world_mut()
+        .resource_mut::<Time<bevy::time::Virtual>>()
+        .set_max_delta(Duration::from_secs(1));
     for _ in 0..3 {
         app.update();
     }
+    app.insert_resource(bevy::time::TimeUpdateStrategy::Automatic);
+    app.world_mut()
+        .resource_mut::<Time<bevy::time::Virtual>>()
+        .set_max_delta(Duration::from_millis(250)); // Bevy's own default
     assert_eq!(
         *app.world().resource::<State<AppState>>().get(),
         AppState::Line,
