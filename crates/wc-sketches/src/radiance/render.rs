@@ -130,8 +130,9 @@ use crate::radiance::systems::spawn::RadianceRoot;
 #[cfg(feature = "body-tracking-mediapipe")]
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct RadianceSilhouetteMaterial {
-    /// The shared 256² `R8Unorm` person mask (Plan B writes it in place;
-    /// Bevy re-uploads on mutation).
+    /// The shared 256² `Rgba8Unorm` multi-body mask (channel `i` = body slot
+    /// `i`, the pinned convention; Plan B writes it in place and Bevy
+    /// re-uploads on mutation).
     #[texture(0)]
     #[sampler(1)]
     pub mask: Handle<Image>,
@@ -148,6 +149,26 @@ pub struct RadianceSilhouetteMaterial {
     /// Emissive rim color (linear HDR).
     #[uniform(5)]
     pub rim_color: Vec4,
+    /// One-hot slot-channel selector: the shader samples the mask as
+    /// `dot(textureSample(...), channel_select)`, so this picks WHICH body's
+    /// channel renders (currently the primary slot; see
+    /// [`channel_select_for_slot`]).
+    #[uniform(6)]
+    pub channel_select: Vec4,
+}
+
+/// One-hot channel-select vector for a body slot (slot 0 → R … slot 3 → A),
+/// the `dot(mask_sample, channel_select)` idiom of the pinned mask channel
+/// convention. Out-of-range slots clamp to slot 0.
+#[cfg(feature = "body-tracking-mediapipe")]
+#[must_use]
+pub fn channel_select_for_slot(slot: usize) -> Vec4 {
+    match slot {
+        1 => Vec4::new(0.0, 1.0, 0.0, 0.0),
+        2 => Vec4::new(0.0, 0.0, 1.0, 0.0),
+        3 => Vec4::new(0.0, 0.0, 0.0, 1.0),
+        _ => Vec4::new(1.0, 0.0, 0.0, 0.0),
+    }
 }
 
 #[cfg(feature = "body-tracking-mediapipe")]
@@ -267,6 +288,7 @@ pub fn drive_radiance_materials(
     settings: Res<'_, RadianceSettings>,
     state: Res<'_, RadianceState>,
     fade: Res<'_, ScreensaverFade>,
+    body: Option<Res<'_, wc_core::input::body::BodyTrackingState>>,
     particle_roots: Query<
         '_,
         '_,
@@ -322,12 +344,19 @@ pub fn drive_radiance_materials(
         f32::from(u8::from(settings.mask_debug_overlay)),
         fit_aspect,
     );
+    // The silhouette renders the PRIMARY body's mask channel (slot 0 when
+    // nobody is tracked — also the synthetic/phantom writers' slot, so the
+    // capture and attract paths keep their single-body look). A later
+    // radiance overhaul can draw all four channels with per-body colors.
+    let primary_slot = body.as_ref().and_then(|b| b.primary).unwrap_or(0);
+    let channel_select = channel_select_for_slot(primary_slot);
     for handle in &silhouette_roots {
         if let Some(mut material) = silhouette_materials.get_mut(&handle.0) {
             material.fill_params = fill_params;
             material.effect_params = effect_params;
             material.fill_color = silhouette_fill_color();
             material.rim_color = rim;
+            material.channel_select = channel_select;
         }
     }
 }

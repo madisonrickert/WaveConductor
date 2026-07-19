@@ -30,6 +30,7 @@ use bytemuck::{cast_slice, Zeroable};
 use wc_core::audio::input::AudioCaptureRequest;
 use wc_core::input::body::{
     BodyTrackingRequest, MaskTexture, SilhouetteEdges, MASK_SIZE, MASK_SIZE_U32, MAX_EDGE_POINTS,
+    MAX_TRACKED_BODIES,
 };
 
 use crate::radiance::compute::sim_params::{
@@ -63,6 +64,8 @@ pub fn ensure_body_surfaces(
     mut commands: Commands<'_, '_>,
 ) {
     if mask.is_none() {
+        // Rgba8Unorm per the pinned multi-body channel convention (channel i
+        // = body slot i); matches wc-core's init_mask_texture.
         let image = Image::new_fill(
             Extent3d {
                 width: u32::try_from(MASK_SIZE).unwrap_or(256),
@@ -70,8 +73,8 @@ pub fn ensure_body_surfaces(
                 depth_or_array_layers: 1,
             },
             TextureDimension::D2,
-            &[0u8],
-            TextureFormat::R8Unorm,
+            &[0u8, 0, 0, 0],
+            TextureFormat::Rgba8Unorm,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
         commands.insert_resource(MaskTexture(images.add(image)));
@@ -79,6 +82,7 @@ pub fn ensure_body_surfaces(
     if edges.is_none() {
         commands.insert_resource(SilhouetteEdges {
             points: Vec::with_capacity(MAX_EDGE_POINTS),
+            slot_counts: [0; MAX_TRACKED_BODIES],
             generation: 0,
         });
     }
@@ -157,6 +161,8 @@ pub fn spawn_radiance(
         effect_params: Vec4::ZERO,
         fill_color: silhouette_fill_color(),
         rim_color: stops[2],
+        // Slot 0 (channel R) until the driver retargets it at the primary.
+        channel_select: crate::radiance::render::channel_select_for_slot(0),
     });
 
     // Silhouette quad under (z 0.0) the billboards (z 1.0) in Transparent2d's

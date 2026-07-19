@@ -1,24 +1,41 @@
-//! Two-stage `BlazePose` pipeline: a camera `Frame` in, landmarks + world
-//! landmarks + a warped/temporally-blended mask + silhouette edges out.
+//! Two-stage `BlazePose` pipeline, multi-person: a camera `Frame` in; per-slot
+//! landmarks + world landmarks + a per-slot channel of the warped/temporally-
+//! blended RGBA mask + slot-partitioned silhouette edges out.
 //!
-//! Flow per frame: square-pad the frame; run the person detector ONLY when no
-//! track is carried (detect-then-track — the aux landmark rows 33/34 supply
-//! next frame's ROI, so a healthy track never pays the detector); warp the
-//! rotated ROI into a 256² crop; run the landmark model; gate on its
-//! pose-presence scalar; project the 39 rows back to square-norm; heavily
-//! One-Euro filter the aux alignment rows before deriving next frame's
-//! tracking ROI so the crop does not jitter; publish the first 33 in
-//! content-norm (mask UV space); de-rotate the metric world landmarks by the
-//! ROI rotation; warp + uncertainty-blend the segmentation mask; extract
-//! silhouette edges into the pooled payload.
+//! Flow per frame: square-pad the frame; run the person detector when no
+//! track is carried (cold start) or on the discovery-scan cadence
+//! (`DETECT_SCAN_INTERVAL`) while capacity remains — a healthy full house
+//! never pays the detector; associate detections to **stable slots**
+//! ([`super::selection::assign_slots`]): active/reserved slots re-bind by
+//! centre distance (a returning person keeps their slot), new people claim
+//! free slots. Per active slot: warp the rotated ROI into a 256² crop; run
+//! the landmark model; gate on its pose-presence scalar; project the 39 rows
+//! back to square-norm; heavily One-Euro filter the aux alignment rows before
+//! deriving next frame's tracking ROI so the crop does not jitter; publish
+//! the first 33 in content-norm (mask UV space); de-rotate the metric world
+//! landmarks by the ROI rotation; warp + uncertainty-blend the segmentation
+//! mask into the slot's channel; extract silhouette edges into the pooled
+//! payload (slot-ordered).
+//!
+//! **Inference budget:** with ≤ `MAX_FULL_INFERENCE_SLOTS` active tracks
+//! every track runs landmark/mask inference every frame; with more, the
+//! pipeline interleaves round-robin (`MAX_FULL_INFERENCE_SLOTS` tracks per
+//! frame), holding the last landmarks/mask for skipped tracks (freshly
+//! activated tracks jump the queue so a new person appears immediately).
+//!
+//! A **lost** track's slot is *reserved* for `SLOT_RESERVE` before a new
+//! person may claim it: long enough for the main-side presence-hold + fade
+//! release to finish, so a mask channel is never recycled while its previous
+//! occupant is still fading out on screen (see `super::envelope`), and long
+//! enough that a brief occlusion re-acquires the same slot.
 //!
 //! The **idle detector-only probe** (`detector_only = true`) runs just the
-//! detector as a presence sensor at the idle rate: landmarks/mask stages are
-//! skipped, the carried track is cleared (stale after idle), and the mask
-//! EMA decays so no stale silhouette lingers.
+//! detector as a presence sensor at the idle rate: landmark/mask stages are
+//! skipped, all carried tracks are dropped (stale after idle), and the mask
+//! channels decay so no stale silhouette lingers.
 //!
-//! All scratch (pad/resize/warp images, input/output tensors, decode buffer,
-//! mask processor) is owned by the pipeline and refilled in place — the
+//! All scratch (pad/resize/warp images, input/output tensors, per-slot mask
+//! processors) is owned by the pipeline and refilled in place — the
 //! steady-state frame path allocates nothing. Image helpers are adapted from
 //! the validated hand pipeline (same conventions: `/255` RGB NHWC, square-pad
 //! to the larger side, bilinear warp/resize with clamp-to-edge).
@@ -32,18 +49,20 @@ use image::RgbImage;
 
 use super::detector::{
     decode_pose_detections_into, generate_pose_anchors, sigmoid, weighted_nms_into, Anchor,
-    PersonDetection, DETECTOR_INPUT, MAX_PERSON_CANDIDATES, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN,
+    PersonDetection, Rect, DETECTOR_INPUT, MAX_PERSON_CANDIDATES, POSE_ANCHOR_COUNT,
+    POSE_REGRESSION_LEN,
 };
-use super::edges::extract_edges;
+use super::edges::extract_edges_append;
 use super::mask::{MaskProcessor, DEFAULT_MASK_EMA_ALPHA};
 use super::roi::{
     project_body_landmarks, roi_from_alignment_points, roi_from_detection, roi_trackable,
     ContentRect, RoiRect, AUX_CENTER_ROW, AUX_SCALE_ROW, LANDMARK_INPUT, LANDMARK_ROWS,
     LANDMARK_VALUES,
 };
+use super::selection::{assign_slots, visible_fraction};
 use super::smoothing::OneEuroFilter;
-use super::transport::BodyFramePayload;
-use super::{BodyLandmark, BODY_LANDMARK_COUNT, MASK_SIZE};
+use super::transport::{BodyFramePayload, SlotFrame};
+use super::{BodyLandmark, BODY_LANDMARK_COUNT, MASK_CHANNELS, MASK_SIZE, MAX_TRACKED_BODIES};
 use crate::input::capture::Frame;
 use crate::input::onnx::{InferenceError, ModelInference, Tensor};
 
@@ -70,18 +89,26 @@ const HEATMAP_MIN_CONFIDENCE: f32 = 0.5;
 /// (`MediaPipe`'s `min_suppression_threshold: 0.3`).
 const PERSON_BLEND_IOU: f32 = 0.3;
 
-/// Primary-dancer stickiness window (our addition — no upstream analog). A
-/// `last_roi` older than this is stale, and cluster selection falls back to the
-/// highest-scoring person. Kiosk rationale: bridge a brief occlusion (someone
-/// walks in front of the tracked dancer) without dropping them, but re-acquire
-/// the strongest person once they have truly left the frame.
-const STICKINESS_TIMEOUT: Duration = Duration::from_secs(2);
+/// Discovery-scan cadence: while at least one track is active and capacity
+/// remains (a free or reserved slot exists), the detector re-runs at this
+/// interval to spot new people walking in and to re-acquire reserved slots.
+/// ~3 Hz keeps the extra detector cost negligible against the per-slot
+/// landmark inference while a newcomer still appears within a beat.
+const DETECT_SCAN_INTERVAL: Duration = Duration::from_millis(300);
 
-/// Max ROI-centre distance (square-norm units) between `last_roi` and a
-/// candidate cluster for stickiness to keep that cluster. Beyond this the
-/// nearest candidate is too far to plausibly be the same person, so selection
-/// falls back to score. Compared squared against the squared distance.
-const STICKINESS_MAX_DIST: f32 = 0.25;
+/// How long a lost track's slot stays *reserved* (matchable by a returning
+/// person, unclaimable by a new one) before freeing. Must cover the main-side
+/// `envelope::PRESENCE_HOLD` (0.3 s) plus the fade release to zero
+/// (`FADE_RELEASE_TAU · ln(1/FADE_DONE_EPSILON)` ≈ 3.6 s) so a mask channel
+/// is never handed to a newcomer mid-fade; it also subsumes the old
+/// single-track 2 s occlusion stickiness.
+const SLOT_RESERVE: Duration = Duration::from_secs(4);
+
+/// Active-track count at or below which every track runs landmark/mask
+/// inference every frame; above it the pipeline interleaves round-robin,
+/// running this many tracks per frame (see the module doc's inference
+/// budget).
+const MAX_FULL_INFERENCE_SLOTS: usize = 2;
 
 /// Aux-landmark One-Euro min cutoff (Hz). `MediaPipe` smooths the aux
 /// alignment rows *much harder* than the main landmarks so the tracking crop
@@ -102,7 +129,7 @@ const AUX_MIN_OBJECT_SCALE: f32 = 0.05;
 /// ROI centre, 34 = circumscribing-circle point) applied **before** the
 /// next-frame tracking ROI is derived. Without it, the raw per-frame aux rows
 /// jitter the crop centre/size/rotation, and everything warped from that crop
-/// (landmarks + mask + edges) inherits the jitter.
+/// (landmarks + mask + edges) inherits the jitter. One instance per slot.
 ///
 /// Mirrors `MediaPipe`'s aux `LandmarksSmoothingCalculator` (see the `AUX_*`
 /// consts). Upstream connects `OBJECT_SCALE_ROI` to the aux bank with **no**
@@ -173,7 +200,7 @@ impl AuxRoiFilter {
 pub struct PoseConfig {
     /// Minimum detector score to accept a person (`min_score_thresh: 0.5`).
     pub detector_score_threshold: f32,
-    /// Minimum pose-presence probability from the landmark model to keep the
+    /// Minimum pose-presence probability from the landmark model to keep a
     /// track (matches `MediaPipe`'s default tracking confidence).
     pub presence_threshold: f32,
     /// Mask temporal-blend combine-with-previous ratio (see
@@ -187,6 +214,11 @@ pub struct PoseConfig {
     /// refines) so the hardware session can A/B refined vs raw landmarks;
     /// directly settable in tests.
     pub disable_heatmap_refine: bool,
+    /// Maximum concurrently tracked people, clamped to
+    /// `1..=`[`MAX_TRACKED_BODIES`] at construction. Slots at or above the
+    /// cap are never claimable (see `BodyTrackingConfig::max_tracked_bodies`
+    /// for the operator knob this mirrors).
+    pub max_tracked_bodies: usize,
 }
 
 impl Default for PoseConfig {
@@ -196,6 +228,7 @@ impl Default for PoseConfig {
             presence_threshold: 0.5,
             mask_ema_alpha: DEFAULT_MASK_EMA_ALPHA,
             disable_heatmap_refine: false,
+            max_tracked_bodies: MAX_TRACKED_BODIES,
         }
     }
 }
@@ -206,18 +239,16 @@ impl Default for PoseConfig {
 /// the hand provider's
 /// `MediaPipeLiveTuning` (f32 bit patterns in `AtomicU32`, all `Relaxed` —
 /// independent scalars, one-frame-stale reads are harmless).
+///
+/// (The old person-cycle counter moved main-side: with stable slots the `KeyN`
+/// hotkey cycles which slot is *primary* in the publisher and never needs to
+/// reach the worker — see `selection::PrimarySelect::cycle`.)
 #[derive(Debug)]
 pub struct BodyLiveTuning {
     /// Worker caps at the shared idle rate + detector-only probe while set.
     idle_throttle: AtomicBool,
     /// [`PoseConfig::mask_ema_alpha`] as `f32` bits.
     mask_ema_alpha: AtomicU32,
-    /// Person-cycle request counter. The main side increments it (a counter,
-    /// not a bool, so a press is never lost outright — though presses landing
-    /// within one worker frame coalesce into a single cycle); the
-    /// worker compares it against its last-seen value and forces a detector
-    /// pass + track switch to the next dancer when it differs.
-    cycle_request: AtomicU32,
 }
 
 impl BodyLiveTuning {
@@ -227,7 +258,6 @@ impl BodyLiveTuning {
         Self {
             idle_throttle: AtomicBool::new(false),
             mask_ema_alpha: AtomicU32::new(mask_ema_alpha.to_bits()),
-            cycle_request: AtomicU32::new(0),
         }
     }
 
@@ -253,36 +283,23 @@ impl BodyLiveTuning {
     pub fn mask_ema_alpha(&self) -> f32 {
         f32::from_bits(self.mask_ema_alpha.load(Ordering::Relaxed))
     }
-
-    /// Request a person cycle on the worker's next processed frame (bumps the
-    /// lock-free counter; safe to call on every hotkey press).
-    pub fn request_cycle(&self) {
-        self.cycle_request.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// The current person-cycle request counter. The worker compares this
-    /// against its last-seen value to detect a pending cycle.
-    #[must_use]
-    pub fn cycle_request(&self) -> u32 {
-        self.cycle_request.load(Ordering::Relaxed)
-    }
 }
 
 /// Why the detector ran or was skipped for the latest processed frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DetectorRunReason {
-    /// No carried track: the detector ran to (re)acquire.
+    /// No active track: the detector ran to (re)acquire.
     #[default]
     ColdStart,
-    /// A carried track supplied the ROI; the detector was skipped.
+    /// Carried tracks supplied every ROI; the detector was skipped.
     Tracking,
     /// Idle detector-only presence probe (landmark stage skipped).
     IdleProbe,
     /// The frame was invalid; no model stage ran.
     InvalidFrame,
-    /// A pending person-cycle request forced a detector pass while tracking to
-    /// switch the primary dancer.
-    Cycle,
+    /// Tracks were active but capacity remained: the periodic discovery scan
+    /// ran the detector to spot new people / re-acquire reserved slots.
+    Scan,
 }
 
 impl DetectorRunReason {
@@ -294,7 +311,7 @@ impl DetectorRunReason {
             Self::Tracking => "tracking",
             Self::IdleProbe => "idle_probe",
             Self::InvalidFrame => "invalid_frame",
-            Self::Cycle => "cycle",
+            Self::Scan => "scan",
         }
     }
 }
@@ -308,73 +325,112 @@ pub struct PoseDiagnostics {
     pub preprocess: Duration,
     /// Detector-stage time (zero when skipped).
     pub detector: Duration,
-    /// Landmark/mask-stage time (zero when skipped).
+    /// Landmark/mask-stage time (all slots run this frame; zero when skipped).
     pub landmark: Duration,
     /// Why the detector ran or was skipped.
     pub detector_reason: DetectorRunReason,
-    /// Whether a person was tracked this frame.
+    /// Whether any person was tracked this frame.
     pub present: bool,
-    /// The frame's confidence (detector score or landmark presence).
+    /// The frame's best confidence over slots (detector score or landmark
+    /// presence).
     pub confidence: f32,
     /// Number of weighted-NMS person candidates from the MOST RECENT detector
-    /// pass. Only refreshes when the detector actually runs (cold start, idle
-    /// probe, or a person-cycle request) — it is stale (carried) on the
+    /// pass. Only refreshes when the detector actually runs (cold start,
+    /// discovery scan, or idle probe) — it is stale (carried) on the
     /// detector-skipping tracking frames in between.
     pub people_detected: u8,
+    /// Number of active tracked slots after this frame.
+    pub active_tracks: u8,
 }
 
-/// The published outcome of one processed frame.
-pub struct PoseResult {
-    /// Whether a person is tracked (idle probes report detector hits here).
-    pub present: bool,
-    /// Track confidence.
-    pub confidence: f32,
-    /// Content-normalized landmarks + visibility (all defaults when absent
-    /// or in the idle probe).
-    pub landmarks: [BodyLandmark; BODY_LANDMARK_COUNT],
-    /// Metric world landmarks (metres, hip-centred).
-    pub world_landmarks: [Vec3; BODY_LANDMARK_COUNT],
+/// Which lifecycle phase a slot is in (worker-side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SlotPhase {
+    /// Unoccupied; claimable by a new person (below the configured cap).
+    #[default]
+    Free,
+    /// Occupied by a live track.
+    Active,
+    /// Recently lost: matchable by a returning person, unclaimable by a new
+    /// one, until `reserved_until` (see [`SLOT_RESERVE`]).
+    Reserved,
 }
 
-impl PoseResult {
-    /// A no-person result.
-    fn absent() -> Self {
+/// Worker-side per-slot tracking state: the carried ROI, association anchor,
+/// aux-ROI filter, mask accumulator, and the last published [`SlotFrame`].
+struct SlotTrack {
+    /// Lifecycle phase.
+    phase: SlotPhase,
+    /// The ROI to crop this frame (carried aux track or a fresh detection);
+    /// `Some` only while [`SlotPhase::Active`].
+    roi: Option<RoiRect>,
+    /// Last known person centre (square-norm) — the association anchor while
+    /// Active or Reserved.
+    anchor: Vec2,
+    /// [`SlotPhase::Reserved`] expiry.
+    reserved_until: Duration,
+    /// This slot's aux alignment-row filter (reset on every fresh track).
+    aux_filter: AuxRoiFilter,
+    /// This slot's mask warp/temporal-blend state (owns 3×256 KB f32).
+    mask: MaskProcessor,
+    /// Latest result, held for round-robin-skipped frames.
+    frame: SlotFrame,
+}
+
+impl SlotTrack {
+    fn new() -> Self {
         Self {
-            present: false,
-            confidence: 0.0,
-            landmarks: [BodyLandmark::default(); BODY_LANDMARK_COUNT],
-            world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
+            phase: SlotPhase::Free,
+            roi: None,
+            anchor: Vec2::ZERO,
+            reserved_until: Duration::ZERO,
+            aux_filter: AuxRoiFilter::new(),
+            mask: MaskProcessor::new(),
+            frame: SlotFrame::default(),
         }
+    }
+
+    /// Track lost: reserve the slot (see [`SLOT_RESERVE`]) so the person can
+    /// return to it and the main-side fade can finish before reuse.
+    fn lose(&mut self, now: Duration) {
+        self.phase = SlotPhase::Reserved;
+        self.reserved_until = now + SLOT_RESERVE;
+        self.roi = None;
+        self.frame.present = false;
+    }
+
+    /// Reservation expired (or idle probe): fully release the slot. The mask
+    /// accumulator is reset so the channel is clean for the next claimant.
+    fn release(&mut self) {
+        self.phase = SlotPhase::Free;
+        self.roi = None;
+        self.frame = SlotFrame::default();
+        self.mask.reset();
     }
 }
 
-/// The two-stage pose pipeline: model sessions, anchors, carried track, mask
-/// processor, and reused scratch buffers.
+/// The two-stage multi-person pose pipeline: model sessions, anchors, slot
+/// tracks, and reused scratch buffers.
 pub struct PosePipeline {
     detector: Box<dyn ModelInference>,
     landmark: Box<dyn ModelInference>,
     anchors: Vec<Anchor>,
     config: PoseConfig,
-    /// Landmark-derived ROI carried to the next frame (detect-then-track).
-    /// While present, `process` skips the detector; dropped when presence
-    /// falls below threshold, the ROI leaves the content, the frame is
-    /// unusable, or an idle probe runs.
-    tracked: Option<RoiRect>,
-    /// Primary-dancer memory that SURVIVES track loss (unlike `tracked`, which
-    /// is wiped the moment the track drops): the last known person ROI plus
-    /// when it was seen. [`Self::select_sticky`] uses it to re-acquire the same
-    /// dancer after a brief occlusion. Only ever reset by building a fresh
-    /// pipeline (worker (re)start / request removal — the whole pipeline is
-    /// dropped); [`STICKINESS_TIMEOUT`] ages it out otherwise.
-    last_roi: Option<(RoiRect, Duration)>,
+    /// Effective tracked-body cap (`config.max_tracked_bodies` clamped to
+    /// `1..=MAX_TRACKED_BODIES`); slots at or above it are never claimed.
+    max_tracked: usize,
+    /// Per-slot tracking state, indexed by stable slot.
+    slots: [SlotTrack; MAX_TRACKED_BODIES],
+    /// Per-slot results of the latest processed frame (what the worker
+    /// publishes).
+    slot_frames: [SlotFrame; MAX_TRACKED_BODIES],
+    /// Next discovery scan is due at this time (worker-relative clock).
+    next_scan: Duration,
+    /// Round-robin cursor: the slot index the next interleaved inference pass
+    /// starts scanning from.
+    rr_next: usize,
     /// Optional live tuning shared with the provider systems.
     live_tuning: Option<Arc<BodyLiveTuning>>,
-    /// Heavy One-Euro filter on the aux alignment rows, applied before the
-    /// next-frame tracking ROI is derived so the crop does not jitter. Reset
-    /// on every fresh track (detector re-run / track drop).
-    aux_filter: AuxRoiFilter,
-    /// Mask warp/temporal-blend state (owns its 3×256 KB f32 buffers).
-    mask: MaskProcessor,
     /// Diagnostics for the most recent processed frame.
     last_diagnostics: PoseDiagnostics,
     // --- reused scratch (see module docs; allocated once) ---
@@ -390,9 +446,6 @@ pub struct PosePipeline {
     /// [`MAX_PERSON_CANDIDATES`]), refilled each detector pass; never allocates
     /// after construction.
     person_clusters: Vec<PersonDetection>,
-    /// Last person-cycle request counter the worker acted on (compared against
-    /// [`BodyLiveTuning::cycle_request`] each frame to detect a fresh press).
-    last_cycle_seen: u32,
     /// Candidate count from the most recent detector pass, surfaced through
     /// [`PoseDiagnostics::people_detected`]. Stale on tracking frames.
     people_detected: u8,
@@ -406,16 +459,18 @@ impl PosePipeline {
         landmark: Box<dyn ModelInference>,
         config: PoseConfig,
     ) -> Self {
+        let max_tracked = config.max_tracked_bodies.clamp(1, MAX_TRACKED_BODIES);
         Self {
             detector,
             landmark,
             anchors: generate_pose_anchors(),
             config,
-            tracked: None,
-            last_roi: None,
+            max_tracked,
+            slots: std::array::from_fn(|_| SlotTrack::new()),
+            slot_frames: [SlotFrame::default(); MAX_TRACKED_BODIES],
+            next_scan: Duration::ZERO,
+            rr_next: 0,
             live_tuning: None,
-            aux_filter: AuxRoiFilter::new(),
-            mask: MaskProcessor::new(),
             last_diagnostics: PoseDiagnostics::default(),
             square_buf: RgbImage::default(),
             detector_resize_buf: RgbImage::new(DETECTOR_INPUT, DETECTOR_INPUT),
@@ -432,7 +487,6 @@ impl PosePipeline {
             landmark_outputs: Vec::new(),
             detections: Vec::new(),
             person_clusters: Vec::with_capacity(MAX_PERSON_CANDIDATES),
-            last_cycle_seen: 0,
             people_detected: 0,
         }
     }
@@ -448,24 +502,32 @@ impl PosePipeline {
         self.last_diagnostics
     }
 
+    /// Per-slot results of the most recent processed frame. The worker copies
+    /// this array into the published `BodyFrame`.
+    #[must_use]
+    pub fn slot_frames(&self) -> &[SlotFrame; MAX_TRACKED_BODIES] {
+        &self.slot_frames
+    }
+
     /// Run one frame. `now` is the worker-relative capture time driving the
-    /// aux-ROI One-Euro filter's timestep (mirrors `BodySmoother::smooth`).
+    /// aux-ROI One-Euro filters, the slot reservations, and the scan cadence.
     /// `detector_only` selects the idle presence probe (see module docs).
-    /// `payload`, when given, receives the quantized mask and the extracted
-    /// edges (full frames only; probes and absent frames decay the mask into it
-    /// instead).
+    /// `payload`, when given, receives the quantized RGBA mask and the
+    /// slot-partitioned edges (full frames only; probes and absent frames
+    /// decay the mask into it instead). Results land in
+    /// [`Self::slot_frames`].
     ///
     /// # Errors
     /// Returns [`InferenceError`] if a model stage that was supposed to run
-    /// fails. Invalid frames and empty detections are `Ok(absent)`, not
-    /// errors.
+    /// fails. Invalid frames and empty detections are `Ok` (absent slots),
+    /// not errors.
     pub fn process(
         &mut self,
         frame: &Frame,
         now: Duration,
         detector_only: bool,
-        mut payload: Option<&mut BodyFramePayload>,
-    ) -> Result<PoseResult, InferenceError> {
+        payload: Option<&mut BodyFramePayload>,
+    ) -> Result<(), InferenceError> {
         let frame_start = Instant::now();
         let mut diag = PoseDiagnostics::default();
         let blend_ratio = self
@@ -474,15 +536,8 @@ impl PosePipeline {
             .map_or(self.config.mask_ema_alpha, |t| t.mask_ema_alpha());
 
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
-            // A bad frame breaks tracking: re-acquire next frame.
-            self.tracked = None;
-            diag.detector_reason = DetectorRunReason::InvalidFrame;
-            self.fade_mask_into(blend_ratio, payload.as_deref_mut());
-            // No detector ran; carry the most-recent candidate count.
-            diag.people_detected = self.people_detected;
-            diag.total = frame_start.elapsed();
-            self.last_diagnostics = diag;
-            return Ok(PoseResult::absent());
+            self.process_invalid_frame(now, blend_ratio, payload, diag, frame_start);
+            return Ok(());
         }
         let content = ContentRect::for_frame(frame.width, frame.height);
 
@@ -497,89 +552,206 @@ impl PosePipeline {
         diag.preprocess = stage.elapsed();
 
         if detector_only {
-            // Idle probe: the detector is a presence sensor; a carried crop
-            // track is stale after idle, so drop it.
-            self.tracked = None;
-            diag.detector_reason = DetectorRunReason::IdleProbe;
+            return self.process_idle_probe(square, blend_ratio, payload, diag, frame_start);
+        }
+
+        // Expire reservations whose window has passed, and clear presence on
+        // the still-reserved ones: a slot that lost its track keeps its final
+        // valid frame `present` (see `run_slot_inference`'s untrackable
+        // branch) but must read absent from the NEXT frame unless the
+        // detector re-acquires it below.
+        for slot in &mut self.slots {
+            match slot.phase {
+                SlotPhase::Reserved if now >= slot.reserved_until => slot.release(),
+                SlotPhase::Reserved => slot.frame.present = false,
+                SlotPhase::Free | SlotPhase::Active => {}
+            }
+        }
+
+        // Detect-or-track: run the detector on cold start (no active track,
+        // every frame) or on the discovery-scan cadence while capacity
+        // remains; otherwise every ROI comes from a carried track.
+        let mut fresh = [false; MAX_TRACKED_BODIES];
+        let active_before = self.active_count();
+        let capacity_open = self.slots[..self.max_tracked]
+            .iter()
+            .any(|s| s.phase != SlotPhase::Active);
+        let need_detect = active_before == 0 || (capacity_open && now >= self.next_scan);
+        if need_detect {
+            diag.detector_reason = if active_before == 0 {
+                DetectorRunReason::ColdStart
+            } else {
+                DetectorRunReason::Scan
+            };
             let stage = Instant::now();
             let detected = self.detect_clusters(&square);
             diag.detector = stage.elapsed();
-            self.square_buf = square;
-            detected?;
-            let (present, confidence) = self
-                .person_clusters
-                .first()
-                .map_or((false, 0.0), |d| (true, d.score));
-            self.fade_mask_into(blend_ratio, payload.as_deref_mut());
-            diag.present = present;
-            diag.confidence = confidence;
-            diag.people_detected = self.people_detected;
-            diag.total = frame_start.elapsed();
-            self.last_diagnostics = diag;
-            return Ok(PoseResult {
-                present,
-                confidence,
-                ..PoseResult::absent()
-            });
-        }
-
-        // Detect-then-track: resolve this frame's ROI (carried track, cold-start
-        // detect + stickiness, or a forced person-cycle detect). On detector
-        // error restore the scratch buffer before propagating.
-        let (roi, fresh_track) = match self.resolve_track_roi(&square, now, &mut diag) {
-            Ok(v) => v,
-            Err(e) => {
+            if let Err(e) = detected {
                 self.square_buf = square;
                 return Err(e);
             }
-        };
-        let Some(roi) = roi else {
-            // Nobody in frame: fade the mask, stay quiet.
-            self.square_buf = square;
-            self.fade_mask_into(blend_ratio, payload.as_deref_mut());
-            diag.total = frame_start.elapsed();
-            self.last_diagnostics = diag;
-            return Ok(PoseResult::absent());
-        };
+            self.next_scan = now + DETECT_SCAN_INTERVAL;
+            self.associate_detections(now, &mut fresh);
+        } else {
+            diag.detector_reason = DetectorRunReason::Tracking;
+        }
+        diag.people_detected = self.people_detected;
 
+        // Landmark/mask inference over the active slots, budgeted (see the
+        // module doc): all of them at ≤ MAX_FULL_INFERENCE_SLOTS, round-robin
+        // otherwise, with freshly-activated slots jumping the queue.
+        let run_set = self.plan_inference(fresh);
+        let active_before_infer = self.active_count();
         let stage = Instant::now();
-        let outcome = self.landmark_stage(
-            &square,
-            roi,
-            content,
-            now,
-            fresh_track,
-            blend_ratio,
-            payload.as_deref_mut(),
-        );
+        for slot_idx in run_set.into_iter().flatten() {
+            let outcome = self.run_slot_inference(
+                slot_idx,
+                &square,
+                content,
+                now,
+                fresh[slot_idx],
+                blend_ratio,
+            );
+            if let Err(e) = outcome {
+                self.square_buf = square;
+                return Err(e);
+            }
+        }
         diag.landmark = stage.elapsed();
         self.square_buf = square;
-        let outcome = outcome?;
+        if self.active_count() < active_before_infer {
+            // A track was lost this frame: re-scan immediately next frame
+            // (re-acquire the person, or confirm the exit) instead of waiting
+            // out the discovery interval — matching the old single-track
+            // "re-detect right after a loss" behaviour.
+            self.next_scan = now;
+        }
 
-        let result = if let Some(tracked) = outcome {
-            // Carry the aux-row ROI only while it stays plausible.
-            self.tracked = roi_trackable(&tracked.next_roi, content).then_some(tracked.next_roi);
-            // Refresh the primary-dancer memory every tracked frame (survives a
-            // later track loss so stickiness can re-acquire the same person).
-            self.last_roi = Some((tracked.next_roi, now));
-            tracked.result
-        } else {
-            // Presence collapsed: drop the track and fade the mask.
-            self.tracked = None;
-            self.fade_mask_into(blend_ratio, payload);
-            PoseResult::absent()
-        };
-        diag.present = result.present;
-        diag.confidence = result.confidence;
+        // Skipped-but-active slots: refresh crop/size from the carried ROI so
+        // primary scoring stays current even between their inference turns.
+        for slot in &mut self.slots {
+            if slot.phase == SlotPhase::Active {
+                if let Some(roi) = slot.roi {
+                    let (crop, size) = roi_metrics(&roi, content);
+                    slot.frame.crop_fraction = crop;
+                    slot.frame.size = size;
+                }
+            } else {
+                // Absent slots: fade their mask channel so no stale
+                // silhouette lingers (the graceful-fade extra; same knob).
+                slot.mask.decay(blend_ratio);
+            }
+        }
+
+        // Payload: every slot's accumulator is written every frame (the
+        // pooled buffers rotate, so each must carry the full picture), then
+        // the slot-partitioned edge list.
+        if let Some(payload) = payload {
+            self.write_payload(payload);
+        }
+
+        self.publish_slot_frames(&mut diag);
         diag.total = frame_start.elapsed();
         self.last_diagnostics = diag;
-        Ok(result)
+        Ok(())
+    }
+
+    /// Invalid-frame path of [`Self::process`]: a bad frame breaks tracking,
+    /// so every active slot is reserved and re-acquired next frame
+    /// (association routes returning people back to their slots), the masks
+    /// decay, and the frame publishes as all-absent.
+    fn process_invalid_frame(
+        &mut self,
+        now: Duration,
+        blend_ratio: f32,
+        payload: Option<&mut BodyFramePayload>,
+        mut diag: PoseDiagnostics,
+        frame_start: Instant,
+    ) {
+        for slot in &mut self.slots {
+            if slot.phase == SlotPhase::Active {
+                slot.lose(now);
+            }
+        }
+        diag.detector_reason = DetectorRunReason::InvalidFrame;
+        self.decay_masks_into(blend_ratio, payload);
+        self.publish_slot_frames(&mut diag);
+        // No detector ran; carry the most-recent candidate count.
+        diag.people_detected = self.people_detected;
+        diag.total = frame_start.elapsed();
+        self.last_diagnostics = diag;
+    }
+
+    /// Idle-probe path of [`Self::process`]: the detector alone is a presence
+    /// sensor. Carried crop tracks are stale after idle, so every slot is
+    /// released; presence + confidence report through slot 0 (landmarks stay
+    /// defaults — nothing renders during idle; the wake path only needs the
+    /// presence bit), and the mask channels decay.
+    fn process_idle_probe(
+        &mut self,
+        square: RgbImage,
+        blend_ratio: f32,
+        payload: Option<&mut BodyFramePayload>,
+        mut diag: PoseDiagnostics,
+        frame_start: Instant,
+    ) -> Result<(), InferenceError> {
+        for slot in &mut self.slots {
+            if slot.phase != SlotPhase::Free {
+                slot.release();
+            }
+        }
+        diag.detector_reason = DetectorRunReason::IdleProbe;
+        let stage = Instant::now();
+        let detected = self.detect_clusters(&square);
+        diag.detector = stage.elapsed();
+        self.square_buf = square;
+        detected?;
+        let (present, confidence) = self
+            .person_clusters
+            .first()
+            .map_or((false, 0.0), |d| (true, d.score));
+        self.slots[0].frame = SlotFrame {
+            present,
+            confidence,
+            ..SlotFrame::default()
+        };
+        self.decay_masks_into(blend_ratio, payload);
+        self.publish_slot_frames(&mut diag);
+        diag.people_detected = self.people_detected;
+        diag.total = frame_start.elapsed();
+        self.last_diagnostics = diag;
+        Ok(())
+    }
+
+    /// Number of [`SlotPhase::Active`] slots.
+    fn active_count(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| s.phase == SlotPhase::Active)
+            .count()
+    }
+
+    /// Copy per-slot frames into the published array and fold the per-slot
+    /// presence/confidence into the diagnostics.
+    fn publish_slot_frames(&mut self, diag: &mut PoseDiagnostics) {
+        let mut present = false;
+        let mut confidence = 0.0_f32;
+        for (dst, slot) in self.slot_frames.iter_mut().zip(&self.slots) {
+            *dst = slot.frame;
+            if slot.frame.present {
+                present = true;
+                confidence = confidence.max(slot.frame.confidence);
+            }
+        }
+        diag.present = present;
+        diag.confidence = confidence;
+        diag.active_tracks = u8::try_from(self.active_count()).unwrap_or(u8::MAX);
     }
 
     /// Detector stage: resize → NHWC tensor → run → decode → weighted NMS,
     /// leaving the bounded person-cluster candidates in `self.person_clusters`
     /// (descending score, `out[0]` = top person). Allocation-free (all buffers
-    /// reused). Caller selects the primary dancer from the candidates.
+    /// reused). The caller associates candidates to slots.
     fn detect_clusters(&mut self, square: &RgbImage) -> Result<(), InferenceError> {
         resize_into(
             square,
@@ -608,160 +780,137 @@ impl PosePipeline {
         Ok(())
     }
 
-    /// Resolve this frame's crop ROI and whether it is a fresh track (which
-    /// cold-starts the aux One-Euro filter). One of three paths, recorded in
-    /// `diag.detector_reason`:
-    /// - **Cycle:** a pending person-cycle request while tracking forces a
-    ///   detector pass and re-seeds the track to the next dancer (or a no-op
-    ///   when ≤ 1 candidate). A switch is a fresh track; the mask blend is left
-    ///   to cross-fade (not reset).
-    /// - **Tracking:** a carried ROI supplies the crop; the detector is skipped.
-    /// - **Cold start:** no carried track → detect + stickiness selection.
-    ///
-    /// Also consumes the cycle-request counter (once per press) and publishes
-    /// the candidate count into `diag.people_detected`. Returns
-    /// `(roi, fresh_track)`; `roi` is `None` when nobody is in frame.
-    fn resolve_track_roi(
-        &mut self,
-        square: &RgbImage,
-        now: Duration,
-        diag: &mut PoseDiagnostics,
-    ) -> Result<(Option<RoiRect>, bool), InferenceError> {
-        let cycle_now = self.live_tuning.as_ref().map(|t| t.cycle_request());
-        let cycle_pending = cycle_now.is_some_and(|c| c != self.last_cycle_seen);
-
-        let mut fresh_track = self.tracked.is_none();
-        let roi = if let (true, Some(current)) = (cycle_pending, self.tracked) {
-            // Forced re-detect to cycle the primary dancer to the next person.
-            diag.detector_reason = DetectorRunReason::Cycle;
-            let stage = Instant::now();
-            self.detect_clusters(square)?;
-            diag.detector = stage.elapsed();
-            match self.cycle_select(current) {
-                Some(next) => {
-                    // Switched: cold-start the aux filter on the new person. The
-                    // mask temporal blend is left to cross-fade naturally
-                    // (deliberately NOT hard-reset — the morph is the desired
-                    // look); the main-side BodySmoother likewise morphs.
-                    fresh_track = true;
-                    Some(roi_from_detection(&next))
-                }
-                // 0/1 candidates → keep the current track (a no-op cycle).
-                None => Some(current),
+    /// Associate the latest detector candidates to slots
+    /// ([`super::selection::assign_slots`]): candidates matched to an
+    /// *active* slot are consumed (no duplicate track), matches to a
+    /// *reserved* slot re-activate it (the returning person keeps their slot
+    /// and mask channel), and unmatched candidates claim free slots below the
+    /// configured cap. Newly (re)activated slots are marked `fresh` so their
+    /// aux filter cold-starts and their inference jumps the queue.
+    fn associate_detections(&mut self, _now: Duration, fresh: &mut [bool; MAX_TRACKED_BODIES]) {
+        let mut anchors: [Option<Vec2>; MAX_TRACKED_BODIES] = [None; MAX_TRACKED_BODIES];
+        let mut claimable = [false; MAX_TRACKED_BODIES];
+        for (i, slot) in self.slots.iter().enumerate() {
+            match slot.phase {
+                SlotPhase::Active | SlotPhase::Reserved => anchors[i] = Some(slot.anchor),
+                SlotPhase::Free => claimable[i] = i < self.max_tracked,
             }
-        } else if let Some(roi) = self.tracked {
-            diag.detector_reason = DetectorRunReason::Tracking;
-            Some(roi)
-        } else {
-            diag.detector_reason = DetectorRunReason::ColdStart;
-            let stage = Instant::now();
-            self.detect_clusters(square)?;
-            diag.detector = stage.elapsed();
-            // Primary-dancer selection over the weighted-NMS candidates, with
-            // stickiness across a brief occlusion.
-            self.select_sticky(now).map(|d| roi_from_detection(&d))
-        };
-        // Consume the cycle request whether or not a switch happened, so it
-        // fires exactly once per press.
-        if let Some(c) = cycle_now {
-            self.last_cycle_seen = c;
         }
-        diag.people_detected = self.people_detected;
-        Ok((roi, fresh_track))
-    }
-
-    /// Pick the primary-dancer cluster from the latest detector pass.
-    ///
-    /// Stickiness (our addition — no upstream analog): when a recent
-    /// [`Self::last_roi`] exists (fresher than [`STICKINESS_TIMEOUT`]) and the
-    /// nearest cluster is within [`STICKINESS_MAX_DIST`] of it, keep tracking
-    /// THAT person across a brief occlusion instead of jumping to whoever now
-    /// scores highest. Otherwise fall back to the top cluster (highest blended
-    /// score). `None` when no one is in frame.
-    fn select_sticky(&self, now: Duration) -> Option<PersonDetection> {
-        if let Some((last, ts)) = self.last_roi {
-            if now.saturating_sub(ts) <= STICKINESS_TIMEOUT {
-                if let Some((det, dist2)) = self.nearest_cluster(last.cx, last.cy) {
-                    if dist2 <= STICKINESS_MAX_DIST * STICKINESS_MAX_DIST {
-                        return Some(det);
-                    }
+        // Candidate centres (ROI centres — keypoint 0, the mid-hip).
+        let mut centres = [Vec2::ZERO; MAX_PERSON_CANDIDATES];
+        let n = self.person_clusters.len().min(MAX_PERSON_CANDIDATES);
+        for (c, det) in self.person_clusters.iter().take(n).enumerate() {
+            let roi = roi_from_detection(det);
+            centres[c] = Vec2::new(roi.cx, roi.cy);
+        }
+        let assigned = assign_slots(&centres[..n], &anchors, &claimable);
+        for (c, slot_idx) in assigned.iter().take(n).enumerate() {
+            let Some(s) = *slot_idx else { continue };
+            let slot = &mut self.slots[s];
+            match slot.phase {
+                // Already tracked: the candidate is the same person; the
+                // carried aux ROI stays authoritative (smoother than a raw
+                // detection). Consuming the match prevents duplicate claims.
+                SlotPhase::Active => {}
+                SlotPhase::Reserved | SlotPhase::Free => {
+                    slot.phase = SlotPhase::Active;
+                    slot.roi = Some(roi_from_detection(&self.person_clusters[c]));
+                    slot.anchor = centres[c];
+                    fresh[s] = true;
                 }
             }
         }
-        // Candidates are descending by score, so the first is the top person.
-        self.person_clusters.first().copied()
     }
 
-    /// The candidate cluster whose ROI centre is nearest `(cx, cy)`, paired
-    /// with its squared distance. `None` when there are no candidates. At most
-    /// [`MAX_PERSON_CANDIDATES`] clusters, so the scan is cheap.
-    fn nearest_cluster(&self, cx: f32, cy: f32) -> Option<(PersonDetection, f32)> {
-        let mut best: Option<(PersonDetection, f32)> = None;
-        for d in &self.person_clusters {
-            let c = roi_from_detection(d);
-            let dist2 = (c.cx - cx).powi(2) + (c.cy - cy).powi(2);
-            if best.is_none_or(|(_, b)| dist2 < b) {
-                best = Some((*d, dist2));
-            }
-        }
-        best
-    }
-
-    /// Cycle the primary dancer to the NEXT candidate in left-to-right order
-    /// (person-cycle hotkey; our addition, no upstream analog).
-    ///
-    /// Sorts the candidates by ROI-centre x, finds the one nearest the
-    /// `current` ROI ("us"), and returns the next candidate cyclically.
-    /// Returns `None` when there are ≤ 1 candidates (one person in frame → keep
-    /// the current track, a no-op). Sorts the reused candidate buffer in place
-    /// (`sort_unstable_by`, no allocation).
-    fn cycle_select(&mut self, current: RoiRect) -> Option<PersonDetection> {
-        if self.person_clusters.len() <= 1 {
-            return None;
-        }
-        self.person_clusters.sort_unstable_by(|a, b| {
-            roi_from_detection(a)
-                .cx
-                .total_cmp(&roi_from_detection(b).cx)
-        });
-        let mut cur = 0;
-        let mut best = f32::INFINITY;
-        for (i, d) in self.person_clusters.iter().enumerate() {
-            let c = roi_from_detection(d);
-            let dist2 = (c.cx - current.cx).powi(2) + (c.cy - current.cy).powi(2);
-            if dist2 < best {
-                best = dist2;
-                cur = i;
-            }
-        }
-        let next = (cur + 1) % self.person_clusters.len();
-        self.person_clusters.get(next).copied()
-    }
-
-    /// Landmark/mask stage for one ROI. `Ok(None)` = presence below
-    /// threshold (person lost). `fresh_track` cold-starts the aux-ROI filter
-    /// (new track); `now` supplies its timestep.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "worker-side stage threads frame time, track-freshness, and blend ratio alongside the ROI/content/payload; splitting into a param struct would obscure the straight-line data flow"
-    )]
-    fn landmark_stage(
+    /// Choose which active slots run landmark/mask inference this frame.
+    /// Returns up to [`MAX_TRACKED_BODIES`] slot indices (`None`-padded).
+    /// All actives run when ≤ [`MAX_FULL_INFERENCE_SLOTS`]; otherwise fresh
+    /// slots first, then round-robin from `rr_next`, capped at the budget.
+    fn plan_inference(
         &mut self,
+        fresh: [bool; MAX_TRACKED_BODIES],
+    ) -> [Option<usize>; MAX_TRACKED_BODIES] {
+        let mut run: [Option<usize>; MAX_TRACKED_BODIES] = [None; MAX_TRACKED_BODIES];
+        let mut count = 0usize;
+        let active = self.active_count();
+        if active <= MAX_FULL_INFERENCE_SLOTS {
+            for (i, slot) in self.slots.iter().enumerate() {
+                if slot.phase == SlotPhase::Active && slot.roi.is_some() {
+                    run[count] = Some(i);
+                    count += 1;
+                }
+            }
+            return run;
+        }
+        // Over budget: fresh slots jump the queue (a new person must appear
+        // immediately)…
+        for (i, _) in fresh.iter().enumerate().filter(|(_, f)| **f) {
+            if count == MAX_FULL_INFERENCE_SLOTS {
+                break;
+            }
+            if self.slots[i].phase == SlotPhase::Active && self.slots[i].roi.is_some() {
+                run[count] = Some(i);
+                count += 1;
+                // Advance the cursor past a fresh pick too, so the next
+                // frame's round-robin starts at the slots this frame skipped.
+                self.rr_next = (i + 1) % MAX_TRACKED_BODIES;
+            }
+        }
+        // …then round-robin over the remaining actives.
+        for step in 0..MAX_TRACKED_BODIES {
+            if count == MAX_FULL_INFERENCE_SLOTS {
+                break;
+            }
+            let i = (self.rr_next + step) % MAX_TRACKED_BODIES;
+            if self.slots[i].phase == SlotPhase::Active
+                && self.slots[i].roi.is_some()
+                && !run[..count].contains(&Some(i))
+            {
+                run[count] = Some(i);
+                count += 1;
+                self.rr_next = (i + 1) % MAX_TRACKED_BODIES;
+            }
+        }
+        run
+    }
+
+    /// Landmark/mask stage for one slot: warp the ROI crop, run the landmark
+    /// model, gate on presence, refine + project, derive next frame's ROI
+    /// through the slot's aux filter, ingest the slot's mask channel, and
+    /// update the slot's [`SlotFrame`]. A lost/untrackable outcome reserves
+    /// the slot.
+    fn run_slot_inference(
+        &mut self,
+        slot_idx: usize,
         square: &RgbImage,
-        roi: RoiRect,
         content: ContentRect,
         now: Duration,
         fresh_track: bool,
         blend_ratio: f32,
-        payload: Option<&mut BodyFramePayload>,
-    ) -> Result<Option<TrackedBody>, InferenceError> {
-        warp_roi_into(square, &roi, LM_SIZE, &mut self.warp_buf);
-        fill_nhwc_unit(&self.warp_buf, &mut self.landmark_input);
-        self.landmark
-            .run(&self.landmark_input, &mut self.landmark_outputs)?;
-        let picked = pick_pose_landmark_outputs(&self.landmark_outputs)?;
-        if picked.confidence < self.config.presence_threshold {
-            return Ok(None);
+    ) -> Result<(), InferenceError> {
+        // Split borrows: the model/scratch fields and the slot are disjoint.
+        let Self {
+            ref mut landmark,
+            ref mut landmark_input,
+            ref mut landmark_outputs,
+            ref mut warp_buf,
+            ref config,
+            ref mut slots,
+            ..
+        } = *self;
+        let slot = &mut slots[slot_idx];
+        let Some(roi) = slot.roi else {
+            return Ok(());
+        };
+
+        warp_roi_into(square, &roi, LM_SIZE, warp_buf);
+        fill_nhwc_unit(warp_buf, landmark_input);
+        landmark.run(landmark_input, landmark_outputs)?;
+        let picked = pick_pose_landmark_outputs(landmark_outputs)?;
+        if picked.confidence < config.presence_threshold {
+            // Presence collapsed: the person left this crop.
+            slot.lose(now);
+            return Ok(());
         }
 
         // Heatmap landmark refinement (upstream `RefineLandmarksFromHeatmap`),
@@ -772,7 +921,7 @@ impl PosePipeline {
         let mut refined = [0.0_f32; LANDMARK_ROWS * LANDMARK_VALUES];
         let copy_len = refined.len().min(picked.landmarks.len());
         refined[..copy_len].copy_from_slice(&picked.landmarks[..copy_len]);
-        if !self.config.disable_heatmap_refine {
+        if !config.disable_heatmap_refine {
             if let Some(heatmap) = picked.heatmap {
                 refine_landmarks_from_heatmap(&mut refined, heatmap);
             }
@@ -783,9 +932,9 @@ impl PosePipeline {
         // fresh track resets the filter first (no stale state from a prior
         // person); the raw points seed the object scale.
         if fresh_track {
-            self.aux_filter.reset();
+            slot.aux_filter.reset();
         }
-        let (aux_center, aux_scale) = self.aux_filter.filter(
+        let (aux_center, aux_scale) = slot.aux_filter.filter(
             rows[AUX_CENTER_ROW].pos.truncate(),
             rows[AUX_SCALE_ROW].pos.truncate(),
             now,
@@ -802,43 +951,89 @@ impl PosePipeline {
         // image-aligned frame (upstream WorldLandmarkProjectionCalculator).
         let world_landmarks = decode_world_landmarks(picked.world, &roi);
 
-        // Mask + edges into the pooled payload (worker-side, per spec).
-        if let Some(payload) = payload {
-            self.mask.ingest(picked.mask, &roi, content, blend_ratio);
-            self.mask.write_u8(&mut payload.mask);
-            extract_edges(self.mask.smoothed(), &mut payload.edges);
-        }
+        // Mask into this slot's accumulator (channel write happens in the
+        // shared payload pass).
+        slot.mask.ingest(picked.mask, &roi, content, blend_ratio);
 
-        Ok(Some(TrackedBody {
-            result: PoseResult {
-                present: true,
-                confidence: picked.confidence,
-                landmarks,
-                world_landmarks,
-            },
-            next_roi,
-        }))
+        let (crop_fraction, size) = roi_metrics(&next_roi, content);
+        slot.frame = SlotFrame {
+            present: true,
+            confidence: picked.confidence,
+            landmarks,
+            world_landmarks,
+            crop_fraction,
+            size,
+        };
+        slot.anchor = Vec2::new(next_roi.cx, next_roi.cy);
+        if roi_trackable(&next_roi, content) {
+            slot.roi = Some(next_roi);
+        } else {
+            // The person is leaving the frame (collapsed/off-content ROI).
+            // THIS frame's landmarks are still valid — `present` stays true —
+            // but the carried track is dropped and the slot reserved; the
+            // caller schedules an immediate re-scan, so next frame either
+            // re-acquires the person into this same slot or confirms the
+            // exit (the reserved-clear pass then reads it absent).
+            slot.phase = SlotPhase::Reserved;
+            slot.reserved_until = now + SLOT_RESERVE;
+            slot.roi = None;
+        }
+        Ok(())
     }
 
-    /// Person-absent path: decay the mask accumulator toward empty and, when a
-    /// payload is supplied, publish the faded mask + its (shrinking) edge list
-    /// so a stale silhouette never lingers on screen. (The decay is our own
+    /// Person-absent / probe path helper: decay every slot's mask accumulator
+    /// toward empty and, when a payload is supplied, publish the faded RGBA
+    /// mask + its (shrinking) slot-partitioned edge list so a stale
+    /// silhouette never lingers on screen. (The decay is our own
     /// graceful-fade extra, not part of the upstream blend; it keeps its
-    /// original EMA-style `acc -= acc·alpha` behavior, driven by the same knob.)
-    fn fade_mask_into(&mut self, alpha: f32, payload: Option<&mut BodyFramePayload>) {
-        self.mask.decay(alpha);
+    /// original EMA-style `acc -= acc·alpha` behavior, driven by the same
+    /// knob.)
+    fn decay_masks_into(&mut self, alpha: f32, payload: Option<&mut BodyFramePayload>) {
+        for slot in &mut self.slots {
+            slot.mask.decay(alpha);
+        }
         if let Some(payload) = payload {
-            self.mask.write_u8(&mut payload.mask);
-            extract_edges(self.mask.smoothed(), &mut payload.edges);
+            self.write_payload(payload);
+        }
+    }
+
+    /// Write every slot's mask channel + the slot-partitioned edge list into
+    /// the pooled payload (in place; no allocation).
+    fn write_payload(&mut self, payload: &mut BodyFramePayload) {
+        payload.edges.clear();
+        for (i, slot) in self.slots.iter().enumerate() {
+            slot.mask.write_channel(&mut payload.mask, MASK_CHANNELS, i);
+            payload.edge_slot_counts[i] =
+                extract_edges_append(slot.mask.smoothed(), &mut payload.edges);
         }
     }
 }
 
-/// One tracked frame's outcome: the published result plus the ROI to track
-/// from next frame. Stack-only.
-struct TrackedBody {
-    result: PoseResult,
-    next_roi: RoiRect,
+/// Axis-aligned bbox of a (possibly rotated) ROI square, rotation ignored —
+/// a cheap approximation that is exact for upright bodies and close enough
+/// for crop/size scoring.
+fn roi_bbox(roi: &RoiRect) -> Rect {
+    let half = roi.size * 0.5;
+    Rect {
+        xmin: roi.cx - half,
+        ymin: roi.cy - half,
+        xmax: roi.cx + half,
+        ymax: roi.cy + half,
+    }
+}
+
+/// `(crop_fraction, size)` for a slot's ROI against the camera content rect:
+/// crop = fraction of the ROI bbox inside the content (1.0 = fully framed),
+/// size = normalized ROI area (the closest-person proxy). Both are computed
+/// from the same ROI source every frame so cross-body comparisons are fair.
+fn roi_metrics(roi: &RoiRect, content: ContentRect) -> (f32, f32) {
+    let bounds = Rect {
+        xmin: content.x0,
+        ymin: content.y0,
+        xmax: content.x1,
+        ymax: content.y1,
+    };
+    (visible_fraction(roi_bbox(roi), bounds), roi.size * roi.size)
 }
 
 // --- model output selection -----------------------------------------------
@@ -1196,27 +1391,57 @@ pub(crate) mod fixtures {
     /// weighted-NMS cluster.
     pub(crate) const PERSON_B_ANCHOR: usize = (4 * 28 + 4) * 2;
 
+    /// Anchor for a third person at stride-8 grid cell (24, 24): image
+    /// position ≈ (24.5/28, 24.5/28) ≈ (0.875, 0.875) — far from A and B.
+    pub(crate) const PERSON_C_ANCHOR: usize = (24 * 28 + 24) * 2;
+
     /// Image-space centre (both axes) of the person at [`HOT_ANCHOR`] / the
     /// second person at [`PERSON_B_ANCHOR`]. Keypoint 0 sits at the anchor
     /// centre, so these are the ROI centres selection compares.
     pub(crate) const PERSON_A_CENTER: f32 = 14.5 / 28.0;
     /// See [`PERSON_A_CENTER`].
     pub(crate) const PERSON_B_CENTER: f32 = 4.5 / 28.0;
+    /// See [`PERSON_A_CENTER`].
+    pub(crate) const PERSON_C_CENTER: f32 = 24.5 / 28.0;
+
+    /// Fill one person's box/score at `anchor` (0.3² box, scale point 0.15
+    /// above — upright ROI) with raw logit `raw`.
+    fn set_person(boxes: &mut [f32], scores: &mut [f32], anchor: usize, raw: f32) {
+        let base = anchor * POSE_REGRESSION_LEN;
+        boxes[base + 2] = 224.0 * 0.3; // w
+        boxes[base + 3] = 224.0 * 0.3; // h
+        boxes[base + 7] = -224.0 * 0.15; // kp1 y offset: 0.15 up
+        scores[anchor] = raw;
+    }
 
     /// Detector outputs with TWO confident people: person A at [`HOT_ANCHOR`]
-    /// and person B at [`PERSON_B_ANCHOR`], each a 0.3² box with a scale point
-    /// 0.15 above (upright ROI). `raw_score_a`/`raw_score_b` are raw logits
-    /// (pre-sigmoid) so a caller can make either the higher scorer.
+    /// and person B at [`PERSON_B_ANCHOR`]. `raw_score_a`/`raw_score_b` are
+    /// raw logits (pre-sigmoid) so a caller can make either the higher scorer.
     pub(crate) fn two_person_detector_outputs(raw_score_a: f32, raw_score_b: f32) -> Vec<Tensor> {
         let mut boxes = vec![0.0_f32; POSE_ANCHOR_COUNT * POSE_REGRESSION_LEN];
         let mut scores = vec![-100.0_f32; POSE_ANCHOR_COUNT];
-        for (anchor, raw) in [(HOT_ANCHOR, raw_score_a), (PERSON_B_ANCHOR, raw_score_b)] {
-            let base = anchor * POSE_REGRESSION_LEN;
-            boxes[base + 2] = 224.0 * 0.3; // w
-            boxes[base + 3] = 224.0 * 0.3; // h
-            boxes[base + 7] = -224.0 * 0.15; // kp1 y offset: 0.15 up
-            scores[anchor] = raw;
-        }
+        set_person(&mut boxes, &mut scores, HOT_ANCHOR, raw_score_a);
+        set_person(&mut boxes, &mut scores, PERSON_B_ANCHOR, raw_score_b);
+        vec![
+            Tensor {
+                data: boxes,
+                shape: vec![1, POSE_ANCHOR_COUNT, POSE_REGRESSION_LEN],
+            },
+            Tensor {
+                data: scores,
+                shape: vec![1, POSE_ANCHOR_COUNT, 1],
+            },
+        ]
+    }
+
+    /// Detector outputs with THREE confident, well-separated people (A, B, C
+    /// anchors; descending scores A > B > C).
+    pub(crate) fn three_person_detector_outputs() -> Vec<Tensor> {
+        let mut boxes = vec![0.0_f32; POSE_ANCHOR_COUNT * POSE_REGRESSION_LEN];
+        let mut scores = vec![-100.0_f32; POSE_ANCHOR_COUNT];
+        set_person(&mut boxes, &mut scores, HOT_ANCHOR, 6.0);
+        set_person(&mut boxes, &mut scores, PERSON_B_ANCHOR, 4.0);
+        set_person(&mut boxes, &mut scores, PERSON_C_ANCHOR, 2.0);
         vec![
             Tensor {
                 data: boxes,
@@ -1371,59 +1596,70 @@ mod tests {
         )
     }
 
+    fn payload() -> BodyFramePayload {
+        BodyFramePayload::new()
+    }
+
     #[test]
     fn cold_start_detects_then_tracks() {
         let mut p = person_pipeline();
-        let mut payload = crate::input::body::transport::BodyFramePayload::new();
+        let mut pl = payload();
         let frame = solid_frame();
 
-        let r1 = p
-            .process(&frame, Duration::from_millis(0), false, Some(&mut payload))
+        p.process(&frame, Duration::from_millis(0), false, Some(&mut pl))
             .expect("frame 1");
-        assert!(r1.present);
-        assert!(r1.confidence > 0.8);
+        let s0 = &p.slot_frames()[0];
+        assert!(s0.present);
+        assert!(s0.confidence > 0.8);
         assert_eq!(
             p.diagnostics().detector_reason,
             DetectorRunReason::ColdStart
         );
+        assert_eq!(p.diagnostics().active_tracks, 1);
         // Landmarks land in content-norm [0, 1] with high visibility.
-        for lm in &r1.landmarks {
+        for lm in &s0.landmarks {
             assert!(lm.pos.x.is_finite() && lm.pos.y.is_finite());
             assert!(lm.visibility > 0.7, "vis={}", lm.visibility);
         }
         // World landmarks decode from the [1, 117] tensor.
-        assert!((r1.world_landmarks[0].x - 0.1).abs() < 1e-5);
-        assert!((r1.world_landmarks[0].y - (-0.2)).abs() < 1e-5);
+        assert!((s0.world_landmarks[0].x - 0.1).abs() < 1e-5);
+        assert!((s0.world_landmarks[0].y - (-0.2)).abs() < 1e-5);
+        // crop/size metrics are published (fully-framed synthetic person).
+        assert!(s0.crop_fraction > 0.9, "crop={}", s0.crop_fraction);
+        assert!(s0.size > 0.0);
 
-        // Frame 2: the carried aux-row track skips the detector entirely.
-        let r2 = p
-            .process(&frame, Duration::from_millis(16), false, Some(&mut payload))
+        // Frame 2: the carried aux-row track skips the detector entirely
+        // (one active track, no free capacity scan due yet).
+        p.process(&frame, Duration::from_millis(16), false, Some(&mut pl))
             .expect("frame 2");
-        assert!(r2.present);
+        assert!(p.slot_frames()[0].present);
         assert_eq!(p.diagnostics().detector_reason, DetectorRunReason::Tracking);
     }
 
     #[test]
-    fn mask_and_edges_land_in_the_payload() {
+    fn mask_and_edges_land_in_the_slot0_channel() {
         let mut p = person_pipeline();
-        let mut payload = crate::input::body::transport::BodyFramePayload::new();
+        let mut pl = payload();
         p.process(
             &solid_frame(),
             Duration::from_millis(0),
             false,
-            Some(&mut payload),
+            Some(&mut pl),
         )
         .expect("process");
-        // The fixture's mask blob covers the crop centre; after warping, the
-        // frame-space mask must be lit near the ROI centre and dark far away.
-        let max = payload.mask.iter().copied().max().unwrap_or(0);
-        assert!(max > 200, "mask never lit: max={max}");
-        assert!(!payload.edges.is_empty(), "edges must be extracted");
-        assert!(payload.edges.len() <= crate::input::body::MAX_EDGE_POINTS);
+        // Slot 0 = channel R of the RGBA-interleaved payload.
+        let max_r = pl.mask.chunks_exact(4).map(|t| t[0]).max().unwrap_or(0);
+        assert!(max_r > 200, "slot-0 channel never lit: max={max_r}");
+        let max_g = pl.mask.chunks_exact(4).map(|t| t[1]).max().unwrap_or(0);
+        assert_eq!(max_g, 0, "unoccupied slot 1 channel must stay dark");
+        assert!(!pl.edges.is_empty(), "edges must be extracted");
+        assert!(pl.edges.len() <= crate::input::body::MAX_EDGE_POINTS);
+        assert_eq!(pl.edge_slot_counts[0], pl.edges.len());
+        assert_eq!(pl.edge_slot_counts[1], 0);
     }
 
     #[test]
-    fn low_landmark_confidence_drops_the_track_and_fades_the_mask() {
+    fn low_landmark_confidence_reserves_the_slot_and_recovers() {
         let mut p = PosePipeline::new(
             Box::new(StaticInference {
                 outputs: hot_person_detector_outputs(),
@@ -1433,22 +1669,24 @@ mod tests {
             }),
             PoseConfig::default(),
         );
-        let mut payload = crate::input::body::transport::BodyFramePayload::new();
-        let r = p
-            .process(
-                &solid_frame(),
-                Duration::from_millis(0),
-                false,
-                Some(&mut payload),
-            )
-            .expect("process");
-        assert!(!r.present, "conf below threshold must read absent");
-        // Next frame must re-detect (track not carried).
+        let mut pl = payload();
+        p.process(
+            &solid_frame(),
+            Duration::from_millis(0),
+            false,
+            Some(&mut pl),
+        )
+        .expect("process");
+        assert!(
+            !p.slot_frames()[0].present,
+            "conf below threshold must read absent"
+        );
+        // Next frame must re-detect (no active track).
         p.process(
             &solid_frame(),
             Duration::from_millis(16),
             false,
-            Some(&mut payload),
+            Some(&mut pl),
         )
         .expect("frame 2");
         assert_eq!(
@@ -1458,10 +1696,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::float_cmp,
-        reason = "exact equality against PoseResult::absent()'s zero literal, not a computed value"
-    )]
     fn empty_detector_output_reads_absent() {
         let mut p = PosePipeline::new(
             Box::new(StaticInference {
@@ -1470,11 +1704,10 @@ mod tests {
             Box::new(FailingInference), // landmark stage must not run
             PoseConfig::default(),
         );
-        let r = p
-            .process(&solid_frame(), Duration::from_millis(0), false, None)
+        p.process(&solid_frame(), Duration::from_millis(0), false, None)
             .expect("process");
-        assert!(!r.present);
-        assert_eq!(r.confidence, 0.0);
+        assert!(p.slot_frames().iter().all(|s| !s.present));
+        assert!(!p.diagnostics().present);
     }
 
     #[test]
@@ -1488,11 +1721,11 @@ mod tests {
             Box::new(FailingInference),
             PoseConfig::default(),
         );
-        let r = p
-            .process(&solid_frame(), Duration::from_millis(0), true, None)
+        p.process(&solid_frame(), Duration::from_millis(0), true, None)
             .expect("probe");
-        assert!(r.present, "idle probe must still report presence");
-        assert!(r.confidence > 0.8);
+        let s0 = &p.slot_frames()[0];
+        assert!(s0.present, "idle probe must still report presence");
+        assert!(s0.confidence > 0.8);
         assert_eq!(
             p.diagnostics().detector_reason,
             DetectorRunReason::IdleProbe
@@ -1500,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_frame_clears_the_track() {
+    fn invalid_frame_reserves_tracks_then_reacquires() {
         let mut p = person_pipeline();
         let good = solid_frame();
         p.process(&good, Duration::from_millis(0), false, None)
@@ -1509,10 +1742,9 @@ mod tests {
             width: 10, // inconsistent: no bytes
             ..Frame::default()
         };
-        let r = p
-            .process(&bad, Duration::from_millis(16), false, None)
+        p.process(&bad, Duration::from_millis(16), false, None)
             .expect("invalid frame is not an error");
-        assert!(!r.present);
+        assert!(!p.slot_frames()[0].present);
         assert_eq!(
             p.diagnostics().detector_reason,
             DetectorRunReason::InvalidFrame
@@ -1523,6 +1755,8 @@ mod tests {
             p.diagnostics().detector_reason,
             DetectorRunReason::ColdStart
         );
+        // Reserved-slot association routes the person back to slot 0.
+        assert!(p.slot_frames()[0].present, "same slot re-acquired");
     }
 
     #[test]
@@ -1533,14 +1767,168 @@ mod tests {
         tuning.set_mask_ema_alpha(0.9);
         assert!((tuning.mask_ema_alpha() - 0.9).abs() < 1e-6);
         // Round-trips through the atomic; the pipeline reads it per frame.
-        let mut payload = crate::input::body::transport::BodyFramePayload::new();
+        let mut pl = payload();
         p.process(
             &solid_frame(),
             Duration::from_millis(0),
             false,
-            Some(&mut payload),
+            Some(&mut pl),
         )
         .expect("process");
+    }
+
+    #[test]
+    fn two_people_occupy_two_stable_slots() {
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: two_person_detector_outputs(4.0, 2.0),
+            }),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig::default(),
+        );
+        let mut pl = payload();
+        let frame = solid_frame();
+        p.process(&frame, Duration::from_millis(0), false, Some(&mut pl))
+            .expect("frame 1");
+        assert_eq!(p.diagnostics().people_detected, 2);
+        assert_eq!(p.diagnostics().active_tracks, 2);
+        assert!(p.slot_frames()[0].present && p.slot_frames()[1].present);
+        // Slot 0 got the higher scorer (person A); each slot's landmarks are
+        // projected through its own ROI, so the two poses land near their own
+        // person's centre.
+        let x0 = p.slot_frames()[0].landmarks[0].pos.x;
+        let x1 = p.slot_frames()[1].landmarks[0].pos.x;
+        assert!(
+            (x0 - PERSON_A_CENTER).abs() < 0.05,
+            "slot 0 tracks person A: {x0}"
+        );
+        assert!(
+            (x1 - PERSON_B_CENTER).abs() < 0.05,
+            "slot 1 tracks person B: {x1}"
+        );
+        // Both mask channels lit; edge partition covers both slots.
+        let max_r = pl.mask.chunks_exact(4).map(|t| t[0]).max().unwrap_or(0);
+        let max_g = pl.mask.chunks_exact(4).map(|t| t[1]).max().unwrap_or(0);
+        assert!(
+            max_r > 200 && max_g > 200,
+            "both channels lit: R={max_r} G={max_g}"
+        );
+        assert!(pl.edge_slot_counts[0] > 0 && pl.edge_slot_counts[1] > 0);
+        assert_eq!(
+            pl.edge_slot_counts.iter().sum::<usize>(),
+            pl.edges.len(),
+            "counts partition the edge list"
+        );
+
+        // Tracking frames keep both slots without re-detecting.
+        p.process(&frame, Duration::from_millis(16), false, Some(&mut pl))
+            .expect("frame 2");
+        assert_eq!(p.diagnostics().detector_reason, DetectorRunReason::Tracking);
+        assert!(p.slot_frames()[0].present && p.slot_frames()[1].present);
+    }
+
+    #[test]
+    fn max_tracked_bodies_caps_claimed_slots() {
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: two_person_detector_outputs(4.0, 2.0),
+            }),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig {
+                max_tracked_bodies: 1,
+                ..PoseConfig::default()
+            },
+        );
+        p.process(&solid_frame(), Duration::from_millis(0), false, None)
+            .expect("frame");
+        assert_eq!(p.diagnostics().people_detected, 2, "both detected");
+        assert_eq!(p.diagnostics().active_tracks, 1, "but only one tracked");
+        assert!(p.slot_frames()[0].present);
+        assert!(!p.slot_frames()[1].present);
+    }
+
+    #[test]
+    fn three_people_interleave_round_robin() {
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: three_person_detector_outputs(),
+            }),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig::default(),
+        );
+        let frame = solid_frame();
+        // Frame 1: three fresh tracks, budget 2 → two run now, one is active
+        // but not yet inferred.
+        p.process(&frame, Duration::from_millis(0), false, None)
+            .expect("frame 1");
+        assert_eq!(p.diagnostics().active_tracks, 3);
+        let present_1 = p.slot_frames().iter().filter(|s| s.present).count();
+        assert_eq!(present_1, 2, "budget: two inferences on frame 1");
+        // Frame 2: the round-robin reaches the remaining slot; all present.
+        p.process(&frame, Duration::from_millis(16), false, None)
+            .expect("frame 2");
+        let present_2 = p.slot_frames().iter().filter(|s| s.present).count();
+        assert_eq!(present_2, 3, "round-robin covers every active slot");
+        // The late-inferred slot 2 tracks person C (its own ROI, not a copy).
+        let x2 = p.slot_frames()[2].landmarks[0].pos.x;
+        assert!(
+            (x2 - PERSON_C_CENTER).abs() < 0.05,
+            "slot 2 tracks person C: {x2}"
+        );
+        // Steady state stays all-present (held frames for skipped slots).
+        p.process(&frame, Duration::from_millis(32), false, None)
+            .expect("frame 3");
+        assert_eq!(p.slot_frames().iter().filter(|s| s.present).count(), 3);
+    }
+
+    #[test]
+    fn discovery_scan_admits_a_second_person_mid_track() {
+        // Start with one person, then the detector begins reporting two: the
+        // periodic scan must claim a slot for the newcomer within the scan
+        // interval, without disturbing slot 0.
+        struct SharedInference(std::sync::Arc<std::sync::Mutex<Vec<Tensor>>>);
+        impl ModelInference for SharedInference {
+            fn run(
+                &mut self,
+                _input: &Tensor,
+                out: &mut Vec<Tensor>,
+            ) -> Result<(), InferenceError> {
+                out.clone_from(&self.0.lock().expect("outputs lock"));
+                Ok(())
+            }
+        }
+
+        let outputs = std::sync::Arc::new(std::sync::Mutex::new(two_person_detector_outputs(
+            4.0, -100.0, // person B far below threshold at first
+        )));
+        let mut p = PosePipeline::new(
+            Box::new(SharedInference(std::sync::Arc::clone(&outputs))),
+            Box::new(StaticInference {
+                outputs: confident_landmark_outputs(),
+            }),
+            PoseConfig::default(),
+        );
+        let frame = solid_frame();
+        p.process(&frame, Duration::from_millis(0), false, None)
+            .expect("frame 1");
+        assert_eq!(p.diagnostics().active_tracks, 1);
+
+        // Person B walks in.
+        *outputs.lock().expect("outputs lock") = two_person_detector_outputs(4.0, 4.0);
+        // Just after the scan interval elapses, the detector re-runs.
+        p.process(&frame, Duration::from_millis(350), false, None)
+            .expect("scan frame");
+        assert_eq!(p.diagnostics().detector_reason, DetectorRunReason::Scan);
+        assert!(
+            p.slot_frames()[0].present && p.slot_frames()[1].present,
+            "newcomer admitted beside the incumbent"
+        );
     }
 
     #[test]
@@ -1640,160 +2028,28 @@ mod tests {
         assert!((out0[0].y + 0.2).abs() < 1e-6, "y0={}", out0[0].y);
     }
 
-    /// Populate `person_clusters` from a two-person detector fixture by running
-    /// the detector stage over a solid frame. Returns the pipeline so the test
-    /// can drive `select_sticky` against known cluster centres.
-    fn two_person_pipeline(raw_score_a: f32, raw_score_b: f32) -> PosePipeline {
-        let mut p = PosePipeline::new(
-            Box::new(StaticInference {
-                outputs: two_person_detector_outputs(raw_score_a, raw_score_b),
-            }),
-            Box::new(StaticInference {
-                outputs: confident_landmark_outputs(),
-            }),
-            PoseConfig::default(),
-        );
-        let frame = solid_frame();
-        let mut square = image::RgbImage::default();
-        square_pad_into(&frame, &mut square);
-        p.detect_clusters(&square).expect("detector runs");
-        p
-    }
-
     #[test]
-    fn stickiness_keeps_the_nearer_dancer_over_a_higher_scorer() {
-        // Two people, B the higher scorer, so the top candidate is B.
-        let mut p = two_person_pipeline(2.0, 4.0);
-        assert_eq!(p.person_clusters.len(), 2, "two separated people");
-        let top = roi_from_detection(&p.person_clusters[0]);
-        assert!(
-            (top.cx - PERSON_B_CENTER).abs() < 1e-3,
-            "top candidate should be B, cx={}",
-            top.cx
-        );
-        // A fresh last_roi sitting on person A must keep A across the frame,
-        // even though B now scores higher (kiosk occlusion must not teleport).
-        let now = Duration::from_secs(5);
-        p.last_roi = Some((
-            RoiRect {
-                cx: PERSON_A_CENTER,
-                cy: PERSON_A_CENTER,
-                size: 0.4,
-                rotation: 0.0,
-            },
-            now,
-        ));
-        let sel = p.select_sticky(now).expect("someone in frame");
-        let c = roi_from_detection(&sel);
-        assert!(
-            (c.cx - PERSON_A_CENTER).abs() < 1e-3,
-            "stickiness must keep A, got cx={}",
-            c.cx
-        );
-    }
-
-    #[test]
-    fn stale_last_roi_falls_back_to_highest_score() {
-        let mut p = two_person_pipeline(2.0, 4.0);
-        // last_roi on A but 3 s old (> STICKINESS_TIMEOUT) → selection falls
-        // back to the highest scorer, person B.
-        let now = Duration::from_secs(5);
-        p.last_roi = Some((
-            RoiRect {
-                cx: PERSON_A_CENTER,
-                cy: PERSON_A_CENTER,
-                size: 0.4,
-                rotation: 0.0,
-            },
-            Duration::from_secs(2),
-        ));
-        let sel = p.select_sticky(now).expect("someone in frame");
-        let c = roi_from_detection(&sel);
-        assert!(
-            (c.cx - PERSON_B_CENTER).abs() < 1e-3,
-            "stale last_roi must fall back to B, got cx={}",
-            c.cx
-        );
-    }
-
-    #[test]
-    fn person_cycle_switches_between_two_dancers_and_back() {
-        let tuning = Arc::new(BodyLiveTuning::new(0.35));
-        let mut p = PosePipeline::new(
-            // Person A the higher scorer, so cold start tracks A first.
-            Box::new(StaticInference {
-                outputs: two_person_detector_outputs(4.0, 2.0),
-            }),
-            Box::new(StaticInference {
-                outputs: confident_landmark_outputs(),
-            }),
-            PoseConfig::default(),
-        );
-        p.set_live_tuning_source(Arc::clone(&tuning));
-        let frame = solid_frame();
-
-        // Frame 1: cold start tracks the higher scorer, person A.
-        p.process(&frame, Duration::from_millis(0), false, None)
-            .expect("f1");
-        let t1 = p.tracked.expect("tracking A");
-        assert!(
-            (t1.cx - PERSON_A_CENTER).abs() < 0.02,
-            "should track A, cx={}",
-            t1.cx
-        );
-
-        // Cycle → the next dancer (left-to-right) is person B.
-        tuning.request_cycle();
-        p.process(&frame, Duration::from_millis(16), false, None)
-            .expect("f2");
-        assert_eq!(p.diagnostics().detector_reason, DetectorRunReason::Cycle);
-        assert_eq!(p.diagnostics().people_detected, 2, "both people surfaced");
-        let t2 = p.tracked.expect("tracking B");
-        assert!(
-            (t2.cx - PERSON_B_CENTER).abs() < 0.02,
-            "should cycle to B, cx={}",
-            t2.cx
-        );
-
-        // Cycle again → back to person A (cyclic order).
-        tuning.request_cycle();
-        p.process(&frame, Duration::from_millis(32), false, None)
-            .expect("f3");
-        let t3 = p.tracked.expect("tracking A again");
-        assert!(
-            (t3.cx - PERSON_A_CENTER).abs() < 0.02,
-            "should cycle back to A, cx={}",
-            t3.cx
-        );
-    }
-
-    #[test]
-    fn single_person_cycle_is_a_no_op() {
-        let tuning = Arc::new(BodyLiveTuning::new(0.35));
-        let mut p = PosePipeline::new(
-            Box::new(StaticInference {
-                outputs: hot_person_detector_outputs(), // ONE person
-            }),
-            Box::new(StaticInference {
-                outputs: confident_landmark_outputs(),
-            }),
-            PoseConfig::default(),
-        );
-        p.set_live_tuning_source(Arc::clone(&tuning));
-        let frame = solid_frame();
-        p.process(&frame, Duration::from_millis(0), false, None)
-            .expect("f1");
-        let before = p.tracked.expect("tracking");
-
-        tuning.request_cycle();
-        p.process(&frame, Duration::from_millis(16), false, None)
-            .expect("f2");
-        let after = p.tracked.expect("still tracking");
-        // One person in frame → cycling keeps the same dancer (no teleport).
-        assert!(
-            (after.cx - before.cx).abs() < 0.02 && (after.cy - before.cy).abs() < 0.02,
-            "single-person cycle must not switch: before={before:?} after={after:?}"
-        );
+    fn roi_metrics_report_crop_and_size() {
+        let content = ContentRect::for_frame(256, 256);
+        // Fully-inside ROI: crop 1, size = 0.4².
+        let inside = RoiRect {
+            cx: 0.5,
+            cy: 0.5,
+            size: 0.4,
+            rotation: 0.0,
+        };
+        let (crop, size) = roi_metrics(&inside, content);
+        assert!((crop - 1.0).abs() < 1e-6);
+        assert!((size - 0.16).abs() < 1e-6);
+        // Half off the left edge: crop ≈ 0.5.
+        let edge = RoiRect {
+            cx: 0.0,
+            cy: 0.5,
+            size: 0.4,
+            rotation: 0.0,
+        };
+        let (crop_edge, _) = roi_metrics(&edge, content);
+        assert!((crop_edge - 0.5).abs() < 1e-3, "crop={crop_edge}");
     }
 
     /// Write a single heatmap cell `(row, col)` for landmark channel `lm`.
@@ -1880,12 +2136,12 @@ mod tests {
         };
         let mut on = make(false);
         let mut off = make(true);
-        let r_on = on
-            .process(&solid_frame(), Duration::from_millis(0), false, None)
+        on.process(&solid_frame(), Duration::from_millis(0), false, None)
             .expect("refine on");
-        let r_off = off
-            .process(&solid_frame(), Duration::from_millis(0), false, None)
+        off.process(&solid_frame(), Duration::from_millis(0), false, None)
             .expect("refine off");
+        let r_on = &on.slot_frames()[0];
+        let r_off = &off.slot_frames()[0];
         assert!(r_on.present && r_off.present);
         assert!(
             r_on.landmarks[0].pos.x > r_off.landmarks[0].pos.x + 1e-3,

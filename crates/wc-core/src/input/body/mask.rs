@@ -179,11 +179,25 @@ impl MaskProcessor {
         &self.ema
     }
 
-    /// Quantize the smoothed mask into a `R8Unorm` byte buffer (the pooled
-    /// payload written in place — no allocation).
+    /// Quantize the smoothed mask into a single-channel byte buffer (one byte
+    /// per texel; the pooled payload written in place — no allocation).
     pub fn write_u8(&self, out: &mut [u8]) {
         for (dst, &v) in out.iter_mut().zip(&self.ema) {
             *dst = byte(v * 255.0);
+        }
+    }
+
+    /// Quantize the smoothed mask into channel `channel` of an interleaved
+    /// `stride`-bytes-per-texel buffer (the RGBA payload: `stride = 4`,
+    /// channel = the body's slot per the pinned channel convention). Other
+    /// channels are untouched; no allocation.
+    pub fn write_channel(&self, out: &mut [u8], stride: usize, channel: usize) {
+        debug_assert!(
+            channel < stride,
+            "channel {channel} outside stride {stride}"
+        );
+        for (texel, &v) in out.chunks_exact_mut(stride).zip(&self.ema) {
+            texel[channel] = byte(v * 255.0);
         }
     }
 }
@@ -358,6 +372,22 @@ mod tests {
         // ROI centre (0.2, 0.2) ≈ texel (51, 51) on the 256 grid.
         let inside = m[51 * MASK_SIZE + 51];
         assert!(inside > 0.9, "roi interior={inside}");
+    }
+
+    #[test]
+    fn write_channel_targets_one_interleaved_channel() {
+        let (content, roi) = identity_setup();
+        let logits = vec![10.0_f32; MASK_SIZE * MASK_SIZE];
+        let mut p = MaskProcessor::new();
+        p.ingest(&logits, &roi, content, 1.0);
+        // RGBA-interleaved buffer, slot 1 → channel G (index 1).
+        let mut out = vec![7_u8; MASK_SIZE * MASK_SIZE * 4];
+        p.write_channel(&mut out, 4, 1);
+        let centre = (128 * MASK_SIZE + 128) * 4;
+        assert_eq!(out[centre + 1], 255, "target channel written");
+        assert_eq!(out[centre], 7, "other channels untouched");
+        assert_eq!(out[centre + 2], 7);
+        assert_eq!(out[centre + 3], 7);
     }
 
     #[test]

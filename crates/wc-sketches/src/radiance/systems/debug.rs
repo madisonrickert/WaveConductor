@@ -63,11 +63,15 @@ pub fn drive_synthetic_body(
     let pose = dancing_pose(t);
 
     // Mask + edges through the same shared surfaces the real tracker uses.
+    // The synthetic dancer is a single body in slot 0 (channel R of the RGBA
+    // mask; slot 0 owns the whole edge list).
     if let (Some(mask), Some(mut edges)) = (mask, edges) {
         if let Some(mut image) = images.get_mut(&mask.0) {
             if let Some(data) = image.data.as_mut() {
                 rasterize_mask(&pose, data);
                 extract_edges(data, &mut edges.points);
+                edges.slot_counts = [0; wc_core::input::body::MAX_TRACKED_BODIES];
+                edges.slot_counts[0] = edges.points.len();
                 edges.generation = edges.generation.wrapping_add(1);
             }
         }
@@ -87,14 +91,21 @@ pub fn drive_synthetic_body(
         let v = (uv_now[slot] - uv_prev[slot]) / h;
         velocities[lm_index] = Vec3::new(v.x, v.y, 0.0);
     }
-    let state = BodyTrackingState {
+    // One fully-faded-in synthetic body in slot 0, marked primary.
+    let mut state = BodyTrackingState::default();
+    state.bodies[0] = Some(wc_core::input::body::TrackedBody {
+        slot: 0,
         present: true,
+        fade: 1.0,
         confidence: 1.0,
         landmarks,
         world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
         velocities,
         timestamp: time.elapsed(),
-    };
+        crop_fraction: 1.0,
+        size: 0.25,
+    });
+    state.primary = Some(0);
     match body {
         Some(mut existing) => *existing = state,
         None => commands.insert_resource(state),
@@ -179,8 +190,8 @@ pub fn radiance_inference_readout(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    if let Some(body) = body.as_ref() {
-        let ts = body.timestamp.as_secs_f64();
+    if let Some(primary) = body.as_ref().and_then(|b| b.primary()) {
+        let ts = primary.timestamp.as_secs_f64();
         let dt = ts - *last_ts;
         if dt > 1e-6 {
             // One-pole smoothed body-frame rate from timestamp deltas.
@@ -200,12 +211,22 @@ pub fn radiance_inference_readout(
         .resizable(false)
         .show(ctx, |ui| {
             match body.as_ref() {
-                Some(b) => {
-                    ui.label(format!(
-                        "body: present={} conf={:.2} ~{:.1} fps",
-                        b.present, b.confidence, *fps
-                    ));
-                }
+                Some(b) => match b.primary() {
+                    Some(p) => {
+                        ui.label(format!(
+                            "bodies: {} primary=slot{} conf={:.2} fade={:.2} crop={:.2} ~{:.1} fps",
+                            b.present_count(),
+                            p.slot,
+                            p.confidence,
+                            p.fade,
+                            p.crop_fraction,
+                            *fps
+                        ));
+                    }
+                    None => {
+                        ui.label("bodies: 0 (nobody tracked)");
+                    }
+                },
                 None => {
                     ui.label("body: (no tracking resource)");
                 }
@@ -355,11 +376,16 @@ mod tests {
         assert!(data.iter().any(|&v| v > 128), "dancer body rasterized");
 
         let body = app.world().resource::<BodyTrackingState>();
-        assert!(body.present, "synthetic body reports present");
-        assert!((body.confidence - 1.0).abs() < f32::EPSILON);
+        assert!(body.any_present(), "synthetic body reports present");
+        let primary = body.primary().expect("slot 0 is primary");
+        assert_eq!(primary.slot, 0, "synthetic dancer lives in slot 0");
+        assert!((primary.confidence - 1.0).abs() < f32::EPSILON);
+        assert!((primary.fade - 1.0).abs() < f32::EPSILON, "fully faded in");
         let visible_and_moving = IMPULSE_LANDMARKS
             .iter()
-            .filter(|&&lm| body.landmarks[lm].visibility > 0.0 && body.velocities[lm] != Vec3::ZERO)
+            .filter(|&&lm| {
+                primary.landmarks[lm].visibility > 0.0 && primary.velocities[lm] != Vec3::ZERO
+            })
             .count();
         assert!(
             visible_and_moving >= 4,

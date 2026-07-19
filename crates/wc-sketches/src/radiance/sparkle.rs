@@ -23,7 +23,7 @@
 //! ## Latency + hot-path posture
 //!
 //! Zero added pipeline latency: the system reads the same-frame
-//! `BodyTrackingState` the sim baker reads and packs one small uniform (the
+//! primary `TrackedBody` the sim baker reads and packs one small uniform (the
 //! `drive_radiance_materials` cost class). All state is fixed-size arrays on
 //! a `Copy` resource; nothing allocates after spawn. Priority switches are
 //! hysteretic ([`SWITCH_RATIO`]/[`SWITCH_FLOOR`]) so the sparkle does not
@@ -40,7 +40,7 @@ use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
 use wc_core::input::body::landmark_index::{
     LEFT_ANKLE, LEFT_HIP, LEFT_WRIST, RIGHT_ANKLE, RIGHT_HIP, RIGHT_WRIST,
 };
-use wc_core::input::body::BodyTrackingState;
+use wc_core::input::body::{BodyTrackingState, TrackedBody};
 use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
 
 use super::render::rotate_hue;
@@ -236,7 +236,7 @@ fn schmitt_step(prev: i8, v: f32) -> i8 {
 /// when both are occluded (the distance gate then passes — with no COM
 /// reference we cannot judge "far from it").
 #[must_use]
-pub fn body_com_uv(body: &BodyTrackingState) -> Option<Vec2> {
+pub fn body_com_uv(body: &TrackedBody) -> Option<Vec2> {
     let left = body.landmarks[LEFT_HIP];
     let right = body.landmarks[RIGHT_HIP];
     match (
@@ -253,7 +253,7 @@ pub fn body_com_uv(body: &BodyTrackingState) -> Option<Vec2> {
 /// Whether a candidate may carry a sparkle this frame: visible, and far
 /// enough from the centre of mass.
 #[must_use]
-pub fn candidate_eligible(body: &BodyTrackingState, candidate: usize, com: Option<Vec2>) -> bool {
+pub fn candidate_eligible(body: &TrackedBody, candidate: usize, com: Option<Vec2>) -> bool {
     let landmark = body.landmarks[CANDIDATE_LANDMARKS[candidate]];
     if landmark.visibility < VISIBILITY_GATE {
         return false;
@@ -267,7 +267,7 @@ impl RadianceSparkles {
     /// into the flipping candidate's score. A limb oscillating at `f` Hz on
     /// one axis converges to a score of `2f` (two flips per cycle); the
     /// ranking only needs relative order.
-    pub fn step_scores(&mut self, body: &BodyTrackingState, dt: f32) {
+    pub fn step_scores(&mut self, body: &TrackedBody, dt: f32) {
         let decay = (-dt / SCORE_TAU_S).exp();
         for (i, &landmark) in CANDIDATE_LANDMARKS.iter().enumerate() {
             self.score[i] *= decay;
@@ -291,7 +291,7 @@ impl RadianceSparkles {
     /// Re-select the prioritized candidate with switch hysteresis: the
     /// incumbent keeps the sparkle unless it becomes ineligible or a
     /// challenger beats it by [`SWITCH_RATIO`] (plus [`SWITCH_FLOOR`]).
-    pub fn select(&mut self, body: &BodyTrackingState) {
+    pub fn select(&mut self, body: &TrackedBody) {
         let com = body_com_uv(body);
         let incumbent = self.current.filter(|&c| candidate_eligible(body, c, com));
         let mut best: Option<usize> = None;
@@ -373,7 +373,12 @@ pub fn update_radiance_sparkles(
         Vec2::new(window.width().max(1.0), h)
     };
 
-    let tracked = body.as_deref().filter(|b| b.present);
+    // Multi-body migration: the sparkles ride the PRIMARY (featured) body;
+    // a later radiance overhaul may fan the pair out per tracked body.
+    let tracked = body
+        .as_deref()
+        .and_then(BodyTrackingState::primary)
+        .filter(|b| b.present);
     let mut primary_target = 0.0;
     let mut mirror_target = 0.0;
     if let Some(body) = tracked {
@@ -447,8 +452,9 @@ mod tests {
     use super::*;
     use wc_core::input::body::{BodyLandmark, BODY_LANDMARK_COUNT};
 
-    /// A visible body with all landmarks at UV (0.5, 0.5) and no motion.
-    fn fixture_body() -> BodyTrackingState {
+    /// A visible primary body (slot 0, fully faded in) with all landmarks at
+    /// UV (0.5, 0.5) and no motion.
+    fn fixture_body() -> TrackedBody {
         let mut landmarks = [BodyLandmark::default(); BODY_LANDMARK_COUNT];
         for lm in &mut landmarks {
             lm.visibility = 1.0;
@@ -460,13 +466,16 @@ mod tests {
         landmarks[RIGHT_WRIST].pos = Vec3::new(0.8, 0.3, 0.0);
         landmarks[LEFT_ANKLE].pos = Vec3::new(0.4, 0.9, 0.0);
         landmarks[RIGHT_ANKLE].pos = Vec3::new(0.6, 0.9, 0.0);
-        BodyTrackingState {
+        TrackedBody {
+            slot: 0,
             present: true,
+            fade: 1.0,
             confidence: 0.9,
             landmarks,
-            world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
-            velocities: [Vec3::ZERO; BODY_LANDMARK_COUNT],
             timestamp: std::time::Duration::from_millis(33),
+            crop_fraction: 1.0,
+            size: 0.2,
+            ..TrackedBody::default()
         }
     }
 
@@ -474,7 +483,7 @@ mod tests {
     /// for `seconds`, stepping the tracker at 60 fps.
     fn oscillate(
         state: &mut RadianceSparkles,
-        body: &mut BodyTrackingState,
+        body: &mut TrackedBody,
         idx: usize,
         hz: f32,
         seconds: f32,

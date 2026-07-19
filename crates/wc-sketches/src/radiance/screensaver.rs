@@ -96,8 +96,12 @@ pub fn drive_phantom(
     let pose = phantom_pose(clock.elapsed * PHANTOM_TIME_SCALE);
     if let Some(mut image) = images.get_mut(&mask.0) {
         if let Some(data) = image.data.as_mut() {
+            // The phantom is a single body in slot 0 (channel R of the RGBA
+            // mask); slot 0 owns the whole edge list.
             rasterize_mask(&pose, data);
             extract_edges(data, &mut edges.points);
+            edges.slot_counts = [0; wc_core::input::body::MAX_TRACKED_BODIES];
+            edges.slot_counts[0] = edges.points.len();
             edges.generation = edges.generation.wrapping_add(1);
         }
     }
@@ -200,6 +204,7 @@ mod tests {
         });
         world.insert_resource(SilhouetteEdges {
             points: Vec::with_capacity(8),
+            slot_counts: [0; wc_core::input::body::MAX_TRACKED_BODIES],
             generation: 1,
         });
         let mut fade = ScreensaverFade::default();

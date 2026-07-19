@@ -96,17 +96,23 @@ impl Drop for WorkerHandle {
 
 /// Load the two vendored pose models and build the pipeline (worker-thread
 /// only — the `CoreML` compile can take seconds on first launch). Returns the
-/// pipeline plus the combined backend label for diagnostics.
+/// pipeline plus the combined backend label for diagnostics. `max_tracked`
+/// is the operator's tracked-body cap
+/// (`BodyTrackingConfig::max_tracked_bodies`), clamped by the pipeline.
 ///
 /// # Errors
 /// Returns a human-readable string when a model file is unreadable or a
 /// session fails to build.
-pub fn load_pose_pipeline(model_dir: &Path) -> Result<(PosePipeline, &'static str), String> {
+pub fn load_pose_pipeline(
+    model_dir: &Path,
+    max_tracked: usize,
+) -> Result<(PosePipeline, &'static str), String> {
     let (detector, det_backend) = load_model(model_dir, POSE_DETECTION_MODEL)?;
     let (landmark, lm_backend) = load_model(model_dir, POSE_LANDMARK_MODEL)?;
     let backend = combined_backend(det_backend, lm_backend);
     let config = PoseConfig {
         disable_heatmap_refine: heatmap_refine_disabled(),
+        max_tracked_bodies: max_tracked,
         ..PoseConfig::default()
     };
     Ok((PosePipeline::new(detector, landmark, config), backend))
@@ -422,7 +428,7 @@ fn run_worker_loop(
                     spare.as_deref_mut()
                 };
                 match pipeline.process(&frame, now, idle_throttled, payload_ref) {
-                    Ok(result) => {
+                    Ok(()) => {
                         let payload = if idle_throttled { None } else { spare.take() };
                         let diag = worker_diag(
                             &pipeline,
@@ -443,10 +449,7 @@ fn run_worker_loop(
                         if let Some(reclaimed) = push_frame(
                             &mut producer,
                             BodyFrame {
-                                present: result.present,
-                                confidence: result.confidence,
-                                landmarks: result.landmarks,
-                                world_landmarks: result.world_landmarks,
+                                slots: *pipeline.slot_frames(),
                                 timestamp: now,
                                 payload,
                             },
@@ -698,7 +701,7 @@ mod tests {
                 match msg {
                     BodyWorkerMsg::Frame(mut f) => {
                         t.frames += 1;
-                        if f.present {
+                        if f.any_present() {
                             t.person_frames += 1;
                         }
                         if let Some(payload) = f.payload.take() {
@@ -952,9 +955,8 @@ mod tests {
         // rtrb returns the rejected value on backpressure; `push_frame` hands
         // the pooled `Box<BodyFramePayload>` back so the pool (seeded once)
         // survives a full ring. Pointer identity proves it's the same buffer.
-        use super::super::transport::{BodyFrame, BodyFramePayload, BodyWorkerMsg};
-        use super::super::{BodyLandmark, BodyTrackingStatus, BODY_LANDMARK_COUNT};
-        use bevy::math::Vec3;
+        use super::super::transport::{BodyFrame, BodyFramePayload, BodyWorkerMsg, SlotFrame};
+        use super::super::{BodyTrackingStatus, MAX_TRACKED_BODIES};
 
         // A one-slot ring, pre-filled, so the next push is guaranteed full.
         let (mut producer, _consumer) = rtrb::RingBuffer::<BodyWorkerMsg>::new(1);
@@ -968,10 +970,7 @@ mod tests {
         let reclaimed = push_frame(
             &mut producer,
             BodyFrame {
-                present: true,
-                confidence: 1.0,
-                landmarks: [BodyLandmark::default(); BODY_LANDMARK_COUNT],
-                world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
+                slots: [SlotFrame::default(); MAX_TRACKED_BODIES],
                 timestamp: std::time::Duration::ZERO,
                 payload: Some(payload),
             },
@@ -995,19 +994,15 @@ mod tests {
     fn successful_frame_push_keeps_payload_in_flight() {
         // The mirror of the reclaim test: a push that fits must NOT return the
         // payload to the caller (it now rides the ring toward the consumer).
-        use super::super::transport::{BodyFrame, BodyFramePayload, BodyWorkerMsg};
-        use super::super::{BodyLandmark, BODY_LANDMARK_COUNT};
-        use bevy::math::Vec3;
+        use super::super::transport::{BodyFrame, BodyFramePayload, BodyWorkerMsg, SlotFrame};
+        use super::super::MAX_TRACKED_BODIES;
 
         let (mut producer, _consumer) = rtrb::RingBuffer::<BodyWorkerMsg>::new(2);
         let mut drops = DropCounters::default();
         let reclaimed = push_frame(
             &mut producer,
             BodyFrame {
-                present: true,
-                confidence: 1.0,
-                landmarks: [BodyLandmark::default(); BODY_LANDMARK_COUNT],
-                world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
+                slots: [SlotFrame::default(); MAX_TRACKED_BODIES],
                 timestamp: std::time::Duration::ZERO,
                 payload: Some(Box::new(BodyFramePayload::new())),
             },
@@ -1173,7 +1168,8 @@ mod model_tests {
     #[test]
     fn load_pose_pipeline_reports_a_known_backend() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/pose");
-        let (_pipeline, backend) = load_pose_pipeline(&dir).expect("pipeline builds");
+        let (_pipeline, backend) =
+            load_pose_pipeline(&dir, super::super::MAX_TRACKED_BODIES).expect("pipeline builds");
         #[cfg(target_os = "macos")]
         assert_eq!(backend, "ort/CoreML", "CoreML must register on macOS");
         #[cfg(not(target_os = "macos"))]

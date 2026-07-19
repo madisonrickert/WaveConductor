@@ -18,16 +18,29 @@ pub const EDGE_THRESHOLD: f32 = 0.5;
 /// Extract silhouette edge points from a `MASK_SIZE`² smoothed mask
 /// (row-major, values in `[0, 1]`) into `out` (cleared first; capacity must
 /// be ≥ [`MAX_EDGE_POINTS`], which the pooled payload and `SilhouetteEdges`
-/// guarantee by construction).
+/// guarantee by construction). Single-mask convenience over
+/// [`extract_edges_append`].
+pub fn extract_edges(mask: &[f32], out: &mut Vec<EdgePoint>) {
+    out.clear();
+    extract_edges_append(mask, out);
+}
+
+/// Append one mask's edge points to `out` **without clearing it**, stopping
+/// at the shared [`MAX_EDGE_POINTS`] capacity; returns how many points this
+/// call appended. The multi-body pipeline calls this once per slot in
+/// ascending slot order (clearing `out` before slot 0), producing the
+/// slot-partitioned list `SilhouetteEdges::slot_counts` describes; earlier
+/// slots fill first when the shared cap is hit.
 ///
 /// Two passes in deterministic scan order: horizontal crossings (between
 /// x and x+1) then vertical (between y and y+1). Each crossing interpolates
 /// the sub-texel position and takes the outward normal from the mask
 /// gradient (central differences, clamped at borders): inside > threshold >
 /// outside, so the outward direction is −gradient. Degenerate zero-gradient
-/// crossings are skipped rather than given a fake normal.
-pub fn extract_edges(mask: &[f32], out: &mut Vec<EdgePoint>) {
-    out.clear();
+/// crossings are skipped rather than given a fake normal. Never allocates
+/// past the caller's [`MAX_EDGE_POINTS`] capacity (worker hot-path rule).
+pub fn extract_edges_append(mask: &[f32], out: &mut Vec<EdgePoint>) -> usize {
+    let start = out.len();
     debug_assert_eq!(mask.len(), MASK_SIZE * MASK_SIZE);
     let n = MASK_SIZE;
     let nf = cellf(n);
@@ -35,7 +48,7 @@ pub fn extract_edges(mask: &[f32], out: &mut Vec<EdgePoint>) {
     for y in 0..n {
         for x in 0..n - 1 {
             if out.len() == MAX_EDGE_POINTS {
-                return;
+                return out.len() - start;
             }
             let a = mask[y * n + x];
             let b = mask[y * n + x + 1];
@@ -54,7 +67,7 @@ pub fn extract_edges(mask: &[f32], out: &mut Vec<EdgePoint>) {
     for y in 0..n - 1 {
         for x in 0..n {
             if out.len() == MAX_EDGE_POINTS {
-                return;
+                return out.len() - start;
             }
             let a = mask[y * n + x];
             let b = mask[(y + 1) * n + x];
@@ -69,6 +82,7 @@ pub fn extract_edges(mask: &[f32], out: &mut Vec<EdgePoint>) {
             }
         }
     }
+    out.len() - start
 }
 
 /// Whether the mask value crosses [`EDGE_THRESHOLD`] between two texels.
@@ -223,6 +237,28 @@ mod tests {
         assert_eq!(out.len(), MAX_EDGE_POINTS, "must clamp at capacity");
         assert_eq!(out.capacity(), MAX_EDGE_POINTS, "must never grow");
         assert_eq!(out.as_ptr(), ptr, "must never reallocate");
+    }
+
+    #[test]
+    fn append_partitions_two_slots_and_respects_the_shared_cap() {
+        // Two disc masks appended back-to-back (slot 0 then slot 1): the
+        // counts partition the list exactly, and the total stays under cap.
+        let a = disc(Vec2::new(90.0, 128.0), 40.0);
+        let b = disc(Vec2::new(180.0, 128.0), 30.0);
+        let mut out = Vec::with_capacity(MAX_EDGE_POINTS);
+        let ptr = out.as_ptr();
+        let n_a = extract_edges_append(&a, &mut out);
+        let n_b = extract_edges_append(&b, &mut out);
+        assert!(n_a > 0 && n_b > 0);
+        assert_eq!(out.len(), n_a + n_b, "counts partition the list");
+        assert_eq!(out.as_ptr(), ptr, "append never reallocates");
+        // Slot 0's range centres on disc A, slot 1's on disc B.
+        let mean =
+            |pts: &[EdgePoint]| pts.iter().map(|p| p.pos).sum::<Vec2>() / cellf(pts.len().max(1));
+        let ca = mean(&out[..n_a]);
+        let cb = mean(&out[n_a..]);
+        assert!((ca.x - 90.0 / 256.0).abs() < 0.02, "slot 0 range = disc A");
+        assert!((cb.x - 180.0 / 256.0).abs() < 0.02, "slot 1 range = disc B");
     }
 
     #[test]

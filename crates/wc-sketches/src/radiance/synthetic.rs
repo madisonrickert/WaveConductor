@@ -10,11 +10,13 @@
 //!
 //! Everything is a pure function of `t` (virtual seconds), so fixed-dt
 //! captures are reproducible frame-for-frame. Mask space is the pinned
-//! contract's: 256×256 `R8Unorm`, UV origin top-left, y down.
+//! contract's: 256×256 **`Rgba8Unorm`** (channel `i` = body slot `i`), UV
+//! origin top-left, y down. The synthetic writers drive a single body in
+//! **slot 0**, so they rasterize into channel R and zero the other channels.
 
 use bevy::prelude::*;
 use wc_core::audio::input::AudioAnalysis;
-use wc_core::input::body::{EdgePoint, MASK_SIZE, MAX_EDGE_POINTS};
+use wc_core::input::body::{EdgePoint, MASK_BYTES, MASK_CHANNELS, MASK_SIZE, MAX_EDGE_POINTS};
 
 /// One soft ellipse blob in mask-UV space.
 #[derive(Clone, Copy, Debug)]
@@ -128,9 +130,11 @@ pub fn dancer_landmark_uv(pose: &PhantomPose) -> [Vec2; 7] {
     ]
 }
 
-/// Rasterize the pose's smooth-union coverage into a `MASK_SIZE²` byte
-/// buffer (255 inside, 0 outside, a soft band at the boundary — matching the
-/// EMA-softened real mask). `out.len()` must be `MASK_SIZE * MASK_SIZE`.
+/// Rasterize the pose's smooth-union coverage into the **slot-0 channel** of
+/// an RGBA-interleaved `MASK_BYTES` buffer (255 inside, 0 outside, a soft
+/// band at the boundary — matching the EMA-softened real mask). The other
+/// three slot channels are zeroed so a stale multi-body frame never ghosts
+/// behind the synthetic dancer. `out.len()` must be [`MASK_BYTES`].
 #[allow(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
@@ -144,7 +148,7 @@ pub fn dancer_landmark_uv(pose: &PhantomPose) -> [Vec2; 7] {
               (f = |(p-c)/r|²) and the WGSL shader math it is the CPU twin of"
 )]
 pub fn rasterize_mask(pose: &PhantomPose, out: &mut [u8]) {
-    debug_assert_eq!(out.len(), MASK_SIZE * MASK_SIZE);
+    debug_assert_eq!(out.len(), MASK_BYTES);
     let inv = 1.0 / MASK_SIZE as f32;
     for y in 0..MASK_SIZE {
         let v = (y as f32 + 0.5) * inv;
@@ -161,7 +165,12 @@ pub fn rasterize_mask(pose: &PhantomPose, out: &mut [u8]) {
                 let c = 1.0 - smoothstep(0.85, 1.15, f);
                 cov = cov.max(c);
             }
-            out[y * MASK_SIZE + x] = (cov * 255.0) as u8;
+            // Slot 0 = channel R; the other slot channels stay dark.
+            let base = (y * MASK_SIZE + x) * MASK_CHANNELS;
+            out[base] = (cov * 255.0) as u8;
+            out[base + 1] = 0;
+            out[base + 2] = 0;
+            out[base + 3] = 0;
         }
     }
 }
@@ -178,21 +187,23 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 pub const EDGE_THRESHOLD: u8 = 128;
 
 /// Extract up to [`MAX_EDGE_POINTS`] `(position, outward normal)` pairs where
-/// the mask crosses [`EDGE_THRESHOLD`], into `out` (cleared first; capacity
-/// is reused, never grown past the cap). Same single-pass scan shape as Plan
-/// B's worker-side extractor: an inside pixel with any 4-neighbor outside is
-/// a boundary pixel; the outward normal is the negated central-difference
-/// gradient (the mask is high inside, so the gradient points inward).
+/// the **slot-0 channel** of the RGBA mask crosses [`EDGE_THRESHOLD`], into
+/// `out` (cleared first; capacity is reused, never grown past the cap). Same
+/// single-pass scan shape as Plan B's worker-side extractor: an inside pixel
+/// with any 4-neighbor outside is a boundary pixel; the outward normal is the
+/// negated central-difference gradient (the mask is high inside, so the
+/// gradient points inward).
 #[allow(
     clippy::as_conversions,
     clippy::cast_precision_loss,
     reason = "pixel index -> UV conversion on bounded 0..256 values"
 )]
 pub fn extract_edges(mask: &[u8], out: &mut Vec<EdgePoint>) {
-    debug_assert_eq!(mask.len(), MASK_SIZE * MASK_SIZE);
+    debug_assert_eq!(mask.len(), MASK_BYTES);
     out.clear();
     let inv = 1.0 / MASK_SIZE as f32;
-    let at = |x: usize, y: usize| mask[y * MASK_SIZE + x];
+    // Channel R (slot 0) of the RGBA-interleaved buffer.
+    let at = |x: usize, y: usize| mask[(y * MASK_SIZE + x) * MASK_CHANNELS];
     for y in 1..MASK_SIZE - 1 {
         for x in 1..MASK_SIZE - 1 {
             if at(x, y) < EDGE_THRESHOLD {
@@ -275,12 +286,22 @@ mod tests {
     #[test]
     fn rasterize_is_deterministic() {
         let pose = dancing_pose(3.25);
-        let mut a = vec![0u8; MASK_SIZE * MASK_SIZE];
-        let mut b = vec![0u8; MASK_SIZE * MASK_SIZE];
+        let mut a = vec![0u8; MASK_BYTES];
+        let mut b = vec![0u8; MASK_BYTES];
         rasterize_mask(&pose, &mut a);
         rasterize_mask(&pose, &mut b);
         assert_eq!(a, b);
-        assert!(a.iter().any(|&v| v >= EDGE_THRESHOLD), "body present");
+        // Slot-0 channel carries the body; the other channels stay dark.
+        assert!(
+            a.chunks_exact(MASK_CHANNELS)
+                .any(|t| t[0] >= EDGE_THRESHOLD),
+            "body present in channel R"
+        );
+        assert!(
+            a.chunks_exact(MASK_CHANNELS)
+                .all(|t| t[1] == 0 && t[2] == 0 && t[3] == 0),
+            "unused slot channels stay dark"
+        );
         assert!(a.contains(&0), "background present");
     }
 
@@ -294,7 +315,7 @@ mod tests {
                 radii: Vec2::new(0.2, 0.2),
             }; 6],
         };
-        let mut mask = vec![0u8; MASK_SIZE * MASK_SIZE];
+        let mut mask = vec![0u8; MASK_BYTES];
         rasterize_mask(&pose, &mut mask);
         let mut edges = Vec::with_capacity(MAX_EDGE_POINTS);
         extract_edges(&mask, &mut edges);
@@ -321,12 +342,12 @@ mod tests {
     /// exactly `MAX_EDGE_POINTS`.
     #[test]
     fn extraction_clamps_to_capacity() {
-        let mut mask = vec![0u8; MASK_SIZE * MASK_SIZE];
+        let mut mask = vec![0u8; MASK_BYTES];
         for y in 0..MASK_SIZE {
             for x in 0..MASK_SIZE {
                 // 4-px stripes with soft 1-px ramps so gradients are nonzero.
                 let phase = x % 8;
-                mask[y * MASK_SIZE + x] = match phase {
+                mask[(y * MASK_SIZE + x) * MASK_CHANNELS] = match phase {
                     0 | 4 => 64,
                     1..=3 => 255,
                     _ => 0,

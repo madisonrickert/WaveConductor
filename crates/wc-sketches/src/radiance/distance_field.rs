@@ -18,7 +18,7 @@
 
 use bevy::image::Image;
 use bevy::prelude::*;
-use wc_core::input::body::{MaskTexture, SilhouetteEdges, MASK_SIZE};
+use wc_core::input::body::{MaskTexture, SilhouetteEdges, MASK_CHANNELS, MASK_SIZE};
 
 /// Distance value (in mask texels) that maps to 1.0 in the `R8Unorm` output.
 /// 160 texels is ~0.63 of the mask square — at a 1080-px-tall window that is
@@ -67,8 +67,10 @@ impl RadianceDistanceField {
 /// Two-pass 3-4 chamfer distance transform: `out[i]` = distance from texel
 /// `i` to the nearest body texel (`mask >= MASK_INSIDE_THRESHOLD`), in
 /// units of [`DIST_MAX_TEXELS`] mapped to `0..=255`. Body-interior texels
-/// are 0. Pure over the buffers for testability; `scratch` must be
-/// `MASK_SIZE²` long, `out` likewise.
+/// are 0. Pure over the buffers for testability; `mask` here is
+/// **single-channel** (`MASK_SIZE²` bytes) — the system seeds directly from
+/// the RGBA image with an all-channel union instead (see
+/// [`update_distance_field`]). `scratch`/`out` must be `MASK_SIZE²` long.
 pub fn chamfer_distance(mask: &[u8], scratch: &mut [u32], out: &mut [u8]) {
     debug_assert_eq!(mask.len(), MASK_SIZE * MASK_SIZE);
     debug_assert_eq!(scratch.len(), MASK_SIZE * MASK_SIZE);
@@ -113,8 +115,18 @@ pub fn update_distance_field(
             field.scratch = scratch;
             return;
         };
-        for (s, &m) in scratch.iter_mut().zip(mask_data.iter()) {
-            *s = if m >= MASK_INSIDE_THRESHOLD { 0 } else { FAR };
+        // The mask is RGBA (channel i = body slot i): seed "inside" from the
+        // UNION of all slot channels, so beat waves emanate from every
+        // tracked dancer's silhouette, not just the primary's.
+        for (s, texel) in scratch
+            .iter_mut()
+            .zip(mask_data.chunks_exact(MASK_CHANNELS))
+        {
+            *s = if texel.iter().any(|&c| c >= MASK_INSIDE_THRESHOLD) {
+                0
+            } else {
+                FAR
+            };
         }
     }
     if let Some(mut out_image) = images.get_mut(&field_handle) {

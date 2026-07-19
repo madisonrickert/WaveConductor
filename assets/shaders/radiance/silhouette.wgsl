@@ -1,20 +1,28 @@
 // Radiance silhouette fill — a window-filling quad under the particles,
-// sampling the 256x256 R8Unorm person mask: a smoothstep-edged dark glassy
-// body fill (deep translucent vertical gradient + audio-shimmered value
-// noise) and a thin emissive rim in the mask's edge band. The rim color is
-// HDR (palette-derived, scaled by rim glow) so it blooms; the fill is dark
-// and mostly occludes via ordinary alpha blending.
+// sampling the 256x256 Rgba8Unorm multi-body mask (pinned channel
+// convention: channel i = body slot i, so R = slot 0 … A = slot 3): a
+// smoothstep-edged dark glassy body fill (deep translucent vertical gradient
+// + audio-shimmered value noise) and a thin emissive rim in the mask's edge
+// band. The rim color is HDR (palette-derived, scaled by rim glow) so it
+// blooms; the fill is dark and mostly occludes via ordinary alpha blending.
+//
+// One body renders at a time: the CPU driver packs a ONE-HOT channel_select
+// vector for the primary slot and the coverage sample is
+// dot(mask_sample, channel_select) — the clean idiom for slot-channel
+// selection (a later overhaul can draw all four channels with per-body
+// colors).
 //
 // Bindings (group 2):
-//   @binding(0)/(1): mask texture + sampler (R8Unorm is filterable).
+//   @binding(0)/(1): mask texture + sampler (Rgba8Unorm is filterable).
 //   @binding(2): fill_params — x fill intensity, y rim glow, z mask
 //                threshold, w mirror (1 = flip x).
 //   @binding(3): effect_params — x elapsed seconds, y shimmer amount
-//                (highs-driven), z raw-mask debug (1 = draw the mask
-//                grayscale), w fit-to-height aspect (window_w/window_h; 1 =
-//                full-window stretch).
+//                (highs-driven), z raw-mask debug (1 = draw the selected
+//                channel grayscale), w fit-to-height aspect
+//                (window_w/window_h; 1 = full-window stretch).
 //   @binding(4): fill_color — deep glassy base (linear).
 //   @binding(5): rim_color — emissive rim (linear HDR).
+//   @binding(6): channel_select — one-hot body-slot channel selector.
 
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
 
@@ -24,6 +32,7 @@
 @group(2) @binding(3) var<uniform> effect_params: vec4<f32>;
 @group(2) @binding(4) var<uniform> fill_color: vec4<f32>;
 @group(2) @binding(5) var<uniform> rim_color: vec4<f32>;
+@group(2) @binding(6) var<uniform> channel_select: vec4<f32>;
 
 // 2D hash -> [0, 1) (Hoskins-style, texture-free).
 fn hash21(p: vec2<f32>) -> f32 {
@@ -62,7 +71,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (uv.x < 0.0 || uv.x > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    let m = textureSample(mask_tex, mask_samp, uv).r;
+    // Selected body slot's coverage: one-hot dot over the RGBA slot channels.
+    let m = dot(textureSample(mask_tex, mask_samp, uv), channel_select);
 
     // Dev isolation: raw mask grayscale (mask_debug_overlay).
     if (effect_params.z > 0.5) {

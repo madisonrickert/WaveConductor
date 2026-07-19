@@ -15,7 +15,7 @@ use wc_core::audio::input::AudioAnalysis;
 use wc_core::input::body::landmark_index::{
     LEFT_ANKLE, LEFT_HIP, LEFT_WRIST, NOSE, RIGHT_ANKLE, RIGHT_HIP, RIGHT_WRIST,
 };
-use wc_core::input::body::{BodyTrackingState, SilhouetteEdges, MAX_EDGE_POINTS};
+use wc_core::input::body::{BodyTrackingState, SilhouetteEdges, TrackedBody, MAX_EDGE_POINTS};
 
 use crate::radiance::compute::sim_params::{
     RadianceImpulse, RadianceSimParams, RadianceSimParamsGpu, MAX_IMPULSES,
@@ -229,7 +229,7 @@ pub fn band_aggregates(audio: &AudioAnalysis) -> (f32, f32) {
 pub fn bake_radiance_sim(
     settings: &RadianceSettings,
     audio: &AudioAnalysis,
-    body: Option<&BodyTrackingState>,
+    body: Option<&TrackedBody>,
     edge_count: usize,
     window_size: Vec2,
     dt: f32,
@@ -367,10 +367,13 @@ pub fn update_radiance_sim(
     let audio_frame = audio.map_or_else(neutral_audio, |a| *a);
     let edge_count = edges.map_or(0, |e| e.points.len());
     let window_size = Vec2::new(window.width(), window.height());
+    // Multi-body migration: limb impulses ride the PRIMARY (featured) body;
+    // a later radiance overhaul may fan impulses out across all slots.
+    let primary = body.as_deref().and_then(BodyTrackingState::primary);
     bake_radiance_sim(
         &settings,
         &audio_frame,
-        body.as_deref(),
+        primary,
         edge_count,
         window_size,
         time.delta_secs(),
@@ -407,7 +410,7 @@ mod tests {
         }
     }
 
-    fn fixture_body(wrist_vel: Vec3) -> BodyTrackingState {
+    fn fixture_body(wrist_vel: Vec3) -> TrackedBody {
         let mut landmarks = [BodyLandmark::default(); BODY_LANDMARK_COUNT];
         for lm in &mut landmarks {
             lm.visibility = 1.0;
@@ -417,20 +420,24 @@ mod tests {
         landmarks[16].pos = Vec3::new(0.7, 0.4, 0.0);
         let mut velocities = [Vec3::ZERO; BODY_LANDMARK_COUNT];
         velocities[16] = wrist_vel;
-        BodyTrackingState {
+        TrackedBody {
+            slot: 0,
             present: true,
+            fade: 1.0,
             confidence: 0.9,
             landmarks,
-            world_landmarks: [Vec3::ZERO; BODY_LANDMARK_COUNT],
             velocities,
             timestamp: std::time::Duration::from_millis(33),
+            crop_fraction: 1.0,
+            size: 0.2,
+            ..TrackedBody::default()
         }
     }
 
     fn bake(
         settings: &RadianceSettings,
         audio: &AudioAnalysis,
-        body: Option<&BodyTrackingState>,
+        body: Option<&TrackedBody>,
         edge_count: usize,
     ) -> (RadianceState, RadianceSimParamsGpu) {
         let mut state = RadianceState::default();

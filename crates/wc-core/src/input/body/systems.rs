@@ -1,12 +1,22 @@
-//! Main-thread systems: request-driven worker lifecycle, ring drain,
-//! poll-rate smoothing, resource publication, and the presence→idle hook.
+//! Main-thread systems: request-driven worker lifecycle, ring drain, per-slot
+//! presence-hold + fade envelopes + poll-rate smoothing, primary selection,
+//! resource publication, and the presence→idle hook.
 //!
 //! Both systems are cheap no-ops while no [`super::BodyTrackingRequest`]
 //! exists (an early-out on an absent resource / empty runtime), which is the
 //! sanctioned always-on-listener shape: they must observe the request's
 //! insertion in every app state, so they gate internally rather than on
 //! `sketch_active`.
+//!
+//! Per-slot publication: each worker slot gets its own presence-hold
+//! ([`super::envelope::presence_decision`]), fade envelope
+//! ([`super::envelope::fade_step`]) and One-Euro smoother; a slot's
+//! `TrackedBody` entry is removed only once its fade releases to zero, so
+//! figures leave the screen gracefully. Primary selection
+//! ([`super::selection::PrimarySelect`]) runs here too — the `KeyN` hotkey
+//! cycles it via [`BodyTrackingWorker::request_person_cycle`].
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,78 +26,39 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rtrb::{Consumer, Producer};
 
+use super::envelope::{fade_step, presence_decision, PresenceDecision};
 use super::pipeline::BodyLiveTuning;
+use super::selection::{primary_score, PrimarySelect};
 use super::smoothing::BodySmoother;
 use super::transport::{
-    seed_payload_pool, BodyFramePayload, BodyWorkerMsg, PAYLOAD_POOL_SIZE, RESULT_RING_CAPACITY,
+    seed_payload_pool, BodyFramePayload, BodyWorkerMsg, SlotFrame, PAYLOAD_POOL_SIZE,
+    RESULT_RING_CAPACITY,
 };
 use super::worker::{load_pose_pipeline, spawn_body_worker, SourceFactory, WorkerHandle};
 use super::{
-    BodyLandmark, BodyTrackingConfig, BodyTrackingDiagnostics, BodyTrackingRequest,
-    BodyTrackingState, BodyTrackingStatus, MaskTexture, SilhouetteEdges, BODY_LANDMARK_COUNT,
-    MASK_SIZE_U32,
+    BodyTrackingConfig, BodyTrackingDiagnostics, BodyTrackingRequest, BodyTrackingState,
+    BodyTrackingStatus, MaskTexture, SilhouetteEdges, TrackedBody, MASK_SIZE_U32,
+    MAX_TRACKED_BODIES,
 };
 use crate::input::capture::{CaptureError, FrameSource};
 use crate::lifecycle::idle::InteractionTimer;
 
-/// The latest worker result, held between worker frames as the smoothing
-/// target (the worker runs at inference cadence; smoothing runs per poll).
-struct BodyTarget {
-    present: bool,
-    confidence: f32,
-    landmarks: [BodyLandmark; BODY_LANDMARK_COUNT],
-    world: [Vec3; BODY_LANDMARK_COUNT],
+/// One slot's publisher-side state: the latest worker result held as the
+/// smoothing target (the worker runs at inference cadence; smoothing runs per
+/// poll), the presence-hold deadline, the fade envelope, and the slot's own
+/// One-Euro smoother.
+struct SlotRuntime {
+    /// Latest worker result for this slot (held between worker frames).
+    target: SlotFrame,
+    /// Worker-relative capture timestamp of `target`.
     timestamp: Duration,
-}
-
-impl Default for BodyTarget {
-    fn default() -> Self {
-        Self {
-            present: false,
-            confidence: 0.0,
-            landmarks: [BodyLandmark::default(); BODY_LANDMARK_COUNT],
-            world: [Vec3::ZERO; BODY_LANDMARK_COUNT],
-            timestamp: Duration::ZERO,
-        }
-    }
-}
-
-/// How long to keep publishing the last silhouette after the detector stops
-/// reporting a person, debouncing brief detection dropouts. A stationary,
-/// partially-framed body (e.g. someone seated close to the camera, upper body
-/// only) sits right at the landmark model's `presence_threshold` (0.5), so its
-/// confidence dips below for a frame or two several times a second — without a
-/// hold that blanks the aura every time and reads as flicker. Long enough to
-/// bridge the thrash, short enough that a real exit clears promptly.
-const PRESENCE_HOLD: Duration = Duration::from_millis(300);
-
-/// Outcome of the presence-hold debounce for one body frame.
-enum PresenceDecision {
-    /// The detector reports a person: publish it and (re)arm the hold.
-    Present,
-    /// No detection, but still within the hold window: keep the last silhouette.
-    Held,
-    /// No detection and the hold window has elapsed: the person really left.
-    Absent,
-}
-
-/// Decide the debounced presence for one frame, and the (possibly re-armed)
-/// hold deadline. Pure so the [`PRESENCE_HOLD`] behaviour is unit-tested without
-/// standing up a worker/clock: a present frame arms `now + PRESENCE_HOLD`; an
-/// absent frame is [`PresenceDecision::Held`] until that deadline passes, then
-/// [`PresenceDecision::Absent`]. An absent frame never extends the deadline.
-fn presence_decision(
-    frame_present: bool,
-    now: Duration,
+    /// `Time::elapsed` value until which presence is held even though the
+    /// worker reports no person (see `envelope::PRESENCE_HOLD`).
     hold_until: Duration,
-) -> (PresenceDecision, Duration) {
-    if frame_present {
-        (PresenceDecision::Present, now + PRESENCE_HOLD)
-    } else if now < hold_until {
-        (PresenceDecision::Held, hold_until)
-    } else {
-        (PresenceDecision::Absent, hold_until)
-    }
+    /// The graceful appearance envelope (`TrackedBody::fade`).
+    fade: f32,
+    /// This slot's poll-rate One-Euro smoother.
+    smoother: BodySmoother,
 }
 
 /// Everything that exists only while a request is active.
@@ -96,15 +67,13 @@ pub(crate) struct BodyRuntime {
     consumer: Consumer<BodyWorkerMsg>,
     recycle: Producer<Box<BodyFramePayload>>,
     tuning: Arc<BodyLiveTuning>,
-    smoother: BodySmoother,
-    target: BodyTarget,
-    /// Whether the previous poll published a person — lets the state emit a
-    /// single clearing write when the person leaves, then stay quiet.
+    /// Per-slot publisher state, indexed by stable slot.
+    slots: [SlotRuntime; MAX_TRACKED_BODIES],
+    /// Primary-slot selection (auto hysteresis + `KeyN` manual pin).
+    primary: PrimarySelect,
+    /// Whether the previous poll had any occupied slot — lets the publisher
+    /// log arrival/departure once instead of every frame.
     had_person: bool,
-    /// `Time::elapsed` value until which presence is held even though the
-    /// detector reports no person, to debounce brief dropouts. Set to
-    /// `now + PRESENCE_HOLD` on every present frame; see [`PRESENCE_HOLD`].
-    present_hold_until: Duration,
 }
 
 /// Owns the worker runtime. `rtrb` endpoints are `Send` but not `Sync`, and
@@ -115,6 +84,11 @@ pub(crate) struct BodyRuntime {
 pub struct BodyTrackingWorker {
     /// `Some` while a request is active.
     pub(crate) runtime: Mutex<Option<BodyRuntime>>,
+    /// Pending `KeyN` person-cycle presses, consumed by `poll_body_worker`.
+    /// With stable slots the cycle is a *primary* switch, decided entirely on
+    /// the main thread — it never crosses to the worker (unlike the old
+    /// single-track design, which had to re-seed the worker's crop).
+    cycle_requests: AtomicU32,
     /// Test-injected camera source (used instead of opening a webcam).
     #[cfg(test)]
     pub(crate) injected_source: Mutex<Option<Box<dyn FrameSource + Send>>>,
@@ -124,24 +98,26 @@ pub struct BodyTrackingWorker {
 }
 
 impl BodyTrackingWorker {
-    /// Request the worker cycle its track to the next detected person on its
-    /// next processed frame. Cheap and lock-free from the caller's view: it
-    /// takes the main-thread-only runtime lock (never contended) and bumps the
-    /// shared [`BodyLiveTuning`] cycle counter the worker polls. A no-op when no
-    /// worker is running (no request active). Takes `&self` so a sketch system
-    /// can drive it from a plain `Res<BodyTrackingWorker>`.
+    /// Request that primary cycle to the next present body on the next poll
+    /// (the `KeyN` hotkey). A counter, not a bool, so rapid presses each
+    /// register; lock-free; a harmless no-op while nothing is tracked. Takes
+    /// `&self` so a sketch system can drive it from a plain
+    /// `Res<BodyTrackingWorker>`.
     pub fn request_person_cycle(&self) {
-        if let Ok(runtime) = self.runtime.lock() {
-            if let Some(rt) = runtime.as_ref() {
-                rt.tuning.request_cycle();
-            }
-        }
+        self.cycle_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drain the pending cycle presses (publisher-side).
+    fn take_cycle_requests(&self) -> u32 {
+        self.cycle_requests.swap(0, Ordering::Relaxed)
     }
 }
 
-/// Startup: create the reused `R8Unorm` mask image and publish
-/// [`MaskTexture`]. Skipped (with a log line) in bare harnesses without
-/// image assets; `poll_body_worker` tolerates the absence.
+/// Startup: create the reused `Rgba8Unorm` multi-person mask image (channel
+/// `i` = slot `i`, the pinned convention — see the module doc on
+/// [`super::MaskTexture`]) and publish [`MaskTexture`]. Skipped (with a log
+/// line) in bare harnesses without image assets; `poll_body_worker` tolerates
+/// the absence.
 pub fn init_mask_texture(
     mut commands: Commands<'_, '_>,
     images: Option<ResMut<'_, Assets<Image>>>,
@@ -157,8 +133,9 @@ pub fn init_mask_texture(
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0_u8],
-        TextureFormat::R8Unorm,
+        // One RGBA texel: all four slot channels dark.
+        &[0_u8, 0, 0, 0],
+        TextureFormat::Rgba8Unorm,
         // MAIN_WORLD (CPU bytes rewritten each body frame) + RENDER_WORLD
         // (sampled by the silhouette material).
         RenderAssetUsages::default(),
@@ -208,6 +185,7 @@ pub fn sync_body_tracking(
             }
             *state = BodyTrackingState::default();
             edges.points.clear();
+            edges.slot_counts = [0; MAX_TRACKED_BODIES];
             edges.generation = edges.generation.wrapping_add(1);
             *diagnostics = BodyTrackingDiagnostics::default();
             tracing::info!("body tracking: request removed, worker stopped");
@@ -217,11 +195,12 @@ pub fn sync_body_tracking(
 }
 
 /// `PreUpdate` (after [`sync_body_tracking`]): drain the worker ring, keep
-/// the newest frame as the smoothing target, publish
-/// [`BodyTrackingState`] / mask bytes / [`SilhouetteEdges`], recycle mask
-/// payloads, and mark the idle [`InteractionTimer`] on person-bearing frames
-/// (empty frames never mark — same semantics as hand-bearing frames in
-/// `reset_on_interaction`; see the plugin doc).
+/// the newest frame as each slot's smoothing target, advance the per-slot
+/// presence-hold + fade envelopes, publish [`BodyTrackingState`] (per-slot
+/// [`TrackedBody`]s + the primary slot) / mask bytes / [`SilhouetteEdges`],
+/// recycle mask payloads, and mark the idle [`InteractionTimer`] on
+/// person-bearing frames (empty frames never mark — same semantics as
+/// hand-bearing frames in `reset_on_interaction`; see the plugin doc).
 ///
 /// [`BodyWorkerMsg::Diagnostics`] snapshots pushed from the worker's
 /// drop-triggered path (over-budget camera drops, see
@@ -259,7 +238,7 @@ pub fn poll_body_worker(
         match msg {
             BodyWorkerMsg::Frame(mut frame) => {
                 if let Some(payload) = frame.payload.take() {
-                    // Copy the mask bytes into the shared image (Bevy
+                    // Copy the RGBA mask bytes into the shared image (Bevy
                     // re-uploads on mutation; 256 KB is trivial)…
                     if let (Some(mask), Some(images)) = (&mask, images.as_deref_mut()) {
                         if let Some(mut image) = images.get_mut(&mask.0) {
@@ -268,41 +247,38 @@ pub fn poll_body_worker(
                             }
                         }
                     }
-                    // …refill the edge list in place (capacity preserved)…
+                    // …refill the slot-partitioned edge list in place
+                    // (capacity preserved)…
                     edges.points.clear();
                     edges.points.extend_from_slice(&payload.edges);
+                    edges.slot_counts = payload.edge_slot_counts;
                     edges.generation = edges.generation.wrapping_add(1);
                     // …and hand the buffer back to the worker. The recycle
                     // ring is sized pool+1 so this cannot fail; if it ever
                     // did, dropping the box merely shrinks the pool.
                     let _ = rt.recycle.push(payload);
                 }
-                let (decision, hold_until) =
-                    presence_decision(frame.present, now, rt.present_hold_until);
-                rt.present_hold_until = hold_until;
-                match decision {
-                    PresenceDecision::Present => {
-                        person_frame = true;
-                        rt.target = BodyTarget {
-                            present: true,
-                            confidence: frame.confidence,
-                            landmarks: frame.landmarks,
-                            world: frame.world_landmarks,
-                            timestamp: frame.timestamp,
-                        };
-                    }
-                    // Within the hold window after a dropout: keep the last
-                    // target untouched (present stays true, last good pose held)
-                    // so a momentary detector dropout does not blank the aura.
-                    PresenceDecision::Held => {}
-                    PresenceDecision::Absent => {
-                        // Hold window elapsed → the person really left.
-                        if rt.target.present {
-                            // Reset the smoother so a return starts fresh (no
-                            // stale momentum), mirroring the hand smoother.
-                            rt.smoother.clear();
+                // Per-slot presence-hold: a present slot re-arms its hold and
+                // updates its target; a held slot keeps the last pose; an
+                // absent slot starts (or continues) its fade-out.
+                for (slot, incoming) in rt.slots.iter_mut().zip(frame.slots.iter()) {
+                    let (decision, hold_until) =
+                        presence_decision(incoming.present, now, slot.hold_until);
+                    slot.hold_until = hold_until;
+                    match decision {
+                        PresenceDecision::Present => {
+                            person_frame = true;
+                            slot.target = *incoming;
+                            slot.timestamp = frame.timestamp;
                         }
-                        rt.target.present = false;
+                        // Within the hold window after a dropout: keep the
+                        // last target untouched (present stays true, last
+                        // good pose held) so a momentary detector dropout
+                        // does not blank the figure.
+                        PresenceDecision::Held => {}
+                        PresenceDecision::Absent => {
+                            slot.target.present = false;
+                        }
                     }
                 }
             }
@@ -332,42 +308,99 @@ pub fn poll_body_worker(
         if let Some(timer) = timer.as_mut() {
             timer.mark(now);
         }
-        if !rt.had_person {
-            tracing::info!("body tracking: person detected");
-        }
     }
 
-    // Ease the exposed pose toward the held target every poll so the
-    // inference cadence renders as fluid motion.
-    if rt.target.present {
-        let smoothed = rt
-            .smoother
-            .smooth(&rt.target.landmarks, &rt.target.world, now);
-        state.present = true;
-        state.confidence = rt.target.confidence;
-        state.landmarks = smoothed.landmarks;
-        state.world_landmarks = smoothed.world;
-        state.velocities = smoothed.velocities;
-        state.timestamp = rt.target.timestamp;
-        rt.had_person = true;
-    } else if rt.had_person {
-        // One clearing write when the person leaves, then quiet.
-        rt.had_person = false;
-        *state = BodyTrackingState::default();
-        rt.smoother.clear();
-        tracing::info!("body tracking: person lost");
+    // Per-slot publication: smooth present slots toward their targets every
+    // poll; fade absent slots out in place; free a slot only at fade 0.
+    publish_bodies(&mut rt.slots, &mut state, now, time.delta_secs());
+
+    // Arrival/departure logging, once per transition.
+    let occupied = state.bodies.iter().any(Option::is_some);
+    if occupied && !rt.had_person {
+        tracing::info!("body tracking: person detected");
+    } else if !occupied && rt.had_person {
+        tracing::info!("body tracking: all people left");
+    }
+    rt.had_person = occupied;
+
+    // Primary selection: manual `KeyN` cycles first, then the score-based
+    // auto policy (size × crop penalty, with switch hysteresis).
+    let mut present = [false; MAX_TRACKED_BODIES];
+    let mut scores: [Option<f32>; MAX_TRACKED_BODIES] = [None; MAX_TRACKED_BODIES];
+    for (i, body) in state.bodies.iter().enumerate() {
+        if let Some(body) = body {
+            if body.present {
+                present[i] = true;
+                scores[i] = Some(primary_score(body.size, body.crop_fraction));
+            }
+        }
+    }
+    for _ in 0..worker.take_cycle_requests() {
+        rt.primary.cycle(&present);
+    }
+    rt.primary.update(&scores, now);
+    state.primary = rt.primary.current();
+}
+
+/// Per-slot publication step of [`poll_body_worker`]: advance each slot's
+/// fade envelope, smooth present slots toward their targets, hold fading-out
+/// slots' last pose in place with a decaying fade (velocities zeroed — a
+/// frozen figure sheds no impulses), and free a slot's [`TrackedBody`] entry
+/// only once its fade reaches exactly zero (the graceful-disappearance
+/// contract). No allocation: `Some(TrackedBody { .. })` writes inline into
+/// the fixed `bodies` array.
+fn publish_bodies(
+    slots: &mut [SlotRuntime; MAX_TRACKED_BODIES],
+    state: &mut BodyTrackingState,
+    now: Duration,
+    dt: f32,
+) {
+    for (i, slot) in slots.iter_mut().enumerate() {
+        slot.fade = fade_step(slot.fade, slot.target.present, dt);
+        if slot.target.present {
+            let smoothed =
+                slot.smoother
+                    .smooth(&slot.target.landmarks, &slot.target.world_landmarks, now);
+            state.bodies[i] = Some(TrackedBody {
+                slot: i,
+                present: true,
+                fade: slot.fade,
+                confidence: slot.target.confidence,
+                landmarks: smoothed.landmarks,
+                world_landmarks: smoothed.world,
+                velocities: smoothed.velocities,
+                timestamp: slot.timestamp,
+                crop_fraction: slot.target.crop_fraction,
+                size: slot.target.size,
+            });
+        } else if slot.fade > 0.0 {
+            if let Some(body) = state.bodies[i].as_mut() {
+                body.present = false;
+                body.fade = slot.fade;
+                body.velocities = [Vec3::ZERO; super::BODY_LANDMARK_COUNT];
+            } else {
+                // Never published (e.g. a held-only blip): nothing to fade.
+                slot.fade = 0.0;
+            }
+        } else if state.bodies[i].is_some() {
+            // Fade complete: free the slot; a returning person starts fresh
+            // (no stale filter momentum), mirroring the hand smoother.
+            state.bodies[i] = None;
+            slot.smoother.clear();
+        }
     }
 }
 
 /// Build the rings, seed the payload pool, and spawn the worker. Reads the
 /// three Dev-panel tuning fields off `request` (Plan C Task 14): the mask
 /// combine-with-previous ratio seeds the shared live-tuning cell the worker
-/// polls each frame, and
-/// the One-Euro min-cutoff/beta seed the main-thread smoother constructed
-/// below. Because these fields are `requires_restart` (Plan C Task 2),
-/// `sync_body_tracking` only reaches this function on a fresh request insert
-/// — including the re-insert after a Dev-panel reload — so a settings change
-/// always takes effect on the next worker (re)start.
+/// polls each frame, and the One-Euro min-cutoff/beta seed the per-slot
+/// main-thread smoothers constructed below. Because these fields are
+/// `requires_restart` (Plan C Task 2), `sync_body_tracking` only reaches this
+/// function on a fresh request insert — including the re-insert after a
+/// Dev-panel reload — so a settings change always takes effect on the next
+/// worker (re)start. `config.max_tracked_bodies` rides into the worker's
+/// pipeline the same way.
 fn start_worker(
     worker: &BodyTrackingWorker,
     config: &BodyTrackingConfig,
@@ -427,7 +460,8 @@ fn start_worker(
         pipeline
     } else {
         let model_dir = config.model_dir.clone();
-        Box::new(move || load_pose_pipeline(&model_dir))
+        let max_tracked = config.max_tracked_bodies;
+        Box::new(move || load_pose_pipeline(&model_dir, max_tracked))
     };
 
     let handle = spawn_body_worker(
@@ -443,16 +477,21 @@ fn start_worker(
         consumer: result_rx,
         recycle: recycle_tx,
         tuning,
-        // One-Euro params seeded straight from the request (see the
-        // function doc). BodySmoother::set_params exists for retuning an
-        // already-running smoother without resetting filter state, but
-        // nothing currently calls it mid-run: these fields are
-        // requires_restart, so a change always arrives via a fresh
-        // start_worker call instead.
-        smoother: BodySmoother::new(request.one_euro_min_cutoff, request.one_euro_beta),
-        target: BodyTarget::default(),
+        // One-Euro params seeded straight from the request (see the function
+        // doc), one smoother per slot so bodies never share filter momentum.
+        // BodySmoother::set_params exists for retuning an already-running
+        // smoother without resetting filter state, but nothing currently
+        // calls it mid-run: these fields are requires_restart, so a change
+        // always arrives via a fresh start_worker call instead.
+        slots: std::array::from_fn(|_| SlotRuntime {
+            target: SlotFrame::default(),
+            timestamp: Duration::ZERO,
+            hold_until: Duration::ZERO,
+            fade: 0.0,
+            smoother: BodySmoother::new(request.one_euro_min_cutoff, request.one_euro_beta),
+        }),
+        primary: PrimarySelect::default(),
         had_person: false,
-        present_hold_until: Duration::ZERO,
     }
 }
 
@@ -496,6 +535,7 @@ mod tests {
 
     use super::super::pipeline::fixtures::{
         confident_landmark_outputs, empty_detector_outputs, hot_person_detector_outputs,
+        two_person_detector_outputs,
     };
     use super::super::pipeline::{PoseConfig, PosePipeline};
     use super::super::smoothing::{DEFAULT_BETA, DEFAULT_MIN_CUTOFF};
@@ -560,37 +600,57 @@ mod tests {
         false
     }
 
-    #[test]
-    fn request_starts_worker_and_publishes_state_mask_edges_and_presence() {
-        let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
-        app.insert_resource(BodyTrackingRequest {
+    fn default_request() -> BodyTrackingRequest {
+        BodyTrackingRequest {
             idle_throttle: false,
             mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
             one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
             one_euro_beta: DEFAULT_BETA,
-        });
+        }
+    }
 
-        let tracked = update_until(&mut app, |w| w.resource::<BodyTrackingState>().present);
+    #[test]
+    fn request_starts_worker_and_publishes_state_mask_edges_and_presence() {
+        let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
+        app.insert_resource(default_request());
+
+        let tracked = update_until(&mut app, |w| {
+            w.resource::<BodyTrackingState>().any_present()
+        });
         assert!(tracked, "state never reported a person");
 
         let world = app.world();
         let state = world.resource::<BodyTrackingState>();
-        assert!(state.confidence > 0.8);
-        assert!(state.landmarks[0].pos.x.is_finite());
-        assert!(state.landmarks[0].visibility > 0.7);
-        assert!((state.world_landmarks[0].x - 0.1).abs() < 1e-4);
+        assert_eq!(state.primary, Some(0), "single person occupies slot 0");
+        let body = state.primary().expect("primary body");
+        assert_eq!(body.slot, 0);
+        assert!(body.present);
+        assert!(body.fade > 0.0, "fade envelope attacking");
+        assert!(body.confidence > 0.8);
+        assert!(body.landmarks[0].pos.x.is_finite());
+        assert!(body.landmarks[0].visibility > 0.7);
+        assert!((body.world_landmarks[0].x - 0.1).abs() < 1e-4);
+        assert!(body.crop_fraction > 0.9, "fully-framed synthetic person");
+        assert!(body.size > 0.0);
 
         let edges = world.resource::<SilhouetteEdges>();
         assert!(edges.generation > 0, "edges never refreshed");
         assert!(!edges.points.is_empty());
+        assert_eq!(
+            edges.slot_counts.iter().sum::<usize>(),
+            edges.points.len(),
+            "slot counts partition the edge list"
+        );
+        assert!(edges.slot_counts[0] > 0, "slot 0 owns the edges");
 
         let mask = world.resource::<MaskTexture>();
         let images = world.resource::<Assets<Image>>();
         let image = images.get(&mask.0).expect("mask image");
         let data = image.data.as_ref().expect("mask image holds CPU data");
+        assert_eq!(data.len(), super::super::MASK_BYTES, "RGBA mask bytes");
         assert!(
-            data.iter().any(|&b| b > 200),
-            "mask bytes never written to the image"
+            data.chunks_exact(4).any(|t| t[0] > 200),
+            "slot-0 channel (R) never written to the image"
         );
 
         let diagnostics = world.resource::<BodyTrackingDiagnostics>();
@@ -613,21 +673,35 @@ mod tests {
     }
 
     #[test]
+    fn two_people_publish_two_bodies_with_a_primary() {
+        let mut app = body_app(
+            two_person_detector_outputs(4.0, 2.0),
+            confident_landmark_outputs(),
+        );
+        app.insert_resource(default_request());
+        let both = update_until(&mut app, |w| {
+            w.resource::<BodyTrackingState>().present_count() >= 2
+        });
+        assert!(both, "two people never published");
+        let state = app.world().resource::<BodyTrackingState>();
+        let primary = state.primary.expect("a primary is chosen");
+        assert!(state.bodies[primary].as_ref().is_some_and(|b| b.present));
+        // Slot indices are stable and distinct.
+        let slots: Vec<usize> = state.iter_bodies().map(|b| b.slot).collect();
+        assert_eq!(slots, vec![0, 1]);
+    }
+
+    #[test]
     fn empty_frames_do_not_touch_the_interaction_timer() {
         let mut app = body_app(empty_detector_outputs(), confident_landmark_outputs());
-        app.insert_resource(BodyTrackingRequest {
-            idle_throttle: false,
-            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
-            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
-            one_euro_beta: DEFAULT_BETA,
-        });
+        app.insert_resource(default_request());
         // Give the worker ample time to stream empty frames.
         for _ in 0..40 {
             app.update();
             std::thread::sleep(Duration::from_millis(5));
         }
         let world = app.world();
-        assert!(!world.resource::<BodyTrackingState>().present);
+        assert!(!world.resource::<BodyTrackingState>().any_present());
         assert_eq!(
             world.resource::<InteractionTimer>().last_interaction(),
             Duration::ZERO,
@@ -636,44 +710,11 @@ mod tests {
     }
 
     #[test]
-    fn presence_decision_arms_hold_on_present() {
-        let now = Duration::from_secs(1);
-        let (d, hold_until) = presence_decision(true, now, Duration::ZERO);
-        assert!(matches!(d, PresenceDecision::Present));
-        assert_eq!(hold_until, now + PRESENCE_HOLD);
-    }
-
-    #[test]
-    fn presence_decision_holds_through_brief_dropout() {
-        // Armed at t = 1000 ms → deadline = 1000 + PRESENCE_HOLD.
-        let hold_until = Duration::from_secs(1) + PRESENCE_HOLD;
-        // A dropout just before the deadline is held, and does not extend it.
-        let now = hold_until.saturating_sub(Duration::from_millis(1));
-        let (d, hu) = presence_decision(false, now, hold_until);
-        assert!(matches!(d, PresenceDecision::Held));
-        assert_eq!(hu, hold_until, "an absent frame must not extend the hold");
-    }
-
-    #[test]
-    fn presence_decision_drops_once_hold_elapses() {
-        let hold_until = Duration::from_secs(1) + PRESENCE_HOLD;
-        // At the deadline and beyond, the person is really gone.
-        assert!(matches!(
-            presence_decision(false, hold_until, hold_until).0,
-            PresenceDecision::Absent
-        ));
-        assert!(matches!(
-            presence_decision(false, hold_until + Duration::from_millis(50), hold_until).0,
-            PresenceDecision::Absent
-        ));
-    }
-
-    #[test]
     fn worker_start_reads_tuning_fields_from_the_request() {
         // Plan C Task 14: the three Dev-panel tuning fields on the request
-        // must reach the worker's live-tuning cell (mask combine ratio) and the
-        // main-thread smoother (One-Euro min-cutoff/beta) at worker start,
-        // not just sit on the struct unread.
+        // must reach the worker's live-tuning cell (mask combine ratio) and
+        // every per-slot main-thread smoother (One-Euro min-cutoff/beta) at
+        // worker start, not just sit on the struct unread.
         let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
         app.insert_resource(BodyTrackingRequest {
             idle_throttle: false,
@@ -694,69 +735,48 @@ mod tests {
             "mask_ema did not reach BodyLiveTuning: {}",
             rt.tuning.mask_ema_alpha()
         );
-        let (min_cutoff, beta) = rt.smoother.params();
-        assert!(
-            (min_cutoff - 3.5).abs() < 1e-6,
-            "one_euro_min_cutoff did not reach BodySmoother: {min_cutoff}"
-        );
-        assert!(
-            (beta - 12.0).abs() < 1e-6,
-            "one_euro_beta did not reach BodySmoother: {beta}"
-        );
+        for slot in &rt.slots {
+            let (min_cutoff, beta) = slot.smoother.params();
+            assert!(
+                (min_cutoff - 3.5).abs() < 1e-6,
+                "one_euro_min_cutoff did not reach a slot smoother: {min_cutoff}"
+            );
+            assert!(
+                (beta - 12.0).abs() < 1e-6,
+                "one_euro_beta did not reach a slot smoother: {beta}"
+            );
+        }
     }
 
     #[test]
-    fn request_person_cycle_bumps_the_worker_cycle_counter() {
-        // The main-side accessor forwards a person-cycle request to the
-        // worker's shared tuning counter (a counter, not a bool, so repeated
-        // presses each register).
-        let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
-        app.insert_resource(BodyTrackingRequest {
-            idle_throttle: false,
-            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
-            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
-            one_euro_beta: DEFAULT_BETA,
-        });
-        app.update(); // sync_body_tracking starts the worker
-
-        let cycle_count = |app: &App| {
-            let worker = app.world().resource::<BodyTrackingWorker>();
-            let runtime = worker.runtime.lock().expect("runtime lock");
-            runtime
-                .as_ref()
-                .expect("worker started")
-                .tuning
-                .cycle_request()
-        };
-        assert_eq!(cycle_count(&app), 0, "starts at zero");
-
-        app.world()
-            .resource::<BodyTrackingWorker>()
-            .request_person_cycle();
-        app.world()
-            .resource::<BodyTrackingWorker>()
-            .request_person_cycle();
-        assert_eq!(cycle_count(&app), 2, "two presses register as two");
+    fn person_cycle_requests_accumulate_and_drain() {
+        // The `KeyN` hotkey path: presses accumulate on the lock-free counter
+        // and poll_body_worker drains them (each press = one primary cycle;
+        // see selection::PrimarySelect::cycle for the policy itself).
+        let worker = BodyTrackingWorker::default();
+        assert_eq!(worker.take_cycle_requests(), 0);
+        worker.request_person_cycle();
+        worker.request_person_cycle();
+        assert_eq!(worker.take_cycle_requests(), 2, "two presses register");
+        assert_eq!(worker.take_cycle_requests(), 0, "drain resets");
     }
 
     #[test]
     fn removing_the_request_stops_the_worker_and_clears_state() {
         let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
-        app.insert_resource(BodyTrackingRequest {
-            idle_throttle: false,
-            mask_ema: super::super::mask::DEFAULT_MASK_EMA_ALPHA,
-            one_euro_min_cutoff: DEFAULT_MIN_CUTOFF,
-            one_euro_beta: DEFAULT_BETA,
-        });
+        app.insert_resource(default_request());
         assert!(update_until(&mut app, |w| w
             .resource::<BodyTrackingState>()
-            .present));
+            .any_present()));
 
         app.world_mut().remove_resource::<BodyTrackingRequest>();
         app.update();
 
         let world = app.world();
-        assert!(!world.resource::<BodyTrackingState>().present);
+        let state = world.resource::<BodyTrackingState>();
+        assert!(!state.any_present());
+        assert!(state.bodies.iter().all(Option::is_none));
+        assert!(state.primary.is_none());
         assert!(world.resource::<SilhouetteEdges>().points.is_empty());
         let worker = world.resource::<BodyTrackingWorker>();
         assert!(
