@@ -15,11 +15,14 @@
 //!   pointer/hand warp, and the single [`sim_params::bake_flame_sim`] baker.
 //!   Also the `OnEnter(SketchActivity::Idle)` freeze that zeroes dispatches.
 //! - [`camera`] — the [`camera::FlameCamera`] CPU orbit resource: autorotate,
-//!   drag, wheel zoom, and decaying fling momentum (F10 sets the momentum on
-//!   hand-grab release). [`crate::flame::render::drive_flame_material`] reads
-//!   it each frame to build the material's view/projection uniforms.
-//! - [`hands`] — grab-and-fling: gathers grabbing [`wc_core::input::entity::TrackedHand`]s,
-//!   drives `camera`'s orbit/momentum the way a mouse drag does, and writes
+//!   mouse drag (the operator's orbit), wheel zoom, and the decaying fling
+//!   momenta the hand layer leaves on release (yaw from two-hand twist, pan
+//!   from a one-hand throw). [`crate::flame::render::drive_flame_material`]
+//!   reads it each frame to build the material's view/projection uniforms.
+//! - [`hands`] — VR-style "grab space" navigation: gathers grabbing
+//!   [`wc_core::input::entity::TrackedHand`]s (with per-hand engage/release
+//!   hysteresis); one hand pans the scene with it, two hands zoom (spread) +
+//!   rotate (twist) + pan (midpoint) about the grip. Writes
 //!   [`hands::FlameGrabState::warp_px`], the pixel-space source
 //!   `sim_params::update_flame_sim` maps into the fractal warp. Also owns the
 //!   idle veto that keeps the sketch `Active` through a fling's coast-down.

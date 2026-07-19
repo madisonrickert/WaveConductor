@@ -87,7 +87,24 @@ pub struct FlameSettings {
     #[serde(default = "default_two_hand_zoom_gamma")]
     pub two_hand_zoom_gamma: f32,
 
-    /// Scale on the two-hand midpoint drag that pans the view; 0 disables pan.
+    /// Gain on the two-hand twist driving camera yaw: the change in the angle
+    /// of the inter-hand line, times this, is added to the azimuth each frame.
+    /// 1 turns the scene degree-for-degree with the hands' twist; higher spins
+    /// faster.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.25_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Two-hand rotate gain",
+        section = "Camera",
+        category = Dev
+    )]
+    #[serde(default = "default_two_hand_rotate_gain")]
+    pub two_hand_rotate_gain: f32,
+
+    /// Scale on the hand drag that pans the view (one-hand grab, the two-hand
+    /// midpoint, and the released pan fling's coast); 0 disables pan.
     #[setting(
         default = 1.0_f32,
         min = 0.0_f32,
@@ -451,6 +468,9 @@ fn default_autorotate_speed() -> f32 {
 fn default_two_hand_zoom_gamma() -> f32 {
     1.0
 }
+fn default_two_hand_rotate_gain() -> f32 {
+    1.0
+}
 fn default_hand_pan_sensitivity() -> f32 {
     1.0
 }
@@ -568,6 +588,7 @@ mod tests {
         assert!((d.target_points - default_target_points()).abs() < f32::EPSILON);
         assert!((d.autorotate_speed - default_autorotate_speed()).abs() < f32::EPSILON);
         assert!((d.two_hand_zoom_gamma - default_two_hand_zoom_gamma()).abs() < f32::EPSILON);
+        assert!((d.two_hand_rotate_gain - default_two_hand_rotate_gain()).abs() < f32::EPSILON);
         assert!((d.hand_pan_sensitivity - default_hand_pan_sensitivity()).abs() < f32::EPSILON);
         assert!((d.camera_return_seconds - default_camera_return_seconds()).abs() < f32::EPSILON);
         assert!((d.dof_strength - default_dof_strength()).abs() < f32::EPSILON);

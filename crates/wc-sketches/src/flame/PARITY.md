@@ -133,13 +133,19 @@ golden-tested against values generated from the v4 source.
 
 Features added after the parity port, by design (not v4 behavior):
 
-1. **Two-hand camera gestures (2026-07-03)** — spec
-   `docs/superpowers/specs/2026-07-03-flame-two-hand-camera-gestures-design.md`.
-   One grabbed hand keeps the v4 orbit-and-fling; two grabbed hands switch to
-   spread-ratio zoom (hands apart = zoom in) plus midpoint-drag pan (new
-   `FlameCamera::target`, clamped to radius 2.0). Orbit momentum is suppressed
-   in two-hand mode, so releasing out of a zoom never flings. Dev knobs:
-   `two_hand_zoom_gamma`, `hand_pan_sensitivity`.
+1. **Grab-space camera gestures (2026-07-03, reworked 2026-07-19)** — original
+   spec `docs/superpowers/specs/2026-07-03-flame-two-hand-camera-gestures-design.md`;
+   the mapping was rebuilt after live-party feedback (guests expected grab to
+   drag the scene, not orbit it — Google Earth VR grip-nav prior art). One
+   grabbed hand PANS (content follows the hand ~1:1; release throws a decaying
+   pan fling). Two grabbed hands zoom (spread ratio vs. the engage anchor,
+   hands apart = zoom in), rotate (twist of the inter-hand line yaws the
+   azimuth), and pan (midpoint drag) about the grip (`FlameCamera::target`,
+   clamped to radius 2.0); releasing keeps a modest yaw momentum from the
+   twist but never a pan fling or zoom momentum. Grab engage/release uses
+   0.7/0.45 hysteresis so a wavering grip doesn't stutter between modes.
+   Hands never tilt (polar stays mouse-only). Dev knobs:
+   `two_hand_zoom_gamma`, `two_hand_rotate_gain`, `hand_pan_sensitivity`.
 2. **Settle-to-home camera ease (2026-07-03, same spec)** — whenever no hand
    grabs and no mouse drags, `polar`/`distance`/`target` ease exponentially back
    to the v4 start pose (`camera_return_seconds` Dev knob, default 8 s time
@@ -193,16 +199,18 @@ Complete each item on the deployment machine (`cargo rund`) before tagging Flame
 
 ### Hardware hand-tracking (`cargo rund` + Leap/MediaPipe)
 
-- [ ] **Grab-and-fling feel**: grab (GrabStrength > 0.5) → the orbit follows the
-  hand's projected position with the amber (`#ffb84d`) bone overlay visible;
-  release with motion → the camera flings/coasts and decays smoothly. Tune the
-  grab threshold and fling decay if the feel is off.
-- [ ] **Two-hand zoom/pan feel** (post-parity addition): grab with both hands →
-  spreading them apart zooms in, squeezing together zooms out, moving both
-  together pans the view (content follows the hands); dropping to one hand
-  resumes orbit without a jump; releasing both never flings. Tune
-  `two_hand_zoom_gamma` and `hand_pan_sensitivity` in **Flame** settings (flip
-  ADVANCED to see Dev knobs) if the feel is off.
+- [ ] **One-hand grab-pan feel**: grab (engages above 0.7 grab strength) → the
+  scene follows the hand ~1:1 with the amber (`#ffb84d`) bone overlay visible;
+  a wavering grip (0.45–0.7) neither engages nor drops; release with motion →
+  the pan flings/coasts and decays smoothly like a thrown map. One hand must
+  never orbit. Tune `hand_pan_sensitivity` if the feel is off.
+- [ ] **Two-hand zoom/rotate/pan feel**: grab with both hands → spreading them
+  apart zooms in, squeezing together zooms out, twisting the pair rotates the
+  scene with the hands, moving both together pans the view (content follows
+  the hands); dropping to one hand resumes pan without a jump; releasing both
+  keeps only a modest spin from the twist — never a pan fling. Tune
+  `two_hand_zoom_gamma`, `two_hand_rotate_gain`, and `hand_pan_sensitivity` in
+  **Flame** settings (flip ADVANCED to see Dev knobs) if the feel is off.
 - [ ] **Settle-to-home**: zoom/pan/tilt the camera into an extreme pose, let go,
   and confirm it drifts back to the start framing over ~10–20 s (azimuth keeps
   autorotating). Tune `camera_return_seconds` if the drift reads too eager or

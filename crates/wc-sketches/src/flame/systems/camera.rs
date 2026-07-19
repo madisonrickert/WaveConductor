@@ -1,8 +1,11 @@
 //! CPU orbit camera for the Flame sketch: autorotate + drag + wheel zoom +
-//! grab-fling momentum (F10 sets [`FlameCamera::angular_velocity`] on release) +
-//! two-hand pan (moves the [`FlameCamera::target`] look-at point) + a
+//! grab-fling momentum (the hand grab layer in
+//! [`crate::flame::systems::hands`] sets [`FlameCamera::angular_velocity`]
+//! from two-hand twist and [`FlameCamera::pan_velocity`] from one-hand pan on
+//! release) + hand pan (moves the [`FlameCamera::target`] look-at point) + a
 //! settle-to-home ease that recenters polar/distance/target whenever nothing
-//! is actively holding the camera (no hand grab, no mouse drag).
+//! is actively holding the camera (no hand grab, no mouse drag, no live
+//! momentum).
 //!
 //! No `Camera3d` entity exists (see the plan's "Approved deviations" note):
 //! [`FlameCamera`] is pure CPU state, and [`crate::flame::render::drive_flame_material`]
@@ -29,8 +32,14 @@ const POLAR_EPSILON: f32 = 0.01;
 /// Wheel-zoom sensitivity: each scroll "line" scales distance by this factor.
 const ZOOM_SENSITIVITY: f32 = 0.1;
 /// Per-frame-at-60fps momentum decay (v4 kept per-frame units; applied
-/// dt-scaled below so the decay rate is frame-rate independent).
+/// dt-scaled below so the decay rate is frame-rate independent). Shared by
+/// the angular (yaw/polar) and pan flings so both coasts feel like the same
+/// material.
 const MOMENTUM_DECAY: f32 = 0.95;
+/// Below this magnitude a decaying momentum snaps to exactly zero, so the
+/// geometric decay terminates, the settle-to-home gate reopens, and the idle
+/// veto (which tests against the same `1e-4`) releases.
+const MOMENTUM_EPSILON: f32 = 1e-4;
 /// Vertical field of view shared by [`FlameCamera::clip_from_view`] and the
 /// pan math in [`FlameCamera::pan_by_pixels`] (v4 camera: 60 degrees).
 const FOVY: f32 = std::f32::consts::PI / 3.0;
@@ -49,8 +58,17 @@ pub struct FlameCamera {
     /// Orbit radius, clamped to v4's `OrbitControls` bounds `[0.1, 8.0]`.
     pub distance: f32,
     /// Grab-fling momentum (azimuth, polar) in rad/frame-at-60fps (v4 kept
-    /// per-frame units; applied dt-scaled: `v * dt * 60`).
+    /// per-frame units; applied dt-scaled: `v * dt * 60`). Set by the hand
+    /// layer's two-hand twist release; applied as `azimuth -= v.x`,
+    /// `polar -= v.y` while coasting.
     pub angular_velocity: Vec2,
+    /// Pan-fling momentum in window-pixels/frame-at-60fps: the one-hand grab
+    /// release's "thrown map" coast. Applied dt-scaled through
+    /// [`FlameCamera::pan_by_pixels`] (the same pixel→world mapping the live
+    /// grab uses, so the coast speed matches the hand speed at release) and
+    /// decayed by `MOMENTUM_DECAY`; killed on hitting the `PAN_MAX_RADIUS`
+    /// clamp rather than grinding against it.
+    pub pan_velocity: Vec2,
     /// Cursor position at the previous frame while dragging.
     pub last_drag: Option<Vec2>,
     /// Orbit/look-at center, in model-world space. `Vec3::ZERO` is v4's fixed
@@ -70,6 +88,7 @@ impl Default for FlameCamera {
             polar: (0.35_f32 / distance).acos(),
             distance,
             angular_velocity: Vec2::ZERO,
+            pan_velocity: Vec2::ZERO,
             last_drag: None,
             target: Vec3::ZERO,
         }
@@ -165,10 +184,14 @@ impl FlameCamera {
 /// drag/zoom input is inert there (no pointer capture during attract mode).
 ///
 /// Order of operations each frame: autorotate advances azimuth, a held-left-
-/// button drag overrides azimuth/polar directly from the cursor delta, wheel
-/// scroll rescales distance, and — when nothing is dragging — decaying fling
-/// momentum (set by F10's hand-grab release) keeps nudging azimuth/polar.
-/// Then, whenever no hand is grabbing and no mouse drag is in progress, a
+/// button drag overrides azimuth/polar directly from the cursor delta (the
+/// operator's orbit — the only polar/tilt access; guests' hands never tilt),
+/// wheel scroll rescales distance, and — when nothing is dragging or
+/// grabbing — the decaying flings the hand layer left behind keep coasting:
+/// `angular_velocity` (two-hand twist release) nudges azimuth/polar and
+/// `pan_velocity` (one-hand pan release) keeps translating the target
+/// through [`FlameCamera::pan_by_pixels`]. Then, whenever no hand is
+/// grabbing, no mouse drag is in progress, and no momentum is still live, a
 /// settle-to-home ease pulls polar/distance/[`FlameCamera::target`] back
 /// toward the default pose. Polar is clamped last so no path can push the eye
 /// through a pole. Last of all (debug builds only),
@@ -237,25 +260,56 @@ pub fn update_flame_camera(
         camera.set_distance_clamped(zoomed);
     }
 
-    // Fling momentum: only applied while nothing is actively dragging (a held
-    // drag overrides the pose directly above). F10 sets `angular_velocity` on
-    // hand-grab release; it decays geometrically each frame toward zero.
-    if camera.last_drag.is_none() {
+    // Fling momentum: only applied while nothing actively holds the camera —
+    // a held drag overrides the pose directly above, and while a hand grabs,
+    // the hand layer both drives the pose directly and rewrites the velocity
+    // accumulators every frame (applying them here too would double-count the
+    // motion). The hand layer seeds `angular_velocity` (two-hand twist
+    // release) and `pan_velocity` (one-hand pan release, the "thrown map");
+    // both decay geometrically each frame toward zero and snap to exactly
+    // zero below `MOMENTUM_EPSILON` so the coast terminates.
+    if grab.grabbing_count == 0 && camera.last_drag.is_none() {
         let velocity = camera.angular_velocity;
         camera.azimuth -= velocity.x * dt * 60.0;
         camera.polar -= velocity.y * dt * 60.0;
         camera.angular_velocity *= MOMENTUM_DECAY.powf(dt * 60.0);
+        if camera.angular_velocity.length() < MOMENTUM_EPSILON {
+            camera.angular_velocity = Vec2::ZERO;
+        }
+
+        // Pan coast: window-pixel velocity through the same pixel→world pan
+        // mapping the live grab uses, so the coast continues at the release's
+        // apparent on-screen speed at any zoom.
+        if camera.pan_velocity != Vec2::ZERO {
+            let step = camera.pan_velocity * dt * 60.0;
+            camera.pan_by_pixels(step, h, settings.hand_pan_sensitivity);
+            camera.pan_velocity *= MOMENTUM_DECAY.powf(dt * 60.0);
+            // Die at the pan clamp rather than grinding against it: once the
+            // target is pinned to the `PAN_MAX_RADIUS` ball, further coast
+            // would only fight `pan_by_pixels`' clamp every frame.
+            if camera.pan_velocity.length() < MOMENTUM_EPSILON
+                || camera.target.length() >= PAN_MAX_RADIUS - 1e-3
+            {
+                camera.pan_velocity = Vec2::ZERO;
+            }
+        }
     }
 
     // Settle-to-home: whenever nothing actively holds the camera (no hand
-    // grabbing, no mouse drag), polar/distance/target ease back to the v4
+    // grabbing, no mouse drag) and no fling is still coasting (a live pan or
+    // yaw momentum owns the motion until it decays out — easing against it
+    // would fight the throw), polar/distance/target ease back to the v4
     // start pose so the kiosk always recovers from any gesture. The ease is
-    // dt-correct (`1 - exp(-dt/tau)`), gentle enough to coexist with a
-    // decaying fling, and also runs during the screensaver — that is what
-    // recenters an abandoned pan for attract mode. During the Idle activity
-    // window this system does not run at all (zero-systems-when-Idle), so the
-    // ease pauses there by design; the screensaver resumes it as the backstop.
-    if grab.grabbing_count == 0 && camera.last_drag.is_none() {
+    // dt-correct (`1 - exp(-dt/tau)`) and also runs during the screensaver —
+    // that is what recenters an abandoned pan for attract mode. During the
+    // Idle activity window this system does not run at all
+    // (zero-systems-when-Idle), so the ease pauses there by design; the
+    // screensaver resumes it as the backstop.
+    if grab.grabbing_count == 0
+        && camera.last_drag.is_none()
+        && camera.angular_velocity.length() <= MOMENTUM_EPSILON
+        && camera.pan_velocity.length() <= MOMENTUM_EPSILON
+    {
         // `.max(0.1)` guards a hand-edited settings file against div-by-zero.
         let alpha = 1.0 - (-dt / settings.camera_return_seconds.max(0.1)).exp();
         camera.ease_toward_home(alpha);
@@ -289,6 +343,7 @@ pub fn update_flame_camera(
         camera.distance = 0.35;
         camera.target = Vec3::new(0.2, 0.0, 0.1);
         camera.angular_velocity = Vec2::ZERO;
+        camera.pan_velocity = Vec2::ZERO;
     }
 }
 
@@ -618,6 +673,180 @@ mod tests {
             (cam.target.x - 1.0).abs() < 1e-6,
             "target must not ease home mid-drag, got {}",
             cam.target.x
+        );
+    }
+
+    /// Build a minimal world for `update_flame_camera` runs: autorotate off,
+    /// no pointer/scroll input, the given camera and grab state.
+    fn camera_world(camera: FlameCamera, grab: FlameGrabState) -> World {
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(100));
+        world.insert_resource(time);
+        world.insert_resource(FlameSettings {
+            autorotate_speed: 0.0,
+            ..FlameSettings::default()
+        });
+        world.insert_resource(PointerState::default());
+        world.insert_resource(PointerOverUi::default());
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        world.insert_resource(AccumulatedMouseScroll::default());
+        world.spawn(Window::default());
+        world.insert_resource(camera);
+        world.insert_resource(grab);
+        world
+    }
+
+    /// A released pan fling coasts (the target keeps moving with the same
+    /// content-follows-hand sign as the live pan) and decays toward zero.
+    #[test]
+    fn pan_momentum_coasts_and_decays() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = camera_world(
+            FlameCamera {
+                pan_velocity: Vec2::new(10.0, 0.0),
+                ..FlameCamera::default()
+            },
+            FlameGrabState::default(),
+        );
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        let cam = *world.resource::<FlameCamera>();
+        assert!(
+            cam.target.x < 0.0,
+            "+x pan momentum must keep panning the target -X, got {}",
+            cam.target.x
+        );
+        assert!(
+            cam.pan_velocity.length() < 10.0,
+            "pan momentum must decay, got {}",
+            cam.pan_velocity.length()
+        );
+        assert!(cam.pan_velocity.x > 0.0, "decay must not reverse the coast");
+    }
+
+    /// A pan fling dies at the `PAN_MAX_RADIUS` clamp instead of grinding
+    /// against it forever.
+    #[test]
+    fn pan_momentum_dies_at_the_clamp() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        // Content-follows-hand: a -x pixel velocity pans the target +X, i.e.
+        // outward against a target already pinned at +X on the clamp ball.
+        let mut world = camera_world(
+            FlameCamera {
+                target: Vec3::new(PAN_MAX_RADIUS, 0.0, 0.0),
+                pan_velocity: Vec2::new(-50.0, 0.0),
+                ..FlameCamera::default()
+            },
+            FlameGrabState::default(),
+        );
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        let cam = *world.resource::<FlameCamera>();
+        assert_eq!(
+            cam.pan_velocity,
+            Vec2::ZERO,
+            "momentum must die at the pan clamp"
+        );
+        assert!(cam.target.length() <= PAN_MAX_RADIUS + 1e-4);
+    }
+
+    /// While a hand grabs, the camera must not double-apply the momentum
+    /// accumulators the hand layer is rewriting each frame: no coast happens.
+    #[test]
+    fn momentum_not_applied_while_grabbing() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = camera_world(
+            FlameCamera {
+                angular_velocity: Vec2::new(0.1, 0.0),
+                pan_velocity: Vec2::new(10.0, 0.0),
+                ..FlameCamera::default()
+            },
+            FlameGrabState {
+                grabbing_count: 1,
+                ..FlameGrabState::default()
+            },
+        );
+        let az0 = FlameCamera::default().azimuth;
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        let cam = *world.resource::<FlameCamera>();
+        assert!(
+            (cam.azimuth - az0).abs() < 1e-6,
+            "angular momentum must not apply mid-grab"
+        );
+        assert_eq!(
+            cam.target,
+            Vec3::ZERO,
+            "pan momentum must not apply mid-grab"
+        );
+        assert_eq!(
+            cam.pan_velocity,
+            Vec2::new(10.0, 0.0),
+            "no decay mid-grab: the hand layer owns the accumulator"
+        );
+    }
+
+    /// Settle-to-home is suppressed while any momentum is live (the throw
+    /// owns the motion) and resumes once the coast has decayed out.
+    #[test]
+    fn settle_to_home_suppressed_while_momentum_live() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        // Pan momentum live: distance must hold.
+        let mut world = camera_world(
+            FlameCamera {
+                distance: 5.0,
+                pan_velocity: Vec2::new(10.0, 0.0),
+                ..FlameCamera::default()
+            },
+            FlameGrabState::default(),
+        );
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        assert!(
+            (world.resource::<FlameCamera>().distance - 5.0).abs() < 1e-6,
+            "no settle while a pan fling coasts"
+        );
+
+        // Yaw momentum live: distance must hold too.
+        let mut world = camera_world(
+            FlameCamera {
+                distance: 5.0,
+                angular_velocity: Vec2::new(0.05, 0.0),
+                ..FlameCamera::default()
+            },
+            FlameGrabState::default(),
+        );
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        assert!(
+            (world.resource::<FlameCamera>().distance - 5.0).abs() < 1e-6,
+            "no settle while a yaw fling coasts"
+        );
+
+        // No momentum: settle resumes.
+        let mut world = camera_world(
+            FlameCamera {
+                distance: 5.0,
+                ..FlameCamera::default()
+            },
+            FlameGrabState::default(),
+        );
+        world
+            .run_system_once(update_flame_camera)
+            .expect("update_flame_camera must run");
+        assert!(
+            world.resource::<FlameCamera>().distance < 5.0,
+            "settle resumes once the coast is over"
         );
     }
 }

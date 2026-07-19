@@ -137,11 +137,12 @@ impl Plugin for FlamePlugin {
                 )),
         );
 
-        // Hand grab-and-fling: gathers grabbing hands and drives the orbit
-        // camera the way a mouse drag does, writing `FlameGrabState.warp_px`
-        // (F7's `update_flame_sim` maps it into the fractal warp every frame).
-        // Ordered before the camera update so this frame's grab delta lands
-        // before autorotate/momentum apply it.
+        // Hand "grab space" navigation: gathers grabbing hands (per-hand
+        // engage/release hysteresis) — one hand pans the scene with the hand,
+        // two hands zoom/rotate/pan about the grip — writing
+        // `FlameGrabState.warp_px` (F7's `update_flame_sim` maps it into the
+        // fractal warp every frame). Ordered before the camera update so this
+        // frame's grab delta lands before autorotate/momentum apply it.
         app.init_resource::<systems::hands::FlameGrabState>();
         app.add_systems(
             Update,
@@ -149,8 +150,9 @@ impl Plugin for FlamePlugin {
                 .before(systems::camera::update_flame_camera)
                 .run_if(wc_core::sketch::sketch_active(AppState::Flame)),
         );
-        // Idle veto: stay Active through a released fling's coast-down and
-        // while a hand is actively grabbing (mirrors `dots::dots_idle_veto`).
+        // Idle veto: stay Active through a released fling's coast-down (yaw
+        // or pan momentum) and while a hand is actively grabbing (mirrors
+        // `dots::dots_idle_veto`).
         app.register_idle_veto(systems::hands::flame_idle_veto);
 
         // Hand-mesh overlay: warm amber #ffb84d, the flame-palette
