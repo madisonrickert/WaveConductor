@@ -191,6 +191,23 @@ pub struct RadianceSettings {
     #[serde(default = "default_mirror")]
     pub mirror: bool,
 
+    /// Fit the square body mask to the window **height** (aspect-correct,
+    /// centred) instead of stretching it to fill the whole window. **On by
+    /// default:** the mask is square, so filling the whole window rect distorts
+    /// the dancer on any non-square display — roughly 1.8x too wide on a 16:9
+    /// landscape screen, 1.8x too tall on a 9:16 portrait screen. With this on
+    /// the dancer keeps its proportions; the aura fills the space to either side
+    /// (landscape) or is cropped at the sides (portrait). Turn it off for the
+    /// original full-window-stretch look.
+    #[setting(
+        default = true,
+        label = "Fit dancer to height",
+        section = "Look",
+        category = User
+    )]
+    #[serde(default = "default_fit_to_height")]
+    pub fit_to_height: bool,
+
     /// Master scale on every audio→visual coupling (emission, buoyancy,
     /// turbulence, burst, intensity). 0 = motion-drive only.
     #[setting(
@@ -415,6 +432,9 @@ fn default_rim_glow() -> f32 {
 fn default_mirror() -> bool {
     true
 }
+fn default_fit_to_height() -> bool {
+    true
+}
 fn default_audio_sensitivity() -> f32 {
     1.0
 }
@@ -499,6 +519,7 @@ mod tests {
         assert!((d.silhouette_fill - default_silhouette_fill()).abs() < f32::EPSILON);
         assert!((d.rim_glow - default_rim_glow()).abs() < f32::EPSILON);
         assert_eq!(d.mirror, default_mirror());
+        assert_eq!(d.fit_to_height, default_fit_to_height());
         assert!((d.audio_sensitivity - default_audio_sensitivity()).abs() < f32::EPSILON);
         assert_eq!(d.audio_input_device, default_audio_input_device());
         assert!((d.mask_threshold - default_mask_threshold()).abs() < f32::EPSILON);

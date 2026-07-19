@@ -216,10 +216,19 @@ pub fn bake_radiance_sim(
     out.lifespan_min = LIFESPAN_MIN;
     out.lifespan_max = LIFESPAN_MAX;
     out.mirror = u32::from(settings.mirror);
-    // Full-window stretch: the 256² mask covers the window rect. (v1 default;
-    // if dancer proportions read wrong on very wide displays, fit-height is
-    // the follow-up tune.)
-    out.uv_to_world = [window_size.x.max(1.0), window_size.y.max(1.0)];
+    // Mask → world scale. The mask is square; the `fit_to_height` setting maps
+    // it to a centred height×height square so the dancer keeps its proportions
+    // on non-square displays (portrait installs — a 9:16 screen otherwise
+    // stretches the dancer ~1.8x tall). The default stretches the square to fill
+    // the whole window rect (the v1 look, tuned for 16:9). Every consumer (fill,
+    // rim, edges, limb impulses) reads `uv_to_world`, so this one value keeps
+    // them consistent.
+    let h = window_size.y.max(1.0);
+    out.uv_to_world = if settings.fit_to_height {
+        [h, h]
+    } else {
+        [window_size.x.max(1.0), h]
+    };
 
     // Limb impulses from the smoothed landmark velocities.
     let scale = Vec2::new(out.uv_to_world[0], out.uv_to_world[1]);
@@ -490,10 +499,11 @@ mod tests {
         let (_, out) = bake(&settings, &neutral_audio(), Some(&body), 500);
         assert_eq!(out.impulse_count, 1, "one moving limb -> one slot");
         let imp = out.impulses[0];
-        // Wrist at UV (0.7, 0.4), mirrored: world x = (1-0.7-0.5)*1920 = -384;
-        // world y = (0.5-0.4)*1080 = 108.
+        // Wrist at UV (0.7, 0.4), mirrored. `fit_to_height` (the default) maps
+        // the square mask by the window height (1080), so world x =
+        // (1-0.7-0.5)*1080 = -216; world y = (0.5-0.4)*1080 = 108.
         assert!(
-            (imp.position[0] - -384.0).abs() < 1e-3,
+            (imp.position[0] - -216.0).abs() < 1e-3,
             "{:?}",
             imp.position
         );

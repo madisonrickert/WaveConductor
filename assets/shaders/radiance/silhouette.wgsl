@@ -11,7 +11,8 @@
 //                threshold, w mirror (1 = flip x).
 //   @binding(3): effect_params — x elapsed seconds, y shimmer amount
 //                (highs-driven), z raw-mask debug (1 = draw the mask
-//                grayscale), w reserved.
+//                grayscale), w fit-to-height aspect (window_w/window_h; 1 =
+//                full-window stretch).
 //   @binding(4): fill_color — deep glassy base (linear).
 //   @binding(5): rim_color — emissive rim (linear HDR).
 
@@ -45,12 +46,21 @@ fn value_noise(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Quad UV == mask UV under the full-window stretch mapping; the mirror
-    // flip here matches the kernel's mask_uv_to_world so fill, rim, and
-    // particle spawn positions all agree.
+    // Quad UV -> mask UV. The mirror flip matches the kernel's mask_uv_to_world
+    // so fill, rim, and particle spawns agree. effect_params.w is the fit-to-
+    // height aspect factor (window_w/window_h; 1.0 = full-window stretch):
+    // scaling u about the centre maps the square mask to a centred, height-tall
+    // square so the dancer keeps its proportions on non-square displays.
     var uv = in.uv;
     if (fill_params.w > 0.5) {
         uv.x = 1.0 - uv.x;
+    }
+    uv.x = 0.5 + (uv.x - 0.5) * effect_params.w;
+    // Outside the mask reads as background — the pillarbox on a wide screen. On
+    // a portrait screen u stays within [0,1], so the dancer fills the height and
+    // the aura is cropped at the sides instead.
+    if (uv.x < 0.0 || uv.x > 1.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     let m = textureSample(mask_tex, mask_samp, uv).r;
 

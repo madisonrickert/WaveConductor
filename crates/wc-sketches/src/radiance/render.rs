@@ -138,7 +138,8 @@ pub struct RadianceSilhouetteMaterial {
     /// x = fill intensity, y = rim glow, z = mask threshold, w = mirror.
     #[uniform(2)]
     pub fill_params: Vec4,
-    /// x = elapsed seconds, y = shimmer amount, z = raw-mask debug, w = 0.
+    /// x = elapsed seconds, y = shimmer amount, z = raw-mask debug, w =
+    /// fit-to-height aspect factor (`window_w`/`window_h`; 1 = full-window stretch).
     #[uniform(3)]
     pub effect_params: Vec4,
     /// Deep glassy base color (linear).
@@ -199,8 +200,13 @@ pub fn particle_material_params(
 /// both materials every frame. The per-frame cost is a small uniform
 /// re-prepare, the same class as flame's eight-uniform driver.
 #[cfg(feature = "body-tracking-mediapipe")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system — each param is a distinct ECS resource/query the driver packs into the two materials"
+)]
 pub fn drive_radiance_materials(
     time: Res<'_, Time>,
+    window: Single<'_, '_, &Window>,
     settings: Res<'_, RadianceSettings>,
     state: Res<'_, RadianceState>,
     fade: Res<'_, ScreensaverFade>,
@@ -239,11 +245,21 @@ pub fn drive_radiance_materials(
         settings.mask_threshold,
         f32::from(u8::from(settings.mirror)),
     );
+    // `fit_to_height` maps the square mask to a centred, height-tall square so
+    // the dancer keeps its proportions on non-square displays; the silhouette
+    // shader remaps its mask sample by this aspect factor (`window_w/window_h`;
+    // 1.0 = the full-window stretch). Matches `uv_to_world` in the sim baker so
+    // fill, rim, and particle spawns agree.
+    let fit_aspect = if settings.fit_to_height {
+        window.width() / window.height().max(1.0)
+    } else {
+        1.0
+    };
     let effect_params = Vec4::new(
         time.elapsed_secs(),
         state.sparkle,
         f32::from(u8::from(settings.mask_debug_overlay)),
-        0.0,
+        fit_aspect,
     );
     for handle in &silhouette_roots {
         if let Some(mut material) = silhouette_materials.get_mut(&handle.0) {
