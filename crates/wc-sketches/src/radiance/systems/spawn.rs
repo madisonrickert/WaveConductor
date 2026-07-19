@@ -29,16 +29,19 @@ use bevy::render::storage::ShaderBuffer;
 use bytemuck::{cast_slice, Zeroable};
 use wc_core::audio::input::AudioCaptureRequest;
 use wc_core::input::body::{
-    BodyTrackingRequest, MaskTexture, SilhouetteEdges, MASK_SIZE, MAX_EDGE_POINTS,
+    BodyTrackingRequest, MaskTexture, SilhouetteEdges, MASK_SIZE, MASK_SIZE_U32, MAX_EDGE_POINTS,
 };
 
 use crate::radiance::compute::sim_params::{
     RadianceParticle, RadianceSimParams, RadianceSimParamsGpu,
 };
+use crate::radiance::distance_field::RadianceDistanceField;
+use crate::radiance::pulse::{RadiancePulseMaterial, RadiancePulses};
 use crate::radiance::render::{
     silhouette_fill_color, RadianceMaterial, RadianceSilhouetteMaterial, QUAD_HALF_PX,
 };
 use crate::radiance::settings::RadianceSettings;
+use crate::radiance::sparkle::{RadianceSparkleMaterial, RadianceSparkles};
 use crate::radiance::systems::sim_params::RadianceState;
 
 /// Marker component on every entity owned by the Radiance sketch;
@@ -89,13 +92,22 @@ pub fn ensure_body_surfaces(
     clippy::cast_sign_loss,
     reason = "particle_count is bounded by the 10k..300k settings slider, exact as f32"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a Bevy spawn system's parameters are its data dependencies; the \
+              beat-pulse + sparkle quads add their material Assets and the \
+              distance-field image store"
+)]
 pub fn spawn_radiance(
     settings: Res<'_, RadianceSettings>,
     mask: Res<'_, MaskTexture>,
     mut buffers: ResMut<'_, Assets<ShaderBuffer>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
+    mut images: ResMut<'_, Assets<Image>>,
     mut particle_materials: ResMut<'_, Assets<RadianceMaterial>>,
     mut silhouette_materials: ResMut<'_, Assets<RadianceSilhouetteMaterial>>,
+    mut pulse_materials: ResMut<'_, Assets<RadiancePulseMaterial>>,
+    mut sparkle_materials: ResMut<'_, Assets<RadianceSparkleMaterial>>,
     window: Single<'_, '_, &Window>,
     mut commands: Commands<'_, '_>,
 ) {
@@ -165,6 +177,48 @@ pub fn spawn_radiance(
         GlobalTransform::default(),
         Visibility::default(),
     ));
+    // Silhouette distance field: R8Unorm 256², seeded saturated (255 = no
+    // body anywhere) so waves are invisible until the first real body frame
+    // computes the field. MAIN_WORLD (CPU chamfer writes) + RENDER_WORLD
+    // (shader samples); Bevy re-uploads on mutation.
+    let distance_image = images.add(Image::new_fill(
+        Extent3d {
+            width: MASK_SIZE_U32,
+            height: MASK_SIZE_U32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[255u8],
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    ));
+
+    // Beat-pulse wave quad over the billboards (z 2.0, additive — light
+    // washes over silhouette and aura alike). Spawns with all slots dead;
+    // `pulse::update_radiance_pulses` packs the live uniform every frame.
+    commands.spawn((
+        RadianceRoot,
+        bevy::mesh::Mesh2d(meshes.add(Mesh::from(Rectangle::new(w, h)))),
+        bevy::sprite_render::MeshMaterial2d(pulse_materials.add(RadiancePulseMaterial {
+            distance_field: distance_image.clone(),
+            pulses: crate::radiance::pulse::RadiancePulseUniform::default(),
+        })),
+        Transform::from_xyz(0.0, 0.0, 2.0),
+        GlobalTransform::default(),
+        Visibility::default(),
+    ));
+    // Extremity-sparkle quad above the waves (z 3.0, additive). Both
+    // sparkles spawn off; `sparkle::update_radiance_sparkles` drives them.
+    commands.spawn((
+        RadianceRoot,
+        bevy::mesh::Mesh2d(meshes.add(Mesh::from(Rectangle::new(w, h)))),
+        bevy::sprite_render::MeshMaterial2d(
+            sparkle_materials.add(RadianceSparkleMaterial::default()),
+        ),
+        Transform::from_xyz(0.0, 0.0, 3.0),
+        GlobalTransform::default(),
+        Visibility::default(),
+    ));
 
     // Zeroed params (emission 0, no edges) until the first bake next Update.
     commands.insert_resource(RadianceSimParams {
@@ -173,6 +227,9 @@ pub fn spawn_radiance(
         particle_count: count,
     });
     commands.insert_resource(RadianceState::default());
+    commands.insert_resource(RadiancePulses::default());
+    commands.insert_resource(RadianceSparkles::default());
+    commands.insert_resource(RadianceDistanceField::new(distance_image));
 }
 
 /// `OnEnter(AppState::Radiance)` (chained after `spawn_radiance`): start the
@@ -220,6 +277,9 @@ pub fn insert_tracking_requests(
 pub fn remove_radiance_resources(mut commands: Commands<'_, '_>) {
     commands.remove_resource::<RadianceSimParams>();
     commands.remove_resource::<RadianceState>();
+    commands.remove_resource::<RadiancePulses>();
+    commands.remove_resource::<RadianceSparkles>();
+    commands.remove_resource::<RadianceDistanceField>();
     commands.remove_resource::<AudioCaptureRequest>();
     commands.remove_resource::<BodyTrackingRequest>();
 }
@@ -239,6 +299,8 @@ mod tests {
         app.init_asset::<Image>();
         app.init_asset::<RadianceMaterial>();
         app.init_asset::<RadianceSilhouetteMaterial>();
+        app.init_asset::<RadiancePulseMaterial>();
+        app.init_asset::<RadianceSparkleMaterial>();
         app.world_mut().spawn(Window::default());
         app.insert_resource(RadianceSettings::default());
         app
@@ -292,11 +354,26 @@ mod tests {
         assert_eq!(data.len(), 12_000 * 32, "32-byte particles at full count");
         assert!(data.iter().all(|&b| b == 0), "zeroed = all dead");
 
-        // Two draw entities (silhouette + billboards) under the marker.
+        // Four draw entities (silhouette + billboards + pulse quad +
+        // sparkle quad) under the marker.
         let mut roots = app
             .world_mut()
             .query_filtered::<Entity, With<RadianceRoot>>();
-        assert_eq!(roots.iter(app.world()).count(), 2);
+        assert_eq!(roots.iter(app.world()).count(), 4);
+        assert!(
+            app.world().get_resource::<RadiancePulses>().is_some(),
+            "pulse state inserted at spawn"
+        );
+        assert!(
+            app.world().get_resource::<RadianceSparkles>().is_some(),
+            "sparkle state inserted at spawn"
+        );
+        assert!(
+            app.world()
+                .get_resource::<RadianceDistanceField>()
+                .is_some(),
+            "distance field inserted at spawn"
+        );
 
         app.world_mut()
             .run_system_once(insert_tracking_requests)
@@ -309,6 +386,12 @@ mod tests {
             .expect("teardown");
         assert!(app.world().get_resource::<RadianceSimParams>().is_none());
         assert!(app.world().get_resource::<RadianceState>().is_none());
+        assert!(app.world().get_resource::<RadiancePulses>().is_none());
+        assert!(app.world().get_resource::<RadianceSparkles>().is_none());
+        assert!(app
+            .world()
+            .get_resource::<RadianceDistanceField>()
+            .is_none());
         assert!(app.world().get_resource::<AudioCaptureRequest>().is_none());
         assert!(app.world().get_resource::<BodyTrackingRequest>().is_none());
     }

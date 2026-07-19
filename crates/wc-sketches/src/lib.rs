@@ -74,6 +74,23 @@ impl Plugin for SketchesPlugin {
         // singleton; the mesh + material entity spawns on Radiance entry).
         app.add_plugins(Material2dPlugin::<crate::radiance::render::RadianceMaterial>::default());
 
+        // Radiance beat-pulse wave material, registered once (Plugin
+        // singleton; the fullscreen quad spawns on Radiance entry).
+        // Feature-gated like the silhouette material: the pulse module
+        // consumes the body-tracking distance field.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_plugins(Material2dPlugin::<
+            crate::radiance::pulse::RadiancePulseMaterial,
+        >::default());
+
+        // Radiance extremity-sparkle material, registered once (Plugin
+        // singleton; same gating — the sparkle module consumes body
+        // landmarks).
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_plugins(Material2dPlugin::<
+            crate::radiance::sparkle::RadianceSparkleMaterial,
+        >::default());
+
         // Radiance silhouette fill material, registered once (Plugin
         // singleton; the quad spawns on Radiance entry, Task 9).
         // Feature-gated: it samples the body-tracking mask and its driver

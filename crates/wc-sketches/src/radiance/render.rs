@@ -169,8 +169,60 @@ pub fn silhouette_fill_color() -> Vec4 {
     Vec4::new(0.05, 0.03, 0.10, 1.0)
 }
 
-/// Pack the particle-material params + palette stops for one frame,
-/// ember-blended by the screensaver fade envelope. Pure for testability.
+/// Rotate a linear-HDR color's hue by `phase` full turns (`0..1` wraps; `0`
+/// and `1` are exact identity). Exact HSV rotation: saturation and the HDR
+/// value (max component) are preserved bit-for-bit, so a rotated palette
+/// stays as vivid and as bloom-hot as the authored one — the psychedelic
+/// hue-cycle must never wash colors out mid-rotation (a YIQ-matrix rotate
+/// would).
+#[must_use]
+pub fn rotate_hue(color: Vec4, phase: f32) -> Vec4 {
+    // `.abs()` folds rem_euclid's `-0.0` (exact negative whole turns) into
+    // `+0.0` so the bit compare below catches it; the bit compare itself
+    // sidesteps `clippy::float_cmp`.
+    let phase = phase.rem_euclid(1.0).abs();
+    // Exact identity at whole turns (no float round-trip drift).
+    if phase.to_bits() == 0.0_f32.to_bits() {
+        return color;
+    }
+    let value = color.x.max(color.y).max(color.z);
+    let low = color.x.min(color.y).min(color.z);
+    let chroma = value - low;
+    if chroma <= 0.0 {
+        return color; // achromatic: hue undefined, rotation is identity
+    }
+    // RGB -> hue in 0..6 sextant units.
+    let hue = if (value - color.x).abs() < f32::EPSILON {
+        ((color.y - color.z) / chroma).rem_euclid(6.0)
+    } else if (value - color.y).abs() < f32::EPSILON {
+        (color.z - color.x) / chroma + 2.0
+    } else {
+        (color.x - color.y) / chroma + 4.0
+    };
+    let hue = (hue + phase * 6.0).rem_euclid(6.0);
+    // Hue -> RGB at the same chroma, then restore the original minimum.
+    let mid = chroma * (1.0 - (hue.rem_euclid(2.0) - 1.0).abs());
+    #[allow(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "hue is clamped to [0, 6) by rem_euclid; the sextant index is 0..=5"
+    )]
+    let (red, green, blue) = match hue as u32 {
+        0 => (chroma, mid, 0.0),
+        1 => (mid, chroma, 0.0),
+        2 => (0.0, chroma, mid),
+        3 => (0.0, mid, chroma),
+        4 => (mid, 0.0, chroma),
+        _ => (chroma, 0.0, mid),
+    };
+    Vec4::new(red + low, green + low, blue + low, color.w)
+}
+
+/// Pack the particle-material params + palette stops for one frame:
+/// hue-rotated by the psychedelic cycle phase, then ember-blended by the
+/// screensaver fade envelope (the attract ember keeps its authored warmth —
+/// only the user palette rotates). Pure for testability.
 ///
 /// Returns `(params_a, [color_a, color_b, color_c])`.
 #[cfg(feature = "body-tracking-mediapipe")]
@@ -183,8 +235,13 @@ pub fn particle_material_params(
     let a = fade_alpha.clamp(0.0, 1.0);
     // Attract mode dims toward the ember: intensity eases to 70%.
     let intensity = state.intensity * (1.0 - a * 0.3);
-    let params_a = Vec4::new(intensity, QUAD_HALF_PX, state.palette_shift, state.sparkle);
-    let user = palette.stops();
+    // Audio-swelled billboard size: the aura visibly breathes with the music
+    // (intensity term) and jumps on onsets. Clamped at 1.5x — fill cost
+    // scales with the square of this factor, so the ceiling bounds the
+    // worst-case raster load at ~2.25x for onset instants only.
+    let quad_half = QUAD_HALF_PX * (0.85 + 0.25 * state.intensity + 0.3 * state.onset_env).min(1.5);
+    let params_a = Vec4::new(intensity, quad_half, state.palette_shift, state.sparkle);
+    let user = palette.stops().map(|c| rotate_hue(c, state.hue_phase));
     let ember = RadiancePalette::Ember.stops();
     let colors = [
         user[0].lerp(ember[0], a),
@@ -237,11 +294,15 @@ pub fn drive_radiance_materials(
         }
     }
     // Rim takes the palette's hottest stop (ember-blended like the
-    // particles); the debug lane routes the raw-mask overlay.
+    // particles); the debug lane routes the raw-mask overlay. The rim's
+    // brightness rides the audio: the dancer's outline glows with the level
+    // and flashes on every onset — the single most legible reactive lane on
+    // a busy floor.
     let rim = colors[2];
+    let rim_drive = (0.7 + 0.35 * state.intensity + 0.6 * state.onset_env).min(2.2);
     let fill_params = Vec4::new(
         settings.silhouette_fill,
-        settings.rim_glow,
+        settings.rim_glow * rim_drive,
         settings.mask_threshold,
         f32::from(u8::from(settings.mirror)),
     );
@@ -284,6 +345,7 @@ mod tests {
             intensity: 1.0,
             sparkle: 0.4,
             palette_shift: 0.25,
+            ..RadianceState::default()
         };
         let (pa0, c0) = particle_material_params(&state, RadiancePalette::Prism, 0.0);
         assert!((pa0.x - 1.0).abs() < 1e-6);
@@ -294,11 +356,83 @@ mod tests {
         assert_eq!(c1, RadiancePalette::Ember.stops());
     }
 
-    /// The quad half-size lane is the shared constant.
+    /// The quad half-size lane swells with intensity + onset and clamps at
+    /// 1.5x the base constant.
     #[test]
-    fn particle_params_carry_quad_half() {
-        let state = RadianceState::default();
-        let (pa, _) = particle_material_params(&state, RadiancePalette::Ocean, 0.0);
-        assert!((pa.y - QUAD_HALF_PX).abs() < f32::EPSILON);
+    fn particle_params_swell_quad_half_with_audio() {
+        let quiet = RadianceState::default();
+        let (pa, _) = particle_material_params(&quiet, RadiancePalette::Ocean, 0.0);
+        assert!(
+            (pa.y - QUAD_HALF_PX * 0.85).abs() < 1e-5,
+            "quiet floor: {}",
+            pa.y
+        );
+        let loud = RadianceState {
+            intensity: 1.0,
+            onset_env: 1.0,
+            ..RadianceState::default()
+        };
+        let (pa_loud, _) = particle_material_params(&loud, RadiancePalette::Ocean, 0.0);
+        assert!(pa_loud.y > pa.y, "audio must swell the billboards");
+        let slammed = RadianceState {
+            intensity: 2.0,
+            onset_env: 2.0,
+            ..RadianceState::default()
+        };
+        let (pa_max, _) = particle_material_params(&slammed, RadiancePalette::Ocean, 0.0);
+        assert!(
+            (pa_max.y - QUAD_HALF_PX * 1.5).abs() < 1e-5,
+            "swell clamps at 1.5x: {}",
+            pa_max.y
+        );
+    }
+
+    /// Whole turns are exact identity; achromatic colors never change.
+    #[test]
+    fn rotate_hue_identity_cases() {
+        let c = Vec4::new(0.35, 0.10, 1.00, 1.0);
+        assert_eq!(rotate_hue(c, 0.0), c);
+        assert_eq!(rotate_hue(c, 1.0), c);
+        assert_eq!(rotate_hue(c, -2.0), c);
+        let grey = Vec4::new(0.5, 0.5, 0.5, 1.0);
+        assert_eq!(rotate_hue(grey, 0.37), grey);
+    }
+
+    /// A third-turn cycles primaries (red → green → blue → red) and
+    /// preserves the HDR value + saturation structure.
+    #[test]
+    fn rotate_hue_cycles_primaries_and_preserves_value() {
+        let red = Vec4::new(2.0, 0.0, 0.0, 1.0); // HDR red
+        let green = rotate_hue(red, 1.0 / 3.0);
+        assert!(
+            (green.y - 2.0).abs() < 1e-5 && green.x.abs() < 1e-5 && green.z.abs() < 1e-5,
+            "{green}"
+        );
+        let blue = rotate_hue(green, 1.0 / 3.0);
+        assert!(
+            (blue.z - 2.0).abs() < 1e-5 && blue.x.abs() < 1e-5 && blue.y.abs() < 1e-5,
+            "{blue}"
+        );
+        // Value (max) and min are invariant under any rotation.
+        let stop = Vec4::new(0.35, 0.10, 1.00, 1.0);
+        let rotated = rotate_hue(stop, 0.618);
+        let value = rotated.x.max(rotated.y).max(rotated.z);
+        let low = rotated.x.min(rotated.y).min(rotated.z);
+        assert!((value - 1.0).abs() < 1e-5, "value preserved: {rotated}");
+        assert!((low - 0.10).abs() < 1e-5, "min preserved: {rotated}");
+        assert!((rotated.w - 1.0).abs() < f32::EPSILON, "alpha untouched");
+    }
+
+    /// A rotated palette feeds through to the packed stops (fade 0).
+    #[test]
+    fn particle_params_apply_hue_phase() {
+        let state = RadianceState {
+            intensity: 1.0,
+            hue_phase: 0.5,
+            ..RadianceState::default()
+        };
+        let (_, colors) = particle_material_params(&state, RadiancePalette::Prism, 0.0);
+        let expected = RadiancePalette::Prism.stops().map(|c| rotate_hue(c, 0.5));
+        assert_eq!(colors, expected);
     }
 }

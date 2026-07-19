@@ -39,8 +39,22 @@
 //! truth for wiring order.
 
 pub mod compute;
+// Silhouette chamfer distance field (feeds the beat-wave shader). Consumes
+// `wc_core::input::body` (mask + edge generation), so it is gated like
+// `synthetic`/`screensaver` below (same `cargo doc` default-features-only
+// rationale).
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod distance_field;
+// Beat-pulse layer (waves of light radiating from the silhouette's edge on
+// detected beats). Consumes `distance_field` above, gated identically.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod pulse;
 pub mod render;
 pub mod settings;
+// Extremity star-sparkles (fastest-oscillating limb + its mirror partner).
+// Consumes `wc_core::input::body` landmarks, gated identically.
+#[cfg(feature = "body-tracking-mediapipe")]
+pub mod sparkle;
 // Consumes `wc_core::input::body` (`EdgePoint`/`MASK_SIZE`/`MAX_EDGE_POINTS`),
 // which wc-core gates behind this feature (camera-independent, CI-testable
 // headless). One generator, three consumers (unit tests here, the Task 12
@@ -170,6 +184,37 @@ impl Plugin for RadiancePlugin {
         app.add_systems(
             Update,
             render::drive_radiance_materials.run_if(in_state(AppState::Radiance)),
+        );
+
+        // Silhouette distance field: recomputed per body frame
+        // (generation-gated), consumed by the beat-wave shader. Ordered
+        // before the pulse driver so a fresh mask's field is live the same
+        // frame its wave brightness updates.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            Update,
+            distance_field::update_distance_field
+                .before(pulse::update_radiance_pulses)
+                .run_if(in_state(AppState::Radiance)),
+        );
+
+        // Beat-pulse driver: spawns silhouette-contour waves on the analysis
+        // engine's beat lane and packs the wave uniform. Gated `in_state`
+        // like the material driver so residual waves keep fading through
+        // Idle/Screensaver (no new waves spawn there — the mic is paused
+        // and beat_confidence holds 0).
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            Update,
+            pulse::update_radiance_pulses.run_if(in_state(AppState::Radiance)),
+        );
+
+        // Extremity-sparkle driver: oscillation tracker + mirrored star
+        // pair. Same gating rationale as the pulse driver.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            Update,
+            sparkle::update_radiance_sparkles.run_if(in_state(AppState::Radiance)),
         );
 
         // Restart listener (requires_restart fields fade out/in via the

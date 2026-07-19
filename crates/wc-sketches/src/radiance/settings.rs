@@ -208,6 +208,50 @@ pub struct RadianceSettings {
     #[serde(default = "default_fit_to_height")]
     pub fit_to_height: bool,
 
+    /// Strength of the beat-synchronized light pulses that radiate outward
+    /// from the dancer. Scales the pulse brightness; 0 disables spawning.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Beat pulses",
+        section = "Audio",
+        category = User
+    )]
+    #[serde(default = "default_pulse_intensity")]
+    pub pulse_intensity: f32,
+
+    /// Strength of the extremity star-sparkles that ride the dancer's
+    /// fastest-oscillating limb and its mirror partner. Scales the glint
+    /// brightness; 0 disables the pair.
+    #[setting(
+        default = 1.0_f32,
+        min = 0.0_f32,
+        max = 3.0_f32,
+        step = 0.05_f32,
+        label = "Limb sparkles",
+        section = "Look",
+        category = User
+    )]
+    #[serde(default = "default_sparkle_intensity")]
+    pub sparkle_intensity: f32,
+
+    /// Palette hue-cycle speed in full spectrum rotations per second. Bass
+    /// accelerates the phase on top of this base rate (see
+    /// `bake_radiance_sim`); 0 pins the palette's original hues.
+    #[setting(
+        default = 0.03_f32,
+        min = 0.0_f32,
+        max = 0.2_f32,
+        step = 0.005_f32,
+        label = "Hue cycle",
+        section = "Look",
+        category = User
+    )]
+    #[serde(default = "default_hue_cycle_speed")]
+    pub hue_cycle_speed: f32,
+
     /// Master scale on every audio→visual coupling (emission, buoyancy,
     /// turbulence, burst, intensity). 0 = motion-drive only.
     #[setting(
@@ -438,6 +482,15 @@ fn default_fit_to_height() -> bool {
 fn default_audio_sensitivity() -> f32 {
     1.0
 }
+fn default_pulse_intensity() -> f32 {
+    1.0
+}
+fn default_sparkle_intensity() -> f32 {
+    1.0
+}
+fn default_hue_cycle_speed() -> f32 {
+    0.03
+}
 fn default_audio_input_device() -> String {
     String::new()
 }
@@ -521,6 +574,9 @@ mod tests {
         assert_eq!(d.mirror, default_mirror());
         assert_eq!(d.fit_to_height, default_fit_to_height());
         assert!((d.audio_sensitivity - default_audio_sensitivity()).abs() < f32::EPSILON);
+        assert!((d.pulse_intensity - default_pulse_intensity()).abs() < f32::EPSILON);
+        assert!((d.sparkle_intensity - default_sparkle_intensity()).abs() < f32::EPSILON);
+        assert!((d.hue_cycle_speed - default_hue_cycle_speed()).abs() < f32::EPSILON);
         assert_eq!(d.audio_input_device, default_audio_input_device());
         assert!((d.mask_threshold - default_mask_threshold()).abs() < f32::EPSILON);
         assert!((d.mask_ema - default_mask_ema()).abs() < f32::EPSILON);

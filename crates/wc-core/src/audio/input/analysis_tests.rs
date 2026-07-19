@@ -571,3 +571,143 @@ fn pausing_after_activity_resets_the_engine_exactly_once() {
         "paused drain still discards newly queued samples"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Offline calibration harness (ignored; operator-invoked)
+// ---------------------------------------------------------------------------
+
+/// Feed a real-room recording through the production engine and print the
+/// feature distributions an operator needs to calibrate sketch audio
+/// coupling. Ignored by default: it requires `WC_CALIB_F32` to point at a
+/// raw mono f32le 48 kHz file (e.g. produced by
+/// `ffmpeg -i room.wav -f f32le -acodec pcm_f32le room.f32`) and exists to
+/// be run by the operating agent, printing stats for judgment — no
+/// assertions beyond file validity.
+///
+/// Run:
+/// `WC_CALIB_F32=<path> cargo test -p wc-core --lib -- --ignored calibration_report --nocapture`
+#[test]
+#[ignore = "operator-invoked calibration report; needs WC_CALIB_F32"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "a linear print-everything diagnostic report; splitting it would obscure it"
+)]
+fn calibration_report_from_recording() {
+    let path = std::env::var("WC_CALIB_F32").expect("set WC_CALIB_F32 to a raw f32le mono file");
+    let bytes = std::fs::read(&path).expect("readable recording");
+    let samples: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(
+        samples.len() > 48_000,
+        "recording too short: {}",
+        samples.len()
+    );
+
+    let mut engine = AnalysisEngine::new(48_000);
+    // 60 Hz frame drain: 800 samples per frame at 48 kHz.
+    let frame_samples = 800;
+    let mut frames: Vec<AudioAnalysis> = Vec::new();
+    for chunk in samples.chunks_exact(frame_samples) {
+        for &s in chunk {
+            engine.push(s);
+        }
+        frames.push(engine.analyze(DT));
+    }
+    // Discard the first 5 s while the AGC converges.
+    let settled: Vec<&AudioAnalysis> = frames.iter().skip(300).collect();
+    assert!(!settled.is_empty(), "need > 5 s of audio");
+
+    let pct = |mut v: Vec<f32>, p: f32| -> f32 {
+        v.sort_by(f32::total_cmp);
+        v[((v.len() - 1) as f32 * p) as usize]
+    };
+    let series =
+        |f: &dyn Fn(&AudioAnalysis) -> f32| -> Vec<f32> { settled.iter().map(|a| f(a)).collect() };
+
+    let bass = series(&|a| (a.bands[0] + a.bands[1] + a.bands[2]) / 3.0);
+    let highs = series(&|a| (a.bands[5] + a.bands[6] + a.bands[7]) / 3.0);
+    let rms = series(&|a| a.rms);
+    let onset = series(&|a| a.onset);
+    let gain = series(&|a| a.gain);
+    let secs = settled.len() as f32 * DT;
+
+    // Mic clipping: the fraction of raw samples at/near full scale. A
+    // speaker next to the laptop can pin the mic ADC; clipped material
+    // compresses every downstream ratio, so this is the first thing to
+    // check when reactivity looks flat.
+    let clipped = samples.iter().filter(|s| s.abs() > 0.98).count();
+    let near = samples.iter().filter(|s| s.abs() > 0.85).count();
+
+    // Room-adaptive drive input: each aggregate over its own slow running
+    // mean (tau 8 s, floored like the sketch's normalizer) — the exact
+    // ratio the radiance band_drive map consumes.
+    let ratio_series = |v: &[f32], floor: f32| -> Vec<f32> {
+        let mut avg = 0.0_f32;
+        let k = 1.0 - (-DT / 8.0_f32).exp();
+        v.iter()
+            .map(|&x| {
+                avg += (x - avg) * k;
+                x / avg.max(floor)
+            })
+            .skip(600) // let the mean converge ~10 s before reporting
+            .collect()
+    };
+    let bass_ratio = ratio_series(&bass, 0.02);
+    let highs_ratio = ratio_series(&highs, 1.0e-3);
+
+    println!("=== calibration report: {path} ===");
+    println!(
+        "clipping: {:.2}% samples > 0.98 FS, {:.2}% > 0.85 FS",
+        clipped as f32 / samples.len() as f32 * 100.0,
+        near as f32 / samples.len() as f32 * 100.0,
+    );
+    println!(
+        "agc gain: p10={:.2} p50={:.2} p90={:.2}",
+        pct(gain.clone(), 0.10),
+        pct(gain.clone(), 0.50),
+        pct(gain, 0.90),
+    );
+    for (name, v) in [("bass/avg", &bass_ratio), ("highs/avg", &highs_ratio)] {
+        println!(
+            "{name} p10={:.3} p50={:.3} p90={:.3} p99={:.3}",
+            pct(v.clone(), 0.10),
+            pct(v.clone(), 0.50),
+            pct(v.clone(), 0.90),
+            pct(v.clone(), 0.99),
+        );
+    }
+    println!("frames: {} ({secs:.1} s settled)", settled.len());
+    println!(
+        "beats: {} ({:.1} BPM apparent)",
+        engine.beat_count(),
+        f64::from(engine.beat_count() as u32) * 60.0 / f64::from(secs)
+    );
+    for (name, v) in [
+        ("bass", &bass),
+        ("highs", &highs),
+        ("rms", &rms),
+        ("onset", &onset),
+    ] {
+        println!(
+            "{name:6} p10={:.3} p50={:.3} p90={:.3} p99={:.3} max={:.3}",
+            pct(v.clone(), 0.10),
+            pct(v.clone(), 0.50),
+            pct(v.clone(), 0.90),
+            pct(v.clone(), 0.99),
+            pct(v.clone(), 1.0),
+        );
+    }
+    for (i, edge) in [50, 100, 200, 400, 800, 1600, 3200, 6400]
+        .iter()
+        .enumerate()
+    {
+        let band = series(&|a| a.bands[i]);
+        println!(
+            "band[{i}] ({edge:>4} Hz+) p50={:.3} p90={:.3}",
+            pct(band.clone(), 0.50),
+            pct(band, 0.90)
+        );
+    }
+}

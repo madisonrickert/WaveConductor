@@ -66,6 +66,18 @@ pub const IMPULSE_RADIUS: f32 = 140.0;
 pub const IMPULSE_FULL_SPEED: f32 = 900.0;
 /// Smoothing time constant for the intensity/sparkle envelopes, seconds.
 pub const ENVELOPE_SMOOTH_SECS: f32 = 0.25;
+/// Time constant of the slow per-aggregate running means the band drives are
+/// normalized by (see [`band_drive`]). Long enough to track a song section,
+/// short enough to re-adapt across a DJ transition.
+pub const BAND_NORM_TAU_S: f32 = 8.0;
+/// Floor on the bass running mean: silence must not normalize the noise
+/// floor up into a full drive.
+pub const BASS_AVG_FLOOR: f32 = 0.02;
+/// Floor on the highs running mean. Far lower than the bass floor: a party
+/// room mic delivers almost no absolute energy above 1.6 kHz (measured
+/// p90 ≈ 0.004 on real material), so the highs lane is useful only as a
+/// *relative* signal — but it still needs a floor against amplified hiss.
+pub const HIGHS_AVG_FLOOR: f32 = 1.0e-3;
 
 /// Smoothed audio-drive envelopes and the palette-shift accumulator; also
 /// read by the material driver (Task 8). Rebuilt fresh on every sketch entry.
@@ -81,6 +93,13 @@ pub struct RadianceState {
     pub sparkle: f32,
     /// Gradient-shift accumulator in `0..1` (wraps); bass advances it.
     pub palette_shift: f32,
+    /// Slow running mean of the bass aggregate ([`band_drive`] reference).
+    pub bass_avg: f32,
+    /// Slow running mean of the highs aggregate ([`band_drive`] reference).
+    pub highs_avg: f32,
+    /// Palette hue-rotation phase in `0..1` (wraps; 1 = one full spectrum
+    /// rotation). Advanced by `hue_cycle_speed`, accelerated by bass.
+    pub hue_phase: f32,
 }
 
 /// The neutral [`AudioAnalysis`] used when the resource is absent (headless
@@ -130,23 +149,61 @@ pub struct AudioDrive {
     pub onset: f32,
 }
 
+/// Contrast-expanded, room-adaptive band drive: `value` relative to its own
+/// slow running mean `reference`, mapped so sitting *at* the mean yields a
+/// moderate drive and ~1.5x the mean saturates. Calibrated against real
+/// party-room mic material (48 s report, 2026-07-18): the post-AGC bass
+/// aggregate spans only ~0.07..0.21 absolute (a 1.1x..1.3x multiplier under
+/// the old absolute mapping — visually near-static), but its *ratio* to its
+/// own mean spans ~0.45..1.55, which this map stretches across the full
+/// `0..1` drive. The highs aggregate is ~50x smaller in absolute terms
+/// (p90 ≈ 0.004) yet has 2x ratio dynamics, so relative normalization is the
+/// only mapping that makes the sparkle/turbulence lane live on a room mic.
+#[must_use]
+pub fn band_drive(value: f32, reference: f32) -> f32 {
+    // ratio 0.7 → 0.0, ratio 1.5 → 1.0 (clamped outside).
+    ((value / reference - 0.7) / 0.8).clamp(0.0, 1.0)
+}
+
 /// Map one analysis frame into drive values. Pure and allocation-free.
 /// `sensitivity == 0.0` returns the exact neutral drive (all multipliers 1.0)
 /// so audio coupling is provably inert at the knob's floor.
+///
+/// `bass_avg` / `highs_avg` are the slow running means tracked in
+/// [`RadianceState`] (floored here so a fresh/silent state cannot divide by
+/// ~0); see [`band_drive`] for the normalization rationale.
 #[must_use]
-pub fn audio_drive(audio: &AudioAnalysis, sensitivity: f32) -> AudioDrive {
+pub fn audio_drive(
+    audio: &AudioAnalysis,
+    sensitivity: f32,
+    bass_avg: f32,
+    highs_avg: f32,
+) -> AudioDrive {
     let s = sensitivity.max(0.0);
-    // Low three bands = bass body; top three = air/sparkle.
-    let bass = (audio.bands[0] + audio.bands[1] + audio.bands[2]) / 3.0;
-    let highs = (audio.bands[5] + audio.bands[6] + audio.bands[7]) / 3.0;
+    let (bass, highs) = band_aggregates(audio);
+    let bass_n = band_drive(bass, bass_avg.max(BASS_AVG_FLOOR));
+    let highs_n = band_drive(highs, highs_avg.max(HIGHS_AVG_FLOOR));
     AudioDrive {
-        emission_mul: 1.0 + 1.5 * bass * s,
-        buoyancy_mul: 1.0 + 0.8 * bass * s,
-        turbulence_mul: 1.0 + 1.2 * highs * s,
-        sparkle: (highs * s).clamp(0.0, 1.0),
-        intensity: 0.55 + 0.9 * audio.rms * s,
+        emission_mul: 1.0 + 1.5 * bass_n * s,
+        buoyancy_mul: 1.0 + 0.8 * bass_n * s,
+        turbulence_mul: 1.0 + 1.6 * highs_n * s,
+        sparkle: (highs_n * s).clamp(0.0, 1.0),
+        // RMS lifts the floor brightness; each detected beat rides a throb on
+        // top (beat_confidence snaps to 1 and decays in ~0.3 s). The 1.7x RMS
+        // slope is calibrated to real material (rms p10..p90 ≈ 0.08..0.23 →
+        // intensity ~0.63..0.89 before the beat term).
+        intensity: 0.5 + (1.7 * audio.rms + 0.3 * audio.beat_confidence) * s,
         onset: (audio.onset * s).clamp(0.0, ONSET_MAX),
     }
+}
+
+/// The two band aggregates every drive consumer shares: low three bands =
+/// bass body (50–400 Hz), top three = air/sparkle (1.6–12.8 kHz).
+#[must_use]
+pub fn band_aggregates(audio: &AudioAnalysis) -> (f32, f32) {
+    let bass = (audio.bands[0] + audio.bands[1] + audio.bands[2]) / 3.0;
+    let highs = (audio.bands[5] + audio.bands[6] + audio.bands[7]) / 3.0;
+    (bass, highs)
 }
 
 /// One baker, two writers (live + screensaver) — flame's Condition A1.
@@ -181,7 +238,18 @@ pub fn bake_radiance_sim(
     out: &mut RadianceSimParamsGpu,
 ) {
     let dt = dt.min(DT_CAP);
-    let drive = audio_drive(audio, settings.audio_sensitivity);
+    // Advance the slow per-aggregate running means the band drives are
+    // normalized by (room-adaptive contrast expansion — see `band_drive`).
+    let (bass_raw, highs_raw) = band_aggregates(audio);
+    let kn = 1.0 - (-dt / BAND_NORM_TAU_S).exp();
+    state.bass_avg += (bass_raw - state.bass_avg) * kn;
+    state.highs_avg += (highs_raw - state.highs_avg) * kn;
+    let drive = audio_drive(
+        audio,
+        settings.audio_sensitivity,
+        state.bass_avg,
+        state.highs_avg,
+    );
 
     // Onset envelope: instant attack to the incoming strength, exponential
     // release — so one drum hit reads as one burst, not a sustained gale.
@@ -194,6 +262,12 @@ pub fn bake_radiance_sim(
     // Palette drifts slowly, faster under bass (audio-shifted gradient).
     state.palette_shift =
         (state.palette_shift + dt * (0.02 + 0.10 * (drive.emission_mul - 1.0))).fract();
+    // Hue rotation phase: the psychedelic full-spectrum drift. Base rate from
+    // the setting, accelerated up to ~2.8x by the bass drive so heavy
+    // sections push the whole palette around the wheel.
+    state.hue_phase = (state.hue_phase
+        + dt * settings.hue_cycle_speed * (1.0 + 1.2 * (drive.emission_mul - 1.0)))
+        .fract();
 
     out.dt = dt;
     out.time = elapsed;
@@ -406,7 +480,7 @@ mod tests {
     #[test]
     fn audio_drive_neutral_at_zero_sensitivity() {
         let loud = fixture_audio([1.0; 8], 1.0, 1.0);
-        let d = audio_drive(&loud, 0.0);
+        let d = audio_drive(&loud, 0.0, 0.5, 0.5);
         assert!((d.emission_mul - 1.0).abs() < f32::EPSILON);
         assert!((d.buoyancy_mul - 1.0).abs() < f32::EPSILON);
         assert!((d.turbulence_mul - 1.0).abs() < f32::EPSILON);
@@ -415,12 +489,13 @@ mod tests {
     }
 
     /// Bass raises emission + buoyancy; highs raise turbulence + sparkle.
+    /// References at half the aggregate: ratio 2 saturates both drives.
     #[test]
     fn audio_drive_routes_bands_per_spec() {
         let bassy = fixture_audio([0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0], 0.3, 0.0);
         let airy = fixture_audio([0.0, 0.0, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9], 0.3, 0.0);
-        let db = audio_drive(&bassy, 1.0);
-        let da = audio_drive(&airy, 1.0);
+        let db = audio_drive(&bassy, 1.0, 0.45, 0.45);
+        let da = audio_drive(&airy, 1.0, 0.45, 0.45);
         assert!(db.emission_mul > 1.5 && db.buoyancy_mul > 1.2);
         assert!(
             (db.turbulence_mul - 1.0).abs() < 1e-6,
@@ -430,6 +505,74 @@ mod tests {
         assert!(
             (da.emission_mul - 1.0).abs() < 1e-6,
             "highs must not pump emission"
+        );
+    }
+
+    /// The relative normalization is the point: a compressed room-mic bass
+    /// wiggle (0.15 mean, ±0.06 swing — the measured party-room shape) maps
+    /// to a wide drive range instead of the near-static absolute mapping.
+    #[test]
+    fn band_drive_expands_compressed_room_mic_dynamics() {
+        let avg = 0.15;
+        let quiet = band_drive(0.09, avg); // p10-ish trough
+        let mid = band_drive(0.15, avg); // sitting at the mean
+        let peak = band_drive(0.22, avg); // p95-ish hit
+        assert!(quiet.abs() < f32::EPSILON, "trough must drop to 0: {quiet}");
+        assert!(
+            (0.2..=0.6).contains(&mid),
+            "at-mean must be moderate: {mid}"
+        );
+        assert!(peak > 0.9, "hits must approach full drive: {peak}");
+    }
+
+    /// Beats throb the intensity target on top of the RMS floor.
+    #[test]
+    fn audio_drive_intensity_throbs_on_beats() {
+        let base = fixture_audio([0.1; 8], 0.16, 0.0);
+        let mut on_beat = base;
+        on_beat.beat_confidence = 1.0;
+        let di = audio_drive(&base, 1.0, 0.1, 0.1).intensity;
+        let db = audio_drive(&on_beat, 1.0, 0.1, 0.1).intensity;
+        assert!((db - di - 0.3).abs() < 1e-6, "beat adds 0.3: {di} -> {db}");
+    }
+
+    /// The baker's running means adapt toward the aggregates, so a sustained
+    /// level stops reading as a hit: the emission drive relaxes over time.
+    #[test]
+    fn bake_normalization_adapts_to_sustained_level() {
+        let settings = RadianceSettings::default();
+        let mut state = RadianceState::default();
+        let mut out = RadianceSimParamsGpu::default();
+        let sustained = fixture_audio([0.3; 8], 0.2, 0.0);
+        let win = Vec2::new(1920.0, 1080.0);
+        let mut first = 0.0;
+        // 40 simulated seconds: five BAND_NORM_TAU_S constants, so the mean
+        // has fully converged onto the sustained aggregate.
+        for i in 0..2400 {
+            bake_radiance_sim(
+                &settings,
+                &sustained,
+                None,
+                100,
+                win,
+                1.0 / 60.0,
+                0.0,
+                &mut state,
+                &mut out,
+            );
+            if i == 0 {
+                first = out.emission_prob;
+            }
+        }
+        assert!(
+            out.emission_prob < first,
+            "sustained level must relax: first {first}, settled {}",
+            out.emission_prob
+        );
+        assert!(
+            (state.bass_avg - 0.3).abs() < 0.02,
+            "bass mean converges to the aggregate: {}",
+            state.bass_avg
         );
     }
 
