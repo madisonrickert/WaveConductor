@@ -56,6 +56,11 @@ impl Plugin for CorePlugin {
         // Inert until a sketch inserts BodyTrackingRequest (Radiance, Plan C).
         #[cfg(feature = "body-tracking-mediapipe")]
         app.add_plugins(input::body::BodyTrackingPlugin);
+        // OBSBOT camera control: takes the camera's on-device AI/gesture
+        // system out of the loop so it stops fighting the app's own tracking
+        // (Windows-only device IO; documented no-op facade elsewhere).
+        #[cfg(feature = "obsbot-camera-control")]
+        app.add_plugins(input::obsbot::ObsbotControlPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
         // Frame-rate cap (restores GPU headroom; see the frame_limiter module

@@ -63,6 +63,11 @@ pub mod entity;
 pub mod gesture;
 pub mod hand;
 pub mod idle_pause;
+/// OBSBOT camera control (disable on-device AI/gestures, gimbal + FOV +
+/// exposure) over the vendored libdev SDK. Real device IO is Windows-only;
+/// other platforms compile a documented no-op facade.
+#[cfg(feature = "obsbot-camera-control")]
+pub mod obsbot;
 /// Shared ONNX inference (tensor types + the ort backend with its CoreML
 /// per-model cache), consumed by the MediaPipe hand provider and the
 /// body-tracking pipeline.
