@@ -405,8 +405,6 @@ const CREDITS_GAP_AFTER_ATTRIBUTION: f32 = 12.0;
 const CREDITS_GAP_BETWEEN_LINKS: f32 = 4.0;
 /// Gap below the contributor hyperlinks.
 const CREDITS_GAP_AFTER_LINKS: f32 = 8.0;
-/// Gap below the Ultraleap attribution line.
-const CREDITS_GAP_AFTER_ULTRALEAP: f32 = 16.0;
 
 /// Render the credits tile (last grid cell), matching v4's `credits-block`
 /// div (HomePage.tsx:45–60).
@@ -485,14 +483,9 @@ fn render_credits_tile(ui: &mut egui::Ui, style: &OverlayStyle, tile_size: egui:
     );
     child_ui.add_space(CREDITS_GAP_AFTER_LINKS);
 
-    // Ultraleap attribution (vendor/leapc/ATTRIBUTION.md short form).
-    // Required by the Ultraleap Enterprise Tracking Licence §5(b).
-    child_ui.label(
-        egui::RichText::new("Hand tracking by Ultraleap.")
-            .size(12.0)
-            .color(style.text_color_dim),
-    );
-    child_ui.add_space(CREDITS_GAP_AFTER_ULTRALEAP);
+    // The Ultraleap attribution (Enterprise Tracking Licence §5(b)) lives on
+    // the credits overlay's HAND TRACKING section (`super::credits`), not on
+    // this tile — the licence requires it to appear, not to appear here.
 
     // Licenses footer — a real link now: opens the full-screen credits /
     // open-source-licenses overlay (`super::credits`), v5's equivalent of
@@ -563,7 +556,6 @@ fn credits_tile_metrics(ui: &egui::Ui, style: &OverlayStyle) -> CreditsTileMetri
 
     let link_madison = measure_line("Madison Rickert", 13.0);
     let link_lovetech = measure_line("Rich Trapani | LoveTech", 13.0);
-    let ultraleap = measure_line("Hand tracking by Ultraleap.", 12.0);
     let licenses = measure_line("Open Source Licenses", 11.0);
 
     let content_height = title_size.y
@@ -574,8 +566,6 @@ fn credits_tile_metrics(ui: &egui::Ui, style: &OverlayStyle) -> CreditsTileMetri
         + CREDITS_GAP_BETWEEN_LINKS
         + link_lovetech.y
         + CREDITS_GAP_AFTER_LINKS
-        + ultraleap.y
-        + CREDITS_GAP_AFTER_ULTRALEAP
         + licenses.y;
 
     CreditsTileMetrics {
