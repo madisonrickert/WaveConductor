@@ -101,6 +101,34 @@ pub struct ScreensaverSettings {
     )]
     #[serde(default = "default_attract_mode_timeout_secs")]
     pub attract_mode_timeout_secs: f32,
+
+    /// Show the head-statue silhouette in the attract-mode hand-tracking
+    /// tutorial overlay (bottom of the screen). Ported from v4's screensaver
+    /// "statue + waving hands" graphic; drawn only while hand tracking is
+    /// available, by [`crate::ui::tutorial`]. Independent of
+    /// [`Self::tutorial_hands`] — either element can show alone.
+    #[setting(
+        default = true,
+        ty = Boolean,
+        section = "Attract Mode",
+        category = User,
+        label = "Tutorial: head statue"
+    )]
+    #[serde(default = "default_tutorial_head")]
+    pub tutorial_head: bool,
+
+    /// Show the pair of drifting guide hands in the attract-mode hand-tracking
+    /// tutorial overlay. See [`Self::tutorial_head`]; the hands invite the
+    /// visitor to raise their own hands over the sensor.
+    #[setting(
+        default = true,
+        ty = Boolean,
+        section = "Attract Mode",
+        category = User,
+        label = "Tutorial: guide hands"
+    )]
+    #[serde(default = "default_tutorial_hands")]
+    pub tutorial_hands: bool,
 }
 
 /// Serde fallback so a config saved before `screensaver_fps` existed still
@@ -118,6 +146,18 @@ fn default_keep_display_awake() -> bool {
 /// existed still loads at the documented default (today's hardcoded 60 s).
 fn default_attract_mode_timeout_secs() -> f32 {
     60.0
+}
+
+/// Serde fallback: the tutorial statue defaults on (kiosk deployments want the
+/// invitation visible out of the box).
+fn default_tutorial_head() -> bool {
+    true
+}
+
+/// Serde fallback: the tutorial guide hands default on, matching
+/// [`default_tutorial_head`].
+fn default_tutorial_hands() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -173,5 +213,22 @@ mod tests {
         let parsed: ScreensaverSettings = toml::from_str(legacy).expect("legacy TOML must parse");
         assert_eq!(parsed.screensaver_fps, 25.0);
         assert_eq!(parsed.attract_mode_timeout_secs, 60.0);
+    }
+
+    /// Forward-compat: TOML persisted before the tutorial toggles existed
+    /// still parses, and both toggles land on their kiosk-first `true`
+    /// defaults (the Priceless deployment wants the overlay on by default).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: panic on bad TOML is the intended failure mode"
+    )]
+    fn legacy_toml_without_tutorial_keys_defaults_both_toggles_on() {
+        let legacy = "screensaver_fps = 25.0";
+        let parsed: ScreensaverSettings = toml::from_str(legacy).expect("legacy TOML must parse");
+        assert!(parsed.tutorial_head);
+        assert!(parsed.tutorial_hands);
+        assert!(ScreensaverSettings::default().tutorial_head);
+        assert!(ScreensaverSettings::default().tutorial_hands);
     }
 }

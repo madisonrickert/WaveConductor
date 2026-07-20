@@ -6,7 +6,7 @@
 //!
 //! ## Composition
 //!
-//! [`WaveConductorUiPlugin`] composes six sub-plugins. They are added in
+//! [`WaveConductorUiPlugin`] composes seven sub-plugins. They are added in
 //! dependency order so that downstream plugins can rely on upstream
 //! resources existing during `Startup`:
 //!
@@ -19,6 +19,9 @@
 //! 5. `picker::SketchPickerPlugin` — Home-state grid.
 //! 6. `credits::CreditsPlugin` — full-screen credits/licenses overlay,
 //!    opened from the picker's credits tile.
+//! 7. `tutorial::TutorialOverlayPlugin` — attract-mode hand-tracking
+//!    tutorial (statue + waving hands), shown only while hand tracking is
+//!    available.
 
 use bevy::prelude::*;
 
@@ -31,6 +34,7 @@ pub mod picker;
 pub mod reload_overlay;
 pub mod style;
 pub mod text;
+pub mod tutorial;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
 pub use buttons::PointerCoarse;
@@ -51,6 +55,7 @@ impl Plugin for WaveConductorUiPlugin {
             buttons::OverlayButtonsPlugin,
             picker::SketchPickerPlugin,
             credits::CreditsPlugin,
+            tutorial::TutorialOverlayPlugin,
         ));
         // Full-screen reload fade overlay: runs unconditionally (no state gate)
         // so it fires even during the one-frame Switch phase (AppState::Home).
