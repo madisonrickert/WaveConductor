@@ -26,72 +26,60 @@ Madison to review and approve/deprioritize. Items already resolved by the
    the existing 8 h soak harness drives the real app now, but the roadmap's
    CSV frame-time p95/p99 + thermal-band telemetry lane and the DRS/perf-governor
    phase it gates remain open.
-5. **Release asset path** (carry-forward #8) — `AssetPlugin.file_path =
-   "../../assets"` is the dev path; bundles need `"assets"` via a
-   `cfg(debug_assertions)`/env switch. Must not ship the dev path.
-6. **Disabled correctness test** `wc-core/tests/input.rs:280`
+5. **Disabled correctness test** `wc-core/tests/input.rs:280`
    (`#[ignore]`, Plan 6 TODO) and the `#[ignore]`d pre-tag
    `line_soak_with_overlay_ui` (carry-forward #71) are release-gate items.
 
 ## Bug-risk (smaller)
 
-7. `mediapipe/pipeline.rs:119` — `MIN_TRACK_LANDMARK_SPREAD = 0.04` needs a
+6. `mediapipe/pipeline.rs:119` — `MIN_TRACK_LANDMARK_SPREAD = 0.04` needs a
    hardware-validated re-pick (candidate 0.03); may drop an edge-on hand.
-8. **Save-on-exit flush** (carry-forward #1) — autosave is 500 ms-debounced;
-   an edit + close inside the window is lost. ~15 LOC.
-9. **LineSettings TOML partial-deserialization data loss** (carry-forward #57)
-   — one missing field discards the whole `[line]` section; needs per-field
-   `#[serde(default)]`.
-10. `LineRestartPending` trampoline cleanup race (carry-forward #10) — narrow,
+7. `LineRestartPending` trampoline cleanup race (carry-forward #10) — narrow,
     needs timestamp-and-reap or a one-shot.
 
 ## Performance
 
-11. Thermal Hot-tier is "Low-Rate Ember", not a true dispatch freeze —
-    explicitly YAGNI until soak data says otherwise (`lifecycle/thermal/mod.rs`).
-12. Fast linker (mold/lld) not wired (carry-forward #86) — merge into the
-    existing per-target rustflags (don't replace; LeapC rpath).
-13. `LinePostProcessNode::run` allocates a 32-byte uniform buffer per frame
-    (carry-forward #54) — mirror the persistent-buffer + `write_buffer` idiom.
-14. `MAX_ATTRACTORS` uniform→storage-buffer switch if count grows past ~16
+8. Thermal Hot-tier is "Low-Rate Ember", not a true dispatch freeze —
+   explicitly YAGNI until soak data says otherwise (`lifecycle/thermal/mod.rs`).
+9. Fast linker (mold/lld) not wired (carry-forward #86) — merge into the
+   existing per-target rustflags (don't replace; LeapC rpath).
+10. `MAX_ATTRACTORS` uniform→storage-buffer switch if count grows past ~16
     (`particles/particle.rs:80`).
-15. Line post-process runs in every state (carry-forward #53) — gate on
-    `AppState::Line` before Plan 9's audio-driven `g_constant` lands.
 
 ## Packaging / distribution
 
-16. Release-gate matrix incomplete: macOS DMG notarization, portable exe,
+11. Release-gate matrix incomplete: macOS DMG notarization, portable exe,
     AppImage, web bundle, CI signing.
-17. `main.rs:144` "Windows builder deferred as a build-prerequisite decision"
+12. `main.rs:144` "Windows builder deferred as a build-prerequisite decision"
     comment — decision point for Madison (wix/ + xtask msi now exist and stage
     all runtime DLLs; likely just needs the comment retired and the decision
     ratified).
-18. `leap-sdk-archive` — offsite archive of the Ultraleap 6.2.0 installers
+13. `leap-sdk-archive` — offsite archive of the Ultraleap 6.2.0 installers
     (abandonware hedge). Ops task, no code.
 
 ## Polish / feature ports (selected)
 
-19. Heatmap-image native file picker (carry-forward #62) — `rfd` dialog instead
+14. Heatmap-image native file picker (carry-forward #62) — `rfd` dialog instead
     of free-text path. Madison wants to iterate on heatmaps visually.
-20. Fullscreen-toggle overlay button (carry-forward #64) — keybinding exists,
+15. Fullscreen-toggle overlay button (carry-forward #64) — keybinding exists,
     button never shipped (~40 LOC).
-21. Info/About overlay (carry-forward #65) — decide: dedicated panel vs the
+16. Info/About overlay (carry-forward #65) — decide: dedicated panel vs the
     credits tile (a full credits screen shipped 2026-07-20; likely drop #65).
-22. Auto-reenter sketch on `requires_restart` change (carry-forward #3) —
+17. Auto-reenter sketch on `requires_restart` change (carry-forward #3) —
     same-frame OnExit→OnEnter instead of punting to Home.
-23. Attractor rings rotationally symmetric so spin is invisible (carry-forward
+18. Attractor rings rotationally symmetric so spin is invisible (carry-forward
     #56; v4 rings visibly spin) — needs low-segment mesh + v4 check.
-24. Per-sketch screensaver attract performers — only Line has one; Flame /
+19. Per-sketch screensaver attract performers — only Line has one; Flame /
     Dots / Cymatics / Radiance want their own (roadmap `screensaver-attract`).
-25. HandMesh port to Dots/Cymatics (+bloom path) (carry-forwards #74/#75).
-26. Provider fusion is a passthrough (carry-forward #76) — per-chirality
+20. HandMesh port to Dots/Cymatics (+bloom path) (carry-forwards #74/#75).
+21. Provider fusion is a passthrough (carry-forward #76) — per-chirality
     precedence unbuilt until a second provider registers.
-27. Reflection panel: number types beyond `u32/f32/f64` render "(unsupported)"
+22. Reflection panel: number types beyond `u32/f32/f64` render "(unsupported)"
     (carry-forward #2); dev panel lacks section grouping (#66).
-28. `line_synth.rs` deferred pieces: chord stack, compressor knee/ratio match,
+23. `line_synth.rs` deferred pieces: chord stack, compressor knee/ratio match,
     background-mp3 mixer.
-29. `WebSocketProvider` stub (web-target input layer).
-30. Micro-polish tail: carry-forwards #4–5, #7, #11–52 (each tiny; absorbed by
+24. `WebSocketProvider` stub (web-target input layer).
+25. Micro-polish tail: carry-forwards #4–5, #7, #11–52 (each tiny; absorbed by
     plan Phase-0s).
 
 ## Body-tracking perf candidates (from the 2026-07-20 parity audit — parity itself is CONFIRMED clean)
@@ -108,20 +96,20 @@ Madison to review and approve/deprioritize. Items already resolved by the
 
 ## Docs / sign-off
 
-31. PARITY.md verdicts PENDING across Cymatics/Flame/Dots/Line/HandMesh —
+26. PARITY.md verdicts PENDING across Cymatics/Flame/Dots/Line/HandMesh —
     operator hardware/visual sign-off + the `line-parity-signoff` capture that
     tags `v5-line-parity`. AgX palette tuning is operator-deferred.
-32. Madison-owned manual checks: gravity smear on press+drag (#55), heatmap
+27. Madison-owned manual checks: gravity smear on press+drag (#55), heatmap
     image end-to-end (#63).
-33. Stale plan-doc patches (#29, #36); `groupedUpness` spelling check (#15).
-34. `docs/adr/` promises "first ADR in Plan 2" — never started; backfill or
+28. Stale plan-doc patches (#29, #36); `groupedUpness` spelling check (#15).
+29. `docs/adr/` promises "first ADR in Plan 2" — never started; backfill or
     drop the promise.
 
 ## Supply-chain deferrals (deny.toml ignores, re-evaluate on dep bumps)
 
-35. `RUSTSEC-2024-0436` (`paste` unmaintained, via wgpu/Bevy).
-36. `RUSTSEC-2026-0192` (`ttf-parser` unmaintained, via bevy_text).
-37. `RUSTSEC-2026-0194/0195` (`quick-xml` DoS, Linux build-time only via
+30. `RUSTSEC-2024-0436` (`paste` unmaintained, via wgpu/Bevy).
+31. `RUSTSEC-2026-0192` (`ttf-parser` unmaintained, via bevy_text).
+32. `RUSTSEC-2026-0194/0195` (`quick-xml` DoS, Linux build-time only via
     wayland-scanner; not exploitable here).
 
 ## ✅ Resolved by the 2026-07-19/20 sessions (found stale during the sweep)
@@ -134,3 +122,9 @@ Madison to review and approve/deprioritize. Items already resolved by the
   stages `libdev.dll` + `w32-pthreads.dll`; MSI harvests them.
 - Carry-forwards #45, #58, #59, #70 — already marked RESOLVED in-doc.
 - `AppState::Waves` seam is intentional (guard-tested), not stale.
+- Verified already-implemented on 2026-07-20 (carry-forwards doc was stale;
+  each has tests in-tree): #1 save-on-exit flush (`autosave.rs
+  flush_on_exit`), #57 per-field serde defaults (all 12 settings structs +
+  regression tests), #53/#54 Line post-process gating + persistent uniform
+  buffer, #8 release asset path (`platform/assets.rs asset_root()` 5-step
+  resolver incl. `WAVECONDUCTOR_ASSET_ROOT` override).
