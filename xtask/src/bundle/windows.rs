@@ -7,6 +7,10 @@
 //! target/dist/windows-x86_64/WaveConductor/
 //!   waveconductor.exe    (release binary)
 //!   LeapC.dll            (vendored Leap runtime; loaded from the .exe directory)
+//!   *.dll                (feature-dependent runtimes found beside the binary:
+//!                         ONNX Runtime / DirectML.dll when hand-tracking-mediapipe
+//!                         was compiled; libdev.dll + w32-pthreads.dll when
+//!                         obsbot-camera-control was compiled)
 //!   assets/              (workspace assets/, recursive copy)
 //!   RUN.txt              (launch notes)
 //! ```
@@ -135,10 +139,14 @@ fn assemble(
 
     // Stage the ONNX Runtime DirectML DLLs that ORT's build script drops next to
     // the release binary (present only when `hand-tracking-mediapipe` is compiled
-    // on Windows). Matched by known name so the exact provider-shared filename —
-    // which varies by ORT build — is tolerated. Best-effort per file; the report
-    // lists what was staged so CI can assert coverage. `LeapC.dll` is handled
-    // above and deliberately excluded here.
+    // on Windows), and the OBSBOT libdev runtime DLLs that wc-core's build script
+    // stages there (present only when `obsbot-camera-control` is compiled).
+    // Matched by known name so the exact provider-shared filename — which varies
+    // by ORT build — is tolerated, and so a feature-off build ships no OBSBOT
+    // binaries (the vendored SDK's redistribution terms are unresolved; see
+    // docs/runbooks/obsbot.md). Best-effort per file; the report lists what was
+    // staged so CI can assert coverage. `LeapC.dll` is handled above and
+    // deliberately excluded here.
     let bin_dir = binary.parent().unwrap_or_else(|| Path::new("."));
     let mut runtime_dlls = Vec::new();
     let entries = std::fs::read_dir(bin_dir).map_err(|e| {
@@ -155,7 +163,8 @@ fn assemble(
         let is_ort = lower.starts_with("onnxruntime")
             && Path::new(&lower).extension().is_some_and(|e| e == "dll");
         let is_directml = lower == "directml.dll";
-        if is_ort || is_directml {
+        let is_obsbot = lower == "libdev.dll" || lower == "w32-pthreads.dll";
+        if is_ort || is_directml || is_obsbot {
             std::fs::copy(entry.path(), app_dir.join(file_name.as_os_str()))
                 .map_err(|e| format!("bundle-windows: cannot stage runtime dll {name}: {e}"))?;
             runtime_dlls.push(name.into_owned());
@@ -309,6 +318,10 @@ mod tests {
         std::fs::write(tmp.join("DirectML.dll"), b"dml").expect("dml dll");
         // Mixed-case ORT DLL to assert the `is_ort` case-folding, not just inspect it.
         std::fs::write(tmp.join("OnnxRuntime_Providers_Cuda.DLL"), b"ort3").expect("ort cuda dll");
+        // OBSBOT libdev runtimes, staged by wc-core's build script when the
+        // obsbot-camera-control feature is compiled.
+        std::fs::write(tmp.join("libdev.dll"), b"obsbot").expect("libdev dll");
+        std::fs::write(tmp.join("w32-pthreads.dll"), b"pthreads").expect("pthreads dll");
         // An unrelated DLL that must NOT be staged.
         std::fs::write(tmp.join("random.dll"), b"nope").expect("random dll");
         let leap = tmp.join("LeapC.dll");
@@ -331,14 +344,21 @@ mod tests {
             app.join("OnnxRuntime_Providers_Cuda.DLL").is_file(),
             "mixed-case ort dll staged"
         );
+        assert!(app.join("libdev.dll").is_file(), "obsbot libdev staged");
+        assert!(
+            app.join("w32-pthreads.dll").is_file(),
+            "obsbot pthreads staged"
+        );
         assert!(!app.join("random.dll").exists(), "unrelated dll not staged");
         assert_eq!(
             report.runtime_dlls,
             vec![
                 "DirectML.dll".to_string(),
                 "OnnxRuntime_Providers_Cuda.DLL".to_string(),
+                "libdev.dll".to_string(),
                 "onnxruntime.dll".to_string(),
                 "onnxruntime_providers_shared.dll".to_string(),
+                "w32-pthreads.dll".to_string(),
             ],
             "sorted staged dll list"
         );

@@ -61,9 +61,11 @@ issues them today.
 - **DLLs beside the exe.** `libdev.dll` **and** `w32-pthreads.dll` (from
   `vendor/libdev/windows/win64-release/`) must sit next to
   `waveconductor.exe`. Dev/test builds are covered: wc-core's build.rs copies
-  both into `target/<profile>/` and `target/<profile>/deps/`. **TODO:** add
-  both DLLs to the WiX/installer packaging when the feature ships in a
-  release build (same packaging step that handles `LeapC.dll`).
+  both into `target/<profile>/` and `target/<profile>/deps/`. Packaging is
+  covered: `cargo xtask bundle-windows` stages both DLLs from the binary dir
+  into the dist folder when the feature was compiled (a feature-off build
+  ships neither), and the MSI harvests the staged dir. Mind the license
+  caveat below before shipping a feature-on MSI publicly.
 - The feature is **not** in `default`; enable it on the app build that runs
   with the OBSBOT connected.
 - Device enumeration is asynchronous (~3 s after SDK init); the worker also
