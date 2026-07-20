@@ -171,6 +171,10 @@ const _: () = {
 /// Extract resource mirrored into the render world each frame. POD fields +
 /// one `Handle`, so the `ExtractResourcePlugin` clone is a memcpy (no heap —
 /// the Cymatics F2 lesson).
+///
+/// The `paused` / `frozen_secs` pair lives on the extract copy only — it is
+/// **not** part of [`RadianceSimParamsGpu`], so the 400-byte uniform layout
+/// and its parity tests are untouched.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct RadianceSimParams {
     /// Per-frame kernel uniforms (baked by `systems::sim_params`).
@@ -179,6 +183,18 @@ pub struct RadianceSimParams {
     pub particles: Handle<ShaderBuffer>,
     /// Particle buffer length — determines dispatch size.
     pub particle_count: u32,
+    /// True once emission has been zero long enough that every particle is
+    /// deterministically dead (`systems::sim_params::step_radiance_pause`);
+    /// the render world maps it to a dispatch size of 0 and the main world
+    /// hides the billboard entity, so a long Idle stops paying the compute +
+    /// 6-verts-per-particle draw for an all-dead field.
+    pub paused: bool,
+    /// Simulated seconds emission has been continuously zero. Advances by
+    /// `params.dt` per `Update` — the exact amount the kernel ages particles
+    /// per dispatch (one dispatch per app update), so this clock matches GPU
+    /// particle aging even under Idle frame throttling. Clamped at the pause
+    /// bound so a settled Idle frame stops dirtying the resource.
+    pub frozen_secs: f32,
 }
 
 #[cfg(test)]

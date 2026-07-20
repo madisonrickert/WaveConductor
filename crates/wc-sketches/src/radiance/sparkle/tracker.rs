@@ -1,58 +1,25 @@
-//! Extremity sparkles: a constellation of small twinkling motes riding every
-//! tracked dancer's high-motion extremities, tinted per body.
+//! Per-body limb-oscillation scoring and the shared mote-pool assignment —
+//! the pure decision half of the sparkle layer (see the module doc in
+//! [`super`] for the full picture; [`super::update_radiance_sparkles`] is
+//! the driver that consumes these each frame).
 //!
-//! ## What it does
-//!
-//! Every frame, a per-body tracker scores the four extremity landmarks
-//! (wrists + ankles) by how *fast they oscillate*, not how fast they move: a
-//! per-axis Schmitt trigger on the One-Euro-smoothed landmark velocity counts
-//! direction flips into an exponentially-decaying flips-per-second score, so
-//! a hand waving at 3 Hz outranks a whole body drifting across frame. Each
-//! body's winning limb and its *contralateral partner* (left wrist ↔ right
-//! wrist, left ankle ↔ right ankle) anchor a handful of motes — small soft
-//! gaussian points that orbit the limb on slow per-mote drift paths, twinkle
-//! on staggered phases, and flash a gentle four-point glint only at the crest
-//! of their twinkle. Mote color is the body's identity color (the same
-//! per-slot derivation the flame and rims use), so each dancer's sparkles
-//! match their flame.
-//!
-//! The mote **budget is shared** across bodies ([`MAX_SPARKLES`] = 12 slots,
-//! capped by the `sparkle_count` setting): a solo dancer gets a fuller
-//! constellation (6 motes), a crowded floor spreads fewer per person (see
-//! [`per_body_quota`]). Every strength change rides an eased attack/release
-//! envelope ([`step_env`]) *and* the body's tracking fade, so motes bloom in
-//! and dissolve out — never binary. Highs-band audio shortens the twinkle
-//! period and lifts the master brightness (the mid/high lane per the spec;
-//! bass never drives the sparkles).
-//!
-//! ## Latency + hot-path posture
-//!
-//! Zero added pipeline latency: the system reads the same-frame
-//! `BodyTrackingState` the sim baker reads and packs one small uniform (the
-//! `drive_radiance_materials` cost class). All state is fixed-size arrays on
-//! a `Copy` resource; nothing allocates after spawn. Priority switches are
-//! hysteretic ([`SWITCH_RATIO`]/[`SWITCH_FLOOR`]) so a body's motes do not
-//! flicker between two similarly-active limbs, and a mote whose assignment
-//! changes fades out at its held position before re-igniting at the new one.
+//! [`LimbOscillator`] scores the four extremity candidates by how fast they
+//! *oscillate* (a per-axis Schmitt trigger on smoothed landmark velocity
+//! counts direction flips into a decaying flips-per-second score) and picks
+//! each body's winning limb with switch hysteresis. [`assign_motes`] then
+//! apportions the shared mote budget across the present bodies
+//! (winner + contralateral partner per body, [`per_body_quota`] each).
+//! Everything here is pure over `Copy` inputs — no ECS, no allocation —
+//! which is what keeps the whole selection behavior unit-testable without an
+//! app.
 
-use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
-    ShaderType, SpecializedMeshPipelineError,
-};
-use bevy::shader::ShaderRef;
-use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
 use wc_core::input::body::landmark_index::{
     LEFT_ANKLE, LEFT_HIP, LEFT_WRIST, RIGHT_ANKLE, RIGHT_HIP, RIGHT_WRIST,
 };
-use wc_core::input::body::{BodyTrackingState, TrackedBody, MAX_TRACKED_BODIES};
-use wc_core::lifecycle::screensaver::fade::ScreensaverFade;
+use wc_core::input::body::{TrackedBody, MAX_TRACKED_BODIES};
 
-use super::render::slot_identity_colors;
-use super::settings::RadianceSettings;
-use super::systems::sim_params::mask_uv_to_world;
-use super::systems::spawn::RadianceRoot;
+use super::{MAX_MOTES_PER_BODY, MAX_SPARKLES};
 
 /// The extremity candidates, ordered so [`PARTNER`] is a same-array index
 /// map: the appendages farthest from the centre of mass, each with a
@@ -62,19 +29,6 @@ pub const CANDIDATE_LANDMARKS: [usize; 4] = [LEFT_WRIST, RIGHT_WRIST, LEFT_ANKLE
 /// Contralateral partner of each entry in [`CANDIDATE_LANDMARKS`]
 /// (candidate-index → candidate-index).
 pub const PARTNER: [usize; 4] = [1, 0, 3, 2];
-
-/// Fixed mote capacity (uniform array size; WGSL mirrors it). The
-/// `sparkle_count` setting caps how many of these slots are ever assigned —
-/// this constant is the hard budget across ALL bodies, documented per the
-/// shared-budget rule.
-pub const MAX_SPARKLES: usize = 12;
-/// Most motes any single body may carry (a solo dancer's constellation).
-pub const MAX_MOTES_PER_BODY: usize = 6;
-/// Base twinkle waveform period, seconds (the highs drive shortens it).
-pub const TWINKLE_PERIOD_S: f32 = 1.4;
-/// HDR gain on the body identity color for mote tint (clears the tonemapper
-/// knee so motes bloom).
-pub const SPARKLE_HDR_GAIN: f32 = 2.0;
 
 /// Schmitt-trigger hysteresis on landmark velocity, mask-UV/s: a direction
 /// flip only counts when the velocity actually crosses ±this, so One-Euro
@@ -96,22 +50,6 @@ pub const MIN_COM_DIST_UV: f32 = 0.12;
 /// Landmark visibility gate (matches the limb-impulse gate).
 pub const VISIBILITY_GATE: f32 = 0.5;
 
-/// Strength-envelope attack rate, 1/s (bloom-in on acquiring a limb).
-const ENV_ATTACK_RATE: f32 = 6.0;
-/// Strength-envelope release rate, 1/s (dissolve on losing it).
-const ENV_RELEASE_RATE: f32 = 3.0;
-/// Envelope level below which a mote may adopt a new assignment (it faded
-/// out far enough that the position jump is invisible).
-const REASSIGN_ENV: f32 = 0.12;
-/// Mote orbit radius range, world px (per-mote constant within it).
-const DRIFT_RADIUS_MIN_PX: f32 = 9.0;
-/// See [`DRIFT_RADIUS_MIN_PX`].
-const DRIFT_RADIUS_SPAN_PX: f32 = 14.0;
-/// Frame-delta cap, matching the sim baker's hitch guard.
-const SPARKLE_DT_CAP: f32 = 0.05;
-
-// ── Per-body oscillation tracker ────────────────────────────────────────────
-
 /// Per-body Schmitt oscillation scorer + hysteretic winner selection (one per
 /// tracked slot).
 #[derive(Clone, Copy, Debug, Default)]
@@ -127,7 +65,8 @@ pub struct LimbOscillator {
 }
 
 impl LimbOscillator {
-    /// The current flips-per-second score of a candidate (test/diagnostic).
+    /// The current flips-per-second score of a candidate (also the driver's
+    /// mote-activity input).
     #[must_use]
     pub fn score(&self, candidate: usize) -> f32 {
         self.score[candidate]
@@ -200,40 +139,8 @@ impl LimbOscillator {
     }
 }
 
-// ── Mote state + assignment ─────────────────────────────────────────────────
-
 /// A mote's assignment: `(body slot, candidate index)`.
 pub type MoteTarget = Option<(usize, usize)>;
-
-/// One mote's continuous state.
-#[derive(Clone, Copy, Debug, Default)]
-struct MoteState {
-    /// Strength envelope `0..1` (eased attack/release).
-    env: f32,
-    /// Last anchored world position (held while fading out).
-    pos: Vec2,
-    /// Current owner; a mote only re-anchors once its envelope has released
-    /// below [`REASSIGN_ENV`], so assignment churn reads as a cross-fade.
-    owner: MoteTarget,
-}
-
-/// Tracker + mote state for the whole constellation. Inserted on Radiance
-/// entry, removed on exit.
-#[derive(Resource, Clone, Copy, Debug, Default)]
-pub struct RadianceSparkles {
-    /// Per-body-slot oscillation trackers.
-    trackers: [LimbOscillator; MAX_TRACKED_BODIES],
-    /// The mote pool (shared budget across all bodies).
-    motes: [MoteState; MAX_SPARKLES],
-}
-
-impl RadianceSparkles {
-    /// A slot's tracker (test/diagnostic).
-    #[must_use]
-    pub fn tracker(&self, slot: usize) -> &LimbOscillator {
-        &self.trackers[slot]
-    }
-}
 
 /// Motes each present body receives: an even split of the budget, capped at
 /// [`MAX_MOTES_PER_BODY`] so a solo dancer gets a rich-but-not-blinding
@@ -292,93 +199,6 @@ pub fn assign_motes(
     out
 }
 
-/// The uniform block the mote shader consumes.
-#[derive(ShaderType, Clone, Copy, Debug)]
-pub struct RadianceSparkleUniform {
-    /// Per mote: xy = anchor world px, z = twinkle phase `0..1`,
-    /// w = strength (0 = off).
-    pub sparkles: [Vec4; MAX_SPARKLES],
-    /// Per mote: rgb = linear-HDR body tint, w = crest-glint gain.
-    pub colors: [Vec4; MAX_SPARKLES],
-    /// x = master intensity, y = elapsed seconds, z = twinkle period s,
-    /// w reserved.
-    pub params: Vec4,
-}
-
-impl Default for RadianceSparkleUniform {
-    /// All motes off, canonical period, master 0.
-    fn default() -> Self {
-        Self {
-            sparkles: [Vec4::ZERO; MAX_SPARKLES],
-            colors: [Vec4::ZERO; MAX_SPARKLES],
-            params: Vec4::new(0.0, 0.0, TWINKLE_PERIOD_S, 0.0),
-        }
-    }
-}
-
-/// Fullscreen additive material drawing the mote constellation
-/// (fragment-only; the default `Material2d` vertex shader supplies world
-/// position).
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone, Default)]
-pub struct RadianceSparkleMaterial {
-    /// The packed mote state for this frame.
-    #[uniform(0)]
-    pub sparkles: RadianceSparkleUniform,
-}
-
-impl Material2d for RadianceSparkleMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/radiance/sparkle.wgsl".into()
-    }
-
-    /// `Blend` routes into `Transparent2d`; [`Self::specialize`] then makes
-    /// it pure additive (the `RadianceMaterial`/pulse recipe).
-    fn alpha_mode(&self) -> AlphaMode2d {
-        AlphaMode2d::Blend
-    }
-
-    /// Override the color-target blend to pure additive `(One, One)` so the
-    /// motes accumulate HDR light into bloom instead of alpha-occluding.
-    fn specialize(
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: Material2dKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            if let Some(Some(target)) = fragment.targets.get_mut(0) {
-                target.blend = Some(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-// ── Pure helpers ────────────────────────────────────────────────────────────
-
-/// One Schmitt-trigger step: the sign only changes when `v` crosses the
-/// hysteresis band, and `0` (unarmed, the initial state) arms without
-/// counting a flip.
-fn schmitt_step(prev: i8, v: f32) -> i8 {
-    if v > FLIP_HYSTERESIS_UV_S {
-        1
-    } else if v < -FLIP_HYSTERESIS_UV_S {
-        -1
-    } else {
-        prev
-    }
-}
-
 /// The centre of mass in mask UV: the mean of the visible hips, or `None`
 /// when both are occluded (the distance gate then passes — with no COM
 /// reference we cannot judge "far from it").
@@ -408,209 +228,16 @@ pub fn candidate_eligible(body: &TrackedBody, candidate: usize, com: Option<Vec2
     com.is_none_or(|c| landmark.pos.truncate().distance(c) >= MIN_COM_DIST_UV)
 }
 
-/// One strength-envelope step toward `target` (asymmetric attack/release,
-/// the `step_flame_energy` shape).
-#[must_use]
-pub fn step_env(env: f32, target: f32, dt: f32) -> f32 {
-    let rate = if target > env {
-        ENV_ATTACK_RATE
+/// One Schmitt-trigger step: the sign only changes when `v` crosses the
+/// hysteresis band, and `0` (unarmed, the initial state) arms without
+/// counting a flip.
+fn schmitt_step(prev: i8, v: f32) -> i8 {
+    if v > FLIP_HYSTERESIS_UV_S {
+        1
+    } else if v < -FLIP_HYSTERESIS_UV_S {
+        -1
     } else {
-        ENV_RELEASE_RATE
-    };
-    (env + (target - env) * (rate * dt).min(1.0)).clamp(0.0, 1.0)
-}
-
-/// Deterministic per-mote hash in `0..1` (golden-ratio stride: motes get
-/// well-spread constants without stored state).
-#[must_use]
-#[allow(
-    clippy::as_conversions,
-    clippy::cast_precision_loss,
-    reason = "mote index < 12, exact in f32"
-)]
-pub fn mote_hash(index: usize, salt: f32) -> f32 {
-    (index as f32 * 0.618_034 + salt).fract()
-}
-
-/// The mote's slow orbital drift offset around its limb anchor at time `t`
-/// (world px). Each mote gets its own radius, angular rate, and starting
-/// phase, so the constellation breathes instead of moving as a rigid body.
-#[must_use]
-pub fn mote_drift(index: usize, t: f32) -> Vec2 {
-    let radius = DRIFT_RADIUS_MIN_PX + DRIFT_RADIUS_SPAN_PX * mote_hash(index, 0.13);
-    let rate = 0.35 + 0.5 * mote_hash(index, 0.47);
-    let angle = std::f32::consts::TAU * (mote_hash(index, 0.79) + t * rate * 0.1);
-    Vec2::new(angle.cos(), angle.sin()) * radius
-}
-
-// ── Per-frame system ────────────────────────────────────────────────────────
-
-/// One frame's tracker outcome per slot, produced by [`advance_trackers`].
-#[derive(Clone, Copy, Debug, Default)]
-struct TrackerFrame {
-    /// Each present body's winning candidate index.
-    winners: [Option<usize>; MAX_TRACKED_BODIES],
-    /// Whether the winner's contralateral partner is visible.
-    partner_ok: [bool; MAX_TRACKED_BODIES],
-    /// Each occupied slot's fade envelope.
-    slot_fade: [f32; MAX_TRACKED_BODIES],
-}
-
-/// Advance each present body's oscillation tracker one frame and reset the
-/// trackers of emptied slots (a returning dancer starts clean).
-fn advance_trackers(
-    trackers: &mut [LimbOscillator; MAX_TRACKED_BODIES],
-    body: Option<&BodyTrackingState>,
-    dt: f32,
-) -> TrackerFrame {
-    let mut frame = TrackerFrame::default();
-    let mut occupied = [false; MAX_TRACKED_BODIES];
-    if let Some(bodies) = body {
-        for tracked in bodies.iter_bodies() {
-            let slot = tracked.slot;
-            if slot >= MAX_TRACKED_BODIES {
-                continue;
-            }
-            occupied[slot] = true;
-            frame.slot_fade[slot] = tracked.fade.clamp(0.0, 1.0);
-            if !tracked.present {
-                continue; // fading out: motes release via fade, tracker holds
-            }
-            let tracker = &mut trackers[slot];
-            tracker.step_scores(tracked, dt);
-            tracker.select(tracked);
-            frame.winners[slot] = tracker.current;
-            if let Some(current) = tracker.current {
-                let partner = tracked.landmarks[CANDIDATE_LANDMARKS[PARTNER[current]]];
-                frame.partner_ok[slot] = partner.visibility >= VISIBILITY_GATE;
-            }
-        }
-    }
-    for (tracker, occupied) in trackers.iter_mut().zip(occupied) {
-        if !occupied {
-            tracker.reset();
-        }
-    }
-    frame
-}
-
-/// `Update` (gated `in_state(AppState::Radiance)`, like the pulse driver):
-/// advance every present body's oscillation tracker, assign the shared mote
-/// pool, ease every envelope, and pack the constellation uniform.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Bevy system — each param is a distinct ECS resource/query the driver packs"
-)]
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::as_conversions,
-    clippy::cast_precision_loss,
-    reason = "mote/slot indices are bounded (12 / 4), exact in f32"
-)]
-pub fn update_radiance_sparkles(
-    time: Res<'_, Time>,
-    window: Single<'_, '_, &Window>,
-    settings: Res<'_, RadianceSettings>,
-    fade: Res<'_, ScreensaverFade>,
-    state: Res<'_, super::systems::sim_params::RadianceState>,
-    body: Option<Res<'_, BodyTrackingState>>,
-    mut sparkles: ResMut<'_, RadianceSparkles>,
-    quads: Query<
-        '_,
-        '_,
-        &bevy::sprite_render::MeshMaterial2d<RadianceSparkleMaterial>,
-        With<RadianceRoot>,
-    >,
-    mut materials: ResMut<'_, Assets<RadianceSparkleMaterial>>,
-) {
-    let dt = time.delta_secs().min(SPARKLE_DT_CAP);
-    let elapsed = time.elapsed_secs();
-
-    // Same mask→world scale the sim baker and pulse driver use.
-    let h = window.height().max(1.0);
-    let scale = if settings.fit_to_height {
-        Vec2::new(h, h)
-    } else {
-        Vec2::new(window.width().max(1.0), h)
-    };
-
-    let frame = advance_trackers(&mut sparkles.trackers, body.as_deref(), dt);
-    let TrackerFrame {
-        winners,
-        partner_ok,
-        slot_fade,
-    } = frame;
-
-    // Assign the shared pool (budget = the setting, hard-capped at 12).
-    let budget = if settings.sparkle_intensity > 0.0 {
-        settings.sparkle_count.min(MAX_SPARKLES as u32) as usize
-    } else {
-        0
-    };
-    let desired = assign_motes(winners, partner_ok, budget);
-
-    // Per-mote envelopes + anchors.
-    let mut uniform = RadianceSparkleUniform {
-        params: Vec4::new(
-            // Master: the setting, dimmed by the screensaver fade, lifted by
-            // the highs drive (mid/high lane per the spec).
-            (settings.sparkle_intensity * (1.0 - fade.alpha()) * (0.6 + 0.5 * state.sparkle))
-                .max(0.0),
-            elapsed,
-            // Highs speed the twinkle up (period shrinks toward ~40%).
-            TWINKLE_PERIOD_S / (1.0 + 1.3 * state.sparkle),
-            0.0,
-        ),
-        ..RadianceSparkleUniform::default()
-    };
-    let slot_colors = slot_identity_colors(
-        settings.palette,
-        state.hue_phase,
-        settings.hue_spread,
-        fade.alpha(),
-    );
-    // Split-borrow the resource so the mote loop can read the trackers.
-    let RadianceSparkles { trackers, motes } = &mut *sparkles;
-    for (i, mote) in motes.iter_mut().enumerate() {
-        let want = desired[i];
-        if mote.owner != want && mote.env > REASSIGN_ENV {
-            // Cross-fade: release at the held position before re-anchoring.
-            mote.env = step_env(mote.env, 0.0, dt);
-        } else {
-            if mote.owner != want {
-                mote.owner = want;
-            }
-            let mut target = 0.0;
-            if let (Some((slot, candidate)), Some(bodies)) = (mote.owner, body.as_deref()) {
-                if let Some(tracked) = bodies.bodies.get(slot).and_then(Option::as_ref) {
-                    let landmark = tracked.landmarks[CANDIDATE_LANDMARKS[candidate]];
-                    if landmark.visibility >= VISIBILITY_GATE {
-                        mote.pos =
-                            mask_uv_to_world(landmark.pos.truncate(), scale, settings.mirror)
-                                + mote_drift(i, elapsed);
-                        // Strength follows limb activity (score ramp) and the
-                        // body's tracking fade — nothing pops.
-                        let activity =
-                            (trackers[slot].score[candidate.min(3)] / 1.5).clamp(0.3, 1.0);
-                        target = activity * slot_fade[slot];
-                    }
-                }
-            }
-            mote.env = step_env(mote.env, target, dt);
-        }
-        if let Some((slot, _)) = mote.owner {
-            let color = slot_colors[slot.min(3)] * SPARKLE_HDR_GAIN;
-            // Crest-glint gain follows the envelope so the cross only shows
-            // on established, active motes.
-            uniform.colors[i] = Vec4::new(color.x, color.y, color.z, mote.env);
-        }
-        uniform.sparkles[i] = Vec4::new(mote.pos.x, mote.pos.y, mote_hash(i, 0.31), mote.env);
-    }
-
-    for handle in &quads {
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.sparkles = uniform;
-        }
+        prev
     }
 }
 
@@ -849,33 +476,5 @@ mod tests {
     fn assignment_empty_without_bodies() {
         let assigned = assign_motes([None; MAX_TRACKED_BODIES], [false; MAX_TRACKED_BODIES], 12);
         assert!(assigned.iter().all(Option::is_none));
-    }
-
-    /// Envelope eases both ways and clamps.
-    #[test]
-    fn env_attacks_and_releases() {
-        let up = step_env(0.0, 1.0, 1.0 / 60.0);
-        assert!(up > 0.0 && up < 1.0);
-        let down = step_env(1.0, 0.0, 1.0 / 60.0);
-        assert!(down < 1.0 && down > 0.0);
-        assert!((0.0..=1.0).contains(&step_env(0.5, 1.0, 100.0)));
-        assert!((0.0..=1.0).contains(&step_env(0.5, 0.0, 100.0)));
-    }
-
-    /// Drift orbits are bounded and per-mote distinct.
-    #[test]
-    fn drift_is_bounded_and_distinct() {
-        for i in 0..MAX_SPARKLES {
-            let d = mote_drift(i, 3.7);
-            let r = d.length();
-            assert!(
-                (DRIFT_RADIUS_MIN_PX - 0.01..=DRIFT_RADIUS_MIN_PX + DRIFT_RADIUS_SPAN_PX + 0.01)
-                    .contains(&r),
-                "mote {i} radius {r}"
-            );
-        }
-        assert_ne!(mote_drift(0, 1.0), mote_drift(1, 1.0));
-        // The orbit actually moves over time.
-        assert_ne!(mote_drift(0, 1.0), mote_drift(0, 4.0));
     }
 }

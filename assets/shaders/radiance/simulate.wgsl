@@ -120,22 +120,27 @@ fn rand01(h: u32) -> f32 {
 // param-driven 1..3 octave sum). Per octave the frequency doubles and the
 // weight halves; each octave drifts along its own incommensurate direction so
 // the field never visibly loops.
+// Per-octave time-drift directions for curl_flow (incommensurate, matching
+// the shared engine's 0.13/0.11 family). Module-scope const rather than a
+// function-scope `var`: the old local array was re-initialized by every
+// alive-particle invocation, every frame (3 vec2 writes × up to 300k
+// particles), purely to satisfy naga's historical rule that dynamically
+// indexed arrays be locals — current naga accepts indexing a const array.
+const CURL_DRIFTS = array<vec2<f32>, 3>(
+    vec2<f32>(0.13, -0.11),
+    vec2<f32>(-0.17, 0.15),
+    vec2<f32>(0.07, 0.19),
+);
+
 fn curl_flow(pos: vec2<f32>, scale: f32, t: f32, octaves: u32) -> vec2<f32> {
-    // Per-octave time-drift directions (incommensurate, matching the shared
-    // engine's 0.13/0.11 family).
-    var drifts = array<vec2<f32>, 3>(
-        vec2<f32>(0.13, -0.11),
-        vec2<f32>(-0.17, 0.15),
-        vec2<f32>(0.07, 0.19),
-    );
     var flow = vec2<f32>(0.0);
     var freq = 1.0;
     var amp = 1.0;
     var total = 0.0;
     let n = clamp(octaves, 1u, 3u);
     for (var i = 0u; i < n; i = i + 1u) {
-        let a = pos.x * scale * freq + drifts[i].x * t;
-        let b = pos.y * scale * freq + drifts[i].y * t;
+        let a = pos.x * scale * freq + CURL_DRIFTS[i].x * t;
+        let b = pos.y * scale * freq + CURL_DRIFTS[i].y * t;
         // psi = sin(a)cos(b); curl = (d psi/dy, -d psi/dx). The chain-rule
         // scale*freq factor is folded into flow_strength by the caller.
         let dpsi_dx = cos(a) * cos(b);

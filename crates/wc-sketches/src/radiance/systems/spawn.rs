@@ -29,7 +29,7 @@ use bevy::render::storage::ShaderBuffer;
 use bytemuck::{cast_slice, Zeroable};
 use wc_core::audio::input::AudioCaptureRequest;
 use wc_core::input::body::{
-    BodyTrackingRequest, MaskTexture, SilhouetteEdges, MASK_SIZE, MASK_SIZE_U32, MAX_EDGE_POINTS,
+    BodyTrackingRequest, MaskTexture, SilhouetteEdges, MASK_SIZE_U32, MAX_EDGE_POINTS,
     MAX_TRACKED_BODIES,
 };
 
@@ -50,26 +50,39 @@ use crate::radiance::systems::sim_params::RadianceState;
 #[derive(Component)]
 pub struct RadianceRoot;
 
-/// Ensure the Plan B mask + edge resources exist (init-if-absent).
+/// Ensure the Plan B mask + edge resources exist (init-if-absent), and zero
+/// a pre-existing mask's bytes.
 ///
-/// With the body-tracking plugin present these already exist and this is a
-/// no-op; in headless tests, feature-reduced harnesses, and the synthetic
-/// capture path this creates the same shapes so the silhouette material, the
-/// phantom, and the edge upload always have a target. Runs first in the
-/// `OnEnter` chain.
+/// With the body-tracking plugin present the resources already exist — but
+/// wc-core's stop path clears `BodyTrackingState` + `SilhouetteEdges` and
+/// leaves the mask *bytes* holding the last dancer, so without the re-entry
+/// zero the silhouette material's phantom-fallback fade renders a frozen
+/// ghost of that dancer at full fill until the worker warms up. In headless
+/// tests, feature-reduced harnesses, and the synthetic capture path this
+/// creates the same shapes so the silhouette material, the phantom, and the
+/// edge upload always have a target. Runs first in the `OnEnter` chain.
 pub fn ensure_body_surfaces(
     mask: Option<Res<'_, MaskTexture>>,
     edges: Option<Res<'_, SilhouetteEdges>>,
     mut images: ResMut<'_, Assets<Image>>,
     mut commands: Commands<'_, '_>,
 ) {
-    if mask.is_none() {
+    if let Some(mask) = mask.as_ref() {
+        // Stale-mask ghost guard: blank the previous session's silhouette.
+        // `get_mut` marks the asset changed, so Bevy re-uploads the zeroed
+        // texture before the first rendered frame.
+        if let Some(mut image) = images.get_mut(&mask.0) {
+            if let Some(data) = image.data.as_mut() {
+                data.fill(0);
+            }
+        }
+    } else {
         // Rgba8Unorm per the pinned multi-body channel convention (channel i
         // = body slot i); matches wc-core's init_mask_texture.
         let image = Image::new_fill(
             Extent3d {
-                width: u32::try_from(MASK_SIZE).unwrap_or(256),
-                height: u32::try_from(MASK_SIZE).unwrap_or(256),
+                width: MASK_SIZE_U32,
+                height: MASK_SIZE_U32,
                 depth_or_array_layers: 1,
             },
             TextureDimension::D2,
@@ -127,11 +140,17 @@ pub fn spawn_radiance(
     ));
 
     // Billboard mesh: count × 6 origin vertices; only the draw count matters
-    // (the flame/particles idiom).
+    // (the flame/particles idiom). RENDER_WORLD-only: the CPU copy is never
+    // read back (the vertex shader derives everything from `vertex_index`;
+    // its fetched `@location(0)` position is a dead attribute), so keeping a
+    // MAIN_WORLD copy would just retain count × 6 × 12 B of zeros (~8.6 MB at
+    // 120k) on the heap for the sketch's lifetime. The dead-attribute vertex
+    // fetch bandwidth on the GPU side is accepted — same trade as the
+    // dots/line vertex-index meshes this mirrors.
     let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; capacity * 6];
     let mut billboard_mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::RENDER_WORLD,
     );
     billboard_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     let billboard_mesh_handle = meshes.add(billboard_mesh);
@@ -222,6 +241,8 @@ pub fn spawn_radiance(
         params,
         particles: particles_handle,
         particle_count: count,
+        paused: false,
+        frozen_secs: 0.0,
     });
     commands.insert_resource(RadianceState::default());
     commands.insert_resource(RadiancePulses::default());
@@ -355,8 +376,9 @@ mod tests {
         app
     }
 
-    /// `ensure_body_surfaces` creates the mask + edges when absent and
-    /// leaves an existing pair untouched.
+    /// `ensure_body_surfaces` creates the mask + edges when absent, keeps an
+    /// existing pair's handles, and zeroes a pre-existing mask's bytes (the
+    /// stale-mask ghost guard: wc-core's stop path never blanks them).
     #[test]
     fn ensure_body_surfaces_is_init_if_absent() {
         let mut app = test_app();
@@ -365,6 +387,14 @@ mod tests {
             .expect("runs");
         let first = app.world().resource::<MaskTexture>().0.clone();
         assert!(app.world().get_resource::<SilhouetteEdges>().is_some());
+
+        // Simulate a previous session's dancer left in the mask bytes.
+        {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            let mut image = images.get_mut(&first).expect("mask image");
+            let data = image.data.as_mut().expect("mask bytes");
+            data.fill(200);
+        }
         app.world_mut()
             .run_system_once(ensure_body_surfaces)
             .expect("runs again");
@@ -372,6 +402,15 @@ mod tests {
             app.world().resource::<MaskTexture>().0,
             first,
             "existing mask must not be replaced"
+        );
+        let images = app.world().resource::<Assets<Image>>();
+        let data = images
+            .get(&first)
+            .and_then(|image| image.data.as_ref())
+            .expect("mask bytes");
+        assert!(
+            data.iter().all(|&b| b == 0),
+            "re-entry must zero the stale silhouette"
         );
     }
 

@@ -18,7 +18,7 @@
 //     params:      x = master intensity, y = elapsed s,
 //                  z = twinkle period s (highs shorten it), w reserved
 //
-// Struct parity: mirrors RadianceSparkleUniform in radiance/sparkle.rs
+// Struct parity: mirrors RadianceSparkleUniform in radiance/sparkle/mod.rs
 // (MAX_SPARKLES = 12).
 
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput

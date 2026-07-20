@@ -1,4 +1,5 @@
-//! Per-frame Radiance simulation writer plus the idle freeze.
+//! Per-frame Radiance simulation writer plus the idle freeze and the
+//! all-dead idle pause.
 //!
 //! Owns [`RadianceState`] (the smoothed audio-drive envelopes), the pure
 //! mask-UV↔world mapping (CPU twin of the kernel's), the pure
@@ -546,11 +547,100 @@ pub fn update_radiance_sim(
 /// `OnEnter(SketchActivity::Idle)` (gated `in_state(AppState::Radiance)`):
 /// zero emission and the burst so the aura fades out over one lifespan while
 /// the throttled last frames hold — flame's freeze idiom, adapted to a
-/// particle field that must die out rather than stop mid-air.
+/// particle field that must die out rather than stop mid-air. Once the field
+/// is deterministically all-dead, [`update_radiance_pause`] stops the
+/// dispatch and the billboard draw entirely.
 pub fn freeze_radiance_emission(mut sim: ResMut<'_, RadianceSimParams>) {
     sim.params.emission_prob = 0.0;
     sim.params.burst_speed = 0.0;
     sim.params.ejecta_prob = 0.0;
+}
+
+/// Safety margin on top of [`LIFESPAN_MAX`] before the frozen aura is
+/// declared all-dead and paused.
+pub const PAUSE_MARGIN_S: f32 = 0.5;
+
+/// Simulated seconds of continuously-zero emission after which every
+/// particle is deterministically dead: the kernel assigns lifespans in
+/// `[LIFESPAN_MIN, LIFESPAN_MAX]`, so the youngest possible particle — born
+/// at the last instant emission was nonzero — is dead once [`LIFESPAN_MAX`]
+/// simulated seconds have elapsed; [`PAUSE_MARGIN_S`] is slack on top.
+/// Derived from the same [`LIFESPAN_MAX`] the baker writes into the kernel
+/// uniform (the single source of truth), never re-hardcoded.
+pub const PAUSE_BOUND_S: f32 = LIFESPAN_MAX + PAUSE_MARGIN_S;
+
+/// One pause-bookkeeping step, pure for testability: given the current
+/// frozen-clock/paused pair and this frame's `emission_prob` + kernel `dt`,
+/// return the next pair.
+///
+/// - Any nonzero emission (live bake, screensaver ember bake) resets the
+///   clock and resumes immediately.
+/// - With emission zero, the clock advances by the kernel `dt` — the exact
+///   amount one dispatch ages every particle, so the bound is met in
+///   *simulated* time regardless of Idle frame throttling — and pauses only
+///   at [`PAUSE_BOUND_S`]; it can never fire while a particle is alive.
+/// - The clock clamps at the bound so a settled pause stops changing state
+///   (no per-frame change-detection churn on the extract resource).
+#[must_use]
+pub fn step_radiance_pause(
+    frozen_secs: f32,
+    paused: bool,
+    emission_prob: f32,
+    dt: f32,
+) -> (f32, bool) {
+    if emission_prob > 0.0 {
+        return (0.0, false);
+    }
+    let frozen = (frozen_secs + dt.max(0.0)).min(PAUSE_BOUND_S);
+    (frozen, paused || frozen >= PAUSE_BOUND_S)
+}
+
+/// `Update` (gated `in_state(AppState::Radiance)`, after the sim writers):
+/// advance the pause bookkeeping and flip the billboard entity's visibility
+/// on pause transitions.
+///
+/// While `paused`, the render world maps the flag to a dispatch size of 0
+/// (no compute workgroups for an all-dead field) and the hidden billboard
+/// skips the count × 6 vertex draw — the two costs an idle Radiance
+/// otherwise pays forever. The screensaver's ember bake writes nonzero
+/// emission, so entering the attract mode (or returning to Active) resumes
+/// both within one frame, before any new particle could be born *and*
+/// rendered.
+pub fn update_radiance_pause(
+    mut sim: ResMut<'_, RadianceSimParams>,
+    mut billboards: Query<
+        '_,
+        '_,
+        &mut Visibility,
+        (
+            With<crate::radiance::systems::spawn::RadianceRoot>,
+            With<bevy::sprite_render::MeshMaterial2d<crate::radiance::render::RadianceMaterial>>,
+        ),
+    >,
+) {
+    let (frozen, paused) = step_radiance_pause(
+        sim.frozen_secs,
+        sim.paused,
+        sim.params.emission_prob,
+        sim.params.dt,
+    );
+    let was_paused = sim.paused;
+    // Write only on change so a settled state stops dirtying the extract
+    // resource (and the render-world copy stops being re-extracted).
+    if (frozen - sim.frozen_secs).abs() > 0.0 || paused != was_paused {
+        sim.frozen_secs = frozen;
+        sim.paused = paused;
+    }
+    if paused != was_paused {
+        let desired = if paused {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+        for mut visibility in &mut billboards {
+            *visibility = desired;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1034,6 +1124,128 @@ mod tests {
         }
     }
 
+    /// The pause decision can never fire while a particle could still be
+    /// alive: the bound derives from the kernel's real [`LIFESPAN_MAX`]
+    /// (single source of truth), the clock only advances while emission is
+    /// zero, and any nonzero emission resets + resumes instantly.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the settled clock is clamped to the bound, so the fixed \
+                  point is bitwise-exact"
+    )]
+    fn pause_decision_waits_out_the_full_lifespan() {
+        assert!(
+            (PAUSE_BOUND_S - (LIFESPAN_MAX + PAUSE_MARGIN_S)).abs() < f32::EPSILON,
+            "the bound must be derived from LIFESPAN_MAX, not re-hardcoded"
+        );
+        let dt = 1.0 / 60.0;
+        let mut frozen = 0.0_f32;
+        let mut paused = false;
+        // Simulate LIFESPAN_MAX of frozen time: a particle born at the
+        // freeze instant may just now be dying, so the pause must not fire.
+        let mut simulated = 0.0_f32;
+        while simulated < LIFESPAN_MAX {
+            (frozen, paused) = step_radiance_pause(frozen, paused, 0.0, dt);
+            simulated += dt;
+            assert!(
+                !paused,
+                "must never pause inside LIFESPAN_MAX ({simulated} s)"
+            );
+        }
+        // Push through the margin: now it pauses, and the clock clamps at
+        // the bound (a settled pause stops changing state).
+        while simulated < PAUSE_BOUND_S + 0.2 {
+            (frozen, paused) = step_radiance_pause(frozen, paused, 0.0, dt);
+            simulated += dt;
+        }
+        assert!(paused, "all-dead field must pause past the bound");
+        assert!(
+            frozen <= PAUSE_BOUND_S,
+            "clock clamps at the bound: {frozen}"
+        );
+        let settled = step_radiance_pause(frozen, paused, 0.0, dt);
+        assert_eq!(settled, (frozen, true), "settled pause is a fixed point");
+        // Emission returning (Active bake or the screensaver ember) resets
+        // and resumes in one step.
+        let (frozen, paused) = step_radiance_pause(frozen, paused, 0.01, dt);
+        assert!(!paused && frozen.abs() < f32::EPSILON, "emission resumes");
+    }
+
+    /// The pause system hides the billboard once the frozen clock clears the
+    /// bound and re-shows it as soon as emission returns.
+    #[test]
+    fn pause_system_parks_and_resumes_billboard() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let params = RadianceSimParamsGpu {
+            dt: 0.05,
+            emission_prob: 0.0, // frozen (the Idle hook's write)
+            ..RadianceSimParamsGpu::default()
+        };
+        world.insert_resource(RadianceSimParams {
+            params,
+            particles: Handle::default(),
+            particle_count: 1000,
+            paused: false,
+            frozen_secs: 0.0,
+        });
+        let billboard = world
+            .spawn((
+                crate::radiance::systems::spawn::RadianceRoot,
+                bevy::sprite_render::MeshMaterial2d(Handle::<
+                    crate::radiance::render::RadianceMaterial,
+                >::default()),
+                Visibility::default(),
+            ))
+            .id();
+
+        // 40 dispatches × 0.05 s = 2.0 simulated seconds: under
+        // LIFESPAN_MAX, so particles may be alive and nothing hides.
+        for _ in 0..40 {
+            world
+                .run_system_once(update_radiance_pause)
+                .expect("pause step");
+        }
+        assert!(!world.resource::<RadianceSimParams>().paused);
+        assert_eq!(
+            *world.entity(billboard).get::<Visibility>().expect("vis"),
+            Visibility::default(),
+            "billboard untouched while particles may live"
+        );
+
+        // 20 more (3.0 s total > PAUSE_BOUND_S): paused + hidden.
+        for _ in 0..20 {
+            world
+                .run_system_once(update_radiance_pause)
+                .expect("pause step");
+        }
+        assert!(world.resource::<RadianceSimParams>().paused);
+        assert_eq!(
+            *world.entity(billboard).get::<Visibility>().expect("vis"),
+            Visibility::Hidden,
+            "all-dead field parks the billboard draw"
+        );
+
+        // A writer bakes emission again (screensaver ember / Active): the
+        // very next step resumes and re-shows.
+        world
+            .resource_mut::<RadianceSimParams>()
+            .params
+            .emission_prob = 0.01;
+        world
+            .run_system_once(update_radiance_pause)
+            .expect("pause step");
+        let sim = world.resource::<RadianceSimParams>();
+        assert!(!sim.paused && sim.frozen_secs.abs() < f32::EPSILON);
+        assert_eq!(
+            *world.entity(billboard).get::<Visibility>().expect("vis"),
+            Visibility::Visible,
+            "emission returning re-shows the billboard"
+        );
+    }
+
     /// The freeze hook zeroes emission and burst, nothing else.
     #[test]
     fn freeze_zeroes_emission() {
@@ -1044,6 +1256,8 @@ mod tests {
             params,
             particles: Handle::default(),
             particle_count: 1000,
+            paused: false,
+            frozen_secs: 0.0,
         });
         bevy::ecs::system::RunSystemOnce::run_system_once(&mut world, freeze_radiance_emission)
             .expect("freeze runs");

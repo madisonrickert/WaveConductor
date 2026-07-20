@@ -205,6 +205,8 @@ mod tests {
             params: RadianceSimParamsGpu::zeroed(),
             particles: Handle::default(),
             particle_count: 1_000,
+            paused: false,
+            frozen_secs: 0.0,
         });
         world.insert_resource(SilhouetteEdges {
             points: Vec::with_capacity(8),

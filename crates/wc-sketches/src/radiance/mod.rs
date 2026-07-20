@@ -21,8 +21,10 @@
 //! the billboards over the silhouette quad. `drive_radiance_materials` runs
 //! through Idle/Screensaver (`in_state`) so the ember blend keeps rendering.
 //! Activity seams pause/resume the mic + body requests; Idle also zeroes
-//! emission (the freeze idiom); `OnExit` tears everything down and schedules
-//! the deferred hand-camera restore. Settings register with the shared
+//! emission (the freeze idiom) and, once every particle is deterministically
+//! dead, `update_radiance_pause` parks the compute dispatch and the
+//! billboard draw until a writer bakes emission again; `OnExit` tears
+//! everything down and schedules the deferred hand-camera restore. Settings register with the shared
 //! panel/persistence system; the `RenderProfile` applier drives the main
 //! camera's tonemapping/bloom while Radiance is active. During the
 //! screensaver, `screensaver::RadianceScreensaverPlugin` takes over the mask
@@ -57,8 +59,9 @@ pub mod pulse;
 pub mod render;
 pub mod settings;
 // Extremity sparkle motes (per-body constellations riding the
-// fastest-oscillating limbs). Consumes `wc_core::input::body` landmarks,
-// gated identically.
+// fastest-oscillating limbs): `sparkle/mod.rs` owns the uniform/material/
+// driver, `sparkle/tracker.rs` the pure oscillation-scoring + mote-pool
+// assignment. Consumes `wc_core::input::body` landmarks, gated identically.
 #[cfg(feature = "body-tracking-mediapipe")]
 pub mod sparkle;
 // Consumes `wc_core::input::body` (`EdgePoint`/`MASK_SIZE`/`MAX_EDGE_POINTS`),
@@ -156,6 +159,22 @@ impl Plugin for RadiancePlugin {
             Update,
             systems::sim_params::update_radiance_sim
                 .run_if(wc_core::sketch::sketch_active(AppState::Radiance)),
+        );
+
+        // Idle pause bookkeeping: once emission has been frozen long enough
+        // that every particle is deterministically dead (LIFESPAN_MAX + a
+        // margin, in simulated time), stop the compute dispatch and hide the
+        // billboard draw; any writer baking nonzero emission (Active,
+        // screensaver ember) resumes both. Runs through Idle/Screensaver
+        // like the material driver, after the sim writers so it reads this
+        // frame's emission. Gated: consumes `RadianceSimParams`/`RadianceRoot`.
+        #[cfg(feature = "body-tracking-mediapipe")]
+        app.add_systems(
+            Update,
+            systems::sim_params::update_radiance_pause
+                .after(systems::sim_params::update_radiance_sim)
+                .after(screensaver::drive_radiance_attract_sim)
+                .run_if(in_state(AppState::Radiance)),
         );
 
         // Idle freeze: zero emission so the aura fades out and the throttled

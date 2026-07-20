@@ -15,9 +15,11 @@
 //!    buffer (`MAX_EDGE_POINTS` × 16 B) once — never per frame.
 //! 4. `prepare_radiance_bind_group` (`PrepareBindGroups`, after the edge
 //!    upload) writes this frame's uniforms and builds (or reuses) the single
-//!    bind group, cached keyed on the particle buffer's [`BufferId`]
-//!    (bounded by construction: one slot, replaced on change so no stale
-//!    buffer is retained across sketch re-entry).
+//!    bind group, cached in [`RadianceBindGroupCache`] keyed on the particle
+//!    buffer's [`BufferId`] (bounded by construction: one slot, replaced on
+//!    change, and *cleared* by the removal companion on sketch exit so the
+//!    freed particle buffer's `Arc` is not pinned for the rest of the
+//!    session).
 //! 5. `radiance_compute` dispatches `ceil(particle_count / 64)` workgroups in
 //!    the root `RenderGraph` schedule before `camera_driver`, so the buffer
 //!    is current before the 2D pass draws it. Dispatch scales with the
@@ -84,6 +86,7 @@ impl Plugin for RadianceComputePlugin {
         };
 
         render_app.init_resource::<ExtractedEdges>();
+        render_app.init_resource::<RadianceBindGroupCache>();
         render_app.add_systems(
             ExtractSchedule,
             (
@@ -128,6 +131,10 @@ pub struct RadiancePipeline {
 }
 
 /// Per-frame bind group + dispatch size, consumed by `radiance_compute`.
+/// Removed by `remove_radiance_sim_params_if_absent` (private, so a code
+/// span) on sketch exit — the held [`BindGroup`] owns an `Arc` reference to
+/// the particle buffer, so letting it linger would pin the freed buffer's
+/// VRAM for the session.
 #[derive(Resource)]
 pub struct RadianceComputeBindGroup {
     /// sim uniform (0), particle storage rw (1), edge storage ro (2).
@@ -135,6 +142,17 @@ pub struct RadianceComputeBindGroup {
     /// `ceil(particle_count / WORKGROUP_SIZE)`.
     dispatch_size: u32,
 }
+
+/// One-slot bind-group cache keyed on the particle buffer's [`BufferId`].
+///
+/// A render-world `Resource` (not a system `Local`) deliberately: the prepare
+/// system stops running once its `run_if(resource_exists::<RadianceSimParams>)`
+/// gate goes false on sketch exit, so a `Local` slot could never release the
+/// old bind group — pinning the freed particle buffer's `Arc`. As a resource,
+/// `remove_radiance_sim_params_if_absent` (private, so a code span) clears
+/// it on the same exit seam.
+#[derive(Resource, Default)]
+pub struct RadianceBindGroupCache(Option<(BufferId, BindGroup)>);
 
 /// Initialises [`RadiancePipeline`] in the render-world startup schedule.
 fn init_radiance_pipeline(
@@ -221,9 +239,11 @@ fn init_radiance_pipeline(
 ///
 /// The sim uniform and edge buffers are pipeline-owned and live for the
 /// process; the particle storage buffer is recreated per sketch entry, so
-/// the cache keys on its [`BufferId`] and replaces its single slot on change
-/// (dropping the old bind group releases the freed buffer's reference —
-/// bounded by construction, no stale retention across re-entry).
+/// [`RadianceBindGroupCache`] keys on its [`BufferId`] and replaces its
+/// single slot on change (dropping the old bind group releases the freed
+/// buffer's reference). On sketch exit — when this system's `run_if` gate
+/// stops it running — the removal companion clears the cache, so the last
+/// buffer is never retained across re-entry (bounded by construction).
 fn prepare_radiance_bind_group(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
@@ -232,7 +252,7 @@ fn prepare_radiance_bind_group(
     sim: Res<'_, RadianceSimParams>,
     buffers: Res<'_, RenderAssets<GpuShaderBuffer>>,
     pipeline: Option<Res<'_, RadiancePipeline>>,
-    mut cached: Local<'_, Option<(BufferId, BindGroup)>>,
+    mut cached: ResMut<'_, RadianceBindGroupCache>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
@@ -249,7 +269,7 @@ fn prepare_radiance_bind_group(
     );
 
     let buffer_id = particle_buffer.buffer.id();
-    let bind_group = match &*cached {
+    let bind_group = match &cached.0 {
         Some((id, bg)) if *id == buffer_id => bg.clone(),
         _ => {
             let layout: BindGroupLayout =
@@ -272,12 +292,18 @@ fn prepare_radiance_bind_group(
                     },
                 ],
             );
-            *cached = Some((buffer_id, bg.clone()));
+            cached.0 = Some((buffer_id, bg.clone()));
             bg
         }
     };
 
-    let dispatch_size = sim.particle_count.div_ceil(WORKGROUP_SIZE);
+    // A paused sim (Idle, field deterministically all-dead — see
+    // `systems::sim_params::update_radiance_pause`) dispatches nothing.
+    let dispatch_size = if sim.paused {
+        0
+    } else {
+        sim.particle_count.div_ceil(WORKGROUP_SIZE)
+    };
     commands.insert_resource(RadianceComputeBindGroup {
         bind_group,
         dispatch_size,
@@ -286,10 +312,11 @@ fn prepare_radiance_bind_group(
 
 /// Render system dispatching the aura kernel each frame.
 ///
-/// Gates directly on [`RadianceSimParams`] (mirroring `particle_compute`):
-/// the lingering [`RadianceComputeBindGroup`] is never removed, so this
-/// `Option` guard — together with [`remove_radiance_sim_params_if_absent`] —
-/// is what actually stops the dispatch after `OnExit`.
+/// Gates directly on [`RadianceSimParams`] (mirroring `particle_compute`).
+/// [`remove_radiance_sim_params_if_absent`] removes both that resource and
+/// the [`RadianceComputeBindGroup`] on `OnExit`; the `Option` guards here
+/// keep the dispatch a no-op for the one extract cycle before those removals
+/// land (and while the pipeline is still compiling).
 fn radiance_compute(
     bind_group: Option<Res<'_, RadianceComputeBindGroup>>,
     pipeline_res: Option<Res<'_, RadiancePipeline>>,
@@ -310,6 +337,11 @@ fn radiance_compute(
     else {
         return;
     };
+    // Paused (Idle all-dead field): skip the pass entirely rather than
+    // encoding a zero-workgroup dispatch.
+    if bg.dispatch_size == 0 {
+        return;
+    }
 
     let mut pass = render_context
         .command_encoder()
@@ -322,16 +354,36 @@ fn radiance_compute(
     pass.dispatch_workgroups(bg.dispatch_size, 1, 1);
 }
 
-/// Removes [`RadianceSimParams`] from the render world when the main-world
-/// source is absent (`ExtractResourcePlugin` does not propagate removals —
-/// the established landmine; mirrors `remove_particle_sim_params_if_absent`).
+/// Removes the render-world Radiance compute resources when the main-world
+/// [`RadianceSimParams`] is absent (`ExtractResourcePlugin` does not
+/// propagate removals — the established landmine; mirrors
+/// `remove_particle_sim_params_if_absent`).
+///
+/// Besides the extracted [`RadianceSimParams`] copy, this also drops the
+/// per-frame [`RadianceComputeBindGroup`] and clears the
+/// [`RadianceBindGroupCache`] slot: both hold a [`BindGroup`] whose `Arc`
+/// references pin the sketch's freed particle buffer (3.84 MB at the default
+/// count) in VRAM, and neither is entity-owned nor re-run once the prepare
+/// system's `run_if` gate goes false — without this, the buffer would be
+/// retained for the rest of the session (AGENTS.md GPU-release mechanism 2/3).
 fn remove_radiance_sim_params_if_absent(
     mut commands: Commands<'_, '_>,
     main_resource: Extract<'_, '_, Option<Res<'_, RadianceSimParams>>>,
     render_resource: Option<Res<'_, RadianceSimParams>>,
+    bind_group: Option<Res<'_, RadianceComputeBindGroup>>,
+    mut cache: ResMut<'_, RadianceBindGroupCache>,
 ) {
-    if main_resource.is_none() && render_resource.is_some() {
+    if main_resource.is_some() {
+        return;
+    }
+    if render_resource.is_some() {
         commands.remove_resource::<RadianceSimParams>();
+    }
+    if bind_group.is_some() {
+        commands.remove_resource::<RadianceComputeBindGroup>();
+    }
+    if cache.0.is_some() {
+        cache.0 = None;
     }
 }
 
@@ -368,5 +420,66 @@ mod tests {
         assert_eq!(63_u32.div_ceil(WORKGROUP_SIZE), 1);
         assert_eq!(64_u32.div_ceil(WORKGROUP_SIZE), 1);
         assert_eq!(65_u32.div_ceil(WORKGROUP_SIZE), 2);
+    }
+
+    /// The removal companion clears every render-world compute resource when
+    /// the main-world source is absent, and leaves them alone while it is
+    /// present — this is the seam that releases the particle buffer's VRAM
+    /// on sketch exit.
+    ///
+    /// [`RadianceComputeBindGroup`] and a populated
+    /// [`RadianceBindGroupCache`] slot hold wgpu handles that cannot be
+    /// constructed headless, so this test exercises the extracted-params
+    /// removal and verifies the system runs cleanly with the (empty) cache;
+    /// the bind-group/cache clears share the same `main_resource.is_none()`
+    /// branch asserted here.
+    #[test]
+    #[allow(clippy::expect_used, reason = "test assertions")]
+    fn removal_companion_clears_render_world_on_exit() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::render::MainWorld;
+
+        let render_params = || RadianceSimParams {
+            params: super::super::sim_params::RadianceSimParamsGpu::default(),
+            particles: Handle::default(),
+            particle_count: 1_000,
+            paused: false,
+            frozen_secs: 0.0,
+        };
+
+        // Main-world source absent: the render copy must be removed.
+        let mut render_world = World::new();
+        render_world.insert_resource(MainWorld::default());
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<RadianceBindGroupCache>();
+        render_world
+            .run_system_once(remove_radiance_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<RadianceSimParams>().is_none(),
+            "extracted params must be dropped once the main source is gone"
+        );
+        assert!(
+            render_world
+                .resource::<RadianceBindGroupCache>()
+                .0
+                .is_none(),
+            "cache slot stays empty after the clear branch"
+        );
+
+        // Main-world source present: everything is left in place.
+        let mut render_world = World::new();
+        let mut main_world = MainWorld::default();
+        main_world.insert_resource(render_params());
+        render_world.insert_resource(main_world);
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<RadianceBindGroupCache>();
+        render_world
+            .run_system_once(remove_radiance_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<RadianceSimParams>().is_some(),
+            "live sketch must keep its extracted params"
+        );
     }
 }

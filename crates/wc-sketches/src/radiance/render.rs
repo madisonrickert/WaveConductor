@@ -49,6 +49,31 @@ use crate::radiance::settings::RadiancePalette;
 /// shader via `params.y`.
 pub const QUAD_HALF_PX: f32 = 4.0;
 
+/// Overwrite the first color target's blend with pure additive `(One, One)`
+/// so the draw accumulates HDR light into bloom instead of alpha-occluding —
+/// the one shared recipe behind Radiance's three additive layers (the aura
+/// billboards here, the beat-pulse quad, and the sparkle quad), each of whose
+/// `Material2d::specialize` calls this. Per-material-pipeline, so it never
+/// leaks into other sketches' blends (Flame keeps its own copy).
+pub(crate) fn override_additive_blend(descriptor: &mut RenderPipelineDescriptor) {
+    if let Some(fragment) = descriptor.fragment.as_mut() {
+        if let Some(Some(target)) = fragment.targets.get_mut(0) {
+            target.blend = Some(BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+                alpha: BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+            });
+        }
+    }
+}
+
 /// Master brightness scale on the additive aura (folded into `params.x`).
 /// The flame is tens of thousands of overlapping additive HDR quads — an
 /// unscaled `state.intensity` saturates the whole frame to white, so this
@@ -114,28 +139,15 @@ impl Material2d for RadianceMaterial {
     }
 
     /// Override the color-target blend to pure additive `(One, One)` —
-    /// flame's mechanism for HDR accumulation inside the 2D pipeline.
+    /// flame's mechanism for HDR accumulation inside the 2D pipeline (the
+    /// shared `override_additive_blend` recipe — a code span, not a link:
+    /// the helper is `pub(crate)` and this doc is public).
     fn specialize(
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
         _key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            if let Some(Some(target)) = fragment.targets.get_mut(0) {
-                target.blend = Some(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                });
-            }
-        }
+        override_additive_blend(descriptor);
         Ok(())
     }
 }
@@ -437,6 +449,27 @@ pub fn drive_radiance_materials(
 #[cfg(all(test, feature = "body-tracking-mediapipe"))]
 mod tests {
     use super::*;
+
+    /// The uniforms' WGSL layout sizes: `AuraUniform` in `render.wgsl` is
+    /// `params: vec4` (16 B) + `slot_colors: array<vec4, 4>` (64 B) = 80 B;
+    /// `SilhouetteSlots` in `silhouette.wgsl` is
+    /// `rim_colors: array<vec4, 4>` (64 B) + `fades: vec4` (16 B) = 80 B.
+    /// Struct parity with the hand-written WGSL is by convention, so this
+    /// locks the Rust side's sizes against silent field drift.
+    #[test]
+    fn material_uniform_sizes_match_wgsl() {
+        use bevy::render::render_resource::ShaderType as _;
+        assert_eq!(
+            RadianceAuraUniform::min_size().get(),
+            80,
+            "RadianceAuraUniform must stay (1 + 4) vec4s"
+        );
+        assert_eq!(
+            RadianceSilhouetteSlots::min_size().get(),
+            80,
+            "RadianceSilhouetteSlots must stay (4 + 1) vec4s"
+        );
+    }
 
     /// Fade 0 (Active) uses the palette identity verbatim; fade 1 lands on
     /// the ember identity with intensity eased to 70%.

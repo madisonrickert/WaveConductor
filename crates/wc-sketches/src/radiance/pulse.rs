@@ -29,12 +29,15 @@
 //! allocates after spawn. During the attract screensaver the mic is paused →
 //! `beat_confidence` holds 0 → no spawns; residual waves fade within
 //! [`PULSE_LIFETIME_S`] and the master lane is dimmed by the screensaver fade.
+//! When the packed uniform contributes exactly zero light — master 0 (nobody
+//! tracked, e.g. all night in the attract screensaver) or every slot dead —
+//! the driver hides the fullscreen quad ([`pulse_uniform_dead`]), so the
+//! additive full-window fragment pass is skipped instead of adding zeros.
 
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
-    ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey};
@@ -157,28 +160,15 @@ impl Material2d for RadiancePulseMaterial {
     }
 
     /// Override the color-target blend to pure additive `(One, One)` so the
-    /// waves accumulate HDR light into bloom instead of alpha-occluding.
+    /// waves accumulate HDR light into bloom instead of alpha-occluding (the
+    /// shared `render::override_additive_blend` recipe — a code span, not a
+    /// link: the helper is `pub(crate)` and this doc is public).
     fn specialize(
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
         _key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            if let Some(Some(target)) = fragment.targets.get_mut(0) {
-                target.blend = Some(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                });
-            }
-        }
+        super::render::override_additive_blend(descriptor);
         Ok(())
     }
 }
@@ -297,9 +287,22 @@ pub fn pack_pulse_uniform(
     uniform
 }
 
+/// True when the packed uniform contributes exactly zero light: the master
+/// lane is zero (pulse setting off, full screensaver dim, or nobody carries
+/// presence fade) or every wave slot packs dead. The shader multiplies its
+/// whole output by `params.x` and skips zero-strength slots, so this
+/// predicate is exact — hiding the quad on it is output-identical.
+#[must_use]
+pub fn pulse_uniform_dead(uniform: &RadiancePulseUniform) -> bool {
+    uniform.params.x <= 0.0 || uniform.pulses.iter().all(|slot| slot.y <= 0.0)
+}
+
 /// `Update` (gated `in_state(AppState::Radiance)`, like the material driver,
 /// so residual waves keep fading through Idle/Screensaver): advance + spawn
 /// waves from the beat lane and pack the uniform into the pulse material.
+/// Hides the fullscreen quad while the uniform is fully dead (see
+/// [`pulse_uniform_dead`]) so the additive pass costs nothing when it would
+/// draw nothing.
 #[allow(
     clippy::too_many_arguments,
     reason = "Bevy system — each param is a distinct ECS resource/query the driver packs"
@@ -313,10 +316,13 @@ pub fn update_radiance_pulses(
     audio: Option<Res<'_, AudioAnalysis>>,
     body: Option<Res<'_, BodyTrackingState>>,
     mut pulses: ResMut<'_, RadiancePulses>,
-    quads: Query<
+    mut quads: Query<
         '_,
         '_,
-        &bevy::sprite_render::MeshMaterial2d<RadiancePulseMaterial>,
+        (
+            &bevy::sprite_render::MeshMaterial2d<RadiancePulseMaterial>,
+            &mut Visibility,
+        ),
         With<RadianceRoot>,
     >,
     mut materials: ResMut<'_, Assets<RadiancePulseMaterial>>,
@@ -370,9 +376,19 @@ pub fn update_radiance_pulses(
     // never outlive the last figure (see `union_fade`).
     let master = settings.pulse_intensity * (1.0 - fade.alpha()) * union_fade(fades);
     let uniform = pack_pulse_uniform(&pulses, master, settings.mirror, fit_aspect, px_per_texel);
-    for handle in &quads {
+    // Fully-dead uniform → hide the quad (skip the full-window additive
+    // pass); assign only on change so visibility change detection stays quiet.
+    let desired = if pulse_uniform_dead(&uniform) {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+    for (handle, mut visibility) in &mut quads {
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.pulses = uniform;
+        }
+        if *visibility != desired {
+            *visibility = desired;
         }
     }
 }
@@ -533,6 +549,106 @@ mod tests {
         assert!((blended.x - 0.5).abs() < 1e-6 && (blended.y - 0.5).abs() < 1e-6);
         let solo = blend_present_colors(colors, Vec4::new(0.3, 0.0, 0.0, 0.0), fallback);
         assert_eq!(solo, colors[0], "solo dancer keeps their exact identity");
+    }
+
+    /// The uniform's WGSL layout size: `PulseUniform` in `pulse.wgsl` is
+    /// `pulses: array<vec4, 6>` (96 B) + `colors: array<vec4, 6>` (96 B) +
+    /// `params: vec4` (16 B) + `mapping: vec4` (16 B) = 224 B. Struct parity
+    /// with the hand-written WGSL is by convention, so this locks the Rust
+    /// side's size against silent field drift.
+    #[test]
+    fn pulse_uniform_size_matches_wgsl() {
+        assert_eq!(
+            <RadiancePulseUniform as bevy::render::render_resource::ShaderType>::min_size().get(),
+            224,
+            "RadiancePulseUniform must stay (6 + 6 + 1 + 1) vec4s"
+        );
+    }
+
+    /// The dead predicate is exact against the shader's contribution: zero
+    /// master or all-dead slots is dead; a live slot under a live master is
+    /// not.
+    #[test]
+    fn dead_predicate_matches_shader_contribution() {
+        // Default: master 0 AND all slots dead.
+        assert!(pulse_uniform_dead(&RadiancePulseUniform::default()));
+        // Live master, all slots dead → still dead.
+        let mut pulses = RadiancePulses::default();
+        let packed = pack_pulse_uniform(&pulses, 1.0, false, 1.0, 4.0);
+        assert!(pulse_uniform_dead(&packed), "no live wave -> dead");
+        // Live master + one live wave → alive.
+        step_pulses(&mut pulses, 0.01, 1.0, true, 0.9, Vec4::ONE);
+        let packed = pack_pulse_uniform(&pulses, 1.0, false, 1.0, 4.0);
+        assert!(!pulse_uniform_dead(&packed), "live wave + master -> alive");
+        // Zero master kills it regardless of live slots.
+        let packed = pack_pulse_uniform(&pulses, 0.0, false, 1.0, 4.0);
+        assert!(pulse_uniform_dead(&packed), "master 0 -> dead");
+    }
+
+    /// The driver hides the quad while the uniform is fully dead (nobody
+    /// tracked → master 0) and shows it again once a live wave rides a live
+    /// presence fade.
+    #[test]
+    fn driver_flips_quad_visibility_on_dead_uniform() {
+        use bevy::asset::AssetPlugin;
+        use bevy::ecs::system::RunSystemOnce;
+        use wc_core::input::body::{BodyTrackingState, TrackedBody};
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<RadiancePulseMaterial>();
+        app.world_mut().spawn(Window::default());
+        app.insert_resource(RadianceSettings::default());
+        app.insert_resource(RadianceState::default());
+        app.insert_resource(wc_core::lifecycle::screensaver::fade::ScreensaverFade::default());
+        app.insert_resource(RadiancePulses::default());
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<RadiancePulseMaterial>>()
+            .add(RadiancePulseMaterial {
+                distance_field: Handle::default(),
+                pulses: RadiancePulseUniform::default(),
+            });
+        let quad = app
+            .world_mut()
+            .spawn((
+                RadianceRoot,
+                bevy::sprite_render::MeshMaterial2d(material),
+                Visibility::default(),
+            ))
+            .id();
+
+        // Nobody tracked: master 0 → hidden.
+        app.world_mut()
+            .run_system_once(update_radiance_pulses)
+            .expect("driver runs");
+        assert_eq!(
+            *app.world().entity(quad).get::<Visibility>().expect("vis"),
+            Visibility::Hidden,
+            "dead uniform must hide the quad"
+        );
+
+        // A present body + a live wave → visible again.
+        let mut body = BodyTrackingState::default();
+        body.bodies[0] = Some(TrackedBody {
+            slot: 0,
+            present: true,
+            fade: 1.0,
+            ..TrackedBody::default()
+        });
+        app.insert_resource(body);
+        {
+            let mut pulses = app.world_mut().resource_mut::<RadiancePulses>();
+            step_pulses(&mut pulses, 0.01, 1.0, true, 0.9, Vec4::ONE);
+        }
+        app.world_mut()
+            .run_system_once(update_radiance_pulses)
+            .expect("driver runs again");
+        assert_eq!(
+            *app.world().entity(quad).get::<Visibility>().expect("vis"),
+            Visibility::Visible,
+            "live wave + presence must re-show the quad"
+        );
     }
 
     /// Gradient sampling hits the stops at 0 / 0.5 / 1 and clamps outside.
