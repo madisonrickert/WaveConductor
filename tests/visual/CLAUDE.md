@@ -52,9 +52,10 @@ manifest` lists it alongside the other subcommands.
 Output lands under `target/capture/<scenario>/`:
 `frame_NNNN.png` (one per scheduled frame, e.g. `frame_0030.png`), `run.json`
 (app-written, self-describing sidecar: `scenario`, scheduled `frames`, `dt_secs`,
-`settle`, `app_version`, `commit` (short git hash), and the active `toggles`
-object — enough to reproduce the run; `scenario`/`commit` are `null` if the
-launcher didn't supply them), `metrics.json` (per-frame metrics array),
+`settle`, `resolution` (the `WC_CAPTURE_RESOLUTION` window override as `[w, h]`;
+`null` = default 1280x720), `app_version`, `commit` (short git hash), and the
+active `toggles` object — enough to reproduce the run; `scenario`/`commit` are
+`null` if the launcher didn't supply them), `metrics.json` (per-frame metrics array),
 `app.log` (teed stdout+stderr), `clean-config/` (fresh settings dir when
 `config = "clean"`).
 
@@ -72,17 +73,42 @@ Scenarios defined today:
 
 | Name | sketch | provider | config | frames | debug |
 |------|--------|----------|--------|--------|-------|
+| `home` | `home` | `mock` | `clean` | `[30, 60]` | — |
+| `home-portrait` | `home` | `mock` | `clean` | `[30, 60]` | — (1080x1920) |
 | `line-synthetic` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
+| `line-synthetic-portrait` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — (1080x1920) |
 | `line-synthetic-no-bloom` | `line` | `synthetic` | `clean` | `[30, 60, 120, 240]` | `DISABLE_BLOOM = "1"` |
 | `line-screensaver` | `line` | `mock` | `clean` | `[180, 276, 495, 570, 666, 780, 1320, 1770]` | `FORCE_SCREENSAVER` |
 | `dots-synthetic` | `dots` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
+| `dots-synthetic-portrait` | `dots` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — (1080x1920) |
 | `dots-screensaver` | `dots` | `mock` | `clean` | `[60, 180, 360, 600, 900, 1320, 1800]` | `FORCE_SCREENSAVER` |
 | `cymatics-synthetic` | `cymatics` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
+| `cymatics-synthetic-portrait` | `cymatics` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — (1080x1920) |
 | `cymatics-interacting` | `cymatics` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_CYMATICS_INTERACTION = "1"` |
 | `cymatics-screensaver` | `cymatics` | `mock` | `clean` | `[180, 360, 600, 1200]` | `FORCE_SCREENSAVER = "1"` |
+| `flame-synthetic` | `flame` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — |
+| `flame-synthetic-portrait` | `flame` | `synthetic` | `clean` | `[30, 60, 120, 240]` | — (1080x1920) |
+| `flame-warp` | `flame` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_FLAME_WARP = "1"` |
+| `flame-camera-pose` | `flame` | `synthetic` | `clean` | `[60, 120, 240, 480]` | `FORCE_FLAME_CAMERA_POSE = "1"` |
+| `flame-screensaver` | `flame` | `mock` | `clean` | `[180, 360, 600, 1200]` | `FORCE_SCREENSAVER = "1"` |
 | `radiance-synthetic` | `radiance` | `off` | `clean` | `[60, 120, 240, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"` |
 | `radiance-synthetic-duo` | `radiance` | `off` | `clean` | `[60, 126, 150, 300, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"`, `FORCE_RADIANCE_SYNTHETIC_DUO = "1"` |
+| `radiance-synthetic-portrait` | `radiance` | `off` | `clean` | `[60, 120, 240, 480]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"` (1080x1920) |
 | `radiance-screensaver` | `radiance` | `off` | `clean` | `[120, 360, 720, 1200]` | `FORCE_RADIANCE_SYNTHETIC_BODY = "1"`, `FORCE_SCREENSAVER = "1"` |
+
+The `-portrait` scenarios (and `home`/`home-portrait`) exist to guard the
+deployment's rotated-1080p display orientation: each pins the window to
+1080x1920 via the `resolution` field and reuses its landscape sibling's
+provider/config/debug/frames. Review them for aspect bugs specifically —
+stretched/squashed content (circles that render as ellipses, a stretched
+dancer or fractal), layout that assumes landscape (offscreen or clipped UI),
+and post-process effects scaled on the wrong axis.
+
+`sketch = "home"` is a first-class capture target: the app stays on the Home
+picker for the whole run (`WAVECONDUCTOR_START_SKETCH=home` is accepted
+explicitly, not via the unknown-name fallback), and the capture readiness
+gate arms on the Home screen instead of waiting for a sketch entry (there is
+no sketch asset load to wait out; the `settle` window still applies).
 
 The `line-screensaver` scenario drives Line's attract mode: the "Wandering
 Pulses" choreography
@@ -148,11 +174,12 @@ Schema:
 
 ```toml
 [scenarios.<name>]
-sketch   = "line"          # -> WAVECONDUCTOR_START_SKETCH (line|flame|dots|cymatics|waves)
+sketch   = "line"          # -> WAVECONDUCTOR_START_SKETCH (line|flame|dots|cymatics|radiance, or "home" = capture the Home picker screen)
 provider = "synthetic"     # -> WAVECONDUCTOR_HAND_PROVIDER (synthetic|mock|leap|mediapipe|auto|off — launch default)
 config   = "clean"         # "clean" = fresh temp config dir; any other value is a path pinned via WAVECONDUCTOR_CONFIG_DIR
 frames   = [30, 60, 120]   # sim-frame indices to capture (frame 0 = first fully-loaded, settled frame)
 dt       = 0.016666667     # optional fixed timestep in seconds (default 1/60 in the app)
+resolution = [1080, 1920]  # optional window size [w, h] -> WC_CAPTURE_RESOLUTION=WxH (default 1280x720; debug builds only)
 
 [scenarios.<name>.debug]   # optional WC_DEBUG_* toggles (KEY without the WC_DEBUG_ prefix)
 FORCE_G       = "8000"
@@ -214,6 +241,16 @@ value-typed and silently ignore unparseable input.
   xtask sets it; not meaningful to pass by hand.
 - `commit` (optional): short git commit hash, recorded in `run.json`. The xtask
   resolves it via `git rev-parse --short HEAD`; absent outside a repo.
+
+The window resolution rides in its own env var, not the `WC_CAPTURE` grammar:
+`WC_CAPTURE_RESOLUTION=WxH` (e.g. `1080x1920`), set by the xtask when the
+scenario has a `resolution` field. Debug builds read it at window creation
+(`crates/waveconductor/src/main.rs`; parsing shared via
+`wc_core::capture::config::parse_resolution`); release builds ignore it, like
+the rest of the `WC_CAPTURE` surface. The active value is recorded in
+`run.json` as `resolution: [w, h]` (`null` = the default 1280x720 window).
+`--watch` also honours the scenario's `resolution`, so what you watch matches
+what captures.
 
 The capture system pins `Time<Virtual>` to `dt` once the sketch's assets are
 ready, screenshots the scheduled frames, writes `run.json`, and requests

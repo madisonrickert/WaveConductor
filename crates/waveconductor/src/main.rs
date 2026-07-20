@@ -52,7 +52,7 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "WaveConductor".into(),
-                        resolution: (1280_u32, 720_u32).into(),
+                        resolution: window_resolution(),
                         ..default()
                     }),
                     ..default()
@@ -157,6 +157,36 @@ fn wgpu_settings() -> WgpuSettings {
 #[cfg(not(target_os = "windows"))]
 fn wgpu_settings() -> WgpuSettings {
     WgpuSettings::default()
+}
+
+/// Startup window size. Debug builds honour the capture harness's
+/// `WC_CAPTURE_RESOLUTION=WxH` override (set per-scenario by
+/// `cargo xtask capture` so portrait/rotated-display scenarios capture at the
+/// deployment aspect ratio); unset or malformed values fall back to the
+/// 1280x720 default. Parsing lives in `wc_core::capture::config` next to the
+/// rest of the `WC_CAPTURE` surface, so the launcher and this override can
+/// never disagree about the format.
+#[cfg(debug_assertions)]
+fn window_resolution() -> bevy::window::WindowResolution {
+    if let Some((w, h)) = std::env::var("WC_CAPTURE_RESOLUTION")
+        .ok()
+        .and_then(|raw| wc_core::capture::config::parse_resolution(&raw))
+    {
+        tracing::info!(
+            width = w,
+            height = h,
+            "WC_CAPTURE_RESOLUTION: overriding window resolution"
+        );
+        return (w, h).into();
+    }
+    (1280_u32, 720_u32).into()
+}
+
+/// Release build: fixed 1280x720 (the capture override compiles out with the
+/// rest of the `WC_CAPTURE` surface — release ignores `WC_CAPTURE_RESOLUTION`).
+#[cfg(not(debug_assertions))]
+fn window_resolution() -> bevy::window::WindowResolution {
+    (1280_u32, 720_u32).into()
 }
 
 fn egui_bindless_mode_array_size() -> Option<std::num::NonZero<u32>> {
@@ -376,13 +406,16 @@ fn debug_tonemapping() -> Tonemapping {
 /// Apply the optional `WAVECONDUCTOR_START_SKETCH` override: when set to a
 /// sketch name (`line`, `dots`, `cymatics`, case-insensitive) the app
 /// navigates straight into that sketch at startup instead of showing the
-/// Home picker. Unset (the default) starts at Home.
+/// Home picker. Unset (the default) starts at Home. `home` is accepted as an
+/// explicit first-class value meaning "stay on the Home picker" — used by the
+/// capture harness's Home-screen scenarios — and logs at info, not warn (no
+/// state transition is needed; `Home` is already the default state).
 ///
 /// This is a deployment + testing convenience: kiosk installs can boot directly
 /// into a fixed sketch, and automated screenshot/verification runs can land in
 /// the sketch under test without driving the keyboard. An unrecognised value
-/// — including `flame`/`waves`, whose `AppState` seams have no implemented
-/// sketch behind them yet (`AUDIT.md` T5) — logs a warning and falls back to
+/// — including `waves`, whose `AppState` seam has no implemented sketch
+/// behind it yet (`AUDIT.md` T5) — logs a warning and falls back to
 /// Home, so no kiosk launch config can boot into a black screen.
 ///
 /// Setting `NextState` in `Startup` triggers the matching `OnEnter` on the
@@ -393,6 +426,10 @@ fn apply_startup_sketch_override(
     let Ok(name) = std::env::var("WAVECONDUCTOR_START_SKETCH") else {
         return;
     };
+    if name.trim().eq_ignore_ascii_case("home") {
+        tracing::info!("WAVECONDUCTOR_START_SKETCH=home: staying on the Home picker");
+        return;
+    }
     match wc_core::lifecycle::state::AppState::from_name(&name) {
         Some(state) => {
             tracing::info!(sketch = %name, "WAVECONDUCTOR_START_SKETCH: starting in sketch");

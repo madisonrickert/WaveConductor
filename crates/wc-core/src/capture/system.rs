@@ -110,16 +110,27 @@ pub fn pin_capture_timestep(
 /// the robust "fully-loaded sketch frame" signal called for by the spec
 /// (sketches enter `SketchActivity::Active` only after `OnEnter` completes).
 ///
+/// Home-screen captures ([`CaptureConfig::expect_home`]) never enter a sketch,
+/// so waiting for one would hang the run until the launcher's wall-clock
+/// timeout: for those the gate arms as soon as the app is observed *on* the
+/// Home screen (there is no sketch asset load to wait out — the Home picker
+/// draws immediately; the `settle` window still applies).
+///
 /// No-op without a [`CaptureConfig`].
 pub fn detect_assets_ready(
     config: Option<Res<'_, CaptureConfig>>,
     state: Option<ResMut<'_, CaptureState>>,
     app_state: Option<Res<'_, State<AppState>>>,
 ) {
-    let (Some(_config), Some(mut state), Some(app_state)) = (config, state, app_state) else {
+    let (Some(config), Some(mut state), Some(app_state)) = (config, state, app_state) else {
         return;
     };
-    if !state.assets_ready && app_state.get().is_sketch() {
+    let ready = if config.expect_home {
+        *app_state.get() == AppState::Home
+    } else {
+        app_state.get().is_sketch()
+    };
+    if !state.assets_ready && ready {
         state.assets_ready = true;
     }
 }
@@ -222,8 +233,13 @@ fn run_json_string(config: &CaptureConfig, toggles: Option<&DebugToggles>) -> St
         .commit
         .as_deref()
         .map_or_else(|| "null".to_string(), |c| format!("\"{}\"", json_escape(c)));
+    // `resolution` is the WC_CAPTURE_RESOLUTION window override; `null` means
+    // the run used the app's default 1280x720 window.
+    let resolution = config
+        .resolution
+        .map_or_else(|| "null".to_string(), |(w, h)| format!("[{w},{h}]"));
     format!(
-        "{{\"scenario\":{scenario},\"frames\":[{frames}],\"dt_secs\":{},\"settle\":{},\"app_version\":\"{}\",\"commit\":{commit},\"toggles\":{}}}\n",
+        "{{\"scenario\":{scenario},\"frames\":[{frames}],\"dt_secs\":{},\"settle\":{},\"resolution\":{resolution},\"app_version\":\"{}\",\"commit\":{commit},\"toggles\":{}}}\n",
         config.dt.as_secs_f64(),
         config.settle,
         env!("CARGO_PKG_VERSION"),
@@ -327,6 +343,8 @@ mod tests {
             settle: 1,
             scenario: None,
             commit: None,
+            resolution: None,
+            expect_home: false,
         }
     }
 
@@ -384,6 +402,8 @@ mod tests {
             settle: 1,
             scenario: Some("line-synthetic".to_string()),
             commit: Some("abc1234".to_string()),
+            resolution: Some((1080, 1920)),
+            expect_home: false,
         };
         let toggles = DebugToggles {
             force_g: Some(8000.0),
@@ -406,6 +426,7 @@ mod tests {
         assert!(json.contains("\"scenario\":\"line-synthetic\""), "{json}");
         assert!(json.contains("\"commit\":\"abc1234\""), "{json}");
         assert!(json.contains("\"frames\":[0,2]"), "{json}");
+        assert!(json.contains("\"resolution\":[1080,1920]"), "{json}");
         assert!(json.contains("\"force_g\":8000"), "{json}");
         assert!(json.contains("\"disable_smear\":true"), "{json}");
         assert!(json.contains("\"force_flame_camera_pose\":true"), "{json}");
@@ -423,7 +444,48 @@ mod tests {
         let json = run_json_string(&cfg(), None);
         assert!(json.contains("\"scenario\":null"), "{json}");
         assert!(json.contains("\"commit\":null"), "{json}");
+        // No WC_CAPTURE_RESOLUTION override -> default 1280x720 window.
+        assert!(json.contains("\"resolution\":null"), "{json}");
         assert!(json.contains("\"toggles\":{}"), "{json}");
+    }
+
+    /// Build a minimal app with `AppState` states and the readiness-gate
+    /// system, using the given capture config.
+    fn gate_app(config: CaptureConfig) -> bevy::app::App {
+        let mut app = bevy::app::App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<AppState>();
+        app.insert_resource(config);
+        app.init_resource::<CaptureState>();
+        app.add_systems(bevy::app::Update, detect_assets_ready);
+        app
+    }
+
+    /// Home-screen capture (`expect_home`): the gate arms while the app sits
+    /// on `Home` — where a sketch-scenario gate would wait until the launcher
+    /// timeout, because no sketch entry ever happens.
+    #[test]
+    fn expect_home_arms_gate_on_home_screen() {
+        let mut app = gate_app(CaptureConfig {
+            expect_home: true,
+            ..cfg()
+        });
+        app.update();
+        assert!(app.world().resource::<CaptureState>().assets_ready);
+    }
+
+    /// Sketch capture (the default): the gate refuses to arm while the app is
+    /// still on `Home`, and arms once a sketch state is entered.
+    #[test]
+    fn sketch_capture_gate_waits_for_sketch_entry() {
+        let mut app = gate_app(cfg());
+        app.update();
+        assert!(!app.world().resource::<CaptureState>().assets_ready);
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Line);
+        app.update(); // transition applies, then Update observes Line
+        assert!(app.world().resource::<CaptureState>().assets_ready);
     }
 
     /// Regression: the last scheduled frame must NOT exit in the same tick it is
@@ -444,6 +506,8 @@ mod tests {
             settle: 0,
             scenario: None,
             commit: None,
+            resolution: None,
+            expect_home: false,
         });
         app.insert_resource(CaptureState {
             assets_ready: true,

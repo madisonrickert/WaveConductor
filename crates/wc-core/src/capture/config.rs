@@ -14,6 +14,16 @@
 //!   provenance (set by the xtask launcher).
 //! - `commit`: optional short git commit hash, recorded in `run.json` for
 //!   provenance (set by the xtask launcher).
+//!
+//! Two sibling env signals are folded into [`CaptureConfig`] by the plugin
+//! (not part of the `WC_CAPTURE` grammar):
+//! - `WC_CAPTURE_RESOLUTION=WxH` (parsed by [`parse_resolution`]) — the
+//!   launcher's per-scenario window-size override, recorded in `run.json` for
+//!   provenance. The window itself is resized by the binary crate at startup.
+//! - `WAVECONDUCTOR_START_SKETCH` — when it resolves to Home (unset, `home`,
+//!   or an unknown name, mirroring the binary's fallback), the capture
+//!   readiness gate arms on the Home screen instead of waiting for a sketch
+//!   entry that will never happen (see [`super::system::detect_assets_ready`]).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,6 +48,15 @@ pub struct CaptureConfig {
     /// Optional short git commit hash, recorded in `run.json` for provenance.
     /// `None` when `WC_CAPTURE` carries no `commit=` key.
     pub commit: Option<String>,
+    /// Window resolution override `(width, height)` from
+    /// `WC_CAPTURE_RESOLUTION=WxH` (set by the plugin, not the `WC_CAPTURE`
+    /// grammar). `None` = the app's default 1280x720 window. Recorded in
+    /// `run.json` for provenance.
+    pub resolution: Option<(u32, u32)>,
+    /// True when the run is expected to stay on the Home screen (the
+    /// `WAVECONDUCTOR_START_SKETCH` env resolves to Home). Arms the capture
+    /// readiness gate on `AppState::Home` instead of a sketch entry.
+    pub expect_home: bool,
 }
 
 /// Default fixed timestep: 1/60 s, expressed in whole nanoseconds so the value
@@ -113,7 +132,27 @@ pub fn parse_wc_capture(raw: &str) -> Result<CaptureConfig, String> {
         settle,
         scenario,
         commit,
+        // Folded in from their own env signals by `CapturePlugin::build`,
+        // not the `WC_CAPTURE` grammar (see the module docs).
+        resolution: None,
+        expect_home: false,
     })
+}
+
+/// Parse a `WC_CAPTURE_RESOLUTION` value (`"WxH"`, e.g. `"1080x1920"`) into
+/// `(width, height)`. Returns `None` for malformed input or a zero dimension —
+/// the caller falls back to the default window size. Shared by the binary
+/// crate's debug-only window override and the capture plugin's `run.json`
+/// provenance so the two can never disagree about the format.
+#[must_use]
+pub fn parse_resolution(raw: &str) -> Option<(u32, u32)> {
+    let (w, h) = raw.trim().split_once(['x', 'X'])?;
+    let w = w.trim().parse::<u32>().ok()?;
+    let h = h.trim().parse::<u32>().ok()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
 }
 
 #[cfg(test)]
@@ -157,6 +196,36 @@ mod tests {
         let cfg = parse_wc_capture("dir=out;frames=1").unwrap();
         assert_eq!(cfg.scenario, None);
         assert_eq!(cfg.commit, None);
+    }
+
+    #[test]
+    fn resolution_and_expect_home_are_not_part_of_the_grammar() {
+        // Both are folded in from their own env signals by the plugin; the
+        // parser always leaves them at their inert defaults.
+        let cfg = parse_wc_capture("dir=out;frames=1").unwrap();
+        assert_eq!(cfg.resolution, None);
+        assert!(!cfg.expect_home);
+        // And `resolution=` as a WC_CAPTURE key is rejected like any unknown key.
+        assert!(parse_wc_capture("dir=out;frames=1;resolution=1x1").is_err());
+    }
+
+    #[test]
+    fn parse_resolution_accepts_wxh() {
+        assert_eq!(parse_resolution("1080x1920"), Some((1080, 1920)));
+        assert_eq!(parse_resolution(" 1280 x 720 "), Some((1280, 720)));
+        assert_eq!(parse_resolution("1080X1920"), Some((1080, 1920)));
+    }
+
+    #[test]
+    fn parse_resolution_rejects_malformed_or_zero() {
+        assert_eq!(parse_resolution(""), None);
+        assert_eq!(parse_resolution("1080"), None);
+        assert_eq!(parse_resolution("1080x"), None);
+        assert_eq!(parse_resolution("x720"), None);
+        assert_eq!(parse_resolution("widexhigh"), None);
+        assert_eq!(parse_resolution("0x720"), None);
+        assert_eq!(parse_resolution("1280x0"), None);
+        assert_eq!(parse_resolution("-1280x720"), None);
     }
 
     #[test]

@@ -30,7 +30,8 @@ impl Scenarios {
 /// One named capture scenario.
 #[derive(Debug, Deserialize)]
 pub struct Scenario {
-    /// Sketch name -> `WAVECONDUCTOR_START_SKETCH`.
+    /// Sketch name -> `WAVECONDUCTOR_START_SKETCH` (`home` captures the Home
+    /// picker screen; the app stays in `AppState::Home` for the whole run).
     pub sketch: String,
     /// Hand provider -> `WAVECONDUCTOR_HAND_PROVIDER` (`synthetic`/`mock`
     /// fixtures for deterministic captures; the env var sets the app's
@@ -48,6 +49,12 @@ pub struct Scenario {
     /// Optional fixed timestep in seconds (default `1/60` in the app).
     #[serde(default)]
     pub dt: Option<f64>,
+    /// Optional window resolution `[width, height]` in physical pixels ->
+    /// `WC_CAPTURE_RESOLUTION=WxH` (debug builds only; the app defaults to
+    /// 1280x720 when absent). Lets portrait/rotated-display scenarios capture
+    /// at the deployment aspect ratio.
+    #[serde(default)]
+    pub resolution: Option<[u32; 2]>,
 }
 
 #[cfg(test)]
@@ -76,6 +83,24 @@ mod tests {
         assert_eq!(s.config, "clean");
         assert_eq!(s.frames, vec![30, 60, 120]);
         assert_eq!(s.debug.get("FORCE_G").map(String::as_str), Some("8000"));
+        // No `resolution` key -> None (the app keeps its 1280x720 default).
+        assert_eq!(s.resolution, None);
+    }
+
+    #[test]
+    fn parses_optional_resolution() {
+        let toml = r#"
+            [scenarios.home-portrait]
+            sketch = "home"
+            provider = "mock"
+            config = "clean"
+            frames = [30, 60]
+            resolution = [1080, 1920]
+        "#;
+        let scenarios: Scenarios = toml::from_str(toml).unwrap();
+        let s = scenarios.get("home-portrait").unwrap();
+        assert_eq!(s.sketch, "home");
+        assert_eq!(s.resolution, Some([1080, 1920]));
     }
 
     #[test]

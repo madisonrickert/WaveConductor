@@ -4,12 +4,54 @@
 # tests/visual/baselines/<name>/. `config = "clean"` means a fresh temp config
 # dir (no stale on-disk settings); a path value pins WAVECONDUCTOR_CONFIG_DIR.
 
+# ── Home picker screen ───────────────────────────────────────────────────────
+# Captures the Home screen (the sketch-picker grid) itself: sketch = "home" is
+# a first-class capture target — the app stays in AppState::Home for the whole
+# run and the capture readiness gate arms on the Home screen instead of waiting
+# for a sketch entry. provider = "mock" (silent; the picker needs no hands).
+# The Home UI draws immediately, so early frames suffice; two indices guard
+# against a first-frame layout settle.
+#
+# BASELINES ARE OPERATOR-SEEDED: seed on the deployment-class machine with
+#   cargo xtask capture home --update-baselines
+# after visual confirmation. See tests/visual/CLAUDE.md.
+
+[scenarios.home]
+sketch = "home"
+provider = "mock"
+config = "clean"
+frames = [30, 60]
+dt = 0.016666667
+
+# Home screen at the deployment portrait resolution (a rotated 1080p display).
+# `resolution` sets the window to WxH via WC_CAPTURE_RESOLUTION (debug-only).
+# Guards the picker layout against portrait aspect bugs (stretched tiles,
+# offscreen UI).
+[scenarios.home-portrait]
+sketch = "home"
+provider = "mock"
+config = "clean"
+frames = [30, 60]
+dt = 0.016666667
+resolution = [1080, 1920]
+
 [scenarios.line-synthetic]
 sketch = "line"
 provider = "synthetic"
 config = "clean"
 frames = [30, 60, 120, 240]
 dt = 0.016666667
+
+# Line at the deployment portrait resolution (rotated 1080p display). Same
+# provider/frames as line-synthetic; guards against landscape-only rendering
+# assumptions (stretched particles, wrong-aspect smear).
+[scenarios.line-synthetic-portrait]
+sketch = "line"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+resolution = [1080, 1920]
 
 [scenarios.line-synthetic-no-bloom]
 sketch = "line"
@@ -92,6 +134,17 @@ config = "clean"
 frames = [30, 60, 120, 240]
 dt = 0.016666667
 
+# Dots at the deployment portrait resolution (rotated 1080p display). Same
+# provider/frames as dots-synthetic; guards the fabric grid against portrait
+# aspect bugs (non-square cells, stretched explode post-process).
+[scenarios.dots-synthetic-portrait]
+sketch = "dots"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+resolution = [1080, 1920]
+
 # ── Dots (Fabric) screensaver / attract mode ─────────────────────────────────
 # Forces the app into SketchActivity::Screensaver at startup (FORCE_SCREENSAVER)
 # so the attract visual is captured deterministically. provider = "mock" (silent,
@@ -154,6 +207,17 @@ provider = "synthetic"
 config = "clean"
 frames = [30, 60, 120, 240]
 dt = 0.016666667
+
+# Cymatics at the deployment portrait resolution (rotated 1080p display). Same
+# provider/frames as cymatics-synthetic; guards the wave field against portrait
+# aspect bugs (elliptical ripples that should be circular).
+[scenarios.cymatics-synthetic-portrait]
+sketch = "cymatics"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+resolution = [1080, 1920]
 
 # ── Cymatics — interacting mode ──────────────────────────────────────────────
 # Captures the wave field with continuous interaction: FORCE_CYMATICS_INTERACTION
@@ -218,6 +282,18 @@ config = "clean"
 frames = [30, 60, 120, 240]
 dt = 0.016666667
 
+# Flame ("You-niverse" 3D fractal) at the deployment portrait resolution
+# (rotated 1080p display). Same provider/frames as flame-synthetic; guards the
+# 3D projection against portrait aspect bugs (stretched fractal, wrong FOV
+# axis).
+[scenarios.flame-synthetic-portrait]
+sketch = "flame"
+provider = "synthetic"
+config = "clean"
+frames = [30, 60, 120, 240]
+dt = 0.016666667
+resolution = [1080, 1920]
+
 # Flame, warped attractor: WC_DEBUG_FORCE_FLAME_WARP pins the pointer warp to
 # (0.35, -0.2), deterministically deforming the shape without hardware.
 [scenarios.flame-warp]
@@ -273,6 +349,21 @@ frames = [60, 120, 240, 480]
 dt = 0.016666667
 
 [scenarios.radiance-synthetic.debug]
+FORCE_RADIANCE_SYNTHETIC_BODY = "1"
+
+# Radiance at the deployment portrait resolution (rotated 1080p display),
+# reusing the deterministic synthetic dancer. Guards the silhouette/flame
+# against portrait aspect bugs (stretched dancer — the fit-to-height mapping
+# must keep the figure aspect-correct in a tall window).
+[scenarios.radiance-synthetic-portrait]
+sketch = "radiance"
+provider = "off"
+config = "clean"
+frames = [60, 120, 240, 480]
+dt = 0.016666667
+resolution = [1080, 1920]
+
+[scenarios.radiance-synthetic-portrait.debug]
 FORCE_RADIANCE_SYNTHETIC_BODY = "1"
 
 # ── Radiance — two synthetic dancers (multi-body identity + fade-in) ────────

@@ -204,6 +204,14 @@ pub fn debug_env_pairs(merged: &BTreeMap<String, String>) -> Vec<(String, String
         .collect()
 }
 
+/// The `WC_CAPTURE_RESOLUTION` value for a scenario: `"WxH"` when the scenario
+/// pins a window resolution, `None` when it relies on the app's 1280x720
+/// default. The env var is honoured by debug builds only (the override is
+/// `#[cfg(debug_assertions)]`-gated in the app, like the rest of `WC_CAPTURE`).
+pub fn resolution_env(scenario: &Scenario) -> Option<String> {
+    scenario.resolution.map(|[w, h]| format!("{w}x{h}"))
+}
+
 // ---- private orchestration helpers --------------------------------------
 
 /// Load `tests/visual/scenarios.toml`.
@@ -234,6 +242,12 @@ fn launch(
             "WC_CAPTURE",
             build_wc_capture(name, scenario, out_dir, commit.as_deref()),
         );
+
+    // Optional per-scenario window resolution (portrait scenarios etc.); the
+    // app's debug-only window override reads it at startup.
+    if let Some(res) = resolution_env(scenario) {
+        cmd.env("WC_CAPTURE_RESOLUTION", res);
+    }
 
     // Config isolation: a fresh temp dir for `config = "clean"`, else a pinned
     // path. The temp dir is created under the output dir so it is inspectable.
@@ -290,6 +304,10 @@ fn run_watch(
     cmd.current_dir(root)
         .env("WAVECONDUCTOR_START_SKETCH", &scenario.sketch)
         .env("WAVECONDUCTOR_HAND_PROVIDER", &scenario.provider);
+    // Match the capture run's window size so what you watch is what captures.
+    if let Some(res) = resolution_env(scenario) {
+        cmd.env("WC_CAPTURE_RESOLUTION", res);
+    }
     let mut child = cmd.spawn()?;
     let start = std::time::Instant::now();
     while start.elapsed().as_secs() < secs {
@@ -563,7 +581,20 @@ mod tests {
             // Digit separators satisfy `clippy::unreadable_literal`; the parsed
             // `f64` value (and thus its formatted string) is unchanged.
             dt: Some(0.016_666_667),
+            resolution: None,
         }
+    }
+
+    #[test]
+    fn resolution_env_is_absent_by_default() {
+        assert_eq!(resolution_env(&scenario()), None);
+    }
+
+    #[test]
+    fn resolution_env_formats_wxh() {
+        let mut s = scenario();
+        s.resolution = Some([1080, 1920]);
+        assert_eq!(resolution_env(&s).as_deref(), Some("1080x1920"));
     }
 
     #[test]

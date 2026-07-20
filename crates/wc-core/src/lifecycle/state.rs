@@ -52,7 +52,9 @@ impl AppState {
 
     /// Parse a sketch name (case-insensitive, surrounding whitespace ignored)
     /// into its [`AppState`]. Returns `None` for unknown names, for `home`
-    /// (Home is the implicit default, not a navigable sketch target here),
+    /// (Home is the implicit default, not a navigable sketch target here —
+    /// the binary crate accepts `home` explicitly *before* calling this, as
+    /// a first-class "stay on the Home picker" value for capture scenarios),
     /// and for `waves` — that `AppState` variant is a reserved seam
     /// (`AUDIT.md` T5) with no implemented sketch behind it yet, so parsing
     /// it intentionally fails closed rather than accepting a name that

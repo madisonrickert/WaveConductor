@@ -45,7 +45,24 @@ impl Plugin for CapturePlugin {
             return;
         };
         match parse_wc_capture(&raw) {
-            Ok(config) => {
+            Ok(mut config) => {
+                // Fold in the sibling env signals (see `config` module docs):
+                // the launcher's window-size override (recorded in `run.json`)
+                // and whether the run stays on the Home screen — derived from
+                // the SAME env var the binary's startup override reads, so the
+                // readiness gate can never disagree with where the app
+                // actually starts (unset / `home` / unknown all fall back to
+                // Home there).
+                config.resolution = std::env::var("WC_CAPTURE_RESOLUTION")
+                    .ok()
+                    .and_then(|v| config::parse_resolution(&v));
+                config.expect_home = match std::env::var("WAVECONDUCTOR_START_SKETCH") {
+                    // Any value that does not parse to a sketch (including the
+                    // explicit `home`) leaves the app on the Home screen.
+                    Ok(value) => crate::lifecycle::state::AppState::from_name(&value).is_none(),
+                    // Unset -> the app starts (and stays) at Home.
+                    Err(_) => true,
+                };
                 tracing::info!(?config, "WC_CAPTURE active");
                 app.insert_resource(config);
                 app.init_resource::<CaptureState>();
