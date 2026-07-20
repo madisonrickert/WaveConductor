@@ -662,10 +662,16 @@ mod tests {
         let mut app = body_app(hot_person_detector_outputs(), confident_landmark_outputs());
         app.insert_resource(default_request());
 
+        // Wait for a present beat that also carries edges: admission (the
+        // ADMIT_DWELL gate) can first publish presence on a *bridged-dropout*
+        // beat of the mock's crop-wobble oscillation, whose payload is a
+        // decay frame with an empty edge list — a one-beat transient the
+        // next full frame refills.
         let tracked = update_until(&mut app, |w| {
             w.resource::<BodyTrackingState>().any_present()
+                && !w.resource::<SilhouetteEdges>().points.is_empty()
         });
-        assert!(tracked, "state never reported a person");
+        assert!(tracked, "state never reported a person with edges");
 
         let world = app.world();
         let state = world.resource::<BodyTrackingState>();

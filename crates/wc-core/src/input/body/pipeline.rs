@@ -124,6 +124,21 @@ const SLOT_RESERVE: Duration = Duration::from_secs(4);
 /// ordering.
 const RESERVE_MIN_ACTIVE: Duration = Duration::from_millis(600);
 
+/// Reservation window for a *young* track whose carried ROI collapsed at the
+/// frame edge (the untrackable-`next_roi` branch of `run_slot_inference`).
+///
+/// That branch is not a confirmed loss: the aux-filtered crop can transiently
+/// collapse while the person is still there (fresh filter state, frame-edge
+/// standing spot), and its contract is "drop the carried track, keep this
+/// frame's landmarks, and let the immediate re-scan re-acquire into the same
+/// slot". A young track therefore cannot take the busy-road hard-free (that
+/// would kill a person who merely wobbled the crop) — but it also must not
+/// pin the slot for the full [`SLOT_RESERVE`] 4 s. This short window covers
+/// one detector re-scan cycle ([`DETECT_SCAN_INTERVAL`] = 300 ms) with
+/// margin: the returning person re-binds within it, a genuine walker frees
+/// the slot in half a second instead of four.
+const YOUNG_EDGE_RESERVE: Duration = Duration::from_millis(500);
+
 /// Active-track count at or below which every track runs landmark/mask
 /// inference every frame; above it the pipeline interleaves round-robin,
 /// running this many tracks per frame (see the module doc's inference
@@ -1014,22 +1029,24 @@ impl PosePipeline {
         slot.anchor = Vec2::new(next_roi.cx, next_roi.cy);
         if roi_trackable(&next_roi, content) {
             slot.roi = Some(next_roi);
-        } else if slot.earns_reserve(now) {
-            // The person is leaving the frame (collapsed/off-content ROI).
+        } else {
+            // The carried crop collapsed (frame edge / transient aux wobble).
             // THIS frame's landmarks are still valid — `present` stays true —
             // but the carried track is dropped and the slot reserved; the
             // caller schedules an immediate re-scan, so next frame either
             // re-acquires the person into this same slot or confirms the
-            // exit (the reserved-clear pass then reads it absent).
+            // exit (the reserved-clear pass then reads it absent). A mature
+            // track earns the full window (its main-side fade may be
+            // mid-flight); a young one gets only [`YOUNG_EDGE_RESERVE`] so
+            // drive-past traffic cannot zombie the slot.
             slot.phase = SlotPhase::Reserved;
-            slot.reserved_until = now + SLOT_RESERVE;
+            slot.reserved_until = now
+                + if slot.earns_reserve(now) {
+                    SLOT_RESERVE
+                } else {
+                    YOUNG_EDGE_RESERVE
+                };
             slot.roi = None;
-        } else {
-            // Too young to have ignited main-side (RESERVE_MIN_ACTIVE): a
-            // walker exiting at the frame edge. Free the slot outright —
-            // discarding this frame's landmarks too is fine, nothing was
-            // ever rendered for this track.
-            slot.release();
         }
         Ok(())
     }
@@ -1712,7 +1729,7 @@ mod tests {
         assert_eq!(pl.edge_slot_counts[1], 0);
     }
 
-    /// (The loss here happens at track age 0 — under RESERVE_MIN_ACTIVE — so
+    /// (The loss here happens at track age 0 — under `RESERVE_MIN_ACTIVE` — so
     /// the slot frees outright rather than reserving; either way the next
     /// frame must cold-start re-detect.)
     #[test]
@@ -1818,53 +1835,57 @@ mod tests {
         assert!(p.slot_frames()[0].present, "same slot re-acquired");
     }
 
-    /// Busy-road fast-free: a track lost before RESERVE_MIN_ACTIVE (a walker
-    /// crossing the frame) must skip the Reserved phase entirely — the slot
-    /// is Free (claimable by the next person) the moment the track drops,
-    /// instead of a 4 s zombie reservation.
+    /// Busy-road fast-free: a confirmed loss ([`SlotTrack::lose`] — presence
+    /// collapse or an invalid frame) before `RESERVE_MIN_ACTIVE` must skip
+    /// the Reserved phase entirely — the slot is Free (claimable by the next
+    /// person) the moment the track drops, instead of a 4 s zombie
+    /// reservation. At the age boundary, the loss reserves.
     #[test]
     fn short_lived_track_frees_immediately_instead_of_reserving() {
-        struct SharedInference(std::sync::Arc<std::sync::Mutex<Vec<Tensor>>>);
-        impl ModelInference for SharedInference {
-            fn run(
-                &mut self,
-                _input: &Tensor,
-                out: &mut Vec<Tensor>,
-            ) -> Result<(), InferenceError> {
-                out.clone_from(&self.0.lock().expect("outputs lock"));
-                Ok(())
-            }
-        }
-        let landmark = std::sync::Arc::new(std::sync::Mutex::new(confident_landmark_outputs()));
-        let mut p = PosePipeline::new(
-            Box::new(StaticInference {
-                outputs: hot_person_detector_outputs(),
-            }),
-            Box::new(SharedInference(std::sync::Arc::clone(&landmark))),
-            PoseConfig::default(),
-        );
-        let frame = solid_frame();
-        p.process(&frame, Duration::from_millis(0), false, None)
-            .expect("acquire");
-        p.process(&frame, Duration::from_millis(100), false, None)
-            .expect("track");
-        assert_eq!(p.slots[0].phase, SlotPhase::Active);
-
-        // The walker leaves 200 ms into the visit (well under the 600 ms
-        // RESERVE_MIN_ACTIVE): presence collapses, and the slot must be FREE,
-        // not Reserved.
-        *landmark.lock().expect("outputs lock") = low_confidence_landmark_outputs();
-        p.process(&frame, Duration::from_millis(200), false, None)
-            .expect("loss frame");
+        let mut young = SlotTrack::new();
+        young.phase = SlotPhase::Active;
+        young.active_since = Duration::ZERO;
+        young.frame.present = true;
+        young.lose(Duration::from_millis(200));
         assert_eq!(
-            p.slots[0].phase,
+            young.phase,
             SlotPhase::Free,
             "young track must free, not reserve"
         );
-        assert!(!p.slot_frames()[0].present);
+        assert!(!young.frame.present, "released slot reads absent");
+
+        let mut mature = SlotTrack::new();
+        mature.phase = SlotPhase::Active;
+        mature.active_since = Duration::ZERO;
+        mature.frame.present = true;
+        mature.lose(RESERVE_MIN_ACTIVE);
+        assert_eq!(
+            mature.phase,
+            SlotPhase::Reserved,
+            "at the age boundary the loss takes the reserved path"
+        );
     }
 
-    /// The complement: a track older than RESERVE_MIN_ACTIVE still takes the
+    /// The untrackable-crop branch is NOT a confirmed loss: a young track
+    /// whose carried ROI collapses reserves for [`YOUNG_EDGE_RESERVE`] (long
+    /// enough for the immediate re-scan to re-bind the same person) rather
+    /// than hard-freeing — and that window must actually cover a detector
+    /// re-scan cycle, else the contract is vacuous.
+    #[test]
+    fn young_edge_reserve_covers_a_rescan_cycle() {
+        assert!(
+            YOUNG_EDGE_RESERVE > DETECT_SCAN_INTERVAL,
+            "young edge reservation ({YOUNG_EDGE_RESERVE:?}) must outlast a \
+             discovery-scan interval ({DETECT_SCAN_INTERVAL:?}) so the re-scan \
+             can re-acquire into the reserved slot"
+        );
+        assert!(
+            YOUNG_EDGE_RESERVE < SLOT_RESERVE,
+            "the whole point is a shorter window than the mature reservation"
+        );
+    }
+
+    /// The complement: a track older than `RESERVE_MIN_ACTIVE` still takes the
     /// full Reserved path on loss (the mask channel may be mid-fade on the
     /// main thread), and a Reserved→Active re-acquisition keeps the original
     /// age — the same person's later loss still reserves.
@@ -1922,8 +1943,8 @@ mod tests {
     }
 
     /// The cross-thread invariant behind the fast-free: the worker's
-    /// RESERVE_MIN_ACTIVE must sit strictly below the main thread's
-    /// ADMIT_DWELL (with jitter margin), so a track that could have ignited
+    /// `RESERVE_MIN_ACTIVE` must sit strictly below the main thread's
+    /// `ADMIT_DWELL` (with jitter margin), so a track that could have ignited
     /// a fade always earns the reservation that protects that fade.
     #[test]
     fn reserve_min_active_sits_under_the_admission_dwell() {

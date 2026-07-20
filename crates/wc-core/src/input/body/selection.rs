@@ -394,7 +394,7 @@ mod tests {
         );
     }
 
-    /// The motion weight spans exactly [MOTION_FLOOR, 1]: a still body keeps
+    /// The motion weight spans exactly [`MOTION_FLOOR`, 1]: a still body keeps
     /// the floor (never zero — a lone still person must still win over
     /// nobody), a fast one carries full weight, and the ramp is monotone.
     #[test]

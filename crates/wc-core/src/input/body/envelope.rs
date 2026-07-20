@@ -340,7 +340,7 @@ mod tests {
         );
     }
 
-    /// A brief 200 ms dropout mid-performance is bridged by PRESENCE_HOLD and
+    /// A brief 200 ms dropout mid-performance is bridged by `PRESENCE_HOLD` and
     /// must NOT re-arm the dwell: the fade keeps attacking straight through.
     #[test]
     fn held_dropout_does_not_rearm_dwell() {

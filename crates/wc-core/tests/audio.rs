@@ -18,7 +18,9 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use wc_core::audio::{
     command::{AudioCommand, AudioMessage},
-    device::{drain_device_topology, AvailableAudioDevices, BoundOutputDevice, DefaultOutputDevice},
+    device::{
+        drain_device_topology, AvailableAudioDevices, BoundOutputDevice, DefaultOutputDevice,
+    },
     ring::{AudioCommandSender, AudioMessageReceiver, RING_CAPACITY},
     state::{pump_audio_messages, AudioState, AudioStatus},
     supervisor::AudioSupervisor,
