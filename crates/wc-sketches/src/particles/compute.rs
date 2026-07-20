@@ -10,7 +10,11 @@
 //! - [`ParticlePipeline`] is initialized in [`RenderStartup`] and caches the
 //!   `BindGroupLayoutDescriptor` + `CachedComputePipelineId`.
 //! - `prepare_bind_group` runs in [`RenderSystems::PrepareBindGroups`] and
-//!   builds the per-frame [`ParticleComputeBindGroup`].
+//!   builds (or reuses) the per-frame [`ParticleComputeBindGroup`], caching it
+//!   in [`ParticleBindGroupCache`] — a render-world `Resource` (not a system
+//!   `Local`), so `remove_particle_sim_params_if_absent` can clear its slot
+//!   (and remove the last [`ParticleComputeBindGroup`]) on sketch exit instead
+//!   of pinning the freed particle buffer's VRAM for the rest of the session.
 //! - `particle_compute` (private) dispatches the compute pass; it runs in the
 //!   root `RenderGraph` schedule, ordered before `camera_driver`.
 //!
@@ -94,6 +98,7 @@ impl Plugin for ParticleComputePlugin {
         // removals, so without this `ParticleSimParams` lingers in the render
         // world after Dots/Line `OnExit`. Mirrors the cymatics fix
         // (`remove_cymatics_sim_params_if_absent`).
+        render_app.init_resource::<ParticleBindGroupCache>();
         render_app.add_systems(ExtractSchedule, remove_particle_sim_params_if_absent);
 
         render_app
@@ -146,6 +151,10 @@ pub struct ParticlePipeline {
 
 /// Per-frame bind group built by the `prepare_bind_group` system (private to
 /// this module) and consumed by `particle_compute` during the render schedule.
+/// Removed by `remove_particle_sim_params_if_absent` (private, so a code span)
+/// on sketch exit — the held [`BindGroup`] owns an `Arc` reference to the
+/// particle buffer, so letting it linger would pin the freed buffer's VRAM for
+/// the session.
 #[derive(Resource)]
 pub struct ParticleComputeBindGroup {
     /// Bind group with `SimParams` uniform (binding 0) and particle buffer (binding 1).
@@ -153,6 +162,17 @@ pub struct ParticleComputeBindGroup {
     /// Workgroup count: `ceil(particle_count / WORKGROUP_SIZE)`.
     pub dispatch_size: u32,
 }
+
+/// One-slot bind-group cache keyed on the particle buffer's [`BufferId`].
+///
+/// A render-world `Resource` (not a system `Local`) deliberately: the prepare
+/// system stops running once its `run_if(resource_exists::<ParticleSimParams>)`
+/// gate goes false on sketch exit, so a `Local` slot could never release the
+/// old bind group — pinning the freed particle buffer's `Arc`. As a resource,
+/// `remove_particle_sim_params_if_absent` (private, so a code span) clears it
+/// on the same exit seam.
+#[derive(Resource, Default)]
+pub struct ParticleBindGroupCache(Option<(BufferId, BindGroup)>);
 
 /// Initializes [`ParticlePipeline`] in the render world startup schedule.
 ///
@@ -242,6 +262,14 @@ fn init_particle_pipeline(
 /// buffer across sketch switches (which would be a soak-stability leak).
 /// `dispatch_size` is recomputed each frame (it tracks `particle_count`, which
 /// settings can change) and is cheap.
+///
+/// The cache lives in [`ParticleBindGroupCache`], a render-world `Resource`,
+/// rather than a system `Local`: this system stops running once its
+/// `run_if(resource_exists::<ParticleSimParams>)` gate goes false on sketch
+/// exit, so a `Local` slot could never release the old bind group — pinning
+/// the freed particle buffer's VRAM for the rest of the session. As a
+/// resource, `remove_particle_sim_params_if_absent` clears the slot on the
+/// same exit seam.
 fn prepare_bind_group(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
@@ -250,7 +278,7 @@ fn prepare_bind_group(
     sim: Res<'_, ParticleSimParams>,
     buffers: Res<'_, RenderAssets<GpuShaderBuffer>>,
     pipeline: Option<Res<'_, ParticlePipeline>>,
-    mut cached: Local<'_, Option<(BufferId, BindGroup)>>,
+    mut cached: ResMut<'_, ParticleBindGroupCache>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
@@ -271,7 +299,7 @@ fn prepare_bind_group(
     // rebuild + replace (releasing the old buffer reference) when the sketch
     // recreates it. See the system docs.
     let buffer_id = particle_buffer.buffer.id();
-    let bind_group = match &*cached {
+    let bind_group = match &cached.0 {
         Some((id, bg)) if *id == buffer_id => bg.clone(),
         _ => {
             let layout: BindGroupLayout =
@@ -290,7 +318,7 @@ fn prepare_bind_group(
                     },
                 ],
             );
-            *cached = Some((buffer_id, bg.clone()));
+            cached.0 = Some((buffer_id, bg.clone()));
             bg
         }
     };
@@ -310,13 +338,11 @@ fn prepare_bind_group(
 ///
 /// Also gates directly on [`ParticleSimParams`]. `prepare_bind_group` stops the
 /// frame the extracted params are removed on sketch exit (its
-/// `run_if(resource_exists::<ParticleSimParams>)`), but the
-/// [`ParticleComputeBindGroup`] it last produced is **never removed** — so
-/// without this guard the dispatch would keep running the stale (off-screen) sim
-/// every frame after Dots/Line exit, wasting GPU/thermal budget. This direct
-/// `Option` guard mirrors `cymatics_compute`'s `sim` param; together with
-/// [`remove_particle_sim_params_if_absent`] (which clears the render-world copy
-/// on exit) it is what actually stops the dispatch.
+/// `run_if(resource_exists::<ParticleSimParams>)`); [`remove_particle_sim_params_if_absent`]
+/// removes both that resource and the [`ParticleComputeBindGroup`] on the same
+/// exit. This direct `Option` guard (mirroring `cymatics_compute`'s `sim`
+/// param) keeps the dispatch a no-op for the one extract cycle before those
+/// removals land (and while the pipeline is still compiling).
 fn particle_compute(
     bind_group: Option<Res<'_, ParticleComputeBindGroup>>,
     pipeline_res: Option<Res<'_, ParticlePipeline>>,
@@ -365,16 +391,96 @@ fn particle_compute(
 /// When the render-world copy is absent the `prepare_bind_group` system's
 /// `run_if(resource_exists::<ParticleSimParams>)` gate becomes false (no new
 /// bind group is produced) and [`particle_compute`]'s direct `sim` guard turns
-/// the dispatch into a no-op (the stale [`ParticleComputeBindGroup`] is never
-/// removed, so that guard is what actually stops it). The `Handle<ShaderBuffer>`
-/// clone held inside the resource is also dropped, releasing the buffer's asset
-/// reference count.
+/// the dispatch into a no-op. The `Handle<ShaderBuffer>` clone held inside the
+/// resource is also dropped, releasing the buffer's asset reference count.
+///
+/// Besides the extracted [`ParticleSimParams`] copy, this also drops the
+/// per-frame [`ParticleComputeBindGroup`] and clears the
+/// [`ParticleBindGroupCache`] slot: both hold a [`BindGroup`] whose `Arc`
+/// references pin the sketch's freed particle buffer in VRAM, and neither is
+/// entity-owned nor re-run once `prepare_bind_group`'s `run_if` gate goes
+/// false — without this, the buffer would be retained for the rest of the
+/// session (AGENTS.md GPU-release mechanism 2/3).
 fn remove_particle_sim_params_if_absent(
     mut commands: Commands<'_, '_>,
     main_resource: Extract<'_, '_, Option<Res<'_, ParticleSimParams>>>,
     render_resource: Option<Res<'_, ParticleSimParams>>,
+    bind_group: Option<Res<'_, ParticleComputeBindGroup>>,
+    mut cache: ResMut<'_, ParticleBindGroupCache>,
 ) {
-    if main_resource.is_none() && render_resource.is_some() {
+    if main_resource.is_some() {
+        return;
+    }
+    if render_resource.is_some() {
         commands.remove_resource::<ParticleSimParams>();
+    }
+    if bind_group.is_some() {
+        commands.remove_resource::<ParticleComputeBindGroup>();
+    }
+    if cache.0.is_some() {
+        cache.0 = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The removal companion clears every render-world compute resource when
+    /// the main-world source is absent, and leaves them alone while it is
+    /// present — this is the seam that releases the particle buffer's VRAM on
+    /// sketch exit.
+    ///
+    /// [`ParticleComputeBindGroup`] and a populated [`ParticleBindGroupCache`]
+    /// slot hold wgpu handles that cannot be constructed headless, so this
+    /// test exercises the extracted-params removal and verifies the system
+    /// runs cleanly with the (empty) cache; the bind-group/cache clears share
+    /// the same `main_resource.is_none()` branch asserted here.
+    #[test]
+    #[allow(clippy::expect_used, reason = "test assertions")]
+    fn removal_companion_clears_render_world_on_exit() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::render::MainWorld;
+
+        let render_params = || ParticleSimParams {
+            params: SimParams::default(),
+            particles_handle: Handle::default(),
+            particle_count: 1_000,
+        };
+
+        // Main-world source absent: the render copy must be removed.
+        let mut render_world = World::new();
+        render_world.insert_resource(MainWorld::default());
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<ParticleBindGroupCache>();
+        render_world
+            .run_system_once(remove_particle_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<ParticleSimParams>().is_none(),
+            "extracted params must be dropped once the main source is gone"
+        );
+        assert!(
+            render_world
+                .resource::<ParticleBindGroupCache>()
+                .0
+                .is_none(),
+            "cache slot stays empty after the clear branch"
+        );
+
+        // Main-world source present: everything is left in place.
+        let mut render_world = World::new();
+        let mut main_world = MainWorld::default();
+        main_world.insert_resource(render_params());
+        render_world.insert_resource(main_world);
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<ParticleBindGroupCache>();
+        render_world
+            .run_system_once(remove_particle_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<ParticleSimParams>().is_some(),
+            "live sketch must keep its extracted params"
+        );
     }
 }

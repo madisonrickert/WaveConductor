@@ -22,9 +22,13 @@
 //!    buffers (the 800-byte `SimParams` and the `MAX_LEVELS`-slot per-level
 //!    array) **once** — never per frame.
 //! 4. `prepare_flame_bind_groups` ([`RenderSystems::PrepareBindGroups`]) uploads
-//!    this frame's uniforms and builds (or reuses) the single bind group, caching
-//!    it keyed on the node storage buffer's id. `flame_compute` runs the per-level
-//!    dispatch loop in the root [`RenderGraph`] schedule before `camera_driver`.
+//!    this frame's uniforms and builds (or reuses) the single bind group, cached
+//!    in [`FlameBindGroupCache`] keyed on the node storage buffer's [`BufferId`]
+//!    (bounded by construction: one slot, replaced on change, and *cleared* by
+//!    the removal companion on sketch exit so the freed node buffer's `Arc` is
+//!    not pinned for the rest of the session). `flame_compute` runs the
+//!    per-level dispatch loop in the root [`RenderGraph`] schedule before
+//!    `camera_driver`.
 
 #![allow(
     clippy::as_conversions,
@@ -112,6 +116,7 @@ impl Plugin for FlameComputePlugin {
 
         // ExtractResourcePlugin does NOT propagate removals — manual companion
         // (the established landmine; see cymatics/compute/pipeline.rs).
+        render_app.init_resource::<FlameBindGroupCache>();
         render_app.add_systems(ExtractSchedule, remove_flame_sim_params_if_absent);
 
         render_app
@@ -148,6 +153,10 @@ struct FlamePipeline {
 }
 
 /// Per-frame bind group + per-level dispatch dims, consumed by [`flame_compute`].
+/// Removed by `remove_flame_sim_params_if_absent` (private, so a code span) on
+/// sketch exit — the held [`BindGroup`] owns an `Arc` reference to the node
+/// buffer, so letting it linger would pin the freed buffer's VRAM for the
+/// session.
 #[derive(Resource)]
 struct FlameComputeBindGroups {
     /// Bind group: sim uniform (0), node storage buffer (1), level uniform (2,
@@ -160,6 +169,17 @@ struct FlameComputeBindGroups {
     /// slot count) in `prepare_flame_bind_groups`. `0` freezes the fractal.
     level_count: u32,
 }
+
+/// One-slot bind-group cache keyed on the node storage buffer's [`BufferId`].
+///
+/// A render-world `Resource` (not a system `Local`) deliberately: the prepare
+/// system stops running once its `run_if(resource_exists::<FlameSimParams>)`
+/// gate goes false on sketch exit, so a `Local` slot could never release the
+/// old bind group — pinning the freed node buffer's `Arc`. As a resource,
+/// `remove_flame_sim_params_if_absent` (private, so a code span) clears it on
+/// the same exit seam.
+#[derive(Resource, Default)]
+struct FlameBindGroupCache(Option<(BufferId, BindGroup)>);
 
 /// Initialises [`FlamePipeline`] in the render-world startup schedule.
 ///
@@ -275,6 +295,13 @@ fn init_flame_pipeline(
 /// cache keys on the node buffer's [`BufferId`]: when it changes the entry is
 /// replaced, dropping the old bind group (releasing its reference to the freed
 /// buffer) so no stale buffer is retained across a re-entry.
+///
+/// The cache lives in [`FlameBindGroupCache`], a render-world `Resource`,
+/// rather than a system `Local`: this system stops running once its
+/// `run_if(resource_exists::<FlameSimParams>)` gate goes false on sketch exit,
+/// so a `Local` slot could never release the old bind group — pinning the
+/// freed node buffer's VRAM for the rest of the session. As a resource,
+/// `remove_flame_sim_params_if_absent` clears the slot on the same exit seam.
 fn prepare_flame_bind_groups(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
@@ -283,7 +310,7 @@ fn prepare_flame_bind_groups(
     sim: Res<'_, FlameSimParams>,
     buffers: Res<'_, RenderAssets<GpuShaderBuffer>>,
     pipeline: Option<Res<'_, FlamePipeline>>,
-    mut cached: Local<'_, Option<(BufferId, BindGroup)>>,
+    mut cached: ResMut<'_, FlameBindGroupCache>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
@@ -329,7 +356,7 @@ fn prepare_flame_bind_groups(
     // replace (releasing the old buffer reference) when the buffer is swapped,
     // which now only happens on sketch re-entry (a fresh `spawn_flame` alloc).
     let buffer_id = gpu_nodes.buffer.id();
-    let bind_group = match &*cached {
+    let bind_group = match &cached.0 {
         Some((id, bg)) if *id == buffer_id => bg.clone(),
         _ => {
             let layout: BindGroupLayout =
@@ -359,7 +386,7 @@ fn prepare_flame_bind_groups(
                     },
                 ],
             );
-            *cached = Some((buffer_id, bg.clone()));
+            cached.0 = Some((buffer_id, bg.clone()));
             bg
         }
     };
@@ -386,6 +413,12 @@ fn prepare_flame_bind_groups(
 /// no-op while the bind groups, pipeline, or sim params are absent (sketch
 /// inactive), the pipeline is still compiling, or `level_count == 0` (Idle
 /// freeze / no work).
+///
+/// Gates directly on [`FlameSimParams`] (mirroring `particle_compute` /
+/// `cymatics_compute`). [`remove_flame_sim_params_if_absent`] removes both
+/// that resource and [`FlameComputeBindGroups`] on `OnExit`; the `Option`
+/// guards here keep the dispatch a no-op for the one extract cycle before
+/// those removals land (and while the pipeline is still compiling).
 fn flame_compute(
     bind_groups: Option<Res<'_, FlameComputeBindGroups>>,
     pipeline_res: Option<Res<'_, FlamePipeline>>,
@@ -444,13 +477,32 @@ fn flame_compute(
 /// This system — added to the render sub-app's [`ExtractSchedule`] alongside the
 /// `ExtractResourcePlugin` — fills that gap, mirroring the identical fix in
 /// `cymatics` and `particles`.
+///
+/// Besides the extracted [`FlameSimParams`] copy, this also drops the
+/// per-frame [`FlameComputeBindGroups`] and clears the [`FlameBindGroupCache`]
+/// slot: both hold a [`BindGroup`] whose `Arc` references pin the sketch's
+/// freed node buffer in VRAM, and neither is entity-owned nor re-run once
+/// `prepare_flame_bind_groups`'s `run_if` gate goes false — without this, the
+/// buffer would be retained for the rest of the session (AGENTS.md
+/// GPU-release mechanism 2/3).
 fn remove_flame_sim_params_if_absent(
     mut commands: Commands<'_, '_>,
     main_resource: Extract<'_, '_, Option<Res<'_, FlameSimParams>>>,
     render_resource: Option<Res<'_, FlameSimParams>>,
+    bind_groups: Option<Res<'_, FlameComputeBindGroups>>,
+    mut cache: ResMut<'_, FlameBindGroupCache>,
 ) {
-    if main_resource.is_none() && render_resource.is_some() {
+    if main_resource.is_some() {
+        return;
+    }
+    if render_resource.is_some() {
         commands.remove_resource::<FlameSimParams>();
+    }
+    if bind_groups.is_some() {
+        commands.remove_resource::<FlameComputeBindGroups>();
+    }
+    if cache.0.is_some() {
+        cache.0 = None;
     }
 }
 
@@ -498,5 +550,62 @@ mod tests {
         assert_eq!(256_u32.div_ceil(WORKGROUP_SIZE), 1);
         // 257 nodes / 256 = 2 workgroups (last covers 1 node).
         assert_eq!(257_u32.div_ceil(WORKGROUP_SIZE), 2);
+    }
+
+    /// The removal companion clears every render-world compute resource when
+    /// the main-world source is absent, and leaves them alone while it is
+    /// present — this is the seam that releases the node buffer's VRAM on
+    /// sketch exit.
+    ///
+    /// [`FlameComputeBindGroups`] and a populated [`FlameBindGroupCache`] slot
+    /// hold wgpu handles that cannot be constructed headless, so this test
+    /// exercises the extracted-params removal and verifies the system runs
+    /// cleanly with the (empty) cache; the bind-group/cache clears share the
+    /// same `main_resource.is_none()` branch asserted here.
+    #[test]
+    #[allow(clippy::expect_used, reason = "test assertions")]
+    fn removal_companion_clears_render_world_on_exit() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::render::MainWorld;
+        use bytemuck::Zeroable;
+
+        let render_params = || FlameSimParams {
+            params: FlameSimParamsGpu::zeroed(),
+            levels: [super::super::sim_params::FlameLevelParamsGpu::zeroed(); MAX_LEVELS],
+            level_count: 0,
+            nodes: Handle::default(),
+        };
+
+        // Main-world source absent: the render copy must be removed.
+        let mut render_world = World::new();
+        render_world.insert_resource(MainWorld::default());
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<FlameBindGroupCache>();
+        render_world
+            .run_system_once(remove_flame_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<FlameSimParams>().is_none(),
+            "extracted params must be dropped once the main source is gone"
+        );
+        assert!(
+            render_world.resource::<FlameBindGroupCache>().0.is_none(),
+            "cache slot stays empty after the clear branch"
+        );
+
+        // Main-world source present: everything is left in place.
+        let mut render_world = World::new();
+        let mut main_world = MainWorld::default();
+        main_world.insert_resource(render_params());
+        render_world.insert_resource(main_world);
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<FlameBindGroupCache>();
+        render_world
+            .run_system_once(remove_flame_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<FlameSimParams>().is_some(),
+            "live sketch must keep its extracted params"
+        );
     }
 }

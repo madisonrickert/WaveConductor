@@ -16,8 +16,11 @@
 //!    per-iteration array) **once** — never per frame.
 //! 3. `prepare_cymatics_bind_groups` ([`RenderSystems::PrepareBindGroups`])
 //!    uploads this frame's uniforms and builds the **two** bind groups — `ab`
-//!    (reads A, writes B) and `ba` (reads B, writes A) — caching them across
-//!    frames keyed on the ping-pong texture views.
+//!    (reads A, writes B) and `ba` (reads B, writes A) — cached in
+//!    [`CymaticsBindGroupCache`] keyed on the ping-pong texture views' ids
+//!    (bounded by construction: one slot, replaced on change, and *cleared* by
+//!    the removal companion on sketch exit so the freed A/B textures' `Arc`s
+//!    are not pinned for the rest of the session).
 //! 4. `cymatics_compute` runs in the root [`RenderGraph`] schedule before
 //!    `camera_driver`, so the field is current before the 2D pass samples it.
 //!    It dispatches the kernel `iterations` times, alternating `ab`/`ba` and
@@ -136,6 +139,7 @@ impl Plugin for CymaticsComputePlugin {
         // `cymatics_compute`'s `run_if(resource_exists::<CymaticsSimParams>)` to
         // stay true and keep dispatching the N-sub-step compute pass on whatever
         // sketch is now showing — wasting GPU and thermal budget.
+        render_app.init_resource::<CymaticsBindGroupCache>();
         render_app.add_systems(ExtractSchedule, remove_cymatics_sim_params_if_absent);
 
         render_app
@@ -172,6 +176,10 @@ struct CymaticsPipeline {
 }
 
 /// Per-frame bind groups + dispatch dims, consumed by [`cymatics_compute`].
+/// Removed by `remove_cymatics_sim_params_if_absent` (private, so a code
+/// span) on sketch exit — the held `ab`/`ba` [`BindGroup`]s each own an `Arc`
+/// reference to the ping-pong A/B textures, so letting them linger would pin
+/// the freed textures' VRAM for the session.
 #[derive(Resource)]
 struct CymaticsComputeBindGroups {
     /// Reads A, writes B — used on even sub-steps.
@@ -186,6 +194,17 @@ struct CymaticsComputeBindGroups {
     /// `iter_buffer` slot count) in `prepare_cymatics_bind_groups`.
     iterations: u32,
 }
+
+/// One-slot bind-group cache keyed on the `(A view, B view)` id pair.
+///
+/// A render-world `Resource` (not a system `Local`) deliberately: the prepare
+/// system stops running once its `run_if(resource_exists::<CymaticsSimParams>)`
+/// gate goes false on sketch exit, so a `Local` slot could never release the
+/// old `ab`/`ba` bind groups — pinning the freed A/B textures' `Arc`s. As a
+/// resource, `remove_cymatics_sim_params_if_absent` (private, so a code span)
+/// clears it on the same exit seam.
+#[derive(Resource, Default)]
+struct CymaticsBindGroupCache(Option<CachedBindGroups>);
 
 /// Initialises [`CymaticsPipeline`] in the render-world startup schedule.
 ///
@@ -317,6 +336,14 @@ fn init_cymatics_pipeline(
 /// (mirroring `hand_mesh::bone_composite`): when a view id changes the entry is
 /// replaced, dropping the old bind groups (releasing their references to the
 /// freed texture) so no stale view is retained across a re-entry.
+///
+/// The cache lives in [`CymaticsBindGroupCache`], a render-world `Resource`,
+/// rather than a system `Local`: this system stops running once its
+/// `run_if(resource_exists::<CymaticsSimParams>)` gate goes false on sketch
+/// exit, so a `Local` slot could never release the old bind groups — pinning
+/// the freed A/B textures' VRAM for the rest of the session. As a resource,
+/// `remove_cymatics_sim_params_if_absent` clears the slot on the same exit
+/// seam.
 fn prepare_cymatics_bind_groups(
     mut commands: Commands<'_, '_>,
     render_device: Res<'_, RenderDevice>,
@@ -325,7 +352,7 @@ fn prepare_cymatics_bind_groups(
     sim: Res<'_, CymaticsSimParams>,
     images: Res<'_, RenderAssets<GpuImage>>,
     pipeline: Option<Res<'_, CymaticsPipeline>>,
-    mut cached: Local<'_, Option<CachedBindGroups>>,
+    mut cached: ResMut<'_, CymaticsBindGroupCache>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
@@ -395,7 +422,7 @@ fn prepare_cymatics_bind_groups(
 
     // Rebuild the bind groups only on a texture-view change; reuse otherwise.
     let key = (gpu_a.texture_view.id(), gpu_b.texture_view.id());
-    let (ab, ba) = match &*cached {
+    let (ab, ba) = match &cached.0 {
         Some((cached_key, ab, ba)) if *cached_key == key => (ab.clone(), ba.clone()),
         _ => {
             let layout: BindGroupLayout =
@@ -433,7 +460,7 @@ fn prepare_cymatics_bind_groups(
             };
             let ab = make(gpu_a, gpu_b);
             let ba = make(gpu_b, gpu_a);
-            *cached = Some((key, ab.clone(), ba.clone()));
+            cached.0 = Some((key, ab.clone(), ba.clone()));
             (ab, ba)
         }
     };
@@ -465,6 +492,12 @@ fn prepare_cymatics_bind_groups(
 /// Runs in the root [`RenderGraph`] schedule before `camera_driver`. A clean
 /// no-op while the bind groups, pipeline, or sim params are absent (sketch
 /// inactive) or the pipeline is still compiling.
+///
+/// Gates directly on [`CymaticsSimParams`] (mirroring `particle_compute` /
+/// `flame_compute`). [`remove_cymatics_sim_params_if_absent`] removes both
+/// that resource and [`CymaticsComputeBindGroups`] on `OnExit`; the `Option`
+/// guards here keep the dispatch a no-op for the one extract cycle before
+/// those removals land (and while the pipeline is still compiling).
 fn cymatics_compute(
     bind_groups: Option<Res<'_, CymaticsComputeBindGroups>>,
     pipeline_res: Option<Res<'_, CymaticsPipeline>>,
@@ -550,19 +583,34 @@ fn cymatics_compute(
 /// all N-sub-step dispatches. The `Handle<Image>` clones of A/B held inside the
 /// resource are also dropped, releasing the asset reference counts.
 ///
-/// Note: the bind-group cache (a render-world `Local` in
-/// `prepare_cymatics_bind_groups`) still holds `TextureView` clones of A/B after
-/// exit; it is gated on the resource so it stops running and is not actively
-/// cleared. This pins ~12.5 MiB of A/B until sketch re-entry — an accepted F5
-/// item mirroring `hand_mesh::bone_composite`. This system addresses the
-/// thermal-budget issue (wasteful dispatch) but not that VRAM pin.
+/// Besides the extracted [`CymaticsSimParams`] copy, this also drops the
+/// per-frame [`CymaticsComputeBindGroups`] and clears the
+/// [`CymaticsBindGroupCache`] slot: both hold `ab`/`ba` [`BindGroup`]s whose
+/// `Arc` references pin the sketch's freed A/B ping-pong textures (~12.5 MiB)
+/// in VRAM, and neither is entity-owned nor re-run once
+/// `prepare_cymatics_bind_groups`'s `run_if` gate goes false — without this,
+/// the textures would be retained until sketch re-entry (AGENTS.md
+/// GPU-release mechanism 2/3). This mirrors the fix landed for
+/// `radiance::compute::pipeline`; `hand_mesh::bone_composite`'s equivalent
+/// cache is a separate, still-open item.
 fn remove_cymatics_sim_params_if_absent(
     mut commands: Commands<'_, '_>,
     main_resource: Extract<'_, '_, Option<Res<'_, CymaticsSimParams>>>,
     render_resource: Option<Res<'_, CymaticsSimParams>>,
+    bind_groups: Option<Res<'_, CymaticsComputeBindGroups>>,
+    mut cache: ResMut<'_, CymaticsBindGroupCache>,
 ) {
-    if main_resource.is_none() && render_resource.is_some() {
+    if main_resource.is_some() {
+        return;
+    }
+    if render_resource.is_some() {
         commands.remove_resource::<CymaticsSimParams>();
+    }
+    if bind_groups.is_some() {
+        commands.remove_resource::<CymaticsComputeBindGroups>();
+    }
+    if cache.0.is_some() {
+        cache.0 = None;
     }
 }
 
@@ -707,5 +755,73 @@ mod tests {
         // Non-multiple: 1023 cells / 8 = 128 tiles (last tile covers 7 cells).
         assert_eq!(1023_u32.div_ceil(WORKGROUP_SIZE), 128);
         assert_eq!(1_u32.div_ceil(WORKGROUP_SIZE), 1);
+    }
+
+    /// The removal companion clears every render-world compute resource when
+    /// the main-world source is absent, and leaves them alone while it is
+    /// present — this is the seam that releases the ping-pong A/B textures'
+    /// VRAM on sketch exit.
+    ///
+    /// [`CymaticsComputeBindGroups`] and a populated [`CymaticsBindGroupCache`]
+    /// slot hold wgpu handles that cannot be constructed headless, so this
+    /// test exercises the extracted-params removal and verifies the system
+    /// runs cleanly with the (empty) cache; the bind-group/cache clears share
+    /// the same `main_resource.is_none()` branch asserted here.
+    #[test]
+    #[allow(clippy::expect_used, reason = "test assertions")]
+    fn removal_companion_clears_render_world_on_exit() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::render::MainWorld;
+
+        let render_params = || CymaticsSimParams {
+            params: SimParamsGpu::default(),
+            phase_base: 0.0,
+            ramp_base: 0.0,
+            phase_dt: 0.0,
+            source_amplitude: 2.0,
+            iterations: 20,
+            ping_mode: 0,
+            ping_base: [0.0, 0.0],
+            ping_amp: [0.0, 0.0],
+            ping_duration: 0.0,
+            tex_a: Handle::default(),
+            tex_b: Handle::default(),
+            resolution: UVec2::new(512, 512),
+        };
+
+        // Main-world source absent: the render copy must be removed.
+        let mut render_world = World::new();
+        render_world.insert_resource(MainWorld::default());
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<CymaticsBindGroupCache>();
+        render_world
+            .run_system_once(remove_cymatics_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<CymaticsSimParams>().is_none(),
+            "extracted params must be dropped once the main source is gone"
+        );
+        assert!(
+            render_world
+                .resource::<CymaticsBindGroupCache>()
+                .0
+                .is_none(),
+            "cache slot stays empty after the clear branch"
+        );
+
+        // Main-world source present: everything is left in place.
+        let mut render_world = World::new();
+        let mut main_world = MainWorld::default();
+        main_world.insert_resource(render_params());
+        render_world.insert_resource(main_world);
+        render_world.insert_resource(render_params());
+        render_world.init_resource::<CymaticsBindGroupCache>();
+        render_world
+            .run_system_once(remove_cymatics_sim_params_if_absent)
+            .expect("companion runs");
+        assert!(
+            render_world.get_resource::<CymaticsSimParams>().is_some(),
+            "live sketch must keep its extracted params"
+        );
     }
 }
