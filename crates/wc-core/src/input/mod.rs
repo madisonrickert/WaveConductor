@@ -50,6 +50,14 @@ pub mod activation;
 #[cfg(feature = "body-tracking-mediapipe")]
 pub mod body;
 pub mod button;
+/// Live camera preview for the settings dock: a low-rate downscaled tap on
+/// the tracking workers' camera frames plus the toggle that gates it. Gated
+/// like [`capture`], whose `FrameSource` it decorates.
+#[cfg(any(
+    feature = "hand-tracking-mediapipe",
+    feature = "body-tracking-mediapipe"
+))]
+pub mod camera_preview;
 /// Shared webcam frame capture: the `FrameSource` trait, the platform
 /// backends (AVFoundation on macOS, nokhwa elsewhere), and the test
 /// `MockFrameSource`. Consumed by the MediaPipe hand provider and by the

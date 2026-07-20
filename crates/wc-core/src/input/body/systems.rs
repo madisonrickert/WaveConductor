@@ -497,13 +497,17 @@ fn start_worker(
 
 /// Open a real webcam source on the calling (worker) thread, or error. The
 /// same per-platform selection as the hand provider, gated on this
-/// modality's camera feature.
+/// modality's camera feature. The returned source is wrapped in a
+/// [`crate::input::camera_preview::PreviewTap`] so the settings dock's
+/// camera-preview toggle can observe the frames (a single atomic check per
+/// frame while the toggle is off).
 pub fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, CaptureError> {
     #[cfg(all(feature = "body-tracking-camera", target_os = "macos"))]
     {
         let source = crate::input::capture::AvfFrameSource::open(camera_index)?;
-        let boxed: Box<dyn FrameSource> = Box::new(source);
-        Ok(boxed)
+        Ok(crate::input::camera_preview::PreviewTap::wrap(Box::new(
+            source,
+        )))
     }
     #[cfg(all(feature = "body-tracking-camera", not(target_os = "macos")))]
     {
@@ -513,8 +517,9 @@ pub fn open_camera_source(camera_index: u32) -> Result<Box<dyn FrameSource>, Cap
         // RDP camera bus may be enumerated first). Falls back to `camera_index`
         // on any box with no matching camera, so non-OBSBot hosts are unchanged.
         let source = crate::input::capture::NokhwaFrameSource::open(camera_index, Some("OBSBOT"))?;
-        let boxed: Box<dyn FrameSource> = Box::new(source);
-        Ok(boxed)
+        Ok(crate::input::camera_preview::PreviewTap::wrap(Box::new(
+            source,
+        )))
     }
     #[cfg(not(feature = "body-tracking-camera"))]
     {

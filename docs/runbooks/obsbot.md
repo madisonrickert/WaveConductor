@@ -38,9 +38,56 @@ A settings toggle — **Camera → "Take control of OBSBOT camera (disable its
 on-device AI)"**, default ON, persisted under the `obsbot` storage key —
 releases/re-takes control live.
 
-Manual gimbal/zoom/FOV APIs (`ObsbotControl::set_gimbal_angle/-speed`,
-`gimbal_stop`, `set_zoom`, `set_fov`) exist for future choreography; no UI
-issues them today.
+## Manual framing controls (settings panel)
+
+The Display tab's **Camera** section (settings panel → DISPLAY) carries four
+framing controls, persisted with the `obsbot` settings:
+
+- **Gimbal pitch** — −45°..45° (the device accepts −90..90; the slider is
+  capped to the useful desk/kiosk range so slider travel isn't wasted on
+  ceiling/base angles).
+- **Gimbal yaw** — −90°..90° (device range −180..180, same rationale — a
+  desk-mounted camera never usefully points backwards).
+- **Zoom** — 1.0..2.0 absolute digital zoom.
+- **Field of view** — Wide86 / Medium78 / Narrow65 preset dropdown.
+
+Behavior:
+
+- **Live-apply, coalesced.** Slider changes are diffed against the last values
+  actually sent and forwarded to the worker at most every 100 ms,
+  latest-wins — a drag never queues stale intermediate positions behind the
+  SDK's blocking setters (`crates/wc-core/src/input/obsbot/framing.rs`).
+- **Gated on control.** The sliders are always editable (the
+  reflection-driven panel cannot disable individual rows), but commands are
+  only sent while the status is `InControl`; otherwise they are held and the
+  status line below the section says why (no camera detected / control
+  disabled / take-control failed).
+- **Framing is re-applied on every (re)acquisition of control.** The
+  take-control sequence recenters the gimbal and resets FOV/zoom (steps 3–4
+  above), so the moment the status enters `InControl` — app start, hotplug
+  re-detect, or the take-control toggle flipping back on — the stored framing
+  is re-sent in full. An installation that restarts comes back with the
+  operator's framing, not the factory center. (Resetting the stored settings
+  to the recentered defaults was considered and rejected: it would discard
+  the operator's framing on exactly the restart that matters.)
+
+A status line under the section shows the live device state (product, serial,
+firmware while in control; "No OBSBOT camera detected" otherwise).
+
+### Camera preview
+
+**Camera → "Camera preview"** (default OFF, storage key `camera_preview`)
+shows a ~320 px live view of the tracking camera inside the settings panel.
+It works with **any** webcam, not just an OBSBOT: it taps the frames the
+hand/body tracking worker is already capturing (so it only shows an image
+while tracking is running — enter a sketch first). While the toggle is off
+the workers skip all preview work (one atomic check per frame); while on,
+frames are downscaled and published at ≤10 Hz
+(`crates/wc-core/src/input/camera_preview.rs`).
+
+The manual APIs behind the sliders (`ObsbotControl::set_gimbal_angle/-speed`,
+`gimbal_stop`, `set_zoom`, `set_fov`) remain available for future
+choreography code.
 
 ## Code map
 

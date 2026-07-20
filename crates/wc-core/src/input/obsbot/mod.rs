@@ -39,14 +39,16 @@
 //!
 //! [`SketchActivity`]: crate::lifecycle::state::SketchActivity
 
+mod framing;
 pub mod platform;
+mod section;
 
 use bevy::prelude::*;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use wc_core_macros::SketchSettings;
 
-use crate::settings::RegisterSketchSettingsExt;
+use crate::settings::{RegisterDockSectionExt, RegisterSketchSettingsExt, SketchSettings};
 
 bitflags! {
     /// The take-control steps, as a bitmask of which steps **succeeded**.
@@ -107,8 +109,10 @@ pub enum ObsbotStatus {
 }
 
 /// Commands the Bevy side sends to the worker thread. The manual-control
-/// variants exist for future use (choreographed gimbal moves, operator
-/// panels); no UI issues them today.
+/// variants are issued by the settings panel's framing controls (see
+/// `framing::apply_framing_settings` — a code span, not a link, because the
+/// target is private and public docs may not link to it) and remain
+/// available to future choreography code via the [`ObsbotControl`] methods.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorkerCommand {
     /// Enable/disable app control at runtime (mirrors the settings toggle).
@@ -141,9 +145,14 @@ pub enum WorkerCommand {
 }
 
 /// Field-of-view presets, mirroring the SDK's `Device::FovType`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Doubles as a `ty = Enum` settings field on [`ObsbotSettings`]: unit
+/// variants only (the reflection-driven panel's contract), variant names are
+/// both the persisted TOML values and the dropdown display strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect, Serialize, Deserialize)]
 pub enum FovPreset {
     /// 86° — widest view, the factory default and the take-control choice.
+    #[default]
     Wide86,
     /// 78° — medium view.
     Medium78,
@@ -183,12 +192,78 @@ pub struct ObsbotSettings {
     )]
     #[serde(default = "default_take_control")]
     pub take_control: bool,
+
+    /// Manual gimbal pitch in degrees (up/down). The device accepts −90..90,
+    /// but the slider is deliberately capped at ±45°: past that a desk/kiosk
+    /// camera is staring at the ceiling or its own base, and the finer slider
+    /// travel over the useful range matters more than the unusable extremes.
+    /// Applied live (coalesced) while the app is in control of the camera;
+    /// see `framing::apply_framing_settings`.
+    #[setting(
+        default = 0.0_f32,
+        min = -45.0,
+        max = 45.0,
+        step = 1.0,
+        unit = "°",
+        category = User,
+        section = "Camera",
+        label = "Gimbal pitch"
+    )]
+    #[serde(default)]
+    pub gimbal_pitch: f32,
+
+    /// Manual gimbal yaw in degrees (left/right). The device accepts
+    /// −180..180; the slider is capped at ±90° for the same
+    /// useful-travel-over-mechanical-extremes reason as the pitch cap (a
+    /// wall- or desk-mounted camera never usefully points backwards).
+    #[setting(
+        default = 0.0_f32,
+        min = -90.0,
+        max = 90.0,
+        step = 1.0,
+        unit = "°",
+        category = User,
+        section = "Camera",
+        label = "Gimbal yaw"
+    )]
+    #[serde(default)]
+    pub gimbal_yaw: f32,
+
+    /// Absolute digital zoom, `1.0` (none) to `2.0` (the SDK's normalized
+    /// maximum for `cameraSetZoomAbsoluteR`).
+    #[setting(
+        default = 1.0_f32,
+        min = 1.0,
+        max = 2.0,
+        step = 0.05,
+        category = User,
+        section = "Camera",
+        label = "Zoom"
+    )]
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
+
+    /// Optical field-of-view preset (86° wide / 78° medium / 65° narrow).
+    #[setting(
+        default = FovPreset::Wide86,
+        ty = Enum,
+        category = User,
+        section = "Camera",
+        label = "Field of view"
+    )]
+    #[serde(default)]
+    pub fov: FovPreset,
 }
 
 /// Serde fallback so a settings file saved before this field existed loads
 /// with control enabled (the deployment default).
 fn default_take_control() -> bool {
     true
+}
+
+/// Serde fallback for [`ObsbotSettings::zoom`]: no digital zoom.
+fn default_zoom() -> f32 {
+    1.0
 }
 
 /// Bevy resource exposing the OBSBOT control status and the manual-control
@@ -249,18 +324,34 @@ impl ObsbotControl {
 /// Signal flow (see the module docs for the thread diagram): `Startup` spawns
 /// the platform worker (device discovery + take-control run there, off the
 /// Bevy thread); each `PreUpdate` the status drain mirrors worker updates
-/// into [`ObsbotControl`] and the settings watcher forwards
-/// [`ObsbotSettings::take_control`] changes to the worker. Worker shutdown —
-/// which restores the camera to its own behavior — happens when the resource
-/// drops with the `App`.
+/// into [`ObsbotControl`], the settings watcher forwards
+/// [`ObsbotSettings::take_control`] changes to the worker, and the framing
+/// watcher (`framing::apply_framing_settings`, chained after the drain so it
+/// sees this frame's status) coalesces gimbal/zoom/FOV settings changes into
+/// manual commands while the camera is under control. The custom dock section
+/// registered after the `obsbot` settings section shows the live device
+/// status in the panel. Worker shutdown — which restores the camera to its
+/// own behavior — happens when the resource drops with the `App`.
 pub struct ObsbotControlPlugin;
 
 impl Plugin for ObsbotControlPlugin {
     fn build(&self, app: &mut App) {
         app.register_sketch_settings::<ObsbotSettings>()
+            .register_type::<FovPreset>()
             .init_resource::<ObsbotControl>()
             .add_systems(Startup, start_worker)
-            .add_systems(PreUpdate, (drain_worker_status, apply_take_control_setting));
+            .add_systems(
+                PreUpdate,
+                (
+                    drain_worker_status,
+                    apply_take_control_setting,
+                    framing::apply_framing_settings,
+                )
+                    .chain(),
+            )
+            // Live camera status (product / serial / firmware, or "no camera")
+            // rendered directly under the reflected "Camera" section.
+            .register_dock_section(ObsbotSettings::STORAGE_KEY, section::render_status_section);
     }
 }
 
@@ -442,15 +533,34 @@ mod tests {
         assert!(parsed.take_control);
     }
 
-    /// Round-trip the toggle through the persisted TOML form.
+    /// Round-trip the full settings struct (toggle + framing) through the
+    /// persisted TOML form, including the enum-as-variant-name convention.
     #[test]
     fn settings_round_trip_through_toml() {
         let settings = ObsbotSettings {
             take_control: false,
+            gimbal_pitch: -12.0,
+            gimbal_yaw: 33.0,
+            zoom: 1.5,
+            fov: FovPreset::Narrow65,
         };
         let text = toml::to_string(&settings).expect("serialize");
         let back: ObsbotSettings = toml::from_str(&text).expect("parse back");
-        assert!(!back.take_control);
+        assert_eq!(back, settings);
+    }
+
+    /// A settings file persisted before the framing fields existed (only
+    /// `take_control`) must load with neutral framing defaults, not error.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "exact serde defaults, no arithmetic")]
+    fn pre_framing_settings_file_loads_neutral_framing() {
+        let parsed: ObsbotSettings =
+            toml::from_str("take_control = false").expect("old settings file loads");
+        assert!(!parsed.take_control);
+        assert_eq!(parsed.gimbal_pitch, 0.0);
+        assert_eq!(parsed.gimbal_yaw, 0.0);
+        assert_eq!(parsed.zoom, 1.0);
+        assert_eq!(parsed.fov, FovPreset::Wide86);
     }
 
     /// With no worker (the non-Windows facade, or pre-Startup), commands are

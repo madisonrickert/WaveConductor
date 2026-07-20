@@ -61,6 +61,14 @@ impl Plugin for CorePlugin {
         // (Windows-only device IO; documented no-op facade elsewhere).
         #[cfg(feature = "obsbot-camera-control")]
         app.add_plugins(input::obsbot::ObsbotControlPlugin);
+        // Live camera preview in the settings dock (works with any webcam —
+        // it taps the tracking workers' frames). Compiled whenever a
+        // camera-consuming modality is, matching input::capture's gate.
+        #[cfg(any(
+            feature = "hand-tracking-mediapipe",
+            feature = "body-tracking-mediapipe"
+        ))]
+        app.add_plugins(input::camera_preview::CameraPreviewPlugin);
         app.add_plugins(audio::AudioPlugin);
         app.add_plugins(settings::SettingsPlugin);
         // Frame-rate cap (restores GPU headroom; see the frame_limiter module

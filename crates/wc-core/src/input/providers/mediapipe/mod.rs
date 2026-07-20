@@ -482,7 +482,11 @@ fn refill_metrics(
 }
 
 /// Open a real webcam source on the calling (worker) thread, or error. Runs
-/// inside the worker so `!Send` camera backends never cross threads.
+/// inside the worker so `!Send` camera backends never cross threads. The
+/// returned source is wrapped in a
+/// [`crate::input::camera_preview::PreviewTap`] so the settings dock's
+/// camera-preview toggle can observe the frames (a single atomic check per
+/// frame while the toggle is off).
 fn open_camera_source(
     camera_index: u32,
     camera_name: Option<&str>,
@@ -493,14 +497,16 @@ fn open_camera_source(
         // concern (multiple MSMF sources on one box).
         let _ = camera_name;
         let source = capture::AvfFrameSource::open(camera_index)?;
-        let boxed: Box<dyn FrameSource> = Box::new(source);
-        Ok(boxed)
+        Ok(crate::input::camera_preview::PreviewTap::wrap(Box::new(
+            source,
+        )))
     }
     #[cfg(all(feature = "hand-tracking-mediapipe-camera", not(target_os = "macos")))]
     {
         let source = capture::NokhwaFrameSource::open(camera_index, camera_name)?;
-        let boxed: Box<dyn FrameSource> = Box::new(source);
-        Ok(boxed)
+        Ok(crate::input::camera_preview::PreviewTap::wrap(Box::new(
+            source,
+        )))
     }
     #[cfg(not(feature = "hand-tracking-mediapipe-camera"))]
     {

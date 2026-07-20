@@ -392,7 +392,12 @@ impl Worker {
         }
         let ret = call(self.dev);
         if ret == ffi::OBSBOT_OK {
-            info!("OBSBOT manual command '{what}': ok");
+            // debug!, not info!: the settings panel's framing sliders send
+            // coalesced commands at up to 10 Hz during a drag, and a
+            // per-command INFO line would flood the operator log (and the
+            // soak harness's app.log) with routine successes. Failures stay
+            // loud below.
+            bevy::log::debug!("OBSBOT manual command '{what}': ok");
         } else {
             warn!("OBSBOT manual command '{what}' failed ({ret})");
         }
@@ -550,5 +555,84 @@ mod tests {
                 "required steps (AI off + gestures off) did not all succeed: {taken:?}"
             );
         }
+    }
+
+    /// Hardware framing smoke — ignored by default (needs a real OBSBOT on
+    /// USB). Exercises the exact worker/command path the settings-panel
+    /// framing sliders use: spawn the production worker, wait for
+    /// `InControl`, then drive gimbal/zoom/FOV through [`WorkerCommand`]s.
+    /// Run with:
+    ///
+    /// ```text
+    /// cargo test -p wc-core --features obsbot-camera-control \
+    ///     obsbot_hardware_framing -- --ignored --nocapture
+    /// ```
+    ///
+    /// The camera should physically: tilt/pan to (+20°, +30°), zoom in,
+    /// narrow its FOV, then recenter — and restore AI/gestures on the clean
+    /// worker shutdown at the end (the `WorkerHandle` drop).
+    #[test]
+    #[ignore = "requires a plugged-in OBSBOT camera; run with -- --ignored --nocapture"]
+    fn obsbot_hardware_framing() {
+        use crate::input::obsbot::FovPreset;
+
+        let handle = spawn_worker(true).expect("worker thread spawns");
+        // Device enumeration is async (up to ~10 s incl. per-device init).
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut status = ObsbotStatus::NoDevice;
+        while Instant::now() < deadline {
+            while let Some(s) = handle.try_recv_status() {
+                status = s;
+            }
+            if matches!(status, ObsbotStatus::InControl { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        println!("worker status: {status:?}");
+        assert!(
+            matches!(status, ObsbotStatus::InControl { .. }),
+            "worker never reached InControl — is a camera plugged in?"
+        );
+
+        // The slider path: absolute gimbal angle, zoom, FOV. Each is a
+        // blocking SDK round-trip on the worker; give them time to land.
+        println!("gimbal -> pitch 20, yaw 30");
+        assert!(handle.send(WorkerCommand::SetGimbalAngle {
+            pitch: 20.0,
+            yaw: 30.0
+        }));
+        std::thread::sleep(Duration::from_secs(2));
+        println!("zoom -> 1.5");
+        assert!(handle.send(WorkerCommand::SetZoom(1.5)));
+        std::thread::sleep(Duration::from_secs(1));
+        println!("fov -> Narrow65");
+        assert!(handle.send(WorkerCommand::SetFov(FovPreset::Narrow65)));
+        std::thread::sleep(Duration::from_secs(1));
+        println!("fov -> Wide86, zoom -> 1.0, gimbal -> center");
+        assert!(handle.send(WorkerCommand::SetFov(FovPreset::Wide86)));
+        assert!(handle.send(WorkerCommand::SetZoom(1.0)));
+        assert!(handle.send(WorkerCommand::SetGimbalAngle {
+            pitch: 0.0,
+            yaw: 0.0
+        }));
+        std::thread::sleep(Duration::from_secs(2));
+
+        // No status degradation while manual commands were in flight.
+        let mut last = None;
+        while let Some(s) = handle.try_recv_status() {
+            last = Some(s);
+        }
+        if let Some(s) = last {
+            println!("final status: {s:?}");
+            assert!(
+                matches!(s, ObsbotStatus::InControl { .. }),
+                "manual commands must not degrade control: {s:?}"
+            );
+        }
+        // Dropping the handle sends Shutdown, releases control (AI/gestures
+        // restored), and joins — the restore-on-exit path under test.
+        drop(handle);
+        println!("worker shut down; camera restored");
     }
 }
