@@ -40,9 +40,47 @@ const MOMENTUM_DECAY: f32 = 0.95;
 /// geometric decay terminates, the settle-to-home gate reopens, and the idle
 /// veto (which tests against the same `1e-4`) releases.
 const MOMENTUM_EPSILON: f32 = 1e-4;
-/// Vertical field of view shared by [`FlameCamera::clip_from_view`] and the
-/// pan math in [`FlameCamera::pan_by_pixels`] (v4 camera: 60 degrees).
+/// The v4 camera's field of view (60 degrees). In landscape this is the
+/// vertical FOV exactly as in v4; [`contain_fovy`] widens the vertical FOV in
+/// portrait so this 60-degree cone always spans the window's *smaller*
+/// dimension. Shared by [`FlameCamera::clip_from_view`] and the pan math in
+/// [`FlameCamera::pan_by_pixels`].
 const FOVY: f32 = std::f32::consts::PI / 3.0;
+
+/// Effective vertical FOV that fits the v4 60-degree view cone to the
+/// window's **smaller** dimension (a "contain" fit).
+///
+/// `Mat4::perspective_rh` takes a *vertical* FOV and derives the horizontal
+/// one as `2·atan(tan(fovy/2)·aspect)`. With a fixed `FOVY` that is correct
+/// in landscape (the fractal is framed against the shorter, vertical axis)
+/// but collapses in portrait: at 9:16 the horizontal FOV shrinks to ~36°, so
+/// a fractal composed for a 60° cone is mostly cropped off the sides and the
+/// window reads as empty.
+///
+/// - `aspect >= 1` (landscape/square): vertical FOV = `FOVY`, byte-identical
+///   to the v4 projection — landscape rendering is unchanged.
+/// - `aspect < 1` (portrait): the vertical FOV widens to
+///   `2·atan(tan(FOVY/2) / aspect)`, which makes the *horizontal* FOV exactly
+///   `FOVY`. The 60° cone now spans the window width, so the fractal shows
+///   at the same scale relative to the smaller dimension as it does in
+///   landscape instead of being cropped.
+///
+/// Pure (no world access) so the aspect math is unit-testable; both
+/// [`FlameCamera::clip_from_view`] and the pan pixel→world mapping call it, so
+/// the grab metaphor's "content follows the hand ~1:1" stays exact in
+/// portrait too.
+#[must_use]
+pub fn contain_fovy(aspect: f32) -> f32 {
+    // `.max(1e-3)` guards a degenerate zero/negative aspect (a zero-sized
+    // window is already floored to 1 px by every caller, so this is defensive).
+    let aspect = aspect.max(1e-3);
+    if aspect >= 1.0 {
+        FOVY
+    } else {
+        // tan is well-defined here: FOVY/2 = 30° < 90°.
+        2.0 * ((FOVY * 0.5).tan() / aspect).atan()
+    }
+}
 /// Maximum distance the pan target may wander from the origin: keeps the
 /// fractal recoverable in-frame no matter how far a two-hand drag runs.
 const PAN_MAX_RADIUS: f32 = 2.0;
@@ -123,11 +161,15 @@ impl FlameCamera {
         view * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
     }
 
-    /// Perspective projection: fovy 60 deg, near 0.01, far 25 (v4 camera),
-    /// matching [`crate::flame::render::default_view_matrices`]'s projection.
+    /// Perspective projection: near 0.01, far 25 (v4 camera), with the
+    /// [`contain_fovy`] vertical FOV — 60 degrees in landscape (v4 parity),
+    /// widened in portrait so the 60-degree cone fits the window's smaller
+    /// dimension instead of cropping the fractal off the sides.
+    /// [`crate::flame::render::default_view_matrices`] delegates here so the
+    /// spawn placeholder uses the identical projection.
     #[must_use]
     pub fn clip_from_view(aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(FOVY, aspect, 0.01, 25.0)
+        Mat4::perspective_rh(contain_fovy(aspect), aspect, 0.01, 25.0)
     }
 
     /// Set the orbit radius, clamped to v4's `OrbitControls` bounds
@@ -143,9 +185,13 @@ impl FlameCamera {
     ///
     /// `world_per_pixel = 2 * distance * tan(fovy/2) / window_height` is the
     /// world-space width of one pixel at the target plane, so pan speed
-    /// matches apparent on-screen hand speed at any zoom. The target is
-    /// clamped to `PAN_MAX_RADIUS` so the fractal can always be recovered.
-    pub fn pan_by_pixels(&mut self, delta_px: Vec2, window_height: f32, sensitivity: f32) {
+    /// matches apparent on-screen hand speed at any zoom. `fovy` is the
+    /// [`contain_fovy`] the projection actually uses — with the fixed `FOVY`
+    /// the mapping would undershoot in portrait, where the effective FOV is
+    /// wider (equivalently: `2·d·tan(FOVY/2) / min(w, h)`, since the 60° cone
+    /// is fitted to the smaller dimension). The target is clamped to
+    /// `PAN_MAX_RADIUS` so the fractal can always be recovered.
+    pub fn pan_by_pixels(&mut self, delta_px: Vec2, window_size: Vec2, sensitivity: f32) {
         // Unit vector from target toward the eye (the spherical terms are
         // already normalized); forward is its negation.
         let toward_eye = Vec3::new(
@@ -159,7 +205,12 @@ impl FlameCamera {
         // stay well-conditioned.
         let right = forward.cross(Vec3::Y).normalize();
         let up = right.cross(forward);
-        let world_per_pixel = 2.0 * self.distance * (FOVY * 0.5).tan() / window_height.max(1.0);
+        // Same FOV the projection uses (contain-fit), so one pixel of hand
+        // motion maps to exactly one pixel of on-screen content motion in
+        // either orientation.
+        let h = window_size.y.max(1.0);
+        let fovy = contain_fovy(window_size.x.max(1.0) / h);
+        let world_per_pixel = 2.0 * self.distance * (fovy * 0.5).tan() / h;
         let motion = (-right * delta_px.x + up * delta_px.y) * world_per_pixel * sensitivity;
         self.target = (self.target + motion).clamp_length_max(PAN_MAX_RADIUS);
     }
@@ -282,7 +333,11 @@ pub fn update_flame_camera(
         // apparent on-screen speed at any zoom.
         if camera.pan_velocity != Vec2::ZERO {
             let step = camera.pan_velocity * dt * 60.0;
-            camera.pan_by_pixels(step, h, settings.hand_pan_sensitivity);
+            camera.pan_by_pixels(
+                step,
+                Vec2::new(window.width().max(1.0), h),
+                settings.hand_pan_sensitivity,
+            );
             camera.pan_velocity *= MOMENTUM_DECAY.powf(dt * 60.0);
             // Die at the pan clamp rather than grinding against it: once the
             // target is pinned to the `PAN_MAX_RADIUS` ball, further coast
@@ -351,6 +406,87 @@ pub fn update_flame_camera(
 #[allow(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    /// Landscape and square windows keep the v4 vertical FOV exactly — the
+    /// contain fit only engages below aspect 1, so landscape rendering is
+    /// unchanged by the portrait fix.
+    #[test]
+    fn contain_fovy_is_v4_fovy_in_landscape_and_square() {
+        for aspect in [16.0_f32 / 9.0, 21.0 / 9.0, 4.0 / 3.0, 1.0] {
+            assert!(
+                (contain_fovy(aspect) - FOVY).abs() < 1e-6,
+                "aspect {aspect} must keep the v4 60-degree fovy"
+            );
+        }
+    }
+
+    /// In portrait the *horizontal* FOV equals the v4 60-degree cone: the
+    /// half-width tangent `tan(fovy/2) * aspect` must equal `tan(FOVY/2)`,
+    /// i.e. the cone is fitted to the smaller (horizontal) dimension.
+    #[test]
+    fn contain_fovy_portrait_fits_cone_to_width() {
+        for aspect in [9.0_f32 / 16.0, 3.0 / 4.0, 0.3] {
+            let fovy = contain_fovy(aspect);
+            assert!(fovy > FOVY, "portrait must widen the vertical FOV");
+            assert!(fovy < std::f32::consts::PI, "fovy must stay < 180 deg");
+            let half_width_tan = (fovy * 0.5).tan() * aspect;
+            assert!(
+                (half_width_tan - (FOVY * 0.5).tan()).abs() < 1e-5,
+                "aspect {aspect}: horizontal FOV must equal the v4 60-degree cone"
+            );
+        }
+    }
+
+    /// Degenerate aspect inputs stay finite (defensive floor).
+    #[test]
+    fn contain_fovy_degenerate_aspect_is_finite() {
+        for aspect in [0.0_f32, -1.0, f32::MIN_POSITIVE] {
+            let fovy = contain_fovy(aspect);
+            assert!(fovy.is_finite() && fovy > 0.0 && fovy < std::f32::consts::PI);
+        }
+    }
+
+    /// The projection matrix uses the contain-fit fovy: at 9:16 the clip-space
+    /// x scale must equal the landscape y scale (60-degree cone on the width),
+    /// and at 16:9 the matrix is byte-identical to the fixed-fovy v4 one.
+    #[test]
+    fn clip_from_view_contains_cone_in_smaller_dimension() {
+        let landscape = FlameCamera::clip_from_view(16.0 / 9.0);
+        let v4 = Mat4::perspective_rh(FOVY, 16.0 / 9.0, 0.01, 25.0);
+        assert_eq!(
+            landscape, v4,
+            "landscape projection must be unchanged from v4"
+        );
+
+        let portrait = FlameCamera::clip_from_view(9.0 / 16.0);
+        // col(0).x is the x (horizontal) focal scale = 1 / (tan(fovy/2)·aspect);
+        // fitting the 60-degree cone to the width makes it 1 / tan(30 deg),
+        // which is the landscape *vertical* scale col(1).y.
+        assert!(
+            (portrait.x_axis.x - landscape.y_axis.y).abs() < 1e-5,
+            "portrait horizontal scale must equal the landscape vertical scale"
+        );
+    }
+
+    /// Pan pixel→world mapping tracks the contain-fit projection: in portrait
+    /// the same pixel delta at the same distance moves the target by
+    /// `height / width` times more world units (one hand pixel still equals
+    /// one content pixel on screen).
+    #[test]
+    fn pan_by_pixels_matches_portrait_projection() {
+        let mut landscape_cam = FlameCamera::default();
+        landscape_cam.pan_by_pixels(Vec2::new(10.0, 0.0), Vec2::new(1920.0, 1080.0), 1.0);
+        let mut portrait_cam = FlameCamera::default();
+        portrait_cam.pan_by_pixels(Vec2::new(10.0, 0.0), Vec2::new(1080.0, 1920.0), 1.0);
+        // world_per_pixel = 2·d·tan(FOVY/2)/min(w,h): identical min dimension
+        // (1080) ⇒ identical world motion for the same pixel delta.
+        assert!(
+            (portrait_cam.target.x - landscape_cam.target.x).abs() < 1e-6,
+            "same smaller dimension must give the same pan mapping ({} vs {})",
+            portrait_cam.target.x,
+            landscape_cam.target.x
+        );
+    }
 
     /// Default pose = v4 camera (0, 0.35, 0.7).
     #[test]
@@ -425,7 +561,7 @@ mod tests {
     #[test]
     fn pan_by_pixels_moves_target_left_when_hands_move_right() {
         let mut cam = FlameCamera::default(); // azimuth 0: eye on +Z, right = +X
-        cam.pan_by_pixels(Vec2::new(10.0, 0.0), 720.0, 1.0);
+        cam.pan_by_pixels(Vec2::new(10.0, 0.0), Vec2::new(1280.0, 720.0), 1.0);
         assert!(
             cam.target.x < 0.0,
             "target must move -X, got {}",
@@ -440,7 +576,7 @@ mod tests {
     #[test]
     fn pan_by_pixels_moves_target_up_when_hands_move_down() {
         let mut cam = FlameCamera::default();
-        cam.pan_by_pixels(Vec2::new(0.0, 10.0), 720.0, 1.0);
+        cam.pan_by_pixels(Vec2::new(0.0, 10.0), Vec2::new(1280.0, 720.0), 1.0);
         assert!(
             cam.target.y > 0.0,
             "target must gain +Y, got {}",
@@ -453,7 +589,7 @@ mod tests {
     fn pan_by_pixels_clamps_target_radius() {
         let mut cam = FlameCamera::default();
         for _ in 0..100 {
-            cam.pan_by_pixels(Vec2::new(500.0, 300.0), 720.0, 1.0);
+            cam.pan_by_pixels(Vec2::new(500.0, 300.0), Vec2::new(1280.0, 720.0), 1.0);
         }
         assert!(cam.target.length() <= PAN_MAX_RADIUS + 1e-4);
     }
@@ -462,7 +598,7 @@ mod tests {
     #[test]
     fn pan_by_pixels_sensitivity_zero_is_inert() {
         let mut cam = FlameCamera::default();
-        cam.pan_by_pixels(Vec2::new(50.0, 50.0), 720.0, 0.0);
+        cam.pan_by_pixels(Vec2::new(50.0, 50.0), Vec2::new(1280.0, 720.0), 0.0);
         assert_eq!(cam.target, Vec3::ZERO);
     }
 

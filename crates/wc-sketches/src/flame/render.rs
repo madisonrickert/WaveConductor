@@ -62,7 +62,9 @@ pub struct FlameMaterial {
     /// `view_from_world * model`. Model bakes v4's `pointCloud.rotateX(-PI/2)`.
     #[uniform(3)]
     pub view_from_model: Mat4,
-    /// Perspective projection: fovy 60 deg, near 0.01, far 25 (v4 camera).
+    /// Perspective projection ([`FlameCamera::clip_from_view`]): fovy 60 deg
+    /// in landscape (v4 camera), contain-fit widened in portrait; near 0.01,
+    /// far 25.
     #[uniform(4)]
     pub clip_from_view: Mat4,
     /// x: `focal_length` (camera distance), y: base point size px,
@@ -128,12 +130,16 @@ impl Material2d for FlameMaterial {
 /// `(0.0, 0.35, 0.7)` looking at the origin (up +Y). Returns
 /// `(view_from_model, clip_from_view)`:
 /// - `view_from_model = view * rotateX(-PI/2)` (bakes v4's `pointCloud.rotateX`).
-/// - `clip_from_view` = 60 deg fovy perspective, near 0.01, far 25 (v4 camera).
+/// - `clip_from_view` = [`FlameCamera::clip_from_view`]: 60 deg fovy
+///   perspective in landscape (v4 camera), contain-fit widened in portrait
+///   (see `systems::camera::contain_fovy`), near 0.01, far 25.
 #[must_use]
 pub fn default_view_matrices(aspect: f32) -> (Mat4, Mat4) {
     let view = Mat4::look_at_rh(Vec3::new(0.0, 0.35, 0.7), Vec3::ZERO, Vec3::Y);
     let view_from_model = view * Mat4::from_rotation_x(-FRAC_PI_2);
-    let clip_from_view = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.01, 25.0);
+    // Delegate so the one-frame spawn placeholder and the live orbit camera
+    // can never disagree about the projection (aspect handling included).
+    let clip_from_view = FlameCamera::clip_from_view(aspect);
     (view_from_model, clip_from_view)
 }
 

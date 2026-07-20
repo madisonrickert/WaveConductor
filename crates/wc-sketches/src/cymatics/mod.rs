@@ -96,7 +96,10 @@ pub struct CymaticsState {
     pub center: Vec2,
     /// Secondary wave centre, sim UV `[0, 1]`, top-left origin (Bevy-native).
     pub center2: Vec2,
-    /// Alive-mask radius (v4 `activeRadius`).
+    /// Alive-mask radius (v4 `activeRadius`), in window heights — the shader
+    /// measures it in a height-normalized frame so the disc renders circular
+    /// at any window aspect (vertically it covers the same span v4's raw-UV
+    /// radius did).
     pub active_radius: f32,
     /// Frequency control (v4 `numCycles`).
     pub num_cycles: f32,
@@ -508,20 +511,50 @@ fn init_cymatics_state(mut commands: Commands<'_, '_>, settings: Res<'_, Cymatic
     commands.insert_resource(warm_start_state(&settings));
 }
 
+/// Derive the sim grid size (texels) from the window size and the
+/// `vertical_resolution` setting: `vertical_resolution` texels tall ×
+/// `round(vertical_resolution · aspect)` texels wide, using the window aspect
+/// (v4's derivation).
+///
+/// The load-bearing property is that each texel covers a **square** region of
+/// the window (equal physical width and height, up to the ±0.5-texel
+/// rounding): square texels are what make the GPU wave propagation isotropic
+/// in physical pixels at any window aspect. The shader completes the picture
+/// by measuring its source/alive-mask distances in a height-normalized frame
+/// (see `assets/shaders/cymatics/simulate.wgsl`), so ripples and discs are
+/// circles on screen in both landscape and portrait.
+///
+/// Pure (no world access) so the aspect math is unit-testable; called by
+/// [`spawn_cymatics`] on every enter — including the silent reload that
+/// re-runs it after a `WindowResizeSettled`.
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "f32 setting → u32 texel grid: rounding then converting is intentional, and the \
+              `.max(1)` keeps the value non-negative before `u32::try_from`"
+)]
+fn derive_sim_grid(win: Vec2, vertical_resolution: f32) -> UVec2 {
+    let aspect = win.x / win.y;
+    // f32 settings → u32 texel grid: round, floor at 1, fall back to 480 if the
+    // (always non-negative) value somehow fails the conversion.
+    let vy = u32::try_from((vertical_resolution.round() as i64).max(1)).unwrap_or(480);
+    let vx = u32::try_from(((vertical_resolution * aspect).round() as i64).max(1)).unwrap_or(480);
+    UVec2::new(vx, vy)
+}
+
 /// `OnEnter(AppState::Cymatics)` — allocate the two ping-pong textures, spawn
 /// the fullscreen quad (sampling texture A), and insert the initial
 /// [`CymaticsSimParams`].
 ///
-/// The sim grid resolution follows v4: `vertical_resolution` texels tall ×
-/// `round(vertical_resolution · aspect)` texels wide, using the window aspect.
+/// The sim grid resolution comes from [`derive_sim_grid`] (v4's window-aspect
+/// derivation; square texels in window space).
 #[allow(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    reason = "settings are f32; rounding then converting to the u32 texel grid is intentional, \
-              the `.max(1)` keeps the value non-negative before `u32::try_from`, and \
+    reason = "the iterations setting is f32; rounding then converting to u32 is intentional, and \
               `MAX_ITERATIONS` (120) trivially fits the clamp bound's integer type"
 )]
 fn spawn_cymatics(
@@ -533,12 +566,7 @@ fn spawn_cymatics(
     window: Single<'_, '_, &Window>,
 ) {
     let win = Vec2::new(window.width().max(1.0), window.height().max(1.0));
-    let aspect = win.x / win.y;
-    // f32 settings → u32 texel grid: round, floor at 1, fall back to 480 if the
-    // (always non-negative) value somehow fails the conversion.
-    let vy = u32::try_from((settings.vertical_resolution.round() as i64).max(1)).unwrap_or(480);
-    let vx = u32::try_from(((settings.vertical_resolution * aspect).round() as i64).max(1))
-        .unwrap_or(480);
+    let UVec2 { x: vx, y: vy } = derive_sim_grid(win, settings.vertical_resolution);
     let textures = create_cymatics_textures(vx, vy, &mut images);
     let sim_resolution = Vec2::new(vx as f32, vy as f32);
 
@@ -800,6 +828,46 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use wc_core::sketch::SketchManifest;
+
+    /// `derive_sim_grid` produces square texels in window space: the grid
+    /// aspect matches the window aspect (up to the ±0.5-texel rounding), in
+    /// both landscape and portrait. Square texels are what keep the GPU wave
+    /// propagation isotropic in physical pixels.
+    #[test]
+    #[allow(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "test arithmetic: u32 texel counts → f32 physical texel sizes"
+    )]
+    fn derive_sim_grid_texels_are_square_in_window_space() {
+        for (win, expected) in [
+            // 16:9 landscape at the default 480 rows: 853 columns.
+            (Vec2::new(1920.0, 1080.0), UVec2::new(853, 480)),
+            // 9:16 portrait: 270 columns.
+            (Vec2::new(1080.0, 1920.0), UVec2::new(270, 480)),
+            // Square window: square grid.
+            (Vec2::new(1000.0, 1000.0), UVec2::new(480, 480)),
+        ] {
+            let grid = derive_sim_grid(win, 480.0);
+            assert_eq!(grid, expected, "grid for window {win:?}");
+            // Square-texel invariant: texel width == texel height within the
+            // half-texel rounding of the column count.
+            let texel_w = win.x / grid.x as f32;
+            let texel_h = win.y / grid.y as f32;
+            assert!(
+                (texel_w - texel_h).abs() / texel_h < 0.01,
+                "texels must be square in window space for {win:?} \
+                 (w {texel_w}, h {texel_h})"
+            );
+        }
+    }
+
+    /// Degenerate inputs floor at a 1×1 grid instead of a zero-sized texture.
+    #[test]
+    fn derive_sim_grid_floors_at_one_texel() {
+        let grid = derive_sim_grid(Vec2::new(1.0, 4000.0), 1.0);
+        assert!(grid.x >= 1 && grid.y >= 1, "grid must be at least 1x1");
+    }
 
     /// `cymatics_idle_veto`: `false` when absent or at rest, `true` once the
     /// alive-mask radius is meaningfully above its resting value.

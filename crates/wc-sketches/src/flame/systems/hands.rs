@@ -353,13 +353,13 @@ pub(crate) fn step_grab(
             camera.angular_velocity.x * MOMENTUM_BLEND_OLD - yaw * MOMENTUM_BLEND_NEW;
         camera.angular_velocity.y = 0.0;
         camera.pan_velocity = Vec2::ZERO;
-        camera.pan_by_pixels(delta_px, window.y, pan_sensitivity);
+        camera.pan_by_pixels(delta_px, window, pan_sensitivity);
         state.last_line_angle = gather.line_angle;
     } else {
         // One-hand mode: pan only — content follows the hand ~1:1 in screen
         // space, and the delta feeds the pan fling for a throw on release.
         // Angular momentum is held at zero: one hand never orbits.
-        camera.pan_by_pixels(delta_px, window.y, pan_sensitivity);
+        camera.pan_by_pixels(delta_px, window, pan_sensitivity);
         camera.pan_velocity =
             camera.pan_velocity * MOMENTUM_BLEND_OLD + delta_px * MOMENTUM_BLEND_NEW;
         camera.angular_velocity = Vec2::ZERO;

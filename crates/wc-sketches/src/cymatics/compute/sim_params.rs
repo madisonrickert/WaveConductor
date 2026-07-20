@@ -32,7 +32,9 @@ pub struct SimParamsGpu {
     pub center2: [f32; 2],
     /// Sim grid size in texels (w, h).
     pub resolution: [u32; 2],
-    /// Alive-mask radius around the centres.
+    /// Alive-mask radius around the centres, in window heights (the shader
+    /// measures source/alive distances in a height-normalized frame so the
+    /// disc is circular in physical pixels at any window aspect).
     pub active_radius: f32,
     /// Neighbour-force scale (v4 `FORCE_MULTIPLIER = 0.25`).
     pub force_multiplier: f32,

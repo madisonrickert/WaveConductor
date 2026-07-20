@@ -1,6 +1,11 @@
 // Cymatics 2D wave-field simulation — one compute invocation per grid cell.
 //
-// Verbatim port of v4 `computeCellState.frag` (GPUComputationRenderer pass).
+// Port of v4 `computeCellState.frag` (GPUComputationRenderer pass), with one
+// deliberate deviation: source/alive-mask distances are measured in a
+// height-normalized, aspect-corrected frame (see `main`) so the discs and the
+// ripples they bound are CIRCLES in physical pixels at any window aspect. v4
+// measured them in raw UV space, which stretched every disc to the window
+// (horizontally elongated in landscape, vertically in portrait).
 // Cell state is packed into an RGBA32F texel:
 //   x = height            (surface displacement)
 //   y = velocity          (rate of change of height)
@@ -25,8 +30,11 @@ struct SimParams {
     center2: vec2<f32>,
     // Sim grid size in texels (w, h). Drives UV<->texel conversion and bounds.
     resolution: vec2<u32>,
-    // Radius (UV units) of the active disc around the centres; outside it the
-    // field is damped to zero by the alive-mask.
+    // Radius of the active disc around the centres; outside it the field is
+    // damped to zero by the alive-mask. Units: window heights (the
+    // height-normalized distance frame in `main`), so the disc is a circle in
+    // physical pixels — vertically it spans the same fraction of the window
+    // as the old raw-UV radius did.
     active_radius: f32,
     // Scales the summed neighbour force (discrete Laplacian). v4 = 0.25.
     force_multiplier: f32,
@@ -60,10 +68,12 @@ struct IterParams {
 @group(0) @binding(2) var write_tex: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(3) var<uniform> iter: IterParams;
 
-// v4 waveSourceAmount: the injection weight of a wave source at UV distance
+// v4 waveSourceAmount: the injection weight of a wave source at distance
 // `dist`. Zero beyond two texels (the source is local), otherwise a soft
-// Lorentzian falloff 1/(1 + (dist/texel)^2) clamped to [0,1]. `texel_spacing`
-// is the UV-space length of one texel diagonal.
+// Lorentzian falloff 1/(1 + (dist/texel)^2) clamped to [0,1]. `dist` and
+// `texel_spacing` share the height-normalized frame built in `main`:
+// `texel_spacing` is the length of one texel diagonal there (texels are
+// square in that frame, so the injected source core is circular on screen).
 fn wave_source_amount(dist: f32, texel_spacing: f32) -> f32 {
     if (dist >= texel_spacing * 2.0) { return 0.0; }
     return clamp(1.0 / (1.0 + pow(dist / texel_spacing, 2.0)), 0.0, 1.0);
@@ -91,15 +101,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ires = vec2<i32>(i32(res.x), i32(res.y));
     let coord = vec2<i32>(i32(gid.x), i32(gid.y));
     let resf = vec2<f32>(f32(res.x), f32(res.y));
-    let texel_size = 1.0 / resf;
-    let texel_spacing = length(texel_size);
+
+    // Height-normalized, aspect-corrected distance frame. The grid has square
+    // texels in window space (width = round(height · window_aspect), see
+    // `derive_sim_grid`), so scaling the UV x-delta by the grid aspect makes
+    // equal distances span equal PHYSICAL pixels in x and y: one unit = one
+    // window height. Raw UV distances (v4) rendered every source disc as an
+    // ellipse stretched to the window — horizontally elongated in landscape,
+    // vertically in portrait.
+    let aspect = resf.x / resf.y;
+    // One texel's diagonal in the height-normalized frame: a texel is
+    // (aspect/res.x, 1/res.y) = (~1/res.y, 1/res.y) there — square, so the
+    // diagonal is sqrt(2)/res.y.
+    let texel_spacing = length(vec2<f32>(1.0, 1.0) / resf.y);
 
     // Texel-centre UV (v4 used gl_FragCoord.xy = pixel + 0.5).
     let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / resf;
 
-    // Distance to each source; the field reacts to whichever is nearer.
-    let d1 = length(uv - params.center);
-    let d2 = length(uv - params.center2);
+    // Distance to each source in the height-normalized frame; the field
+    // reacts to whichever is nearer.
+    let d1 = length((uv - params.center) * vec2<f32>(aspect, 1.0));
+    let d2 = length((uv - params.center2) * vec2<f32>(aspect, 1.0));
     let min_dist = min(d1, d2);
 
     let cell = textureLoad(read_tex, coord, 0);
