@@ -31,11 +31,50 @@ pub fn letter_spaced_label(
     color: egui::Color32,
     letter_spacing: f32,
 ) -> egui::Response {
-    // Pre-measure total width and row height by laying out each glyph.
+    let size = measure_letter_spaced(ui.ctx(), text, &font_id, color, letter_spacing);
+    let chars: Vec<char> = text.chars().collect();
+
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let mut cursor_x = rect.left();
+        for ch in &chars {
+            let galley = ui
+                .ctx()
+                .fonts_mut(|fonts| fonts.layout_no_wrap(ch.to_string(), font_id.clone(), color));
+            let glyph_width = galley.rect.width();
+            ui.painter()
+                .galley(egui::pos2(cursor_x, rect.top()), galley, color);
+            cursor_x += glyph_width + letter_spacing;
+        }
+    }
+
+    response
+}
+
+/// Measure the exact rect [`letter_spaced_label`] would allocate for `text`
+/// without painting it.
+///
+/// Returns `(total_width, row_height)` in logical points: the sum of the
+/// individual glyph widths plus `(n-1) * letter_spacing` gaps, and the tallest
+/// glyph's height. Callers that need to vertically centre a block containing a
+/// letter-spaced heading (e.g. the picker's credits tile) use this instead of
+/// hardcoding a font-size estimate.
+///
+/// `color` should match the colour the text will later be painted with so the
+/// memoized galley cache entry is shared between the measure and paint passes
+/// (galleys are cached keyed on the full layout job, colour included).
+pub fn measure_letter_spaced(
+    ctx: &egui::Context,
+    text: &str,
+    font_id: &egui::FontId,
+    color: egui::Color32,
+    letter_spacing: f32,
+) -> egui::Vec2 {
     // `fonts_mut` is required because `FontsView::layout_no_wrap` takes
     // `&mut self` (memoized galley cache is mutated on cache miss).
     let chars: Vec<char> = text.chars().collect();
-    let (total_width, height) = ui.ctx().fonts_mut(|fonts| {
+    ctx.fonts_mut(|fonts| {
         let mut w = 0.0_f32;
         let mut max_h = 0.0_f32;
         for ch in &chars {
@@ -55,26 +94,8 @@ pub fn letter_spaced_label(
             let gap_count = (chars.len() - 1) as f32;
             w += letter_spacing * gap_count;
         }
-        (w, max_h)
-    });
-
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(total_width, height), egui::Sense::hover());
-
-    if ui.is_rect_visible(rect) {
-        let mut cursor_x = rect.left();
-        for ch in &chars {
-            let galley = ui
-                .ctx()
-                .fonts_mut(|fonts| fonts.layout_no_wrap(ch.to_string(), font_id.clone(), color));
-            let glyph_width = galley.rect.width();
-            ui.painter()
-                .galley(egui::pos2(cursor_x, rect.top()), galley, color);
-            cursor_x += glyph_width + letter_spacing;
-        }
-    }
-
-    response
+        egui::vec2(w, max_h)
+    })
 }
 
 #[cfg(test)]
@@ -90,5 +111,35 @@ mod tests {
         // Smoke check — type-level only.
         let _: fn(&mut egui::Ui, &str, egui::FontId, egui::Color32, f32) -> egui::Response =
             letter_spaced_label;
+    }
+
+    /// The measure helper lays out glyphs against a real (default-font) egui
+    /// context: a non-empty string must measure wider than a shorter prefix
+    /// of itself, and adding letter-spacing must widen the result by exactly
+    /// `(n-1) * spacing`.
+    #[test]
+    fn measure_letter_spaced_accounts_for_gaps() {
+        let ctx = egui::Context::default();
+        // Force font atlas initialization by running one (empty) pass.
+        ctx.begin_pass(egui::RawInput::default());
+        let _ = ctx.end_pass();
+        let font = egui::FontId::proportional(20.0);
+        let color = egui::Color32::WHITE;
+
+        let unspaced = measure_letter_spaced(&ctx, "WaveConductor", &font, color, 0.0);
+        let spaced = measure_letter_spaced(&ctx, "WaveConductor", &font, color, 2.0);
+        assert!(unspaced.x > 0.0, "non-empty text must have positive width");
+        assert!(unspaced.y > 0.0, "non-empty text must have positive height");
+        // "WaveConductor" has 13 chars → 12 gaps of 2.0 points each.
+        let expected_extra = 12.0 * 2.0;
+        let extra = spaced.x - unspaced.x;
+        assert!(
+            (extra - expected_extra).abs() < 0.01,
+            "letter-spacing must add (n-1)*spacing width: got {extra}, want {expected_extra}"
+        );
+        assert!(
+            (spaced.y - unspaced.y).abs() < f32::EPSILON,
+            "letter-spacing must not change the measured height"
+        );
     }
 }

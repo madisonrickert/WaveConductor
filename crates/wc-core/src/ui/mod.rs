@@ -6,7 +6,7 @@
 //!
 //! ## Composition
 //!
-//! [`WaveConductorUiPlugin`] composes five sub-plugins. They are added in
+//! [`WaveConductorUiPlugin`] composes six sub-plugins. They are added in
 //! dependency order so that downstream plugins can rely on upstream
 //! resources existing during `Startup`:
 //!
@@ -17,12 +17,15 @@
 //!    `InteractionTimer`.
 //! 4. `buttons::OverlayButtonsPlugin` — Home/Settings/Volume corner buttons.
 //! 5. `picker::SketchPickerPlugin` — Home-state grid.
+//! 6. `credits::CreditsPlugin` — full-screen credits/licenses overlay,
+//!    opened from the picker's credits tile.
 
 use bevy::prelude::*;
 
 pub mod auto_fade;
 pub mod blur;
 pub mod buttons;
+pub mod credits;
 pub mod frame;
 pub mod picker;
 pub mod reload_overlay;
@@ -31,9 +34,10 @@ pub mod text;
 
 pub use blur::{BackdropBlurEnabled, BackdropBlurPlugin, BackdropBlurTexture};
 pub use buttons::PointerCoarse;
+pub use credits::CreditsVisible;
 pub use frame::{backdrop_blur_frame, hairline, FrameOptions};
 pub use style::OverlayStyle;
-pub use text::letter_spaced_label;
+pub use text::{letter_spaced_label, measure_letter_spaced};
 
 /// Umbrella plugin for the overlay UI surface.
 pub struct WaveConductorUiPlugin;
@@ -46,6 +50,7 @@ impl Plugin for WaveConductorUiPlugin {
             auto_fade::AutoFadePlugin,
             buttons::OverlayButtonsPlugin,
             picker::SketchPickerPlugin,
+            credits::CreditsPlugin,
         ));
         // Full-screen reload fade overlay: runs unconditionally (no state gate)
         // so it fires even during the one-frame Switch phase (AppState::Home).
