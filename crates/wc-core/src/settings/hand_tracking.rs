@@ -178,6 +178,47 @@ pub struct HandTrackingSettings {
     #[serde(default = "default_depth_calibration_k")]
     pub depth_calibration_k: f32,
 
+    /// MediaPipe-only: motion weight `w` of the hand *engagement* score,
+    /// `engagement = (1 − w)·proximity + w·activity` — how much a hand's
+    /// motion/articulation counts vs how close it is, for both the worker's
+    /// bystander eviction (which hand keeps a track slot when a new hand
+    /// appears at capacity) and Line's focal-hand pick. `0` ranks purely by
+    /// distance, `1` purely by movement. Raise if a static-but-close
+    /// bystander hand still wins over an active player; lower if a
+    /// far-but-fidgety background hand steals focus. Default must match
+    /// `input::engagement::DEFAULT_MOTION_WEIGHT` (`0.6`).
+    #[setting(
+        default = 0.6_f32,
+        min = 0.0,
+        max = 1.0,
+        step = 0.05,
+        category = Dev,
+        section = "Hand Tracking",
+        label = "Engagement motion weight"
+    )]
+    #[serde(default = "default_engagement_motion_weight")]
+    pub engagement_motion_weight: f32,
+
+    /// MediaPipe-only: how decisively a newly detected "challenger" hand must
+    /// out-score a *passive* tracked hand (engagement ratio) before evicting
+    /// it from a full track slot — the fix for a bystander's static
+    /// drink-holding hand locking out the player. A hand that is actively
+    /// moving/articulating is never evicted regardless of this margin.
+    /// Raise toward the max to make eviction rarer; very high (≥ ~10)
+    /// effectively disables it (the on-site rollback). Default must match
+    /// `mediapipe::pipeline`'s `DEFAULT_BYSTANDER_EVICTION_MARGIN` (`1.4`).
+    #[setting(
+        default = 1.4_f32,
+        min = 1.0,
+        max = 20.0,
+        step = 0.1,
+        category = Dev,
+        section = "Hand Tracking",
+        label = "Bystander eviction margin"
+    )]
+    #[serde(default = "default_bystander_eviction_margin")]
+    pub bystander_eviction_margin: f32,
+
     /// MediaPipe-only: One-Euro min cutoff (Hz) — at-rest smoothing. Lower =
     /// steadier when the hand holds still (more lag on slow motion). Default must
     /// match `mediapipe::smoothing::DEFAULT_MIN_CUTOFF` (`10.0`).
@@ -217,6 +258,12 @@ fn default_grab_rest_deadzone() -> f32 {
 }
 fn default_depth_calibration_k() -> f32 {
     0.8
+}
+fn default_engagement_motion_weight() -> f32 {
+    0.6
+}
+fn default_bystander_eviction_margin() -> f32 {
+    1.4
 }
 fn default_smoothing_min_cutoff() -> f32 {
     10.0

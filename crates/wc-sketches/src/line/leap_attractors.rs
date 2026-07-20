@@ -20,8 +20,12 @@
 //! [`drive_target`] for why that stacking is deliberate.
 
 use bevy::prelude::*;
-use wc_core::input::entity::{CameraDistance, GrabStrength, PalmPosition, TrackedHand};
+use wc_core::input::engagement;
+use wc_core::input::entity::{
+    CameraDistance, GrabStrength, PalmPosition, PalmVelocity, TrackedHand,
+};
 use wc_core::input::projection::palm_to_world;
+use wc_core::settings::HandTrackingSettings;
 use wc_core::sketch::sketch_active;
 
 use wc_core::lifecycle::state::AppState;
@@ -227,15 +231,289 @@ fn update_line_hand_attractors(
     }
 }
 
+/// Stickiness margin for the focal-hand pick: a rival hand must exceed the
+/// current focal hand's engagement score by this factor (×1.4) before it can
+/// start earning focus. Prevents per-frame flapping between two similarly
+/// scored hands — focus is a latch, not an argmax.
+pub const FOCAL_SWITCH_MARGIN: f32 = 1.4;
+
+/// How long (seconds) a rival must *continuously* hold the margin before
+/// focus actually switches — a sustained beat, so a single-frame velocity
+/// spike (landmark jitter) can never steal the focal point mid-gesture.
+pub const FOCAL_SWITCH_SUSTAIN_S: f32 = 0.5;
+
+/// Max simultaneously scored hands. Providers cap at 2 tracked hands; 4
+/// leaves headroom for a provider handover frame. A hand beyond the cap is
+/// simply not scored this frame (it can never become focal until a slot
+/// frees) — fixed-size storage keeps the per-frame system allocation-free.
+const FOCAL_SCORE_CAP: usize = 4;
+
+/// Per-hand render-rate engagement state for the focal pick: EMAs of palm
+/// speed and grab articulation (τ = [`engagement::ENGAGEMENT_TAU_S`], same
+/// constants as the provider-side score so the two lanes agree).
+#[derive(Debug, Clone, Copy)]
+struct FocalHandScore {
+    /// The tracked-hand entity this entry follows.
+    entity: Entity,
+    /// EMA of |palm velocity| (mm/s) — the motion term.
+    motion_mm_s: f32,
+    /// EMA of |Δgrab|/dt (1/s) — the articulation term. Grab only (no pinch
+    /// here): Line's interaction is grab-driven, and grab is the component
+    /// the task of picking "the hand that is actually playing" cares about.
+    articulation_per_s: f32,
+    /// Previous frame's grab, for the articulation finite difference;
+    /// `None` until the entry's second frame.
+    prev_grab: Option<f32>,
+    /// The engagement score computed this frame ([`engagement::engagement`]).
+    score: f32,
+    /// Seen-this-frame flag for pruning despawned hands.
+    seen: bool,
+}
+
+impl FocalHandScore {
+    /// A cold entry for a newly seen hand: no motion/articulation history —
+    /// like the provider-side tracker, a hand must *demonstrate* activity.
+    fn new(entity: Entity) -> Self {
+        Self {
+            entity,
+            motion_mm_s: 0.0,
+            articulation_per_s: 0.0,
+            prev_grab: None,
+            score: 0.0,
+            seen: true,
+        }
+    }
+
+    /// Advance the EMAs one frame and recompute the score.
+    ///
+    /// `speed_mm_s` is this frame's |`PalmVelocity`|; `grab` this frame's
+    /// grab strength; `distance_mm` the physical camera distance (`0` =
+    /// unknown → neutral proximity); `motion_weight` the live
+    /// `HandTrackingSettings::engagement_motion_weight`.
+    fn step(
+        &mut self,
+        distance_mm: f32,
+        speed_mm_s: f32,
+        grab: f32,
+        dt_s: f32,
+        motion_weight: f32,
+    ) {
+        // Framerate-independent EMA step (alpha = 1 − e^(−dt/τ)).
+        let alpha = engagement::ema_alpha(dt_s, engagement::ENGAGEMENT_TAU_S);
+        if speed_mm_s.is_finite() {
+            self.motion_mm_s += alpha * (speed_mm_s - self.motion_mm_s);
+        }
+        // Articulation rate |Δgrab|/dt: the drink-holder discriminator — a
+        // static grip has a high grab LEVEL but zero grab CHANGE.
+        if let Some(prev) = self.prev_grab {
+            if dt_s > 0.0 {
+                let rate = (grab - prev).abs() / dt_s;
+                if rate.is_finite() {
+                    self.articulation_per_s += alpha * (rate - self.articulation_per_s);
+                }
+            }
+        }
+        self.prev_grab = Some(grab);
+        self.score = engagement::engagement(
+            engagement::proximity(distance_mm),
+            engagement::activity(self.motion_mm_s, self.articulation_per_s),
+            motion_weight,
+        );
+        self.seen = true;
+    }
+}
+
+/// `Local` state for `pick_line_focal_hand` (plain code span: the system is
+/// private, so an intra-doc link would break without
+/// `--document-private-items`): fixed-capacity per-hand score
+/// entries (no allocation in the per-frame system) plus the rival latch that
+/// implements the sustained-beat switch.
+#[derive(Debug, Default)]
+pub struct FocalPickState {
+    /// Score entries, one per live tracked hand (`None` = free slot).
+    entries: [Option<FocalHandScore>; FOCAL_SCORE_CAP],
+    /// The rival currently accumulating switch time, if any.
+    rival: Option<Entity>,
+    /// How long the rival has continuously held the switch margin.
+    rival_hold_s: f32,
+}
+
+/// Query row for the focal pick: each tracked Line hand with the three
+/// engagement inputs already maintained on its entity.
+type FocalHandQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static CameraDistance,
+        &'static PalmVelocity,
+        &'static GrabStrength,
+    ),
+    (With<TrackedHand>, With<LineHandAttractor>),
+>;
+
+impl FocalPickState {
+    /// The entry for `entity`, creating one in a free slot if needed
+    /// (`None` when the fixed capacity is full — that hand goes unscored).
+    fn entry_mut(&mut self, entity: Entity) -> Option<&mut FocalHandScore> {
+        // Two passes (find, then insert) keep the borrow checker happy
+        // without unsafe or allocation; N is at most 4.
+        let found = self
+            .entries
+            .iter()
+            .position(|e| e.is_some_and(|e| e.entity == entity));
+        let index = if let Some(i) = found {
+            i
+        } else {
+            let free = self.entries.iter().position(Option::is_none)?;
+            self.entries[free] = Some(FocalHandScore::new(entity));
+            free
+        };
+        self.entries[index].as_mut()
+    }
+
+    /// This frame's best-scored seen hand.
+    fn best(&self) -> Option<(Entity, f32)> {
+        self.entries
+            .iter()
+            .flatten()
+            .filter(|e| e.seen)
+            .max_by(|a, b| a.score.total_cmp(&b.score))
+            .map(|e| (e.entity, e.score))
+    }
+
+    /// The current score of `entity`, if it was seen this frame.
+    fn score_of(&self, entity: Entity) -> Option<f32> {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|e| e.seen && e.entity == entity)
+            .map(|e| e.score)
+    }
+}
+
 /// Pick the hand entity that drives the gravity focal point this frame.
-/// v4's choice was "the first hand the controller reported" — in our
-/// entity model that's the lowest-index `Entity`, since Bevy assigns
-/// entity ids monotonically.
+///
+/// v4 (and v5 until the kiosk deployment) used "the first hand the
+/// controller reported" — the lowest entity index, i.e. the *oldest-acquired*
+/// hand. Beside a busy road that is exactly wrong: a bystander's static
+/// drink-holding hand that grabbed a slot first held the focal point forever
+/// while the actual player waved unheeded.
+///
+/// Now the pick is engagement-scored ([`engagement::engagement`]) from
+/// components already on the entity — [`CameraDistance`] (closer wins),
+/// [`PalmVelocity`] (moving wins), [`GrabStrength`] *change* (articulating
+/// wins; a static grip scores zero) — with stickiness: the current focal hand
+/// keeps focus unless a rival beats its score by [`FOCAL_SWITCH_MARGIN`] for
+/// a sustained [`FOCAL_SWITCH_SUSTAIN_S`] ([`choose_focal`]), so focus never
+/// flaps frame to frame. Per-hand EMA state lives in the `Local`
+/// ([`FocalPickState`], fixed capacity — no per-frame allocation).
 fn pick_line_focal_hand(
-    hands: Query<'_, '_, Entity, (With<TrackedHand>, With<LineHandAttractor>)>,
+    hands: FocalHandQuery<'_, '_>,
+    time: Res<'_, Time>,
+    tracking_settings: Option<Res<'_, HandTrackingSettings>>,
+    mut state: Local<'_, FocalPickState>,
     mut focal: ResMut<'_, LineFocalHand>,
 ) {
-    focal.0 = hands.iter().min_by_key(|e| e.index());
+    let dt_s = time.delta_secs();
+    // Same live knob as the provider-side eviction score, so one on-site
+    // adjustment shapes both; default when the settings resource is absent
+    // (tests, headless harnesses).
+    let motion_weight = tracking_settings
+        .as_ref()
+        .map_or(engagement::DEFAULT_MOTION_WEIGHT, |settings| {
+            settings.engagement_motion_weight
+        });
+
+    // Mark-and-sweep the fixed entry set: score every live hand, then drop
+    // entries whose entity vanished (hand left / sketch exit).
+    for entry in state.entries.iter_mut().flatten() {
+        entry.seen = false;
+    }
+    for (entity, distance, velocity, grab) in &hands {
+        if let Some(entry) = state.entry_mut(entity) {
+            entry.step(distance.0, velocity.0.length(), grab.0, dt_s, motion_weight);
+        }
+    }
+    for slot in &mut state.entries {
+        if slot.is_some_and(|e| !e.seen) {
+            *slot = None;
+        }
+    }
+
+    let best = state.best();
+    // The incumbent only counts while it is still a live, scored hand.
+    let current = focal
+        .0
+        .and_then(|entity| state.score_of(entity).map(|score| (entity, score)));
+    let FocalPickState {
+        rival,
+        rival_hold_s,
+        ..
+    } = &mut *state;
+    let next = choose_focal(current, best, rival, rival_hold_s, dt_s);
+    // set_if_neq semantics by hand: only write on change (avoid ticking the
+    // resource every frame while focus is steady).
+    if focal.0 != next {
+        focal.0 = next;
+    }
+}
+
+/// The focal-hand latch: keep `current` unless `best` (the top-scored rival)
+/// has beaten it by [`FOCAL_SWITCH_MARGIN`] continuously for
+/// [`FOCAL_SWITCH_SUSTAIN_S`]. Pure and generic over the id type so the
+/// decision is unit-testable without an ECS world.
+///
+/// `rival` / `rival_hold_s` are the caller-owned latch state: which candidate
+/// is currently accumulating switch time and for how long. Any break in the
+/// rival's dominance (score dips under the margin, a different hand becomes
+/// best, the incumbent vanishes) resets the hold — the beat must be
+/// *sustained*, not cumulative.
+fn choose_focal<T: Copy + PartialEq>(
+    current: Option<(T, f32)>,
+    best: Option<(T, f32)>,
+    rival: &mut Option<T>,
+    rival_hold_s: &mut f32,
+    dt_s: f32,
+) -> Option<T> {
+    let clear = |rival: &mut Option<T>, hold: &mut f32| {
+        *rival = None;
+        *hold = 0.0;
+    };
+    let Some((best_id, best_score)) = best else {
+        // No scored hands at all: no focal point.
+        clear(rival, rival_hold_s);
+        return None;
+    };
+    let Some((current_id, current_score)) = current else {
+        // No (live) incumbent: adopt the best immediately — first hand in
+        // gets focus with no waiting period.
+        clear(rival, rival_hold_s);
+        return Some(best_id);
+    };
+    if best_id == current_id {
+        // The incumbent is still the best hand: nothing to latch.
+        clear(rival, rival_hold_s);
+        return Some(current_id);
+    }
+    if best_score > current_score * FOCAL_SWITCH_MARGIN {
+        // The rival holds the margin: accumulate its beat (restarting if the
+        // rival identity changed since last frame).
+        if *rival == Some(best_id) {
+            *rival_hold_s += dt_s;
+        } else {
+            *rival = Some(best_id);
+            *rival_hold_s = dt_s;
+        }
+        if *rival_hold_s >= FOCAL_SWITCH_SUSTAIN_S {
+            clear(rival, rival_hold_s);
+            return Some(best_id);
+        }
+    } else {
+        // Margin lost: the beat must be continuous, so the latch resets.
+        clear(rival, rival_hold_s);
+    }
+    Some(current_id)
 }
 
 /// Per-frame: derive [`HandAudioDrive`] from tracked hands + mouse activity.
@@ -671,6 +949,229 @@ mod tests {
         assert!(released < 1.0, "release must start the drive decay");
         // …but as a first-order lag, not a snap.
         assert!(released > 0.95, "decay is a lag, not a snap: {released}");
+    }
+
+    // --- engagement-based focal-hand pick ----------------------------------
+
+    /// Drive [`choose_focal`] one step with fresh latch state helpers.
+    struct FocalLatch {
+        rival: Option<u32>,
+        hold: f32,
+    }
+
+    impl FocalLatch {
+        fn new() -> Self {
+            Self {
+                rival: None,
+                hold: 0.0,
+            }
+        }
+
+        fn step(
+            &mut self,
+            current: Option<(u32, f32)>,
+            best: Option<(u32, f32)>,
+            dt: f32,
+        ) -> Option<u32> {
+            choose_focal(current, best, &mut self.rival, &mut self.hold, dt)
+        }
+    }
+
+    #[test]
+    fn focal_is_none_without_hands_and_adopts_the_first_hand_instantly() {
+        let mut latch = FocalLatch::new();
+        assert_eq!(latch.step(None, None, 0.016), None);
+        // First hand in: focus with no waiting period.
+        assert_eq!(latch.step(None, Some((7, 0.1)), 0.016), Some(7));
+    }
+
+    #[test]
+    fn focal_sticks_when_the_rival_is_not_decisively_better() {
+        // Rival at 1.3× the incumbent — under the 1.4× margin — must never
+        // steal focus no matter how long it persists (no flapping between
+        // two similar hands).
+        let mut latch = FocalLatch::new();
+        for _ in 0..600 {
+            assert_eq!(
+                latch.step(Some((1, 0.5)), Some((2, 0.65)), 0.016),
+                Some(1),
+                "sub-margin rival must never take focus"
+            );
+        }
+    }
+
+    #[test]
+    fn decisive_rival_takes_focus_only_after_a_sustained_beat() {
+        // Rival at 2× the incumbent: switches, but only after
+        // FOCAL_SWITCH_SUSTAIN_S of continuous dominance — never on the
+        // first frame (a velocity spike must not steal focus).
+        let mut latch = FocalLatch::new();
+        let dt = 0.016;
+        let mut elapsed = 0.0;
+        let mut switched_at = None;
+        for _ in 0..120 {
+            let now = latch.step(Some((1, 0.4)), Some((2, 0.8)), dt);
+            elapsed += dt;
+            if now == Some(2) {
+                switched_at = Some(elapsed);
+                break;
+            }
+        }
+        assert!(
+            switched_at.is_some(),
+            "a decisively better rival must eventually win"
+        );
+        let at = switched_at.unwrap_or(0.0);
+        assert!(
+            at >= FOCAL_SWITCH_SUSTAIN_S,
+            "switched after {at}s — before the sustained beat"
+        );
+        assert!(at < FOCAL_SWITCH_SUSTAIN_S + 0.1, "switched late: {at}s");
+    }
+
+    #[test]
+    fn interrupted_dominance_resets_the_switch_beat() {
+        // The rival holds the margin for a while, dips under it for one
+        // frame, then holds again: the beat restarts, so no switch happens
+        // in less than a full sustained window after the dip.
+        let mut latch = FocalLatch::new();
+        let dt = 0.016;
+        // 20 frames (~0.32 s) of dominance — not enough to switch.
+        for _ in 0..20 {
+            assert_eq!(latch.step(Some((1, 0.4)), Some((2, 0.8)), dt), Some(1));
+        }
+        // One frame under the margin resets the latch.
+        assert_eq!(latch.step(Some((1, 0.4)), Some((2, 0.5)), dt), Some(1));
+        // 20 more frames of dominance: still under the sustain window
+        // because the hold restarted.
+        for _ in 0..20 {
+            assert_eq!(
+                latch.step(Some((1, 0.4)), Some((2, 0.8)), dt),
+                Some(1),
+                "beat must restart after the dip"
+            );
+        }
+    }
+
+    #[test]
+    fn vanished_incumbent_hands_focus_to_the_best_hand_immediately() {
+        let mut latch = FocalLatch::new();
+        // Incumbent gone (current = None) but hands remain: no dead focal.
+        assert_eq!(latch.step(None, Some((3, 0.2)), 0.016), Some(3));
+    }
+
+    #[test]
+    fn static_grip_score_stays_low_while_a_mover_overtakes_it() {
+        // Component-level scenario: the drink-holder (near, strong CONSTANT
+        // grab, zero velocity) vs the player (farther, waving). After ~1 s of
+        // frames the player's score must exceed the holder's by more than the
+        // switch margin.
+        let w = engagement::DEFAULT_MOTION_WEIGHT;
+        let dt = 1.0 / 60.0;
+        let mut holder = FocalHandScore::new(Entity::PLACEHOLDER);
+        let mut player = FocalHandScore::new(Entity::PLACEHOLDER);
+        for _ in 0..60 {
+            // Holder: 600 mm away, motionless, grab pinned at 0.9 — high
+            // grab LEVEL, zero grab CHANGE.
+            holder.step(600.0, 0.0, 0.9, dt, w);
+            // Player: 1200 mm away, waving at 400 mm/s, light grab.
+            player.step(1200.0, 400.0, 0.2, dt, w);
+        }
+        assert!(
+            player.score > holder.score * FOCAL_SWITCH_MARGIN,
+            "player {} must decisively beat static holder {}",
+            player.score,
+            holder.score
+        );
+    }
+
+    #[test]
+    fn articulating_hand_scores_activity_without_moving() {
+        // A hand opening/closing in place (playing Line without waving):
+        // grab toggling drives the articulation term even at zero velocity.
+        let w = engagement::DEFAULT_MOTION_WEIGHT;
+        let dt = 1.0 / 60.0;
+        let mut still_player = FocalHandScore::new(Entity::PLACEHOLDER);
+        let mut still_holder = FocalHandScore::new(Entity::PLACEHOLDER);
+        for n in 0..60 {
+            let grab = if n % 2 == 0 { 0.1 } else { 0.6 };
+            still_player.step(800.0, 0.0, grab, dt, w);
+            still_holder.step(800.0, 0.0, 0.9, dt, w);
+        }
+        assert!(
+            still_player.score > still_holder.score * FOCAL_SWITCH_MARGIN,
+            "articulation alone must win focus: {} vs {}",
+            still_player.score,
+            still_holder.score
+        );
+    }
+
+    /// System-level: the exact deployment failure. The drink-holder hand is
+    /// spawned FIRST (lower entity index — the old pick's winner) and sits
+    /// static with a strong grip; the player spawns second, farther away but
+    /// waving. Focus must migrate to the player within ~2 s and stay there.
+    #[test]
+    fn system_focal_hand_migrates_from_static_holder_to_moving_player() {
+        let mut app = App::new();
+        app.init_resource::<LineFocalHand>();
+        app.init_resource::<Time>();
+        app.add_systems(Update, pick_line_focal_hand);
+
+        let holder = app
+            .world_mut()
+            .spawn((
+                TrackedHand,
+                LineHandAttractor::default(),
+                CameraDistance(600.0),
+                PalmVelocity(Vec3::ZERO),
+                GrabStrength(0.9),
+            ))
+            .id();
+        let player = app
+            .world_mut()
+            .spawn((
+                TrackedHand,
+                LineHandAttractor::default(),
+                CameraDistance(1200.0),
+                PalmVelocity(Vec3::new(400.0, 0.0, 0.0)),
+                GrabStrength(0.2),
+            ))
+            .id();
+
+        // Frame 1: both cold — the (nearer) holder wins the initial pick,
+        // reproducing the pre-fix state of the world.
+        tick(&mut app, 1.0 / 60.0);
+        assert_eq!(
+            app.world().resource::<LineFocalHand>().0,
+            Some(holder),
+            "cold start: proximity alone favours the holder"
+        );
+
+        // ~2 s of frames: the player's motion EMA fills in, beats the margin
+        // for the sustained window, and takes focus.
+        for _ in 0..120 {
+            tick(&mut app, 1.0 / 60.0);
+        }
+        assert_eq!(
+            app.world().resource::<LineFocalHand>().0,
+            Some(player),
+            "the waving player must take focus from the static grip"
+        );
+
+        // And keeps it (no flapping back).
+        for _ in 0..60 {
+            tick(&mut app, 1.0 / 60.0);
+            assert_eq!(app.world().resource::<LineFocalHand>().0, Some(player));
+        }
+
+        // Player leaves: focus falls back to the remaining hand immediately.
+        app.world_mut().entity_mut(player).despawn();
+        tick(&mut app, 1.0 / 60.0);
+        assert_eq!(
+            app.world().resource::<LineFocalHand>().0,
+            Some(holder),
+            "focus must not point at a despawned entity"
+        );
     }
 
     /// Advance the manually-driven `Time` resource by `dt` seconds and run one

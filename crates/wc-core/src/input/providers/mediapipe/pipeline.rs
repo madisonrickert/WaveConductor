@@ -61,6 +61,7 @@ use super::palm::{
 use super::signals::{
     grab_strength, palm_center, palm_normal, palm_velocity, pinch_strength, HandTracker,
 };
+use crate::input::engagement;
 use crate::input::hand::{Chirality, Hand, LANDMARK_COUNT};
 use crate::input::state::MAX_HANDS;
 
@@ -131,6 +132,75 @@ const MIN_TRACK_LANDMARK_SPREAD: f32 = 0.04;
 /// produce a false fist/grab for one more frame.
 const TRACK_LANDMARK_EDGE_MARGIN: f32 = 0.015;
 
+// --- bystander eviction (capacity-scan) constants --------------------------
+//
+// The count-gated detect-then-track design has a kiosk failure mode: once a
+// bystander's static hand (a drink grip beside the installation) occupies one
+// of the MAX_HANDS slots, palm detection never runs again and the actual
+// player can never be acquired. These constants govern the fix: a low-rate
+// palm re-detection while at capacity, and an engagement-scored eviction of a
+// demonstrably passive incumbent in favour of a persistent new "challenger"
+// detection. See `crate::input::engagement` for the score itself.
+
+/// How often palm detection re-runs while both track slots are occupied.
+///
+/// Inference-cost tradeoff: the palm stage is the dominant per-frame model
+/// cost (it is exactly what the at-capacity skip exists to avoid), so it is
+/// re-run at 2 Hz rather than per frame — at a 30 Hz inference rate that is a
+/// ~1/15 duty cycle, a few percent of extra model time, in exchange for a
+/// challenger hand being *seen* within 500 ms of appearing. Combined with the
+/// 2-scan streak requirement below, a player displacing a passive bystander
+/// takes ≈ 1–1.5 s end to end.
+const CAPACITY_REDETECT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Minimum time between evictions. A cooldown bounds the worst case under a
+/// pathological detector (e.g. a face repeatedly reading as a palm): tracking
+/// can be disturbed at most once per cooldown, and a just-admitted hand gets
+/// this long to demonstrate engagement before it can itself be evicted.
+const EVICTION_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// Consecutive capacity-scans a challenger must survive (same spot, still
+/// unassociated) before it may evict. `2` means no single-frame eviction: a
+/// one-scan flicker (NMS jitter, a passer-by crossing the frame) never
+/// disturbs tracking.
+const CHALLENGER_MIN_STREAK: u32 = 2;
+
+/// Activity level (see [`engagement::activity`]) at or above which an
+/// incumbent track counts as *actively playing* and is never evicted,
+/// regardless of scores. The floor protects a genuinely engaged pair of
+/// hands absolutely: eviction only ever removes a hand that is demonstrably
+/// passive (a static grip scores `0`; deliberate waving or articulation
+/// scores well above `0.25`).
+const ACTIVE_PLAY_ACTIVITY_FLOOR: f32 = 0.25;
+
+/// Max centre distance (normalized square units) between one scan's
+/// challenger and the next for them to count as the *same* persistent
+/// challenger (the streak). Roughly one typical ROI half-size: a real hand
+/// waiting to play stays put on this scale across a 500 ms scan interval.
+const CHALLENGER_MATCH_DIST: f32 = 0.15;
+
+/// How many NMS survivors a capacity-scan considers (vs [`MAX_HANDS`] on the
+/// normal acquisition path). At capacity the two incumbent hands themselves
+/// usually occupy the top detection ranks, so a challenger must be visible
+/// *behind* them — truncating at `MAX_HANDS` would hide it forever.
+const CAPACITY_SCAN_CANDIDATES: usize = MAX_HANDS + 2;
+
+/// ROI size (normalized square units) at/above which a challenger's
+/// provisional proximity reads `1.0` (hand fills a large fraction of the
+/// frame ⇒ close). With the 2.6× palm-ROI expansion, a hand at ~0.5 m on a
+/// typical webcam produces an ROI around this size.
+const CHALLENGER_ROI_SIZE_NEAR: f32 = 0.35;
+
+/// ROI size at/below which a challenger's provisional proximity reads `0.0`
+/// (a small, distant hand — likely across-the-road traffic, not a player).
+const CHALLENGER_ROI_SIZE_FAR: f32 = 0.10;
+
+/// Default for [`PipelineConfig::bystander_eviction_margin`]: a challenger
+/// must out-score the weakest passive incumbent by 40 % before evicting.
+/// Live-tunable (`HandTrackingSettings::bystander_eviction_margin`); raising
+/// it far (≥ ~10) effectively disables eviction, the on-site rollback.
+const DEFAULT_BYSTANDER_EVICTION_MARGIN: f32 = 1.4;
+
 /// Tunables for the pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -157,6 +227,18 @@ pub struct PipelineConfig {
     /// (`HandTrackingSettings::depth_calibration_k`); refreshed each frame from
     /// the shared [`MediaPipeLiveTuning`].
     pub depth_calibration_k: f32,
+    /// Motion weight `w` of the engagement score (see
+    /// [`engagement::engagement`]): how much moving/articulating counts vs
+    /// being close. Live-tunable from the dev panel
+    /// (`HandTrackingSettings::engagement_motion_weight`); refreshed each
+    /// frame from the shared [`MediaPipeLiveTuning`].
+    pub engagement_motion_weight: f32,
+    /// How decisively a capacity-scan challenger must out-score the weakest
+    /// passive incumbent before evicting it (see [`decide_eviction`]).
+    /// Very high (≥ ~10) effectively disables eviction. Live-tunable
+    /// (`HandTrackingSettings::bystander_eviction_margin`); refreshed each
+    /// frame from the shared [`MediaPipeLiveTuning`].
+    pub bystander_eviction_margin: f32,
 }
 
 impl Default for PipelineConfig {
@@ -171,6 +253,10 @@ impl Default for PipelineConfig {
             // Must stay in sync with `HandTrackingSettings::grab_rest_deadzone`.
             grab_rest_deadzone: 0.05,
             depth_calibration_k: DEFAULT_DEPTH_CALIBRATION_K,
+            // Must stay in sync with `HandTrackingSettings::engagement_motion_weight`.
+            engagement_motion_weight: engagement::DEFAULT_MOTION_WEIGHT,
+            // Must stay in sync with `HandTrackingSettings::bystander_eviction_margin`.
+            bystander_eviction_margin: DEFAULT_BYSTANDER_EVICTION_MARGIN,
         }
     }
 }
@@ -197,6 +283,10 @@ pub struct MediaPipeLiveTuning {
     grab_deadzone: AtomicU32,
     /// [`PipelineConfig::depth_calibration_k`] as `f32` bits.
     depth_k: AtomicU32,
+    /// [`PipelineConfig::engagement_motion_weight`] as `f32` bits.
+    engagement_motion_weight: AtomicU32,
+    /// [`PipelineConfig::bystander_eviction_margin`] as `f32` bits.
+    bystander_eviction_margin: AtomicU32,
     /// Whether the app is in Idle/Screensaver — worker drops to the idle
     /// inference rate. Starts `false` (full rate): a freshly built provider is
     /// un-throttled until the per-frame mirror system stores the current
@@ -206,12 +296,17 @@ pub struct MediaPipeLiveTuning {
 
 impl MediaPipeLiveTuning {
     /// Build a tuning cell seeded with the given values. The idle-throttle
-    /// flag starts cleared (full inference rate).
+    /// flag starts cleared (full inference rate); the engagement knobs start
+    /// at their [`PipelineConfig`] defaults (the settings-apply system pushes
+    /// the persisted values within a frame of startup).
     #[must_use]
     pub fn new(grab_deadzone: f32, depth_k: f32) -> Self {
+        let defaults = PipelineConfig::default();
         Self {
             grab_deadzone: AtomicU32::new(grab_deadzone.to_bits()),
             depth_k: AtomicU32::new(depth_k.to_bits()),
+            engagement_motion_weight: AtomicU32::new(defaults.engagement_motion_weight.to_bits()),
+            bystander_eviction_margin: AtomicU32::new(defaults.bystander_eviction_margin.to_bits()),
             idle_throttle: AtomicBool::new(false),
         }
     }
@@ -239,6 +334,32 @@ impl MediaPipeLiveTuning {
         f32::from_bits(self.depth_k.load(Ordering::Relaxed))
     }
 
+    /// Live-set the engagement motion weight (see
+    /// [`PipelineConfig::engagement_motion_weight`]).
+    pub fn set_engagement_motion_weight(&self, weight: f32) {
+        self.engagement_motion_weight
+            .store(weight.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The current engagement motion weight.
+    #[must_use]
+    pub fn engagement_motion_weight(&self) -> f32 {
+        f32::from_bits(self.engagement_motion_weight.load(Ordering::Relaxed))
+    }
+
+    /// Live-set the bystander eviction margin (see
+    /// [`PipelineConfig::bystander_eviction_margin`]).
+    pub fn set_bystander_eviction_margin(&self, margin: f32) {
+        self.bystander_eviction_margin
+            .store(margin.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The current bystander eviction margin.
+    #[must_use]
+    pub fn bystander_eviction_margin(&self) -> f32 {
+        f32::from_bits(self.bystander_eviction_margin.load(Ordering::Relaxed))
+    }
+
     /// Live-set the idle-throttle flag (`true` = Idle/Screensaver, cap
     /// inference at the idle rate). A Relaxed store, cheap enough to call
     /// unconditionally every frame from the activity-mirror system.
@@ -264,6 +385,9 @@ pub enum PalmRunReason {
     BelowMaxHands,
     /// The pipeline already had [`MAX_HANDS`] active tracks and skipped palm.
     SkippedAtCapacity,
+    /// The pipeline was at capacity but ran the low-rate bystander scan
+    /// ([`CAPACITY_REDETECT_INTERVAL`]) looking for a challenger hand.
+    CapacityScan,
     /// The frame was invalid; no model stage ran.
     InvalidFrame,
 }
@@ -276,6 +400,7 @@ impl PalmRunReason {
             Self::ColdStart => "cold_start",
             Self::BelowMaxHands => "below_max_hands",
             Self::SkippedAtCapacity => "skipped_at_capacity",
+            Self::CapacityScan => "capacity_scan",
             Self::InvalidFrame => "invalid_frame",
         }
     }
@@ -323,6 +448,11 @@ pub struct PipelineDiagnostics {
     /// Deadzoned grab of the focal hand in permille — exactly what ships on
     /// `Hand::grab_strength` (the dev panel's "Grab (‰)"). `0` when no hand.
     pub grab_permille: u64,
+    /// Cumulative bystander evictions since pipeline start (a capacity-scan
+    /// challenger displacing a passive incumbent — see [`decide_eviction`]).
+    /// Flat in a healthy single-player session; each on-site tick means a
+    /// slot was reassigned. The dev panel's "Evictions" metric.
+    pub bystander_evictions: u64,
 }
 
 /// Remap a raw geometric grab so a *relaxed-open* hand reads exactly `0`.
@@ -354,14 +484,34 @@ pub struct Pipeline {
     tracker: HandTracker,
     config: PipelineConfig,
     /// Per-hand landmark-derived ROIs carried to the next frame
-    /// (`MediaPipe`'s detect-then-track). While this holds [`MAX_HANDS`] tracks the
-    /// next [`Self::process`] skips palm entirely (the dominant per-frame cost) and
-    /// tracks landmark-only; palm re-runs only when fewer than [`MAX_HANDS`] are
-    /// tracked (count-gated re-detection), so a healthy pair of hands is never
-    /// re-seeded. A track is dropped when its hand is lost (landmark presence below
-    /// threshold), when it leaves the frame ([`roi_trackable`]), or when the
-    /// frame is unusable.
-    tracked: SmallVec<[RoiRect; MAX_HANDS]>,
+    /// (`MediaPipe`'s detect-then-track), each with its latest engagement
+    /// score. While this holds [`MAX_HANDS`] tracks the next [`Self::process`]
+    /// skips palm (the dominant per-frame cost) on most frames and tracks
+    /// landmark-only; palm re-runs when fewer than [`MAX_HANDS`] are tracked
+    /// (count-gated re-detection), **plus** a low-rate at-capacity bystander
+    /// scan every [`CAPACITY_REDETECT_INTERVAL`] that can evict a passive
+    /// incumbent for a persistent, better-engaged challenger (the kiosk
+    /// drink-holder fix — see [`decide_eviction`]). A track is dropped when
+    /// its hand is lost (landmark presence below threshold), when it leaves
+    /// the frame ([`roi_trackable`]), when the frame is unusable, or when it
+    /// is evicted.
+    tracked: SmallVec<[TrackedSlot; MAX_HANDS]>,
+    /// Time accumulated (from the caller's `dt`) since the last at-capacity
+    /// palm scan; reset whenever the pipeline is below capacity, so the first
+    /// scan fires [`CAPACITY_REDETECT_INTERVAL`] after reaching capacity.
+    since_capacity_scan: Duration,
+    /// Time since the last bystander eviction (the [`EVICTION_COOLDOWN`]
+    /// clock). Starts at `Duration::MAX` so the first eviction is never
+    /// cooldown-blocked; `saturating_add` keeps it pinned there.
+    since_eviction: Duration,
+    /// Consecutive capacity-scans that saw the same unassociated challenger
+    /// (see [`CHALLENGER_MIN_STREAK`] / [`CHALLENGER_MATCH_DIST`]).
+    challenger_streak: u32,
+    /// The previous scan's challenger ROI, for the same-spot streak match.
+    challenger_last: Option<RoiRect>,
+    /// Cumulative bystander evictions (mirrored into
+    /// [`PipelineDiagnostics::bystander_evictions`]).
+    evictions: u64,
     /// Optional live source for the tunable config values (grab rest-deadzone,
     /// depth calibration `k`), shared lock-free with the provider so a tuning
     /// UI can re-tune them while the worker thread runs. Refreshed at the top
@@ -411,6 +561,13 @@ impl Pipeline {
             tracker: HandTracker::default(),
             config,
             tracked: SmallVec::new(),
+            since_capacity_scan: Duration::ZERO,
+            // Duration::MAX: the first eviction is gated by streak +
+            // engagement, never by a cooldown that hasn't started.
+            since_eviction: Duration::MAX,
+            challenger_streak: 0,
+            challenger_last: None,
+            evictions: 0,
             live_tuning: None,
             last_diagnostics: PipelineDiagnostics::default(),
             // Scratch buffers, pre-sized so steady-state processing allocates
@@ -479,15 +636,21 @@ impl Pipeline {
             ..PipelineDiagnostics::default()
         };
         // Pick up any live re-tune from the provider/UI before this frame
-        // derives grab and depth.
+        // derives grab, depth, and engagement.
         if let Some(tuning) = &self.live_tuning {
             self.config.grab_rest_deadzone = tuning.grab_deadzone();
             self.config.depth_calibration_k = tuning.depth_k();
+            self.config.engagement_motion_weight = tuning.engagement_motion_weight();
+            self.config.bystander_eviction_margin = tuning.bystander_eviction_margin();
         }
+        // The eviction-cooldown clock always advances (saturating: it starts
+        // pinned at MAX so the first eviction is never cooldown-blocked).
+        self.since_eviction = self.since_eviction.saturating_add(dt);
         let mut hands: SmallVec<[Hand; MAX_HANDS]> = SmallVec::new();
         if !frame.is_consistent() || frame.width == 0 || frame.height == 0 {
             self.tracker.end_frame();
             self.tracked.clear(); // a bad frame breaks tracking → re-acquire next
+            self.reset_challenger();
             diagnostics.palm_reason = PalmRunReason::InvalidFrame;
             diagnostics.total = frame_start.elapsed();
             self.last_diagnostics = diagnostics;
@@ -509,35 +672,58 @@ impl Pipeline {
         diagnostics.preprocess = stage_start.elapsed();
 
         // Count-gated re-detection (MediaPipe's detect-then-track): run palm
-        // detection ONLY while fewer than MAX_HANDS are tracked — including cold
-        // start (empty). Once MAX_HANDS are tracked, palm never runs; the hands
-        // are tracked landmark-only and are never re-seeded by a fresh detection
-        // (the old fixed-interval re-detect re-seeded healthy tracks, which
-        // duplicated/swapped hands). A track drops via presence or leaving the
-        // frame, lowering the count, which re-enables detection next frame.
-        // [`associate`] merges fresh palm ROIs with the tracked ROIs: tracked win
-        // (kept verbatim), only a non-overlapping detection is added as a new hand.
+        // detection on EVERY frame while fewer than MAX_HANDS are tracked —
+        // including cold start (empty). At capacity the hands track
+        // landmark-only and palm is skipped on most frames (it is the dominant
+        // per-frame cost; the old fixed-interval re-detect also re-seeded
+        // healthy tracks, which duplicated/swapped hands) — EXCEPT for the
+        // low-rate bystander scan every CAPACITY_REDETECT_INTERVAL, which
+        // looks for a persistent unassociated "challenger" hand and may evict
+        // a demonstrably passive incumbent for it (the kiosk drink-holder
+        // fix; existing tracks are still never re-seeded/duplicated).
+        // [`associate`] merges fresh palm ROIs with the tracked ROIs: tracked
+        // win (kept verbatim), only a non-overlapping detection is added.
         let to_run: SmallVec<[RoiRect; MAX_HANDS]> = if self.tracked.len() < MAX_HANDS {
             diagnostics.palm_reason = if self.tracked.is_empty() {
                 PalmRunReason::ColdStart
             } else {
                 PalmRunReason::BelowMaxHands
             };
+            // Below capacity a new hand is admitted by plain detection, so no
+            // challenger bookkeeping should linger into the next full stretch.
+            self.reset_challenger();
             let stage_start = Instant::now();
-            let palm_rois = self.acquire_rois(&square)?;
+            let palm_rois = self.acquire_rois(&square, MAX_HANDS)?;
             diagnostics.palm = stage_start.elapsed();
-            let tracked = std::mem::take(&mut self.tracked);
-            associate(tracked, &palm_rois)
+            let tracked_rois: SmallVec<[RoiRect; MAX_HANDS]> =
+                self.tracked.iter().map(|slot| slot.roi).collect();
+            self.tracked.clear();
+            associate(tracked_rois, &palm_rois)
         } else {
-            diagnostics.palm_reason = PalmRunReason::SkippedAtCapacity;
-            std::mem::take(&mut self.tracked)
+            self.since_capacity_scan = self.since_capacity_scan.saturating_add(dt);
+            if self.since_capacity_scan >= CAPACITY_REDETECT_INTERVAL {
+                self.since_capacity_scan = Duration::ZERO;
+                diagnostics.palm_reason = PalmRunReason::CapacityScan;
+                let stage_start = Instant::now();
+                // Wider candidate cut than the acquisition path: at capacity
+                // the incumbents usually rank first, so a challenger is only
+                // visible behind them.
+                let palm_rois = self.acquire_rois(&square, CAPACITY_SCAN_CANDIDATES)?;
+                diagnostics.palm = stage_start.elapsed();
+                self.capacity_scan(&palm_rois)
+            } else {
+                diagnostics.palm_reason = PalmRunReason::SkippedAtCapacity;
+                let rois = self.tracked.iter().map(|slot| slot.roi).collect();
+                self.tracked.clear();
+                rois
+            }
         };
 
         // Run the landmark stage on each ROI; keep the hand and carry its
         // next-frame ROI (derived from this frame's landmarks) when presence holds
         // AND the hand is still on screen. A dropped track lowers the count, so the
         // next frame re-detects to re-acquire (or pick up a new hand).
-        let mut next: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
+        let mut next: SmallVec<[TrackedSlot; MAX_HANDS]> = SmallVec::new();
         for roi in to_run {
             let stage_start = Instant::now();
             if let Some(tracked) = self.landmark_for(&square, roi, content, dt)? {
@@ -567,7 +753,11 @@ impl Pipeline {
                             u64::from(floor_u32(tracked.hand.grab_strength.mul_add(1000.0, 0.5)));
                     }
                     hands.push(tracked.hand);
-                    next.push(tracked.next_roi);
+                    next.push(TrackedSlot {
+                        roi: tracked.next_roi,
+                        engagement: tracked.engagement,
+                        activity: tracked.activity,
+                    });
                 }
             }
             diagnostics.landmark = diagnostics.landmark.saturating_add(stage_start.elapsed());
@@ -578,18 +768,23 @@ impl Pipeline {
         diagnostics.tracks_after = u64::try_from(self.tracked.len()).unwrap_or(u64::MAX);
         diagnostics.hands = u64::try_from(hands.len()).unwrap_or(u64::MAX);
         diagnostics.track_churn = self.tracker.churn();
+        diagnostics.bystander_evictions = self.evictions;
         diagnostics.total = frame_start.elapsed();
         self.last_diagnostics = diagnostics;
         Ok(hands)
     }
 
-    /// Acquisition path: run palm detection on the square frame and return up to
-    /// [`MAX_HANDS`] candidate ROIs (highest-scoring first). Only runs when not
-    /// already tracking.
+    /// Acquisition path: run palm detection on the square frame and return up
+    /// to `max_candidates` candidate ROIs (highest-scoring first). Runs when
+    /// below [`MAX_HANDS`] (with `max_candidates = MAX_HANDS`) and on the
+    /// at-capacity bystander scan (with [`CAPACITY_SCAN_CANDIDATES`], so a
+    /// challenger ranked behind the two incumbent re-detections stays
+    /// visible).
     fn acquire_rois(
         &mut self,
         square: &RgbImage,
-    ) -> Result<SmallVec<[RoiRect; MAX_HANDS]>, InferenceError> {
+        max_candidates: usize,
+    ) -> Result<SmallVec<[RoiRect; CAPACITY_SCAN_CANDIDATES]>, InferenceError> {
         // Bilinear-resize into the reused 192² buffer (see [`resize_into`] for
         // the equivalence story vs the image crate's Triangle resize), then
         // refill the reused input tensor — no per-acquisition allocation.
@@ -613,13 +808,103 @@ impl Pipeline {
         // `nms_output_is_sorted_by_descending_score` pins) that its output is
         // already non-increasing by score — each blended cluster carries its
         // seed's maximal score and seeds are visited in descending order — so
-        // truncating keeps the top MAX_HANDS. (The stable sort_by that stood
-        // here also allocated an aux buffer above ~20 elements.)
-        self.palm_dets.truncate(MAX_HANDS);
-        // NOT an allocation: SmallVec<[RoiRect; MAX_HANDS]> keeps up to
-        // MAX_HANDS (= 2) elements inline on the stack, and `dets` was just
-        // truncated to that, so this collect never spills to the heap.
+        // truncating keeps the top `max_candidates`. (The stable sort_by that
+        // stood here also allocated an aux buffer above ~20 elements.)
+        self.palm_dets
+            .truncate(max_candidates.min(CAPACITY_SCAN_CANDIDATES));
+        // NOT an allocation: SmallVec<[RoiRect; CAPACITY_SCAN_CANDIDATES]>
+        // keeps up to CAPACITY_SCAN_CANDIDATES (= 4) elements inline on the
+        // stack, and `dets` was just truncated to at most that, so this
+        // collect never spills to the heap.
         Ok(self.palm_dets.iter().map(roi_from_palm).collect())
+    }
+
+    /// Clear the at-capacity challenger bookkeeping (streak, last-seen ROI,
+    /// scan timer). Called whenever the pipeline leaves capacity — a free
+    /// slot admits new hands by plain detection, so stale challenger state
+    /// must not carry into the next full stretch — and on invalid frames.
+    fn reset_challenger(&mut self) {
+        self.since_capacity_scan = Duration::ZERO;
+        self.challenger_streak = 0;
+        self.challenger_last = None;
+    }
+
+    /// One at-capacity bystander scan: find the best unassociated palm
+    /// detection ("challenger"), update its persistence streak, and — when
+    /// [`decide_eviction`] approves — evict the weakest passive incumbent and
+    /// hand the challenger its slot this same frame. Returns the ROI set for
+    /// this frame's landmark stage (always ≤ [`MAX_HANDS`]); drains
+    /// `self.tracked` like the other `process` branches.
+    fn capacity_scan(&mut self, palm_rois: &[RoiRect]) -> SmallVec<[RoiRect; MAX_HANDS]> {
+        // The challenger is the highest-scoring detection that associates
+        // with NO incumbent track (palm_rois is score-descending). The same
+        // gate as `associate`, so "unassociated" means the same thing on
+        // both paths: this is a distinct hand, not a jittered re-detection
+        // of one we already track.
+        let challenger = palm_rois
+            .iter()
+            .find(|palm| {
+                self.tracked.iter().all(|slot| {
+                    roi_center_dist(&slot.roi, palm) > association_gate(&slot.roi, palm)
+                })
+            })
+            .copied();
+        // Streak bookkeeping: consecutive scans must see the challenger in
+        // (roughly) the same place, so a one-scan NMS flicker or a passer-by
+        // sweeping through the frame never accumulates eviction credit.
+        if let Some(candidate) = challenger {
+            let same_spot = self
+                .challenger_last
+                .is_some_and(|prev| roi_center_dist(&prev, &candidate) <= CHALLENGER_MATCH_DIST);
+            self.challenger_streak = if same_spot {
+                self.challenger_streak.saturating_add(1)
+            } else {
+                1
+            };
+            self.challenger_last = Some(candidate);
+        } else {
+            self.challenger_streak = 0;
+            self.challenger_last = None;
+        }
+
+        let mut to_run: SmallVec<[RoiRect; MAX_HANDS]> = SmallVec::new();
+        if let Some(candidate) = challenger {
+            // Provisional engagement: the challenger has never run the
+            // landmark stage, so ROI size is the only proximity signal and
+            // its motion/articulation are unknown (scored neutral).
+            let challenger_engagement =
+                provisional_engagement(candidate.size, self.config.engagement_motion_weight);
+            if let Some(evict) = decide_eviction(
+                &self.tracked,
+                challenger_engagement,
+                self.challenger_streak,
+                self.since_eviction,
+                self.config.bystander_eviction_margin,
+            ) {
+                self.tracked.remove(evict);
+                self.evictions = self.evictions.saturating_add(1);
+                self.since_eviction = Duration::ZERO;
+                // The admitted challenger is now an incumbent; a future
+                // challenger starts a fresh streak.
+                self.challenger_streak = 0;
+                self.challenger_last = None;
+                for slot in &self.tracked {
+                    to_run.push(slot.roi);
+                }
+                // The challenger takes the freed slot immediately: its
+                // landmark stage runs this same frame, so admission latency
+                // is the scan cadence, not scan + re-detect.
+                to_run.push(candidate);
+                self.tracked.clear();
+                return to_run;
+            }
+        }
+        // No eviction this scan: track the incumbents unchanged.
+        for slot in &self.tracked {
+            to_run.push(slot.roi);
+        }
+        self.tracked.clear();
+        to_run
     }
 
     /// Run the landmark stage for one ROI. Returns the tracked hand, the ROI
@@ -736,6 +1021,22 @@ impl Pipeline {
         // Raw geometric grab, computed once: deadzoned onto the emitted hand,
         // surfaced raw in the diagnostics so the dev panel can show both.
         let grab_raw = grab_strength(&world);
+        let pinch = pinch_strength(&world);
+
+        // Engagement score for the bystander-eviction path: advance this
+        // track's motion/articulation EMAs (raw grab/pinch, so the deadzone
+        // never hides small articulations), then blend with the physical-
+        // distance proximity. |velocity| includes the smoothed-depth z term,
+        // so a push toward the camera counts as motion too.
+        let levels =
+            self.tracker
+                .update_engagement(assigned.id, velocity.length(), grab_raw, pinch, dt);
+        let activity = engagement::activity(levels.motion_mm_s, levels.articulation_per_s);
+        let engagement_score = engagement::engagement(
+            engagement::proximity(assigned.distance_mm),
+            activity,
+            self.config.engagement_motion_weight,
+        );
 
         Ok(Some(TrackedHand {
             hand: Hand {
@@ -752,7 +1053,7 @@ impl Pipeline {
                 palm_velocity: velocity,
                 // Pinch/grab from the metric world landmarks: pose-invariant,
                 // so a tilted-open hand no longer reads as pinched/grabbed.
-                pinch_strength: pinch_strength(&world),
+                pinch_strength: pinch,
                 // Rest-deadzone the grab so a relaxed-open hand reads exactly 0
                 // (otherwise its small positive floor keeps Line's attractor on).
                 grab_strength: apply_grab_deadzone(grab_raw, self.config.grab_rest_deadzone),
@@ -767,6 +1068,8 @@ impl Pipeline {
             next_roi,
             est_distance_mm: depth.distance_mm,
             grab_raw,
+            engagement: engagement_score,
+            activity,
         }))
     }
 }
@@ -788,6 +1091,26 @@ struct TrackedHand {
     /// the rest deadzone; the deadzoned value lives on
     /// [`Self::hand`]`.grab_strength`.
     grab_raw: f32,
+    /// This track's engagement score in `[0, 1]`
+    /// ([`engagement::engagement`]) — carried onto the next frame's
+    /// [`TrackedSlot`] for the bystander-eviction comparison.
+    engagement: f32,
+    /// The activity component of the score alone (motion/articulation,
+    /// proximity excluded) — the [`decide_eviction`] "actively playing"
+    /// floor tests this, so nearness can never protect a passive hand.
+    activity: f32,
+}
+
+/// One carried track slot: the next-frame ROI plus the engagement scores the
+/// at-capacity bystander scan compares against a challenger. Stack-only.
+#[derive(Debug, Clone, Copy)]
+struct TrackedSlot {
+    /// Landmark-derived ROI to track this hand from next frame.
+    roi: RoiRect,
+    /// Latest engagement score in `[0, 1]` (see [`engagement::engagement`]).
+    engagement: f32,
+    /// Latest activity component in `[0, 1]` (see [`engagement::activity`]).
+    activity: f32,
 }
 
 // --- detect-then-track association ---------------------------------------
@@ -817,6 +1140,69 @@ fn associate(
         }
     }
     out
+}
+
+/// Provisional engagement score for a capacity-scan challenger that has not
+/// yet run the landmark stage.
+///
+/// Proximity is estimated from the detection's ROI size — apparent size is
+/// inversely proportional to distance, so a linear ramp between
+/// [`CHALLENGER_ROI_SIZE_FAR`] (→ 0) and [`CHALLENGER_ROI_SIZE_NEAR`] (→ 1)
+/// is a monotone stand-in for the physical-distance band incumbents are
+/// scored on. Motion/articulation are unobservable pre-admission, so the
+/// activity term is the neutral `0.5` — the challenger is scored as "might
+/// be playing", which a genuinely active incumbent (activity ≈ 1) still
+/// comfortably outranks while a static grip (activity 0) does not.
+fn provisional_engagement(roi_size: f32, motion_weight: f32) -> f32 {
+    // clamp((size − far) / (near − far), 0, 1): bigger ROI ⇒ closer ⇒ higher.
+    let proximity = ((roi_size - CHALLENGER_ROI_SIZE_FAR)
+        / (CHALLENGER_ROI_SIZE_NEAR - CHALLENGER_ROI_SIZE_FAR))
+        .clamp(0.0, 1.0);
+    engagement::engagement(proximity, 0.5, motion_weight)
+}
+
+/// Decide whether a capacity-scan challenger evicts an incumbent track, and
+/// which one. Pure — all pipeline state arrives as arguments — so the
+/// deployment scenarios are unit-testable without models.
+///
+/// Eviction requires ALL of:
+/// 1. **Persistence**: the challenger has been seen on at least
+///    [`CHALLENGER_MIN_STREAK`] consecutive capacity-scans (no single-frame
+///    evictions — a detector flicker or a passer-by never disturbs tracking).
+/// 2. **Cooldown**: at least [`EVICTION_COOLDOWN`] since the last eviction,
+///    bounding churn under a pathological repeating false detection.
+/// 3. **A passive victim exists**: only incumbents whose *activity* (motion/
+///    articulation term, proximity excluded) is below
+///    [`ACTIVE_PLAY_ACTIVITY_FLOOR`] are evictable — a hand that is
+///    moving or articulating is NEVER evicted, no matter the scores. Among
+///    evictable incumbents the lowest-engagement one is the victim.
+/// 4. **Decisive win**: the challenger's (provisional) engagement exceeds the
+///    victim's by the live-tunable `margin` factor
+///    (`HandTrackingSettings::bystander_eviction_margin`) — setting the
+///    margin very high effectively disables eviction entirely.
+///
+/// Returns the index into `incumbents` to evict, or `None`.
+fn decide_eviction(
+    incumbents: &[TrackedSlot],
+    challenger_engagement: f32,
+    challenger_streak: u32,
+    since_eviction: Duration,
+    margin: f32,
+) -> Option<usize> {
+    if challenger_streak < CHALLENGER_MIN_STREAK || since_eviction < EVICTION_COOLDOWN {
+        return None;
+    }
+    // Weakest PASSIVE incumbent: min engagement among tracks below the
+    // activity floor. An actively playing hand is categorically protected.
+    let victim = incumbents
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.activity < ACTIVE_PLAY_ACTIVITY_FLOOR)
+        .min_by(|(_, a), (_, b)| a.engagement.total_cmp(&b.engagement))?;
+    // The challenger must beat the victim decisively (margin ≥ 1 recommended;
+    // the settings slider enforces its own range). `>` not `>=` so a margin
+    // of ∞-ish semantics ("never") cannot be defeated by equal zeros.
+    (challenger_engagement > victim.1.engagement * margin).then_some(victim.0)
 }
 
 /// Scale-relative merge gate for [`associate`].
@@ -2033,6 +2419,313 @@ mod tests {
         // old timer kept re-seeding.
         let out = associate(tracks(&[(0.2, 0.2), (0.8, 0.8)]), &[roi_at(0.5, 0.1)]);
         assert_eq!(out.len(), MAX_HANDS);
+    }
+
+    // --- bystander eviction (kiosk drink-holder fix) -----------------------
+
+    /// A tracked slot with the given scores (ROI position is irrelevant to
+    /// [`decide_eviction`]).
+    fn slot(engagement: f32, activity: f32) -> TrackedSlot {
+        TrackedSlot {
+            roi: roi_at(0.5, 0.5),
+            engagement,
+            activity,
+        }
+    }
+
+    /// Two passive incumbents (static grips: some proximity, zero activity),
+    /// the first slightly weaker.
+    fn passive_pair() -> [TrackedSlot; 2] {
+        [slot(0.35, 0.0), slot(0.4, 0.05)]
+    }
+
+    #[test]
+    fn eviction_requires_a_persistent_challenger() {
+        // Scenario: the challenger appears on one scan, then vanishes (a
+        // passer-by, an NMS flicker). Below the 2-scan streak nothing may be
+        // evicted, whatever the scores.
+        let incumbents = passive_pair();
+        for streak in [0, 1] {
+            assert_eq!(
+                decide_eviction(&incumbents, 1.0, streak, Duration::MAX, 1.4),
+                None,
+                "streak {streak} must not evict"
+            );
+        }
+        assert_eq!(
+            decide_eviction(&incumbents, 1.0, 2, Duration::MAX, 1.4),
+            Some(0),
+            "two consecutive sightings evict the weakest passive incumbent"
+        );
+    }
+
+    #[test]
+    fn eviction_respects_the_cooldown() {
+        let incumbents = passive_pair();
+        assert_eq!(
+            decide_eviction(&incumbents, 1.0, 2, Duration::from_millis(500), 1.4),
+            None,
+            "within the 2 s cooldown nothing is evicted"
+        );
+        assert_eq!(
+            decide_eviction(&incumbents, 1.0, 2, EVICTION_COOLDOWN, 1.4),
+            Some(0),
+            "at the cooldown boundary eviction is allowed again"
+        );
+    }
+
+    #[test]
+    fn engaged_players_are_never_evicted() {
+        // Scenario: two hands actively playing (waving / articulating —
+        // activity far above the floor). No challenger, streak, margin, or
+        // score may ever displace them: the activity floor is categorical.
+        let engaged = [slot(0.9, 0.8), slot(0.55, 0.4)];
+        assert_eq!(
+            decide_eviction(&engaged, 1.0, 100, Duration::MAX, 1.0),
+            None,
+            "an actively playing hand is never evicted"
+        );
+        // Mixed: one engaged, one passive — only the passive one is at risk,
+        // even though the engaged one has (say) a lower engagement score.
+        let mixed = [slot(0.3, 0.9), slot(0.4, 0.0)];
+        assert_eq!(
+            decide_eviction(&mixed, 1.0, 2, Duration::MAX, 1.4),
+            Some(1),
+            "the passive hand is the victim, not the lower-scored active one"
+        );
+    }
+
+    #[test]
+    fn eviction_requires_a_decisive_margin_and_high_margin_disables() {
+        let incumbents = passive_pair();
+        // Challenger 0.45 vs weakest 0.35: wins at margin 1.0 but not 1.4
+        // (0.45 < 0.49) — an indecisive challenger leaves tracking alone.
+        assert_eq!(
+            decide_eviction(&incumbents, 0.45, 2, Duration::MAX, 1.0),
+            Some(0)
+        );
+        assert_eq!(
+            decide_eviction(&incumbents, 0.45, 2, Duration::MAX, 1.4),
+            None
+        );
+        // The rollback knob: a very high margin disables eviction outright.
+        assert_eq!(
+            decide_eviction(&incumbents, 1.0, 100, Duration::MAX, 20.0),
+            None,
+            "margin 20 must never evict (challenger scores are ≤ 1)"
+        );
+    }
+
+    #[test]
+    fn provisional_engagement_scores_close_hands_above_far_ones() {
+        let w = engagement::DEFAULT_MOTION_WEIGHT;
+        // A large (close) challenger ROI: proximity 1, neutral activity 0.5.
+        let close = provisional_engagement(0.5, w);
+        assert!(
+            (close - 0.7).abs() < 1e-6,
+            "close challenger scores {close}"
+        );
+        // A tiny (distant) ROI: proximity 0 — only the neutral activity term.
+        let far = provisional_engagement(0.08, w);
+        assert!((far - 0.3).abs() < 1e-6, "far challenger scores {far}");
+        assert!(close > far);
+        // The deployment case: a close challenger decisively beats a static
+        // near incumbent (engagement (1−w)·1 = 0.4) at the default margin.
+        assert!(close > 0.4 * DEFAULT_BYSTANDER_EVICTION_MARGIN);
+    }
+
+    /// Palm-stage mock outputs with one hot stride-8 anchor per requested
+    /// detection: `(row, col, logit)` on the 24×24 stride-8 grid (anchor index
+    /// `(row·24 + col)·2`, centre `((col+0.5)/24, (row+0.5)/24)`), each a
+    /// 0.2×0.2 box like [`fixtures::hot_anchor_palm_outputs`]. Distinct cells
+    /// stay distinct through NMS, so tests can stage multi-hand scenes.
+    fn multi_anchor_palm_outputs(dets: &[(usize, usize, f32)]) -> Vec<Tensor> {
+        let mut scores = vec![-100.0f32; 2016];
+        let mut boxes = vec![0.0f32; 2016 * 18];
+        for &(row, col, logit) in dets {
+            let anchor = (row * 24 + col) * 2;
+            scores[anchor] = logit;
+            let b = anchor * 18;
+            boxes[b + 2] = 192.0 * 0.2;
+            boxes[b + 3] = 192.0 * 0.2;
+            boxes[b + 5] = 192.0 * 0.1;
+            boxes[b + 9] = -192.0 * 0.1;
+        }
+        vec![
+            Tensor {
+                data: boxes,
+                shape: vec![1, 2016, 18],
+            },
+            Tensor {
+                data: scores,
+                shape: vec![1, 2016, 1],
+            },
+        ]
+    }
+
+    /// Counting pipeline whose palm stage sees the given multi-anchor scene
+    /// every frame and whose landmark stage confidently confirms every ROI.
+    fn multi_hand_counting_pipeline(
+        dets: &[(usize, usize, f32)],
+        config: PipelineConfig,
+    ) -> (Pipeline, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Arc;
+        let palm_calls = Arc::new(AtomicU32::new(0));
+        let pipe = Pipeline::new(
+            Box::new(CountingInference {
+                calls: Arc::clone(&palm_calls),
+                outputs: multi_anchor_palm_outputs(dets),
+            }),
+            Box::new(CountingInference {
+                calls: Arc::new(AtomicU32::new(0)),
+                outputs: fixtures::confident_spread_landmark_outputs(),
+            }),
+            config,
+        );
+        (pipe, palm_calls)
+    }
+
+    #[test]
+    fn at_capacity_palm_rescans_at_the_bystander_interval() {
+        use std::sync::atomic::Ordering;
+        // Two stable hands fill both slots; the pipeline must re-run palm at
+        // the low CAPACITY_REDETECT_INTERVAL cadence (never per frame — the
+        // thermal budget) and, with both detections associating back to their
+        // own tracks, must not disturb or evict anything.
+        let (mut pipe, palm_calls) =
+            multi_hand_counting_pipeline(&[(12, 6, 3.0), (12, 18, 2.5)], PipelineConfig::default());
+        let frame = consistent_frame();
+        let dt = Duration::from_millis(250); // half the scan interval
+
+        let hands = pipe.process(&frame, dt).expect("frame 1");
+        assert_eq!(hands.len(), 2, "cold start acquires both hands");
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 1);
+
+        // Frame 2: at capacity with 250 ms accumulated — palm stays skipped.
+        let hands = pipe.process(&frame, dt).expect("frame 2");
+        assert_eq!(hands.len(), 2);
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 1, "no scan at 250 ms");
+        assert_eq!(
+            pipe.diagnostics().palm_reason,
+            PalmRunReason::SkippedAtCapacity
+        );
+
+        // Frame 3: 500 ms accumulated — the bystander scan runs palm.
+        let hands = pipe.process(&frame, dt).expect("frame 3");
+        assert_eq!(hands.len(), 2, "the scan must not disturb a tracked pair");
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 2, "scan at 500 ms");
+        assert_eq!(pipe.diagnostics().palm_reason, PalmRunReason::CapacityScan);
+        assert_eq!(
+            pipe.diagnostics().bystander_evictions,
+            0,
+            "both detections associate with their own tracks — no challenger"
+        );
+
+        // Frames 4–5: the interval restarts — skip, then scan again.
+        pipe.process(&frame, dt).expect("frame 4");
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 2);
+        pipe.process(&frame, dt).expect("frame 5");
+        assert_eq!(palm_calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn persistent_challenger_evicts_a_static_incumbent_within_two_scans() {
+        use std::sync::atomic::Ordering;
+        // THE deployment scenario. Two bystander hands (static grips: the
+        // mock repeats identical world landmarks, so zero articulation) hold
+        // both slots from cold start. A third, lower-scoring detection — the
+        // player's hand — is invisible during acquisition (top-MAX_HANDS cut)
+        // and never associates with either track. The capacity scans must see
+        // it, hold it to the 2-scan streak, then evict a passive incumbent
+        // and admit it — ≈ 1 s from first sighting at the 500 ms scan
+        // cadence, within the 1–1.5 s admission budget.
+        //
+        // dt = one full scan interval per frame, so every at-capacity frame
+        // is a scan; depth estimator pinned off (k = 0) because the static
+        // landmark mock re-derives a slightly smaller ROI every frame, and
+        // the size-estimated depth would read that shrinkage as physical
+        // motion (a real hand's landmarks re-measure its true extent).
+        let config = PipelineConfig {
+            depth_calibration_k: 0.0,
+            ..PipelineConfig::default()
+        };
+        let (mut pipe, palm_calls) =
+            multi_hand_counting_pipeline(&[(12, 6, 3.0), (12, 18, 2.5), (6, 12, 1.5)], config);
+        let frame = consistent_frame();
+        let dt = CAPACITY_REDETECT_INTERVAL;
+
+        let hands = pipe.process(&frame, dt).expect("frame 1");
+        assert_eq!(hands.len(), 2, "top-2 detections fill both slots");
+        let initial_ids: Vec<u32> = hands.iter().map(|h| h.id).collect();
+
+        // Frame 2: first scan — challenger seen (streak 1), no eviction yet
+        // (no single-scan evictions).
+        let hands = pipe.process(&frame, dt).expect("frame 2 (scan 1)");
+        assert_eq!(pipe.diagnostics().palm_reason, PalmRunReason::CapacityScan);
+        assert_eq!(
+            pipe.diagnostics().bystander_evictions,
+            0,
+            "one sighting must never evict"
+        );
+        assert_eq!(hands.len(), 2);
+
+        // Frame 3: second consecutive scan sees the same challenger → the
+        // weakest passive incumbent is evicted and the challenger admitted
+        // the same frame.
+        let hands = pipe.process(&frame, dt).expect("frame 3 (scan 2)");
+        assert_eq!(pipe.diagnostics().bystander_evictions, 1, "evicted");
+        assert_eq!(hands.len(), 2, "slot count is preserved");
+        assert!(
+            hands.iter().any(|h| !initial_ids.contains(&h.id)),
+            "the admitted challenger carries a fresh track id"
+        );
+        assert_eq!(
+            palm_calls.load(Ordering::Relaxed),
+            3,
+            "acquisition + two scans"
+        );
+    }
+
+    #[test]
+    fn vanishing_challenger_resets_the_streak_and_never_evicts() {
+        // Direct capacity_scan driving: challenger present on scan 1, gone on
+        // scan 2, back on scan 3 — the streak restarts each time it vanishes,
+        // so no eviction ever happens (scenario: passers-by flickering
+        // through the detector).
+        let (mut pipe, _palm, _lm) = counting_pipeline();
+        let incumbents = [
+            TrackedSlot {
+                roi: roi_at(0.3, 0.5),
+                engagement: 0.4,
+                activity: 0.0,
+            },
+            TrackedSlot {
+                roi: roi_at(0.7, 0.5),
+                engagement: 0.4,
+                activity: 0.0,
+            },
+        ];
+        let with_challenger = [roi_at(0.3, 0.5), roi_at(0.7, 0.5), roi_at(0.5, 0.1)];
+        let without_challenger = [roi_at(0.3, 0.5), roi_at(0.7, 0.5)];
+
+        for (scan, rois) in [
+            &with_challenger[..],
+            &without_challenger[..],
+            &with_challenger[..],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            pipe.tracked = SmallVec::from_slice(&incumbents);
+            let to_run = pipe.capacity_scan(rois);
+            assert_eq!(to_run.len(), 2, "scan {scan}: incumbents keep running");
+            assert!(
+                pipe.challenger_streak <= 1,
+                "scan {scan}: a vanishing challenger must never build a streak"
+            );
+        }
+        assert_eq!(pipe.evictions, 0, "no eviction across flickering scans");
     }
 
     #[test]

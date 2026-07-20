@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use bevy::math::Vec3;
 
+use crate::input::engagement;
 use crate::input::hand::{Chirality, LandmarkIndex, LANDMARK_COUNT};
 
 /// Reference hand scale: wrist → middle-finger MCP distance. Used to normalize
@@ -219,6 +220,19 @@ struct Track {
     /// EMA-smoothed physical camera distance (mm); `0.0` = estimator off.
     /// See [`Assigned::distance_mm`].
     distance_mm: f32,
+    /// EMA of |palm velocity| (mm/s; τ = [`engagement::ENGAGEMENT_TAU_S`]) —
+    /// the *motion* half of the engagement score. Starts at `0` (a fresh
+    /// track has no velocity history).
+    motion_mm_s: f32,
+    /// EMA of the articulation rate `(|Δgrab| + |Δpinch|) / dt` (1/s; same
+    /// τ) — the *articulation* half of the engagement score, and the
+    /// drink-holder discriminator: a static grip has a high grab *level* but
+    /// zero grab *change*. Starts at `0`.
+    articulation_per_s: f32,
+    /// Previous frame's raw grab/pinch pair for the articulation finite
+    /// difference; `None` until the first [`HandTracker::update_engagement`]
+    /// on this track (a fresh track has no Δ to measure).
+    prev_grab_pinch: Option<(f32, f32)>,
     seen_this_frame: bool,
 }
 
@@ -327,6 +341,12 @@ impl HandTracker {
             pos: Vec3::new(pos.x, pos.y, raw_depth_mm),
             depth_mm: raw_depth_mm,
             distance_mm: raw_distance_mm.max(0.0),
+            // Engagement EMAs start cold: no velocity/articulation history
+            // yet, so a brand-new track reads as inactive until it earns
+            // activity (a challenger must *demonstrate* engagement).
+            motion_mm_s: 0.0,
+            articulation_per_s: 0.0,
+            prev_grab_pinch: None,
             seen_this_frame: true,
         });
         // A brand-new track has no previous position → velocity starts at zero.
@@ -358,6 +378,75 @@ impl HandTracker {
     pub fn churn(&self) -> u64 {
         self.churn
     }
+
+    /// Advance the engagement EMAs (motion + articulation) of the track with
+    /// `id` by one frame and return the smoothed levels.
+    ///
+    /// Called by the pipeline right after [`Self::assign`] each frame, with:
+    /// - `speed_mm_s` — this frame's |palm velocity| (finite-difference over
+    ///   `dt`, same value the emitted [`crate::input::hand::Hand`] carries);
+    /// - `grab` / `pinch` — this frame's **raw** (pre-deadzone) grab and
+    ///   pinch, so the articulation rate `(|Δgrab| + |Δpinch|) / dt` sees the
+    ///   full gesture excursion (the deadzone would hide small openings);
+    /// - `dt` — time since the previous processed frame, driving the
+    ///   framerate-independent EMA step ([`engagement::ema_alpha`], τ =
+    ///   [`engagement::ENGAGEMENT_TAU_S`]).
+    ///
+    /// The first call on a fresh track seeds the grab/pinch history and
+    /// leaves both EMAs at `0` (there is no Δ yet) — a newly acquired hand
+    /// must *demonstrate* activity before it scores any. Unknown `id`
+    /// (already aged out) returns zeros; no allocation either way.
+    pub fn update_engagement(
+        &mut self,
+        id: u32,
+        speed_mm_s: f32,
+        grab: f32,
+        pinch: f32,
+        dt: Duration,
+    ) -> EngagementLevels {
+        let Some(t) = self.tracks.iter_mut().find(|t| t.id == id) else {
+            return EngagementLevels::default();
+        };
+        let dt_s = dt.as_secs_f32();
+        // alpha = 1 − e^(−dt/τ): the exact discrete first-order low-pass step,
+        // so smoothing strength is independent of the inference rate.
+        let alpha = engagement::ema_alpha(dt_s, engagement::ENGAGEMENT_TAU_S);
+        // Motion: EMA toward this frame's palm speed. A non-finite speed
+        // (degenerate dt upstream) is treated as "no observation".
+        if speed_mm_s.is_finite() {
+            t.motion_mm_s = alpha.mul_add(speed_mm_s - t.motion_mm_s, t.motion_mm_s);
+        }
+        // Articulation: EMA toward this frame's |Δgrab|+|Δpinch| rate. The
+        // rate needs a previous sample and a positive dt; the first sighting
+        // only seeds the history.
+        if let Some((prev_grab, prev_pinch)) = t.prev_grab_pinch {
+            if dt_s > 0.0 {
+                let rate = ((grab - prev_grab).abs() + (pinch - prev_pinch).abs()) / dt_s;
+                if rate.is_finite() {
+                    t.articulation_per_s =
+                        alpha.mul_add(rate - t.articulation_per_s, t.articulation_per_s);
+                }
+            }
+        }
+        t.prev_grab_pinch = Some((grab, pinch));
+        EngagementLevels {
+            motion_mm_s: t.motion_mm_s,
+            articulation_per_s: t.articulation_per_s,
+        }
+    }
+}
+
+/// The smoothed per-track engagement inputs returned by
+/// [`HandTracker::update_engagement`]: feed them through
+/// [`engagement::activity`] + [`engagement::engagement`] (with the track's
+/// proximity) to get the score.
+// Not `Eq`: f32 fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EngagementLevels {
+    /// EMA of |palm velocity| in mm/s (τ = [`engagement::ENGAGEMENT_TAU_S`]).
+    pub motion_mm_s: f32,
+    /// EMA of the grab+pinch articulation rate in 1/s (same τ).
+    pub articulation_per_s: f32,
 }
 
 /// One EMA step of a track's physical camera distance, with sentinel-aware
@@ -789,5 +878,132 @@ mod tests {
         let left_hand = assign_at(&mut t, Chirality::Right, Vec3::new(-150.0, 200.0, 0.0));
         let right_hand = assign_at(&mut t, Chirality::Right, Vec3::new(150.0, 200.0, 0.0));
         assert_ne!(left_hand.id, right_hand.id);
+    }
+
+    // --- per-track engagement EMAs (bystander-eviction inputs) --------------
+
+    /// Drive one track for `frames` frames at a fixed dt with constant speed
+    /// and an alternating grab (articulation), returning the final levels.
+    fn drive_engagement(
+        t: &mut HandTracker,
+        id: u32,
+        frames: u32,
+        dt: Duration,
+        speed: f32,
+        grab_toggle: bool,
+    ) -> EngagementLevels {
+        let mut last = EngagementLevels::default();
+        for n in 0..frames {
+            let pos = Vec3::new(0.0, 200.0, 0.0);
+            t.assign(Chirality::Right, pos, 120.0, 500.0, dt);
+            // Alternate grab between 0.1 and 0.6 per frame when toggling —
+            // a playing hand's open/close — else hold a constant strong grip
+            // (the drink-holder pose: high grab LEVEL, zero grab CHANGE).
+            let grab = if grab_toggle {
+                if n % 2 == 0 {
+                    0.1
+                } else {
+                    0.6
+                }
+            } else {
+                0.9
+            };
+            last = t.update_engagement(id, speed, grab, 0.0, dt);
+            t.end_frame();
+        }
+        last
+    }
+
+    #[test]
+    fn engagement_emas_start_cold_on_a_fresh_track() {
+        let mut t = HandTracker::default();
+        let a = t.assign(
+            Chirality::Right,
+            Vec3::new(0.0, 200.0, 0.0),
+            120.0,
+            500.0,
+            Duration::from_millis(33),
+        );
+        let levels = t.update_engagement(a.id, 400.0, 0.9, 0.0, Duration::from_millis(33));
+        // Motion EMA has taken one small step; articulation has no Δ yet.
+        assert!(levels.motion_mm_s > 0.0 && levels.motion_mm_s < 400.0);
+        assert!(
+            levels.articulation_per_s.abs() < f32::EPSILON,
+            "first sighting only seeds the grab/pinch history: {levels:?}"
+        );
+    }
+
+    #[test]
+    fn static_grip_accumulates_zero_articulation() {
+        // The drink-holder: strong constant grab, no motion. After 3 s of
+        // frames both EMAs must still read (near) zero — the grab LEVEL must
+        // never leak into the articulation RATE.
+        let mut t = HandTracker::default();
+        let id = t
+            .assign(
+                Chirality::Right,
+                Vec3::new(0.0, 200.0, 0.0),
+                120.0,
+                500.0,
+                Duration::from_millis(33),
+            )
+            .id;
+        t.end_frame();
+        let levels = drive_engagement(&mut t, id, 90, Duration::from_millis(33), 0.0, false);
+        assert!(levels.motion_mm_s.abs() < 1e-3, "{levels:?}");
+        assert!(levels.articulation_per_s.abs() < 1e-3, "{levels:?}");
+    }
+
+    #[test]
+    fn articulating_hand_accumulates_articulation_within_a_second() {
+        // A playing hand toggling grab 0.1 ↔ 0.6 at 30 Hz articulates at
+        // 0.5 × 30 = 15/s raw — the ~1 s-τ EMA must cross the 1.0/s
+        // saturation threshold well within a second of frames.
+        let mut t = HandTracker::default();
+        let id = t
+            .assign(
+                Chirality::Right,
+                Vec3::new(0.0, 200.0, 0.0),
+                120.0,
+                500.0,
+                Duration::from_millis(33),
+            )
+            .id;
+        t.end_frame();
+        let levels = drive_engagement(&mut t, id, 30, Duration::from_millis(33), 0.0, true);
+        assert!(
+            levels.articulation_per_s > engagement::ARTICULATION_SATURATION_PER_S,
+            "one second of open/close must saturate articulation: {levels:?}"
+        );
+    }
+
+    #[test]
+    fn waving_hand_accumulates_motion_within_a_second() {
+        let mut t = HandTracker::default();
+        let id = t
+            .assign(
+                Chirality::Right,
+                Vec3::new(0.0, 200.0, 0.0),
+                120.0,
+                500.0,
+                Duration::from_millis(33),
+            )
+            .id;
+        t.end_frame();
+        // Constant 400 mm/s wave for 1 s of 30 Hz frames: the EMA converges
+        // ~63 % of the way in τ = 1 s → comfortably past the 300 mm/s
+        // saturation × 0.63 ≈ 190; require it to beat half saturation.
+        let levels = drive_engagement(&mut t, id, 30, Duration::from_millis(33), 400.0, false);
+        assert!(
+            levels.motion_mm_s > engagement::MOTION_SATURATION_MM_S * 0.5,
+            "{levels:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_track_id_returns_zero_levels() {
+        let mut t = HandTracker::default();
+        let levels = t.update_engagement(99, 100.0, 0.5, 0.5, Duration::from_millis(33));
+        assert_eq!(levels, EngagementLevels::default());
     }
 }

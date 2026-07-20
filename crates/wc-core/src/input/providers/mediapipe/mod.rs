@@ -245,6 +245,23 @@ impl MediaPipeProvider {
         self.live_tuning.set_depth_k(k);
     }
 
+    /// Live-set the engagement motion weight (how much moving/articulating
+    /// counts vs proximity in the bystander-eviction score — see
+    /// `pipeline::PipelineConfig::engagement_motion_weight`). Cheap and
+    /// lock-free; safe to call every frame from a tuning system.
+    pub fn set_engagement_motion_weight(&self, weight: f32) {
+        self.live_tuning.set_engagement_motion_weight(weight);
+    }
+
+    /// Live-set the bystander eviction margin (how decisively a challenger
+    /// hand must out-score a passive incumbent before evicting it; very high
+    /// disables eviction — see
+    /// `pipeline::PipelineConfig::bystander_eviction_margin`). Cheap and
+    /// lock-free; safe to call every frame from a tuning system.
+    pub fn set_bystander_eviction_margin(&self, margin: f32) {
+        self.live_tuning.set_bystander_eviction_margin(margin);
+    }
+
     /// Live-set the idle inference throttle (shared with the running worker:
     /// `true` caps inference at `worker::IDLE_INFERENCE_HZ`). Mirrors the
     /// `SketchActivity` state — see `apply_mediapipe_idle_throttle`. Cheap
@@ -338,6 +355,8 @@ pub fn apply_mediapipe_tuning_settings(
         {
             mp.set_grab_deadzone(settings.grab_rest_deadzone);
             mp.set_depth_calibration_k(settings.depth_calibration_k);
+            mp.set_engagement_motion_weight(settings.engagement_motion_weight);
+            mp.set_bystander_eviction_margin(settings.bystander_eviction_margin);
             mp.set_smoothing_params(settings.smoothing_min_cutoff, settings.smoothing_beta);
         }
     }
@@ -459,6 +478,11 @@ fn refill_metrics(
         .push(ProviderMetric::count("Grab (‰)", p.grab_permille));
     d.metrics
         .push(ProviderMetric::count("Track churn", p.track_churn));
+    // Bystander evictions: how often the at-capacity challenger scan has
+    // reassigned a track slot. Flat in a healthy session; useful on-site when
+    // tuning the eviction margin (each tick = a slot handed to a challenger).
+    d.metrics
+        .push(ProviderMetric::count("Evictions", p.bystander_evictions));
     d.metrics.push(ProviderMetric::count(
         "Pipeline errors",
         worker_diag.pipeline_errors,

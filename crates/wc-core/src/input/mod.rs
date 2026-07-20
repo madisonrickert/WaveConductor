@@ -67,6 +67,9 @@ pub mod camera_preview;
     feature = "body-tracking-mediapipe"
 ))]
 pub mod capture;
+/// Pure engagement-scoring math ("is this a player's hand?"), shared by the
+/// `MediaPipe` worker's bystander-eviction logic and Line's focal-hand pick.
+pub mod engagement;
 pub mod entity;
 pub mod gesture;
 pub mod hand;
