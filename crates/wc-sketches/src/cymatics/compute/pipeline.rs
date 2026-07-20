@@ -17,7 +17,7 @@
 //! 3. `prepare_cymatics_bind_groups` ([`RenderSystems::PrepareBindGroups`])
 //!    uploads this frame's uniforms and builds the **two** bind groups — `ab`
 //!    (reads A, writes B) and `ba` (reads B, writes A) — cached in
-//!    [`CymaticsBindGroupCache`] keyed on the ping-pong texture views' ids
+//!    `CymaticsBindGroupCache` keyed on the ping-pong texture views' ids
 //!    (bounded by construction: one slot, replaced on change, and *cleared* by
 //!    the removal companion on sketch exit so the freed A/B textures' `Arc`s
 //!    are not pinned for the rest of the session).

@@ -23,7 +23,7 @@
 //!    array) **once** — never per frame.
 //! 4. `prepare_flame_bind_groups` ([`RenderSystems::PrepareBindGroups`]) uploads
 //!    this frame's uniforms and builds (or reuses) the single bind group, cached
-//!    in [`FlameBindGroupCache`] keyed on the node storage buffer's [`BufferId`]
+//!    in `FlameBindGroupCache` keyed on the node storage buffer's [`BufferId`]
 //!    (bounded by construction: one slot, replaced on change, and *cleared* by
 //!    the removal companion on sketch exit so the freed node buffer's `Arc` is
 //!    not pinned for the rest of the session). `flame_compute` runs the
