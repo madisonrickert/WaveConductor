@@ -16,11 +16,12 @@
 //!
 //! ## What runs where
 //!
-//! [`resolve_output_device`] and [`saved_device_reappeared`] are **pure** — no
-//! host, no device, no thread — and carry the two decisions this half turns on,
+//! [`resolve_output_device`], [`saved_device_reappeared`],
+//! [`bound_device_disappeared`], and [`default_device_switched`] are **pure** —
+//! no host, no device, no thread — and carry the decisions this half turns on,
 //! so they are unit-tested with literal name lists (CI has no audio device).
-//! Neither allocates beyond the single owned name it returns, and neither runs
-//! per frame: the resolver runs on (re)build, the diff runs on the watcher's
+//! None of them allocates beyond the single owned name it returns, and none runs
+//! per frame: the resolver runs on (re)build, the diffs run on the watcher's
 //! ~2 s poll.
 //!
 //! [`enumerate_output_names`] calls into cpal and **can block** (WASAPI
@@ -155,6 +156,57 @@ pub fn bound_device_disappeared(bound: Option<&str>, current: &[String], running
     running && !current.iter().any(|d| d == name)
 }
 
+/// Whether a rebuild should be triggered because the host's **default** output
+/// endpoint changed identity while the operator has no pinned device — i.e. the
+/// stream is configured to *follow the system default* and the default moved out
+/// from under it.
+///
+/// ## The third migrate trigger, and why the other two cannot cover it
+///
+/// "User plugs in the event PA and the OS promotes it to default" changes **no
+/// list membership** when the old endpoint stays present, and it raises **no
+/// cpal `StreamError`** on any backend (WASAPI errors the stream on *unplug*,
+/// not on a default switch). So neither death trigger fires, and
+/// [`saved_device_reappeared`] is inert with no saved name. Without this check a
+/// kiosk following the system default keeps playing into the old endpoint all
+/// night.
+///
+/// ## When it deliberately does *not* fire
+///
+/// - **A pinned device** (`saved` non-empty): the operator chose an endpoint
+///   explicitly; the OS default is irrelevant to them, and yanking their stream
+///   onto it would override that choice.
+/// - **No live binding** (`bound == None`): the engine never came up or the
+///   binding was cleared by a stream death — a reconnect cycle is already armed,
+///   and its rebuild resolves to the *current* default anyway.
+/// - **Already on the new default** (`bound == current`): nothing to do; this is
+///   the steady state every successful fallback rebuild lands in.
+/// - **Not a rising edge** (`previous == current`): snapshots are also published
+///   for list-only changes, and re-firing on every one of those while
+///   `bound != default` for any transient reason would turn each topology
+///   publish into a stream rebuild.
+///
+/// Fires at most once per actual default switch (the edge), like
+/// [`saved_device_reappeared`]. A pathological OS default that flaps A↔B
+/// rebuilds once per flap — the same bounded exposure the reappearance edge
+/// already accepts, and the supervisor's settle-window backoff still governs the
+/// attempts if those rebuilds keep failing.
+#[must_use]
+pub fn default_device_switched(
+    saved: Option<&str>,
+    bound: Option<&str>,
+    previous_default: Option<&str>,
+    current_default: Option<&str>,
+) -> bool {
+    if saved.is_some_and(|name| !name.is_empty()) {
+        return false;
+    }
+    let (Some(bound), Some(current)) = (bound, current_default) else {
+        return false;
+    };
+    bound != current && previous_default != Some(current)
+}
+
 /// Live list of output-device names, refreshed by the device-watcher thread.
 /// Read by the audio settings panel (via Plan 03a's runtime-enumerated dropdown,
 /// see the [`RuntimeEnumOptionsSource`] impl below) and by the supervisor's
@@ -201,6 +253,38 @@ impl RuntimeEnumOptionsSource for AvailableAudioDevices {
 /// device.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct BoundOutputDevice(pub Option<String>);
+
+/// Name of the host's current **default** output endpoint, as last reported by
+/// the device watcher; `None` before the first snapshot lands (and forever, in a
+/// headless harness) or when the host has no default endpoint at all.
+///
+/// This is the "previous" half of [`default_device_switched`]'s rising-edge
+/// check: [`drain_device_topology`] compares each incoming snapshot's default
+/// against it, then overwrites it. Main-thread-only bookkeeping — the watcher
+/// thread never touches it.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct DefaultOutputDevice(pub Option<String>);
+
+/// One watcher observation: the canonical output-name list plus the identity of
+/// the host's current **default** output endpoint.
+///
+/// The default is carried alongside the list because it can change while the
+/// membership does not (a default-device *switch* with the old endpoint still
+/// present — see [`default_device_switched`]), and the list can change while the
+/// default does not. Either difference is a publishable topology change.
+///
+/// `default_output: None` means the host reported no default endpoint (or the
+/// endpoint could not report a name — cpal's API cannot distinguish the two);
+/// it never means "the query failed", because a failed *list* enumeration skips
+/// the whole tick upstream and this snapshot is never built.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct OutputTopology {
+    /// Sorted, non-de-duplicated output names; see [`canonical_output_names`].
+    pub outputs: Vec<String>,
+    /// Name of the host's default output device, if it has one with a name.
+    pub default_output: Option<String>,
+}
 
 /// Enumerate the host's output devices and collect their names, sorted.
 ///
@@ -327,6 +411,31 @@ pub(crate) fn apply_topology(
     migrate
 }
 
+/// One full watcher poll: the output-name list plus the default endpoint's name.
+///
+/// **Can block** (both halves are WASAPI COM calls); watcher thread only. The
+/// default is queried only after the list enumeration succeeded — a host broken
+/// enough to fail `output_devices()` gives no trustworthy default either, and
+/// keeping the two in one all-or-nothing result preserves the differ's "a failed
+/// poll teaches us nothing, skip the tick" rule for both.
+///
+/// The extra `String` this allocates per poll (the default's name) is in the
+/// same cpal-forced class as the name list itself: ~every 2 s on the watcher
+/// thread, never the audio callback and never a per-frame system. cpal's
+/// `default_output_device()` folds "no default" and "query failed" into `None`;
+/// both land here as `default_output: None`, which is the honest reading —
+/// either way there is currently no default to follow.
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_output_topology(host: &cpal::Host) -> Result<OutputTopology, cpal::DevicesError> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let outputs = try_enumerate_output_names(host)?;
+    let default_output = host.default_output_device().and_then(|d| d.name().ok());
+    Ok(OutputTopology {
+        outputs,
+        default_output,
+    })
+}
+
 /// The ~2 s cadence at which the watcher re-enumerates output devices.
 #[cfg(not(target_arch = "wasm32"))]
 const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -337,7 +446,7 @@ const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Decide what one watcher poll should publish, given the previous snapshot and
-/// the result of [`enumerate_output_names`].
+/// the result of [`poll_output_topology`].
 ///
 /// This is the whole decision the watcher thread makes, extracted so it is
 /// testable without a device, a thread, or a two-second sleep. The thread around
@@ -347,24 +456,26 @@ const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 ///   The tick is skipped: no diff, no publish, and the caller keeps its previous
 ///   snapshot. Folding this into "the list is now empty" would make the next
 ///   *successful* poll look like a rising edge and provoke a spurious rebuild.
-/// - `polled == Some(list)` equal to `last` — steady state (the overwhelmingly
-///   common case). Nothing to publish, so the channel stays quiet.
-/// - `polled == Some(list)` differing from `last` (including the very first poll,
-///   where `last` is `None`) — a real topology change. Return it; the caller
-///   publishes it and adopts it as the new `last`.
+/// - `polled == Some(topology)` equal to `last` — steady state (the
+///   overwhelmingly common case). Nothing to publish, so the channel stays quiet.
+/// - `polled == Some(topology)` differing from `last` in **either** field — the
+///   name list *or* the default endpoint (including the very first poll, where
+///   `last` is `None`) — a real topology change. Return it; the caller publishes
+///   it and adopts it as the new `last`. A default-only difference is a real
+///   change: it is the entire signal behind [`default_device_switched`].
 ///
-/// `Some(vec![])` is a legitimate answer, not an error: when the only endpoint is
-/// a sleeping HDMI TV the host genuinely enumerates nothing. Equality is exact,
-/// which is sound precisely because [`enumerate_output_names`] sorts — a host that
-/// re-orders its list between polls is not a topology change.
+/// An empty `outputs` is a legitimate answer, not an error: when the only
+/// endpoint is a sleeping HDMI TV the host genuinely enumerates nothing.
+/// Equality is exact, which is sound precisely because the list is sorted — a
+/// host that re-orders its enumeration between polls is not a topology change.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn topology_snapshot_to_publish(
-    last: Option<&[String]>,
-    polled: Option<Vec<String>>,
-) -> Option<Vec<String>> {
+    last: Option<&OutputTopology>,
+    polled: Option<OutputTopology>,
+) -> Option<OutputTopology> {
     let current = polled?;
-    if last == Some(current.as_slice()) {
+    if last == Some(&current) {
         return None;
     }
     Some(current)
@@ -416,8 +527,9 @@ impl Drop for DeviceWatcher {
 /// installed as a **non-send** resource and only ever read on the main thread.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct DeviceTopologyReceiver {
-    /// Receives a fresh name snapshot only when the list actually changed.
-    rx: std::sync::mpsc::Receiver<Vec<String>>,
+    /// Receives a fresh topology snapshot only when it actually changed (name
+    /// list or default endpoint).
+    rx: std::sync::mpsc::Receiver<OutputTopology>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -430,7 +542,7 @@ impl DeviceTopologyReceiver {
     /// disconnected channel (the watcher exited, or panicked) is indistinguishable
     /// from an empty one here, and deliberately so — it is a normal end-of-life
     /// state, not something to log once per frame.
-    fn latest(&self) -> Option<Vec<String>> {
+    fn latest(&self) -> Option<OutputTopology> {
         let mut newest = None;
         while let Ok(snapshot) = self.rx.try_recv() {
             newest = Some(snapshot);
@@ -493,7 +605,7 @@ pub fn spawn_device_watcher() -> (DeviceWatcher, DeviceTopologyReceiver) {
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+    let (tx, rx) = std::sync::mpsc::channel::<OutputTopology>();
 
     let spawned = std::thread::Builder::new()
         .name("wc-audio-device-watcher".to_owned())
@@ -550,26 +662,29 @@ pub fn spawn_device_watcher() -> (DeviceWatcher, DeviceTopologyReceiver) {
 /// below and the function's caller docs): a persistently broken host must not turn
 /// a 2 s poll into a log flood for the length of a soak.
 #[cfg(not(target_arch = "wasm32"))]
-fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sender<Vec<String>>) {
+fn watch_devices(
+    stop: &std::sync::atomic::AtomicBool,
+    tx: &std::sync::mpsc::Sender<OutputTopology>,
+) {
     use std::sync::atomic::Ordering;
 
     let host = cpal::default_host();
     // Reused across the session; the first poll (`last == None`) always
     // publishes, so the dropdown and the resolver see a list without
     // waiting out an interval.
-    let mut last: Option<Vec<String>> = None;
+    let mut last: Option<OutputTopology> = None;
     // Whether the *previous* poll's enumeration failed. The one piece of state
     // that turns a per-poll warning into a per-outage one.
     let mut failing = false;
 
     while !stop.load(Ordering::Relaxed) {
-        let polled = match try_enumerate_output_names(&host) {
-            Ok(names) => {
+        let polled = match poll_output_topology(&host) {
+            Ok(topology) => {
                 if failing {
                     tracing::info!("cpal output-device enumeration recovered");
                     failing = false;
                 }
-                Some(names)
+                Some(topology)
             }
             Err(err) => {
                 if !failing {
@@ -587,7 +702,7 @@ fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sen
             }
         };
 
-        if let Some(current) = topology_snapshot_to_publish(last.as_deref(), polled) {
+        if let Some(current) = topology_snapshot_to_publish(last.as_ref(), polled) {
             // The one clone: the channel takes ownership, and we keep a copy to
             // diff the next poll against. Only on a real change.
             if tx.send(current.clone()).is_err() {
@@ -610,9 +725,10 @@ fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sen
 }
 
 /// `PreUpdate` system: pull the newest topology snapshot off the watcher channel,
-/// update [`AvailableAudioDevices`], and act on the two edges it can carry.
+/// update [`AvailableAudioDevices`] / [`DefaultOutputDevice`], and act on the
+/// three edges it can carry.
 ///
-/// ## The two edges
+/// ## The three edges
 ///
 /// 1. **Our endpoint vanished** ([`bound_device_disappeared`]) — the stream is a
 ///    zombie: cpal never raised a `StreamError`, but the device it renders into is
@@ -624,13 +740,20 @@ fn watch_devices(stop: &std::sync::atomic::AtomicBool, tx: &std::sync::mpsc::Sen
 /// 2. **The operator's saved endpoint reappeared** ([`saved_device_reappeared`]) —
 ///    ask the supervisor to bring its next attempt forward rather than waiting out
 ///    a backoff that may be as long as 30 s, so the stream migrates back promptly.
+/// 3. **The system default switched while we follow it**
+///    ([`default_device_switched`]) — no saved preference, and the host promoted a
+///    different endpoint to default (the event PA was just plugged in) without
+///    erroring the live stream or removing its device. Ask the supervisor for an
+///    immediate rebuild; `rebuild_engine`'s fallback path opens the *current*
+///    default, which is precisely the migration wanted.
 ///
 /// They compose: a TV that sleeps and later wakes fires (1) then (2), and if a
-/// snapshot somehow carries both they still converge on **one** reconnect cycle —
-/// (1) only moves a status that is still `Running`, and the supervisor's `begin`
-/// is gated on no cycle already being armed.
+/// snapshot somehow carries several they still converge on **one** reconnect cycle
+/// — (1) only moves a status that is still `Running`, (3) short-circuits on a
+/// cleared binding, and the supervisor's `begin` is gated on no cycle already
+/// being armed.
 ///
-/// The saved **setting** is never touched by either edge. Only
+/// The saved **setting** is never touched by any edge. Only
 /// [`BoundOutputDevice`] — what we are currently *bound to* — is cleared, and only
 /// by (1). The operator's choice survives its device being away; that is the whole
 /// premise of remembering it by name.
@@ -654,6 +777,7 @@ pub fn drain_device_topology(
     receiver: Option<bevy::ecs::system::NonSend<'_, DeviceTopologyReceiver>>,
     mut available: ResMut<'_, AvailableAudioDevices>,
     mut bound: ResMut<'_, BoundOutputDevice>,
+    mut default_device: ResMut<'_, DefaultOutputDevice>,
     mut state: ResMut<'_, crate::audio::state::AudioState>,
     settings: Option<Res<'_, crate::audio::settings::AudioSettings>>,
     mut supervisor: ResMut<'_, crate::audio::supervisor::AudioSupervisor>,
@@ -668,11 +792,15 @@ pub fn drain_device_topology(
     let Some(incoming) = receiver.latest() else {
         return;
     };
+    let OutputTopology {
+        outputs: incoming_outputs,
+        default_output: incoming_default,
+    } = incoming;
 
     // Edge 1: the endpoint under the live stream is gone. Checked against the
     // *incoming* snapshot, before `apply_topology` consumes it.
     let running = state.status == crate::audio::state::AudioStatus::Running;
-    if bound_device_disappeared(bound.0.as_deref(), &incoming, running) {
+    if bound_device_disappeared(bound.0.as_deref(), &incoming_outputs, running) {
         tracing::warn!(
             device = bound.0.as_deref().unwrap_or_default(),
             "the bound output device is no longer enumerated; treating the stream as dead. \
@@ -692,10 +820,37 @@ pub fn drain_device_topology(
         .as_ref()
         .map(|s| s.output_device.as_str())
         .filter(|name| !name.is_empty());
+
+    // Edge 3: the system default switched while nothing is pinned. Read after
+    // edge 1 so a binding it just cleared short-circuits this (a reconnect cycle
+    // is starting anyway, and its rebuild resolves to the current default).
+    if default_device_switched(
+        saved,
+        bound.0.as_deref(),
+        default_device.0.as_deref(),
+        incoming_default.as_deref(),
+    ) {
+        tracing::info!(
+            from = bound.0.as_deref().unwrap_or_default(),
+            to = incoming_default.as_deref().unwrap_or_default(),
+            "system default output device changed and no device is pinned in settings; \
+             requesting an immediate stream rebuild to follow it"
+        );
+        supervisor.request_now(time.elapsed_secs_f64());
+    }
+    // Adopt the new default *after* the edge check — it is the check's
+    // "previous" half.
+    default_device.0 = incoming_default;
+
     // Edge 2: the saved endpoint came back. `bound` is read *after* edge 1 may have
     // cleared it, so a device that vanished and returned in the same snapshot gap
     // is still seen as something to migrate to.
-    if apply_topology(&mut available.0, incoming, saved, bound.0.as_deref()) {
+    if apply_topology(
+        &mut available.0,
+        incoming_outputs,
+        saved,
+        bound.0.as_deref(),
+    ) {
         // Bring the next reconnect attempt forward instead of waiting out a
         // backoff that may be as long as 30 s. `Time<Real>` is the monotonic
         // clock the supervisor's contract requires.
@@ -947,11 +1102,135 @@ mod tests {
         assert!(!bound_device_disappeared(None, &Vec::new(), true));
     }
 
+    /// The third migrate trigger: the host's default endpoint changed identity
+    /// while the operator follows the system default. The case none of the other
+    /// checks can see — no list change, no stream error.
+    mod default_switch {
+        use super::*;
+
+        /// The headline case: no pinned device, the event PA is plugged in and
+        /// the OS promotes it. The old endpoint is still present and the stream
+        /// is still "healthy" — only this check notices.
+        #[test]
+        fn a_default_switch_with_no_pinned_device_fires() {
+            assert!(default_device_switched(
+                None,
+                Some("Built-in"),
+                Some("Built-in"),
+                Some("Event PA"),
+            ));
+        }
+
+        /// A pinned device makes the OS default irrelevant: the operator chose an
+        /// endpoint, and a default switch must never yank the stream off it.
+        #[test]
+        fn a_pinned_device_ignores_default_switches() {
+            assert!(!default_device_switched(
+                Some("LG TV (HDMI)"),
+                Some("LG TV (HDMI)"),
+                Some("Built-in"),
+                Some("Event PA"),
+            ));
+            // Even when the stream is on a fallback because the pinned device is
+            // away: the operator's choice is the TV, not "whatever is default".
+            assert!(!default_device_switched(
+                Some("LG TV (HDMI)"),
+                Some("Built-in"),
+                Some("Built-in"),
+                Some("Event PA"),
+            ));
+        }
+
+        /// The empty saved string is the "follow the system default" sentinel,
+        /// exactly as in the resolver — it must behave like no preference.
+        #[test]
+        fn an_empty_saved_name_follows_the_default() {
+            assert!(default_device_switched(
+                Some(""),
+                Some("Built-in"),
+                Some("Built-in"),
+                Some("Event PA"),
+            ));
+        }
+
+        /// Already bound to the new default (the state every fallback rebuild
+        /// lands in): nothing to migrate. This is the steady state after the
+        /// migration succeeds, so it must not re-fire.
+        #[test]
+        fn already_on_the_new_default_does_not_fire() {
+            assert!(!default_device_switched(
+                None,
+                Some("Event PA"),
+                Some("Built-in"),
+                Some("Event PA"),
+            ));
+        }
+
+        /// No live binding: either the engine never came up or a death edge just
+        /// cleared it — a reconnect cycle is armed either way, and its rebuild
+        /// resolves to the current default without help from this trigger.
+        #[test]
+        fn no_binding_means_nothing_to_migrate_from() {
+            assert!(!default_device_switched(
+                None,
+                None,
+                Some("Built-in"),
+                Some("Event PA"),
+            ));
+        }
+
+        /// No current default (deviceless host, or a nameless default endpoint):
+        /// there is nothing to follow.
+        #[test]
+        fn no_current_default_never_fires() {
+            assert!(!default_device_switched(
+                None,
+                Some("Built-in"),
+                Some("Built-in"),
+                None,
+            ));
+        }
+
+        /// Snapshots are also published for list-only changes. A stable default
+        /// must not re-fire on those — only the rising edge of the default's
+        /// *identity* counts, or every headphone unplug would rebuild the stream.
+        #[test]
+        fn an_unchanged_default_is_not_an_edge() {
+            assert!(!default_device_switched(
+                None,
+                Some("Built-in"),
+                Some("Event PA"),
+                Some("Event PA"),
+            ));
+        }
+
+        /// The first snapshot of the session (`previous == None`) is an edge when
+        /// the binding disagrees with the default — the startup build raced a
+        /// default change, and the stream should follow.
+        #[test]
+        fn a_first_snapshot_disagreeing_with_the_binding_fires() {
+            assert!(default_device_switched(
+                None,
+                Some("Built-in"),
+                None,
+                Some("Event PA"),
+            ));
+        }
+    }
+
     /// The watcher, its channel, and the drain system are native-only (cpal
     /// enumeration is), so the pure cores they are built out of are too.
     #[cfg(not(target_arch = "wasm32"))]
     mod topology {
         use super::*;
+
+        /// An [`OutputTopology`] from literals, so each test reads as data.
+        fn topo(list: &[&str], default: Option<&str>) -> OutputTopology {
+            OutputTopology {
+                outputs: names(list),
+                default_output: default.map(str::to_owned),
+            }
+        }
 
         #[test]
         fn apply_topology_updates_the_list_and_flags_reappearance() {
@@ -1029,23 +1308,25 @@ mod tests {
         /// publishes — otherwise the dropdown would be empty until something changed.
         #[test]
         fn the_first_poll_always_publishes() {
-            let first = names(&["Built-in"]);
+            let first = topo(&["Built-in"], Some("Built-in"));
             assert_eq!(
                 topology_snapshot_to_publish(None, Some(first.clone())),
                 Some(first),
             );
-            // Even when the host genuinely has nothing: `Some(vec![])` is an answer.
+            // Even when the host genuinely has nothing: an empty answer is an answer.
+            let empty = topo(&[], None);
             assert_eq!(
-                topology_snapshot_to_publish(None, Some(Vec::new())),
-                Some(Vec::new()),
+                topology_snapshot_to_publish(None, Some(empty.clone())),
+                Some(empty),
             );
         }
 
-        /// Steady state: the same list, poll after poll, for hours. Nothing is
-        /// published, so the channel stays silent and the main thread does no work.
+        /// Steady state: the same list and default, poll after poll, for hours.
+        /// Nothing is published, so the channel stays silent and the main thread
+        /// does no work.
         #[test]
-        fn an_unchanged_list_publishes_nothing() {
-            let last = names(&["Built-in", "LG TV (HDMI)"]);
+        fn an_unchanged_topology_publishes_nothing() {
+            let last = topo(&["Built-in", "LG TV (HDMI)"], Some("LG TV (HDMI)"));
             assert_eq!(
                 topology_snapshot_to_publish(Some(&last), Some(last.clone())),
                 None,
@@ -1055,18 +1336,32 @@ mod tests {
         /// A real change — the TV woke up — is published.
         #[test]
         fn a_changed_list_is_published() {
-            let last = names(&["Built-in"]);
-            let with = names(&["Built-in", "LG TV (HDMI)"]);
+            let last = topo(&["Built-in"], Some("Built-in"));
+            let with = topo(&["Built-in", "LG TV (HDMI)"], Some("Built-in"));
             assert_eq!(
                 topology_snapshot_to_publish(Some(&last), Some(with.clone())),
                 Some(with),
             );
             // And so is the reverse: the TV sleeping empties the list, which the
             // dropdown must reflect.
-            let gone: Vec<String> = Vec::new();
+            let gone = topo(&[], None);
             assert_eq!(
                 topology_snapshot_to_publish(Some(&last), Some(gone.clone())),
                 Some(gone),
+            );
+        }
+
+        /// A default-only change — same membership, the OS promoted a different
+        /// endpoint — is a real topology change too. It is the entire signal
+        /// behind `default_device_switched`; swallowing it here would blind the
+        /// follow-the-default migration.
+        #[test]
+        fn a_default_switch_alone_is_published() {
+            let last = topo(&["Built-in", "Event PA"], Some("Built-in"));
+            let switched = topo(&["Built-in", "Event PA"], Some("Event PA"));
+            assert_eq!(
+                topology_snapshot_to_publish(Some(&last), Some(switched.clone())),
+                Some(switched),
             );
         }
 
@@ -1076,10 +1371,10 @@ mod tests {
         /// stream for no reason — every time the host hiccups, forever.
         #[test]
         fn a_failed_enumeration_skips_the_tick_and_keeps_the_previous_snapshot() {
-            let last = names(&["Built-in", "LG TV (HDMI)"]);
+            let last = topo(&["Built-in", "LG TV (HDMI)"], Some("LG TV (HDMI)"));
             assert_eq!(topology_snapshot_to_publish(Some(&last), None), None);
             // The caller therefore still holds `last`, so the next successful poll of
-            // the same list is (correctly) not a change either.
+            // the same topology is (correctly) not a change either.
             assert_eq!(
                 topology_snapshot_to_publish(Some(&last), Some(last.clone())),
                 None,
@@ -1095,19 +1390,32 @@ mod tests {
         /// `saved_device_reappeared` short-circuited on `currently_bound == saved`
         /// when the TV came back, so neither safety net ever armed. Silent for the
         /// night.
-        #[test]
-        fn a_vanished_bound_device_drives_reconnecting_and_clears_the_binding() {
-            use crate::audio::state::{AudioState, AudioStatus};
-            use crate::audio::supervisor::AudioSupervisor;
+        /// A headless app carrying exactly the resources `drain_device_topology`
+        /// takes, plus a channel standing in for the watcher thread.
+        fn drain_test_app() -> (bevy::prelude::App, std::sync::mpsc::Sender<OutputTopology>) {
             use bevy::prelude::*;
 
             let mut app = App::new();
             app.add_plugins(MinimalPlugins);
             app.init_resource::<AvailableAudioDevices>();
             app.init_resource::<BoundOutputDevice>();
-            app.init_resource::<AudioState>();
-            app.init_resource::<AudioSupervisor>();
+            app.init_resource::<DefaultOutputDevice>();
+            app.init_resource::<crate::audio::state::AudioState>();
+            app.init_resource::<crate::audio::supervisor::AudioSupervisor>();
             app.add_systems(PreUpdate, drain_device_topology);
+
+            // Stand in for the watcher thread: the same channel it would send on.
+            let (tx, rx) = std::sync::mpsc::channel::<OutputTopology>();
+            app.insert_non_send(DeviceTopologyReceiver { rx });
+            (app, tx)
+        }
+
+        #[test]
+        fn a_vanished_bound_device_drives_reconnecting_and_clears_the_binding() {
+            use crate::audio::state::{AudioState, AudioStatus};
+            use bevy::prelude::*;
+
+            let (mut app, tx) = drain_test_app();
 
             // A healthy stream, bound to the TV, which is in the current list.
             app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
@@ -1115,12 +1423,8 @@ mod tests {
             app.world_mut().resource_mut::<AvailableAudioDevices>().0 =
                 names(&["Built-in", "LG TV (HDMI)"]);
 
-            // Stand in for the watcher thread: the same channel it would send on.
-            let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
-            app.insert_non_send(DeviceTopologyReceiver { rx });
-
             // 2 a.m.: the TV sleeps. cpal raises nothing.
-            assert!(tx.send(names(&["Built-in"])).is_ok());
+            assert!(tx.send(topo(&["Built-in"], Some("Built-in"))).is_ok());
             app.update();
 
             assert_eq!(
@@ -1137,14 +1441,122 @@ mod tests {
                 names(&["Built-in"]),
                 "and the list still lands, for the settings dropdown",
             );
+            assert_eq!(
+                app.world().resource::<DefaultOutputDevice>().0.as_deref(),
+                Some("Built-in"),
+                "the default bookkeeping lands too",
+            );
 
             // A second snapshot with the device still gone changes nothing: the
             // status is no longer `Running`, so the trigger does not re-fire.
-            assert!(tx.send(names(&["Built-in", "Headphones"])).is_ok());
+            assert!(tx
+                .send(topo(&["Built-in", "Headphones"], Some("Built-in")))
+                .is_ok());
             app.update();
             assert_eq!(
                 app.world().resource::<AudioState>().status,
                 AudioStatus::Reconnecting,
+            );
+        }
+
+        /// Edge 3 end to end through the real system: the operator has no pinned
+        /// device (there is no `AudioSettings` resource at all here, the strongest
+        /// form of "no preference"), the event PA is plugged in, and the OS
+        /// promotes it. No membership the stream cares about changed, no error
+        /// fired — only the default's identity moved. The supervisor must be asked
+        /// for an immediate rebuild, and the stream itself is left alone (the
+        /// rebuild is the supervisor's job, on the main thread, next `Update`).
+        #[test]
+        fn a_default_switch_with_no_pinned_device_arms_an_immediate_rebuild() {
+            use crate::audio::state::{AudioState, AudioStatus};
+            use crate::audio::supervisor::AudioSupervisor;
+
+            let (mut app, tx) = drain_test_app();
+            app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
+            app.world_mut().resource_mut::<BoundOutputDevice>().0 = Some("Built-in".to_owned());
+
+            // Baseline snapshot: bound to the default, nothing to do.
+            assert!(tx.send(topo(&["Built-in"], Some("Built-in"))).is_ok());
+            app.update();
+            assert!(
+                !app.world().resource::<AudioSupervisor>().is_reconnecting(),
+                "bound == default: no migration armed",
+            );
+
+            // The event PA arrives and becomes the default. The old endpoint stays.
+            assert!(tx
+                .send(topo(&["Built-in", "Event PA"], Some("Event PA")))
+                .is_ok());
+            app.update();
+
+            assert!(
+                app.world().resource::<AudioSupervisor>().is_reconnecting(),
+                "a default switch while following the default must arm a rebuild",
+            );
+            assert_eq!(
+                app.world().resource::<AudioState>().status,
+                AudioStatus::Running,
+                "this is a migration, not a death: the stream is healthy until \
+                 the supervisor swaps it",
+            );
+            assert_eq!(
+                app.world().resource::<BoundOutputDevice>().0.as_deref(),
+                Some("Built-in"),
+                "the binding is rewritten by the rebuild, never by the drain",
+            );
+            assert_eq!(
+                app.world().resource::<DefaultOutputDevice>().0.as_deref(),
+                Some("Event PA"),
+            );
+
+            // The same snapshot content again (e.g. a later list-only change with
+            // the default stable) is not an edge: no re-arm after the cycle would
+            // have been spent. Clear the armed cycle to observe that directly.
+            app.world_mut()
+                .resource_mut::<AudioSupervisor>()
+                .record_success(0.0);
+            assert!(tx
+                .send(topo(
+                    &["Built-in", "Event PA", "Headphones"],
+                    Some("Event PA"),
+                ))
+                .is_ok());
+            app.update();
+            assert!(
+                !app.world().resource::<AudioSupervisor>().is_reconnecting(),
+                "a stable default is not an edge, whatever else the list does",
+            );
+        }
+
+        /// The negative: an operator who pinned a device keeps it across any
+        /// number of default switches. Their explicit choice outranks the OS.
+        #[test]
+        fn a_default_switch_with_a_pinned_device_is_ignored() {
+            use crate::audio::settings::AudioSettings;
+            use crate::audio::state::{AudioState, AudioStatus};
+            use crate::audio::supervisor::AudioSupervisor;
+
+            let (mut app, tx) = drain_test_app();
+            app.insert_resource(AudioSettings {
+                output_device: "Built-in".to_owned(),
+            });
+            app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
+            app.world_mut().resource_mut::<BoundOutputDevice>().0 = Some("Built-in".to_owned());
+            app.world_mut().resource_mut::<AvailableAudioDevices>().0 = names(&["Built-in"]);
+            app.world_mut().resource_mut::<DefaultOutputDevice>().0 = Some("Built-in".to_owned());
+
+            assert!(tx
+                .send(topo(&["Built-in", "Event PA"], Some("Event PA")))
+                .is_ok());
+            app.update();
+
+            assert!(
+                !app.world().resource::<AudioSupervisor>().is_reconnecting(),
+                "a pinned device must not follow the OS default anywhere",
+            );
+            assert_eq!(
+                app.world().resource::<AudioState>().status,
+                AudioStatus::Running,
             );
         }
 
@@ -1155,25 +1567,21 @@ mod tests {
         fn a_topology_change_that_keeps_the_bound_device_leaves_a_running_stream_alone() {
             use crate::audio::state::{AudioState, AudioStatus};
             use crate::audio::supervisor::AudioSupervisor;
-            use bevy::prelude::*;
 
-            let mut app = App::new();
-            app.add_plugins(MinimalPlugins);
-            app.init_resource::<AvailableAudioDevices>();
-            app.init_resource::<BoundOutputDevice>();
-            app.init_resource::<AudioState>();
-            app.init_resource::<AudioSupervisor>();
-            app.add_systems(PreUpdate, drain_device_topology);
+            let (mut app, tx) = drain_test_app();
 
             app.world_mut().resource_mut::<AudioState>().status = AudioStatus::Running;
             app.world_mut().resource_mut::<BoundOutputDevice>().0 = Some("LG TV (HDMI)".to_owned());
+            app.world_mut().resource_mut::<DefaultOutputDevice>().0 =
+                Some("LG TV (HDMI)".to_owned());
 
-            let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
-            app.insert_non_send(DeviceTopologyReceiver { rx });
-
-            // Someone plugs in headphones. Our endpoint is untouched.
+            // Someone plugs in headphones. Our endpoint — also the default — is
+            // untouched.
             assert!(tx
-                .send(names(&["Built-in", "Headphones", "LG TV (HDMI)"]))
+                .send(topo(
+                    &["Built-in", "Headphones", "LG TV (HDMI)"],
+                    Some("LG TV (HDMI)"),
+                ))
                 .is_ok());
             app.update();
 
@@ -1225,12 +1633,18 @@ mod tests {
         /// `try_enumerate_output_names` makes — not a hand-sort in the test.
         #[test]
         fn two_host_orderings_canonicalise_to_the_same_snapshot_and_do_not_reach_the_differ() {
-            let one = canonical_output_names(
-                names(&["LG TV (HDMI)", "Built-in", "Headphones"]).into_iter(),
-            );
-            let other = canonical_output_names(
-                names(&["Headphones", "LG TV (HDMI)", "Built-in"]).into_iter(),
-            );
+            let one = OutputTopology {
+                outputs: canonical_output_names(
+                    names(&["LG TV (HDMI)", "Built-in", "Headphones"]).into_iter(),
+                ),
+                default_output: Some("Built-in".to_owned()),
+            };
+            let other = OutputTopology {
+                outputs: canonical_output_names(
+                    names(&["Headphones", "LG TV (HDMI)", "Built-in"]).into_iter(),
+                ),
+                default_output: Some("Built-in".to_owned()),
+            };
             assert_eq!(topology_snapshot_to_publish(Some(&one), Some(other)), None);
         }
     }

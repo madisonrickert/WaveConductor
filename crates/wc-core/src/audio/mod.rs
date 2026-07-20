@@ -51,6 +51,20 @@
 //! With no sketches loaded, the audio engine runs silently — [`dsp::DspHost`]
 //! defaults to a graph that emits zeros. Sketches in Plan 6+ will add their
 //! own DSP graphs via `AudioCommand::AddSynth` (added when needed).
+//!
+//! ## Output-device failover is unconditional
+//!
+//! There is **no setting that enables or disables audio recovery** — a kiosk must
+//! never run silent for hours because its endpoint blinked, so the whole failover
+//! stack is always on: the cpal error callback's lock-free flag
+//! ([`state::AudioErrorFlag`]), the device watcher's vanished-endpoint and
+//! reappearance edges ([`device::drain_device_topology`]), the follow-the-default
+//! migration ([`device::default_device_switched`]), the backoff supervisor
+//! ([`supervisor::supervise_audio`], 1 s doubling to a 30 s cap, retrying
+//! forever), and the post-rebuild synth-graph restore
+//! ([`supervisor::SynthGraphReloadPending`]). The only related setting,
+//! [`settings::AudioSettings::output_device`], picks *which* endpoint to prefer;
+//! it never gates *whether* recovery runs.
 
 pub mod background;
 pub mod command;
@@ -93,12 +107,15 @@ use crate::settings::{RegisterRuntimeEnumOptionsExt, RegisterSketchSettingsExt};
 /// Besides the main thread and cpal's audio thread, `Startup` also spawns the
 /// **device-watcher** OS thread ([`device::spawn_device_watcher`]). cpal's device
 /// enumeration can block (WASAPI especially), so it may sit on neither of the
-/// other two. The watcher polls output-device topology every ~2 s and sends a
-/// name snapshot — only when the list actually changed — down an `mpsc` channel;
+/// other two. The watcher polls output-device topology every ~2 s — the name
+/// list **and** the identity of the host's default endpoint — and sends a
+/// snapshot, only when either actually changed, down an `mpsc` channel;
 /// [`device::drain_device_topology`] (`PreUpdate`, main thread) moves the newest
-/// one into `AvailableAudioDevices` and asks [`supervisor::AudioSupervisor`] for
-/// an immediate reconnect when the saved endpoint reappears. It is the thing that
-/// notices the TV came back.
+/// one into `AvailableAudioDevices` / `DefaultOutputDevice` and asks
+/// [`supervisor::AudioSupervisor`] for an immediate reconnect when the saved
+/// endpoint reappears, or when the default switches while no device is pinned
+/// (the event PA being plugged in). It is the thing that notices the TV came
+/// back.
 pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
@@ -136,6 +153,7 @@ impl Plugin for AudioPlugin {
             // below — can rely on them existing from app build.
             .init_resource::<device::AvailableAudioDevices>()
             .init_resource::<device::BoundOutputDevice>()
+            .init_resource::<device::DefaultOutputDevice>()
             .init_resource::<supervisor::AudioSupervisor>()
             .add_systems(Startup, engine::start_audio_engine)
             .add_systems(PreUpdate, state::pump_audio_messages)

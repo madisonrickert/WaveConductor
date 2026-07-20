@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use wc_core::audio::{
     command::{AudioCommand, AudioMessage},
-    device::{drain_device_topology, AvailableAudioDevices, BoundOutputDevice},
+    device::{drain_device_topology, AvailableAudioDevices, BoundOutputDevice, DefaultOutputDevice},
     ring::{AudioCommandSender, AudioMessageReceiver, RING_CAPACITY},
     state::{pump_audio_messages, AudioState, AudioStatus},
     supervisor::AudioSupervisor,
@@ -123,6 +123,7 @@ fn drain_device_topology_is_inert_without_a_watcher() {
     app.init_resource::<AudioState>();
     app.init_resource::<AvailableAudioDevices>();
     app.init_resource::<BoundOutputDevice>();
+    app.init_resource::<DefaultOutputDevice>();
     app.init_resource::<AudioSupervisor>();
     app.add_systems(PreUpdate, drain_device_topology);
 

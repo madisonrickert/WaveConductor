@@ -19,14 +19,11 @@ Madison to review and approve/deprioritize. Items already resolved by the
 2. **Touch & hand-gesture can't activate the Line attractor** (carry-forward
    #60; `line/systems/mouse.rs` reads only `MouseButton::Left`). Blocks the
    touchscreen-kiosk primary interaction. Needs `Touches` + a pinch/fist press.
-3. **Audio device failover unbuilt** (roadmap 1.A) — mid-run cpal errors surface
-   as `AudioStatus::Errored` but the stream is never rebuilt; an install runs
-   silent for hours if the output device disappears.
-4. **Full-render soak telemetry** (roadmap Phase 2; carry-forwards #87/#88) —
+3. **Full-render soak telemetry** (roadmap Phase 2; carry-forwards #87/#88) —
    the existing 8 h soak harness drives the real app now, but the roadmap's
    CSV frame-time p95/p99 + thermal-band telemetry lane and the DRS/perf-governor
    phase it gates remain open.
-5. **Disabled correctness test** `wc-core/tests/input.rs:280`
+4. **Disabled correctness test** `wc-core/tests/input.rs:280`
    (`#[ignore]`, Plan 6 TODO) and the `#[ignore]`d pre-tag
    `line_soak_with_overlay_ui` (carry-forward #71) are release-gate items.
 
@@ -128,3 +125,7 @@ Madison to review and approve/deprioritize. Items already resolved by the
   regression tests), #53/#54 Line post-process gating + persistent uniform
   buffer, #8 release asset path (`platform/assets.rs asset_root()` 5-step
   resolver incl. `WAVECONDUCTOR_ASSET_ROOT` override).
+- Roadmap 1.A audio-device failover — was already ~complete in-tree (error
+  flag, backoff supervisor, watcher-thread zombie detection, synth-graph
+  reload); the last gap (default-device switch with old device still
+  present) closed 2026-07-20.

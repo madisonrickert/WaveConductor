@@ -28,11 +28,14 @@ use wc_core_macros::SketchSettings;
 #[reflect(Resource, Default)]
 #[settings(storage_key = "audio")]
 pub struct AudioSettings {
-    /// Output device name. Empty = follow the system default output. When set,
-    /// the engine opens the matching device at startup and after every
-    /// reconnect; if the name is not currently enumerated (e.g. an HDMI TV
-    /// asleep) the engine falls back to the default **and keeps this value**,
-    /// so the binding is restored when the device reappears.
+    /// Output device name. Empty = follow the system default output — including
+    /// **live**: when the OS promotes a different endpoint to default (the event
+    /// PA is plugged in), the stream migrates to it via
+    /// [`crate::audio::device::default_device_switched`]. When set, the engine
+    /// opens the matching device at startup and after every reconnect and
+    /// ignores default switches; if the name is not currently enumerated (e.g.
+    /// an HDMI TV asleep) the engine falls back to the default **and keeps this
+    /// value**, so the binding is restored when the device reappears.
     ///
     /// Rendered with Plan 03a's runtime-enumerated widget: the panel resolves
     /// `options_key` against the `RuntimeEnumOptionsSource` registry, which
