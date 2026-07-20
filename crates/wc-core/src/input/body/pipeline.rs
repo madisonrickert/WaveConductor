@@ -1236,7 +1236,8 @@ fn square_pad_into(frame: &Frame, out: &mut RgbImage) {
 
 /// Bilinearly resize `src` into a reused `dst` (same half-pixel-centre
 /// convention and downscale-aliasing tradeoff as the hand pipeline's
-/// `resize_into` — `MediaPipe`'s own preprocessing point-samples identically).
+/// `resize_into`; upstream `MediaPipe`'s CPU `ImageToTensor` is likewise
+/// bilinear — `warpAffine` with `LINEAR` sampling).
 fn resize_into(src: &RgbImage, w: u32, h: u32, dst: &mut RgbImage) {
     if dst.width() != w || dst.height() != h {
         *dst = RgbImage::new(w, h);

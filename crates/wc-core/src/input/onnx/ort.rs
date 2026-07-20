@@ -226,6 +226,11 @@ impl OrtInference {
 
         // Reuse `out`: size it to the output count, then refill each tensor's
         // buffers in place, in declared order. `Shape` derefs to `[i64]`.
+        // Residual cost: ort owns the output tensors, so each refill copies the
+        // whole output out of ort's buffers (~0.9 MB/frame for the pose
+        // landmark model: 262 KB mask + 640 KB heatmap floats). Dependency-
+        // forced today; ort IOBinding with pre-allocated outputs would remove
+        // it — profiling-gated follow-up per AGENTS.md.
         out.truncate(self.output_names.len());
         while out.len() < self.output_names.len() {
             out.push(Tensor::default());
