@@ -26,9 +26,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rtrb::{Consumer, Producer};
 
-use super::envelope::{fade_step, presence_decision, PresenceDecision};
+use super::envelope::{admit_step, fade_step, presence_decision, PresenceDecision};
 use super::pipeline::BodyLiveTuning;
-use super::selection::{primary_score, PrimarySelect};
+use super::selection::{body_motion_measure, motion_ema_step, primary_score, PrimarySelect};
 use super::smoothing::BodySmoother;
 use super::transport::{
     seed_payload_pool, BodyFramePayload, BodyWorkerMsg, SlotFrame, PAYLOAD_POOL_SIZE,
@@ -55,8 +55,19 @@ struct SlotRuntime {
     /// `Time::elapsed` value until which presence is held even though the
     /// worker reports no person (see `envelope::PRESENCE_HOLD`).
     hold_until: Duration,
+    /// Admission-dwell state (see `envelope::ADMIT_DWELL`): `true` once the
+    /// current occupant has persisted long enough for their fade-in to begin.
+    /// Kept through the fade-out tail; reset only when the slot fully frees.
+    admitted: bool,
+    /// When the current continuous-present run began (`None` while absent).
+    /// The dwell clock; survives held dropouts.
+    present_since: Option<Duration>,
     /// The graceful appearance envelope (`TrackedBody::fade`).
     fade: f32,
+    /// Smoothed motion measure (`selection::motion_ema_step` over
+    /// `selection::body_motion_measure`), published as `TrackedBody::motion`.
+    /// Plain per-slot state — no allocation on the poll path.
+    motion_ema: f32,
     /// This slot's poll-rate One-Euro smoother.
     smoother: BodySmoother,
 }
@@ -260,11 +271,17 @@ pub fn poll_body_worker(
                 }
                 // Per-slot presence-hold: a present slot re-arms its hold and
                 // updates its target; a held slot keeps the last pose; an
-                // absent slot starts (or continues) its fade-out.
+                // absent slot starts (or continues) its fade-out. The
+                // admission dwell runs beside the hold: fade (and
+                // publication) only begin once the occupant has persisted
+                // ADMIT_DWELL — see envelope::admit_step for the busy-road
+                // rationale and publish_bodies for the gate itself.
                 for (slot, incoming) in rt.slots.iter_mut().zip(frame.slots.iter()) {
                     let (decision, hold_until) =
                         presence_decision(incoming.present, now, slot.hold_until);
                     slot.hold_until = hold_until;
+                    (slot.admitted, slot.present_since) =
+                        admit_step(slot.admitted, slot.present_since, decision, now);
                     match decision {
                         PresenceDecision::Present => {
                             person_frame = true;
@@ -324,14 +341,15 @@ pub fn poll_body_worker(
     rt.had_person = occupied;
 
     // Primary selection: manual `KeyN` cycles first, then the score-based
-    // auto policy (size × crop penalty, with switch hysteresis).
+    // auto policy (size × crop penalty × motion weight, with switch
+    // hysteresis — closer, moving people win; see selection::primary_score).
     let mut present = [false; MAX_TRACKED_BODIES];
     let mut scores: [Option<f32>; MAX_TRACKED_BODIES] = [None; MAX_TRACKED_BODIES];
     for (i, body) in state.bodies.iter().enumerate() {
         if let Some(body) = body {
             if body.present {
                 present[i] = true;
-                scores[i] = Some(primary_score(body.size, body.crop_fraction));
+                scores[i] = Some(primary_score(body.size, body.crop_fraction, body.motion));
             }
         }
     }
@@ -349,6 +367,13 @@ pub fn poll_body_worker(
 /// only once its fade reaches exactly zero (the graceful-disappearance
 /// contract). No allocation: `Some(TrackedBody { .. })` writes inline into
 /// the fixed `bodies` array.
+///
+/// Admission gate: a present-but-not-yet-admitted slot (still inside the
+/// `envelope::ADMIT_DWELL`) is treated as absent here — its fade stays 0 and
+/// no `TrackedBody` publishes, so a road-traffic walk-through never reaches
+/// any consumer. Because the fade never leaves 0, a candidate that vanishes
+/// mid-dwell needs no release tail: the slot is clean the moment the worker
+/// reports it absent.
 fn publish_bodies(
     slots: &mut [SlotRuntime; MAX_TRACKED_BODIES],
     state: &mut BodyTrackingState,
@@ -356,11 +381,22 @@ fn publish_bodies(
     dt: f32,
 ) {
     for (i, slot) in slots.iter_mut().enumerate() {
-        slot.fade = fade_step(slot.fade, slot.target.present, dt);
-        if slot.target.present {
+        // Present AND past the admission dwell: only then does the envelope
+        // attack / the body publish.
+        let engaged = slot.target.present && slot.admitted;
+        slot.fade = fade_step(slot.fade, engaged, dt);
+        if engaged {
             let smoothed =
                 slot.smoother
                     .smooth(&slot.target.landmarks, &slot.target.world_landmarks, now);
+            // Motion envelope: distance-normalized torso speed through the
+            // slow EMA (see selection::body_motion_measure). Updated only
+            // while engaged; the fade-out branch below holds the last value.
+            slot.motion_ema = motion_ema_step(
+                slot.motion_ema,
+                body_motion_measure(&smoothed.velocities, slot.target.size),
+                dt,
+            );
             state.bodies[i] = Some(TrackedBody {
                 slot: i,
                 present: true,
@@ -372,6 +408,7 @@ fn publish_bodies(
                 timestamp: slot.timestamp,
                 crop_fraction: slot.target.crop_fraction,
                 size: slot.target.size,
+                motion: slot.motion_ema,
             });
         } else if slot.fade > 0.0 {
             if let Some(body) = state.bodies[i].as_mut() {
@@ -384,9 +421,12 @@ fn publish_bodies(
             }
         } else if state.bodies[i].is_some() {
             // Fade complete: free the slot; a returning person starts fresh
-            // (no stale filter momentum), mirroring the hand smoother.
+            // (no stale filter momentum, a fresh admission dwell, and a cold
+            // motion envelope), mirroring the hand smoother.
             state.bodies[i] = None;
             slot.smoother.clear();
+            slot.admitted = false;
+            slot.motion_ema = 0.0;
         }
     }
 }
@@ -487,7 +527,10 @@ fn start_worker(
             target: SlotFrame::default(),
             timestamp: Duration::ZERO,
             hold_until: Duration::ZERO,
+            admitted: false,
+            present_since: None,
             fade: 0.0,
+            motion_ema: 0.0,
             smoother: BodySmoother::new(request.one_euro_min_cutoff, request.one_euro_beta),
         }),
         primary: PrimarySelect::default(),

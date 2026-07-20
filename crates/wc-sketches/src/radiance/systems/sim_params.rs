@@ -16,6 +16,7 @@ use wc_core::audio::input::AudioAnalysis;
 use wc_core::input::body::landmark_index::{
     LEFT_ANKLE, LEFT_HIP, LEFT_WRIST, NOSE, RIGHT_ANKLE, RIGHT_HIP, RIGHT_WRIST,
 };
+use wc_core::input::body::selection::motion_weight;
 use wc_core::input::body::{
     BodyTrackingState, SilhouetteEdges, MAX_EDGE_POINTS, MAX_TRACKED_BODIES,
 };
@@ -78,6 +79,14 @@ pub const TONGUE_FREQ: f32 = 0.017;
 /// range): the appearing dancer's flame catches with a visible flare while
 /// the *total* budget stays constant (weights are normalized).
 pub const IGNITE_BOOST: f32 = 2.5;
+/// [`motion_weight`] floor for the background-subdue emission grace:
+/// a completely still body's weight factor at FULL `background_subdue`. Kept
+/// high (0.6, above the primary-selection floor of 0.55) because this scales
+/// *rendered flame* rather than a selection score — a still body must stay
+/// visibly alight, just subdued, so bystanders never see their aura vanish
+/// outright. At the default `background_subdue = 0.5` a still body burns at
+/// `1 − 0.5·(1 − 0.6)` = 80% relative weight (before normalization).
+pub const SUBDUE_MOTION_FLOOR: f32 = 0.6;
 /// Fade ceiling below which a rising body still counts as igniting.
 pub const IGNITE_FADE_CEIL: f32 = 0.7;
 /// Velocity fraction remaining after one second of drag.
@@ -251,6 +260,15 @@ pub fn band_aggregates(audio: &AudioAnalysis) -> (f32, f32) {
 /// - An *igniting* slot (fade rising through the low range — a dancer
 ///   appearing) gets an [`IGNITE_BOOST`]× share so its flame catches with a
 ///   visible flare; the boost shifts share, never raises the total.
+/// - **Background subdue** (crowded-venue grace): each slot's weight is
+///   scaled by that body's [`motion_weight`] (floor
+///   [`SUBDUE_MOTION_FLOOR`]), blended by `background_subdue` — `0` is the
+///   exact legacy behaviour, `1` is the full motion scaling. A static
+///   background loiterer burns subdued while dancers burn full; because the
+///   weights renormalize, equal motion across all bodies (including "all
+///   still") cancels out and nothing changes. `motions[i]` is
+///   `TrackedBody::motion`. Applied CPU-side, before the CDF — the GPU
+///   uniform layout is untouched.
 /// - When **no** slot carries fade (the attract phantom and the synthetic
 ///   writers publish mask/edges without `TrackedBody` entries), shares fall
 ///   back to each slot's edge-count proportion so those single-body paths
@@ -261,7 +279,10 @@ pub fn emission_slot_weights(
     fades: [f32; MAX_TRACKED_BODIES],
     igniting: [bool; MAX_TRACKED_BODIES],
     counts: [usize; MAX_TRACKED_BODIES],
+    motions: [f32; MAX_TRACKED_BODIES],
+    background_subdue: f32,
 ) -> [f32; MAX_TRACKED_BODIES] {
+    let subdue = background_subdue.clamp(0.0, 1.0);
     let mut weights = [0.0_f32; MAX_TRACKED_BODIES];
     let mut sum = 0.0_f32;
     for i in 0..MAX_TRACKED_BODIES {
@@ -269,7 +290,10 @@ pub fn emission_slot_weights(
             continue;
         }
         let boost = if igniting[i] { IGNITE_BOOST } else { 1.0 };
-        weights[i] = fades[i].clamp(0.0, 1.0) * boost;
+        // 1 at subdue 0 (knob off — provably identical to the pre-knob
+        // behaviour); eases toward the motion weight as the knob rises.
+        let grace = 1.0 - subdue * (1.0 - motion_weight(motions[i], SUBDUE_MOTION_FLOOR));
+        weights[i] = fades[i].clamp(0.0, 1.0) * boost * grace;
         sum += weights[i];
     }
     if sum <= f32::EPSILON {
@@ -418,6 +442,7 @@ pub fn bake_radiance_sim(
     let mut start = 0_usize;
     let mut fades = [0.0_f32; MAX_TRACKED_BODIES];
     let mut igniting = [false; MAX_TRACKED_BODIES];
+    let mut motions = [0.0_f32; MAX_TRACKED_BODIES];
     let mut clamped_counts = [0_usize; MAX_TRACKED_BODIES];
     for i in 0..MAX_TRACKED_BODIES {
         let clamped = slot_counts[i].min(MAX_EDGE_POINTS.saturating_sub(start));
@@ -437,10 +462,19 @@ pub fn bake_radiance_sim(
                 fades[body.slot] = fade;
                 igniting[body.slot] =
                     fade > state.slot_fade_prev[body.slot] + 1e-4 && fade < IGNITE_FADE_CEIL;
+                // The publisher's smoothed motion envelope (held through the
+                // fade-out tail) — feeds the background-subdue grace.
+                motions[body.slot] = body.motion;
             }
         }
     }
-    out.slot_cdf = weights_to_cdf(emission_slot_weights(fades, igniting, clamped_counts));
+    out.slot_cdf = weights_to_cdf(emission_slot_weights(
+        fades,
+        igniting,
+        clamped_counts,
+        motions,
+        settings.background_subdue,
+    ));
     state.slot_fade_prev = fades;
 
     // Mask → world scale. The mask is square; the `fit_to_height` setting maps
@@ -952,23 +986,44 @@ mod tests {
 
     /// Fade-weighted apportioning: shares are normalized (constant total
     /// density), zero-edge slots get nothing, and an igniting slot's share
-    /// is boosted at its sibling's expense — never the total's.
+    /// is boosted at its sibling's expense — never the total's. (Subdue off
+    /// here; its own tests are below.)
     #[test]
     fn emission_weights_apportion_by_fade() {
         // Two full-fade bodies with edges split the budget evenly.
-        let w = emission_slot_weights([1.0, 1.0, 0.0, 0.0], [false; 4], [300, 300, 0, 0]);
+        let w = emission_slot_weights(
+            [1.0, 1.0, 0.0, 0.0],
+            [false; 4],
+            [300, 300, 0, 0],
+            [0.0; 4],
+            0.0,
+        );
         assert!((w[0] - 0.5).abs() < 1e-6 && (w[1] - 0.5).abs() < 1e-6);
         // A half-faded second body takes a third of the budget.
-        let w = emission_slot_weights([1.0, 0.5, 0.0, 0.0], [false; 4], [300, 300, 0, 0]);
+        let w = emission_slot_weights(
+            [1.0, 0.5, 0.0, 0.0],
+            [false; 4],
+            [300, 300, 0, 0],
+            [0.0; 4],
+            0.0,
+        );
         assert!((w[0] - 2.0 / 3.0).abs() < 1e-6 && (w[1] - 1.0 / 3.0).abs() < 1e-6);
         // A slot with fade but no edges spawns nothing.
-        let w = emission_slot_weights([1.0, 1.0, 0.0, 0.0], [false; 4], [300, 0, 0, 0]);
+        let w = emission_slot_weights(
+            [1.0, 1.0, 0.0, 0.0],
+            [false; 4],
+            [300, 0, 0, 0],
+            [0.0; 4],
+            0.0,
+        );
         assert!((w[0] - 1.0).abs() < 1e-6 && w[1].abs() < f32::EPSILON);
         // Ignite boost shifts share toward the appearing body; sum stays 1.
         let w = emission_slot_weights(
             [1.0, 0.3, 0.0, 0.0],
             [false, true, false, false],
             [300, 300, 0, 0],
+            [0.0; 4],
+            0.0,
         );
         let boosted = 0.3 * IGNITE_BOOST;
         assert!((w[1] - boosted / (1.0 + boosted)).abs() < 1e-6, "{w:?}");
@@ -980,10 +1035,80 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp, reason = "exact zero sentinel comparison")]
     fn emission_weights_phantom_fallback() {
-        let w = emission_slot_weights([0.0; 4], [false; 4], [400, 100, 0, 0]);
+        let w = emission_slot_weights([0.0; 4], [false; 4], [400, 100, 0, 0], [0.0; 4], 0.5);
         assert!((w[0] - 0.8).abs() < 1e-6 && (w[1] - 0.2).abs() < 1e-6);
-        let w = emission_slot_weights([0.0; 4], [false; 4], [0; 4]);
+        let w = emission_slot_weights([0.0; 4], [false; 4], [0; 4], [0.0; 4], 0.5);
         assert_eq!(w, [0.0; 4]);
+    }
+
+    /// `background_subdue = 0` is the exact legacy behaviour, whatever the
+    /// motion inputs — the venue kill-switch must be provably inert.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "knob-off must be bit-identical")]
+    fn emission_weights_subdue_off_is_identity() {
+        let fades = [1.0, 0.4, 0.9, 0.0];
+        let igniting = [false, true, false, false];
+        let counts = [300, 200, 100, 0];
+        let legacy = emission_slot_weights(fades, igniting, counts, [0.0; 4], 0.0);
+        let wild_motion = emission_slot_weights(fades, igniting, counts, [0.0, 5.0, 0.3, 9.0], 0.0);
+        assert_eq!(legacy, wild_motion, "knob at 0 must ignore motion");
+    }
+
+    /// A still background loiterer's share shrinks in favour of a moving
+    /// dancer; the total stays normalized; the still body never drops below
+    /// the floored fraction of an even split.
+    #[test]
+    fn emission_weights_subdue_favours_movers() {
+        use wc_core::input::body::selection::MOTION_SPEED_HI;
+        let fades = [1.0, 1.0, 0.0, 0.0];
+        let counts = [300, 300, 0, 0];
+        // Slot 0 dances, slot 1 stands still. Full subdue for the clearest
+        // split: still weight = SUBDUE_MOTION_FLOOR vs 1.0.
+        let w = emission_slot_weights(
+            fades,
+            [false; 4],
+            counts,
+            [MOTION_SPEED_HI, 0.0, 0.0, 0.0],
+            1.0,
+        );
+        let expect_still = SUBDUE_MOTION_FLOOR / (1.0 + SUBDUE_MOTION_FLOOR);
+        assert!((w[1] - expect_still).abs() < 1e-6, "{w:?}");
+        assert!(w[0] > w[1], "the dancer takes the larger share");
+        assert!(
+            (w.iter().sum::<f32>() - 1.0).abs() < 1e-6,
+            "still normalized"
+        );
+        // Default (modest) strength subdues less than full strength.
+        let w_default = emission_slot_weights(
+            fades,
+            [false; 4],
+            counts,
+            [MOTION_SPEED_HI, 0.0, 0.0, 0.0],
+            0.5,
+        );
+        assert!(
+            w_default[1] > w[1] && w_default[1] < 0.5,
+            "default strength is between off and full: {w_default:?}"
+        );
+    }
+
+    /// Equal motion across all live bodies cancels under normalization: a
+    /// lone still person (or an all-still, all-moving crowd) keeps exactly
+    /// the legacy shares — the subdue only ever *redistributes*.
+    #[test]
+    fn emission_weights_subdue_cancels_when_motion_is_uniform() {
+        let fades = [1.0, 0.5, 0.0, 0.0];
+        let counts = [300, 300, 0, 0];
+        let legacy = emission_slot_weights(fades, [false; 4], counts, [0.0; 4], 0.0);
+        for uniform in [0.0_f32, 2.0] {
+            let w = emission_slot_weights(fades, [false; 4], counts, [uniform; 4], 1.0);
+            for (a, b) in w.iter().zip(legacy.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "uniform motion {uniform} must cancel: {w:?} vs {legacy:?}"
+                );
+            }
+        }
     }
 
     /// The CDF is the running sum; all-zero weights stay all-zero (the

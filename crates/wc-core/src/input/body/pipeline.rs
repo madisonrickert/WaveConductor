@@ -101,8 +101,28 @@ const DETECT_SCAN_INTERVAL: Duration = Duration::from_millis(300);
 /// `envelope::PRESENCE_HOLD` (0.3 s) plus the fade release to zero
 /// (`FADE_RELEASE_TAU · ln(1/FADE_DONE_EPSILON)` ≈ 3.6 s) so a mask channel
 /// is never handed to a newcomer mid-fade; it also subsumes the old
-/// single-track 2 s occlusion stickiness.
+/// single-track 2 s occlusion stickiness. Tracks lost before
+/// [`RESERVE_MIN_ACTIVE`] skip the reservation entirely (they can never have
+/// ignited a fade to protect).
 const SLOT_RESERVE: Duration = Duration::from_secs(4);
+
+/// Minimum time a track must have been active for its loss to earn the
+/// [`SLOT_RESERVE`] reservation; a younger track frees its slot immediately.
+///
+/// Busy-road defence (see the `envelope` module doc): the main thread only
+/// begins a slot's fade-in after `envelope::ADMIT_DWELL` (0.7 s) of
+/// sustained presence, so a track that lived less than that has **nothing on
+/// screen to protect** — reserving it would only convert drive-past traffic
+/// into 4 s slot zombies that starve a genuine newcomer of capacity (four
+/// walkers in quick succession would otherwise pin all four slots Reserved).
+///
+/// Invariant: must stay **strictly below** `envelope::ADMIT_DWELL` with
+/// margin for the worker→main transport/poll jitter (a frame or three at
+/// 30 Hz), so any track whose main-side dwell *could* have completed — and
+/// whose fade could therefore be mid-flight — always takes the reserved
+/// path. 0.6 s leaves 100 ms of margin; a defaults-agreement test pins the
+/// ordering.
+const RESERVE_MIN_ACTIVE: Duration = Duration::from_millis(600);
 
 /// Active-track count at or below which every track runs landmark/mask
 /// inference every frame; above it the pipeline interleaves round-robin,
@@ -367,6 +387,11 @@ struct SlotTrack {
     /// Last known person centre (square-norm) — the association anchor while
     /// Active or Reserved.
     anchor: Vec2,
+    /// When this occupancy first became [`SlotPhase::Active`] (worker clock).
+    /// NOT reset on a Reserved→Active re-acquisition — the occupancy
+    /// continues — only on a fresh Free→Active claim. Drives the
+    /// [`RESERVE_MIN_ACTIVE`] fast-free decision in [`Self::lose`].
+    active_since: Duration,
     /// [`SlotPhase::Reserved`] expiry.
     reserved_until: Duration,
     /// This slot's aux alignment-row filter (reset on every fresh track).
@@ -383,6 +408,7 @@ impl SlotTrack {
             phase: SlotPhase::Free,
             roi: None,
             anchor: Vec2::ZERO,
+            active_since: Duration::ZERO,
             reserved_until: Duration::ZERO,
             aux_filter: AuxRoiFilter::new(),
             mask: MaskProcessor::new(),
@@ -390,9 +416,23 @@ impl SlotTrack {
         }
     }
 
+    /// Whether a loss at `now` earns the [`SLOT_RESERVE`] reservation: only
+    /// tracks old enough ([`RESERVE_MIN_ACTIVE`]) to possibly have ignited a
+    /// main-side fade. Younger tracks (drive-past traffic) free immediately.
+    fn earns_reserve(&self, now: Duration) -> bool {
+        now.saturating_sub(self.active_since) >= RESERVE_MIN_ACTIVE
+    }
+
     /// Track lost: reserve the slot (see [`SLOT_RESERVE`]) so the person can
-    /// return to it and the main-side fade can finish before reuse.
+    /// return to it and the main-side fade can finish before reuse — unless
+    /// the track was too young to have ignited ([`Self::earns_reserve`]), in
+    /// which case the slot frees on the spot (no zombie reservation for
+    /// walk-through traffic).
     fn lose(&mut self, now: Duration) {
+        if !self.earns_reserve(now) {
+            self.release();
+            return;
+        }
         self.phase = SlotPhase::Reserved;
         self.reserved_until = now + SLOT_RESERVE;
         self.roi = None;
@@ -787,7 +827,7 @@ impl PosePipeline {
     /// and mask channel), and unmatched candidates claim free slots below the
     /// configured cap. Newly (re)activated slots are marked `fresh` so their
     /// aux filter cold-starts and their inference jumps the queue.
-    fn associate_detections(&mut self, _now: Duration, fresh: &mut [bool; MAX_TRACKED_BODIES]) {
+    fn associate_detections(&mut self, now: Duration, fresh: &mut [bool; MAX_TRACKED_BODIES]) {
         let mut anchors: [Option<Vec2>; MAX_TRACKED_BODIES] = [None; MAX_TRACKED_BODIES];
         let mut claimable = [false; MAX_TRACKED_BODIES];
         for (i, slot) in self.slots.iter().enumerate() {
@@ -813,6 +853,13 @@ impl PosePipeline {
                 // detection). Consuming the match prevents duplicate claims.
                 SlotPhase::Active => {}
                 SlotPhase::Reserved | SlotPhase::Free => {
+                    if slot.phase == SlotPhase::Free {
+                        // A fresh occupancy starts its age clock here; a
+                        // Reserved re-acquisition keeps the original
+                        // active_since (the same person's visit continues,
+                        // and their main-side fade may be mid-flight).
+                        slot.active_since = now;
+                    }
                     slot.phase = SlotPhase::Active;
                     slot.roi = Some(roi_from_detection(&self.person_clusters[c]));
                     slot.anchor = centres[c];
@@ -967,7 +1014,7 @@ impl PosePipeline {
         slot.anchor = Vec2::new(next_roi.cx, next_roi.cy);
         if roi_trackable(&next_roi, content) {
             slot.roi = Some(next_roi);
-        } else {
+        } else if slot.earns_reserve(now) {
             // The person is leaving the frame (collapsed/off-content ROI).
             // THIS frame's landmarks are still valid — `present` stays true —
             // but the carried track is dropped and the slot reserved; the
@@ -977,6 +1024,12 @@ impl PosePipeline {
             slot.phase = SlotPhase::Reserved;
             slot.reserved_until = now + SLOT_RESERVE;
             slot.roi = None;
+        } else {
+            // Too young to have ignited main-side (RESERVE_MIN_ACTIVE): a
+            // walker exiting at the frame edge. Free the slot outright —
+            // discarding this frame's landmarks too is fine, nothing was
+            // ever rendered for this track.
+            slot.release();
         }
         Ok(())
     }
@@ -1659,8 +1712,11 @@ mod tests {
         assert_eq!(pl.edge_slot_counts[1], 0);
     }
 
+    /// (The loss here happens at track age 0 — under RESERVE_MIN_ACTIVE — so
+    /// the slot frees outright rather than reserving; either way the next
+    /// frame must cold-start re-detect.)
     #[test]
-    fn low_landmark_confidence_reserves_the_slot_and_recovers() {
+    fn low_landmark_confidence_drops_the_slot_and_recovers() {
         let mut p = PosePipeline::new(
             Box::new(StaticInference {
                 outputs: hot_person_detector_outputs(),
@@ -1756,8 +1812,126 @@ mod tests {
             p.diagnostics().detector_reason,
             DetectorRunReason::ColdStart
         );
-        // Reserved-slot association routes the person back to slot 0.
+        // The person lands back in slot 0 (a young track freed by the
+        // fast-free rule re-claims the lowest free slot; a mature one would
+        // re-bind to its reservation — same outcome either way here).
         assert!(p.slot_frames()[0].present, "same slot re-acquired");
+    }
+
+    /// Busy-road fast-free: a track lost before RESERVE_MIN_ACTIVE (a walker
+    /// crossing the frame) must skip the Reserved phase entirely — the slot
+    /// is Free (claimable by the next person) the moment the track drops,
+    /// instead of a 4 s zombie reservation.
+    #[test]
+    fn short_lived_track_frees_immediately_instead_of_reserving() {
+        struct SharedInference(std::sync::Arc<std::sync::Mutex<Vec<Tensor>>>);
+        impl ModelInference for SharedInference {
+            fn run(
+                &mut self,
+                _input: &Tensor,
+                out: &mut Vec<Tensor>,
+            ) -> Result<(), InferenceError> {
+                out.clone_from(&self.0.lock().expect("outputs lock"));
+                Ok(())
+            }
+        }
+        let landmark = std::sync::Arc::new(std::sync::Mutex::new(confident_landmark_outputs()));
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: hot_person_detector_outputs(),
+            }),
+            Box::new(SharedInference(std::sync::Arc::clone(&landmark))),
+            PoseConfig::default(),
+        );
+        let frame = solid_frame();
+        p.process(&frame, Duration::from_millis(0), false, None)
+            .expect("acquire");
+        p.process(&frame, Duration::from_millis(100), false, None)
+            .expect("track");
+        assert_eq!(p.slots[0].phase, SlotPhase::Active);
+
+        // The walker leaves 200 ms into the visit (well under the 600 ms
+        // RESERVE_MIN_ACTIVE): presence collapses, and the slot must be FREE,
+        // not Reserved.
+        *landmark.lock().expect("outputs lock") = low_confidence_landmark_outputs();
+        p.process(&frame, Duration::from_millis(200), false, None)
+            .expect("loss frame");
+        assert_eq!(
+            p.slots[0].phase,
+            SlotPhase::Free,
+            "young track must free, not reserve"
+        );
+        assert!(!p.slot_frames()[0].present);
+    }
+
+    /// The complement: a track older than RESERVE_MIN_ACTIVE still takes the
+    /// full Reserved path on loss (the mask channel may be mid-fade on the
+    /// main thread), and a Reserved→Active re-acquisition keeps the original
+    /// age — the same person's later loss still reserves.
+    #[test]
+    fn mature_track_reserves_and_reacquisition_keeps_its_age() {
+        struct SharedInference(std::sync::Arc<std::sync::Mutex<Vec<Tensor>>>);
+        impl ModelInference for SharedInference {
+            fn run(
+                &mut self,
+                _input: &Tensor,
+                out: &mut Vec<Tensor>,
+            ) -> Result<(), InferenceError> {
+                out.clone_from(&self.0.lock().expect("outputs lock"));
+                Ok(())
+            }
+        }
+        let landmark = std::sync::Arc::new(std::sync::Mutex::new(confident_landmark_outputs()));
+        let mut p = PosePipeline::new(
+            Box::new(StaticInference {
+                outputs: hot_person_detector_outputs(),
+            }),
+            Box::new(SharedInference(std::sync::Arc::clone(&landmark))),
+            PoseConfig::default(),
+        );
+        let good = solid_frame();
+        p.process(&good, Duration::from_millis(0), false, None)
+            .expect("acquire");
+        // An invalid frame at 700 ms (age ≥ RESERVE_MIN_ACTIVE): reserves.
+        let bad = Frame {
+            width: 10,
+            ..Frame::default()
+        };
+        p.process(&bad, Duration::from_millis(700), false, None)
+            .expect("invalid");
+        assert_eq!(
+            p.slots[0].phase,
+            SlotPhase::Reserved,
+            "mature track must reserve on loss"
+        );
+        // Re-acquire the same person into the reservation…
+        p.process(&good, Duration::from_millis(750), false, None)
+            .expect("reacquire");
+        assert_eq!(p.slots[0].phase, SlotPhase::Active);
+        // …and a loss 50 ms later must STILL reserve: the occupancy's age
+        // carries across the re-acquisition (750 ms > 600 ms), it does not
+        // restart at the re-acquisition instant.
+        *landmark.lock().expect("outputs lock") = low_confidence_landmark_outputs();
+        p.process(&good, Duration::from_millis(800), false, None)
+            .expect("second loss");
+        assert_eq!(
+            p.slots[0].phase,
+            SlotPhase::Reserved,
+            "re-acquired occupancy keeps its original age"
+        );
+    }
+
+    /// The cross-thread invariant behind the fast-free: the worker's
+    /// RESERVE_MIN_ACTIVE must sit strictly below the main thread's
+    /// ADMIT_DWELL (with jitter margin), so a track that could have ignited
+    /// a fade always earns the reservation that protects that fade.
+    #[test]
+    fn reserve_min_active_sits_under_the_admission_dwell() {
+        let margin = crate::input::body::envelope::ADMIT_DWELL.saturating_sub(RESERVE_MIN_ACTIVE);
+        assert!(
+            margin >= Duration::from_millis(66),
+            "need ≥ two 30 Hz frames of transport-jitter margin, got {margin:?}"
+        );
     }
 
     #[test]

@@ -173,6 +173,26 @@ pub struct RadianceSettings {
     #[serde(default = "default_ejecta_amount")]
     pub ejecta_amount: f32,
 
+    /// Crowded-venue emission grace: how strongly a standing-still body's
+    /// share of the particle budget is subdued in favour of moving dancers
+    /// (see `systems::sim_params::emission_slot_weights` and
+    /// `SUBDUE_MOTION_FLOOR`). 0 = off (every tracked body burns by fade
+    /// alone — the pre-2026-07 behaviour), 1 = full motion scaling. The
+    /// weights renormalize, so with only one body (or everyone equally
+    /// still/moving) this knob changes nothing; it only redistributes
+    /// between movers and loiterers. Live-tunable at the venue.
+    #[setting(
+        default = 0.5_f32,
+        min = 0.0_f32,
+        max = 1.0_f32,
+        step = 0.05_f32,
+        label = "Background subdue",
+        section = "Simulation",
+        category = User
+    )]
+    #[serde(default = "default_background_subdue")]
+    pub background_subdue: f32,
+
     /// Per-body hue spread, in fractions of a full hue turn per slot: each
     /// tracked dancer's color identity is the palette hue rotated by
     /// `slot × spread`, so multiple dancers read as distinct-but-harmonious
@@ -531,6 +551,9 @@ fn default_tongue_strength() -> f32 {
 fn default_ejecta_amount() -> f32 {
     0.6
 }
+fn default_background_subdue() -> f32 {
+    0.5
+}
 fn default_hue_spread() -> f32 {
     0.13
 }
@@ -643,6 +666,7 @@ mod tests {
         assert_eq!(d.curl_octaves, default_curl_octaves());
         assert!((d.tongue_strength - default_tongue_strength()).abs() < f32::EPSILON);
         assert!((d.ejecta_amount - default_ejecta_amount()).abs() < f32::EPSILON);
+        assert!((d.background_subdue - default_background_subdue()).abs() < f32::EPSILON);
         assert!((d.hue_spread - default_hue_spread()).abs() < f32::EPSILON);
         assert_eq!(d.sparkle_count, default_sparkle_count());
         assert_eq!(d.palette, default_palette());

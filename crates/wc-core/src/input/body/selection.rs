@@ -11,14 +11,26 @@
 //!   occlusion — the multi-body successor of the old single-track
 //!   "stickiness".
 //! - **Primary selection** ([`PrimarySelect`]): which slot is the featured
-//!   body. Score = [`primary_score`] (`size × crop_weight`), so the closest
-//!   person wins **unless** they are substantially cropped off the frame edge
-//!   ([`crop_weight`] strongly penalizes low [`visible_fraction`] — the fix
-//!   for "camera stayed locked on someone cropped off screen"). Switches are
+//!   body. Score = [`primary_score`] (`size × crop_weight × motion_weight`),
+//!   so the closest person wins **unless** they are substantially cropped off
+//!   the frame edge ([`crop_weight`] strongly penalizes low
+//!   [`visible_fraction`] — the fix for "camera stayed locked on someone
+//!   cropped off screen") or standing still while someone else at similar
+//!   size is dancing ([`motion_weight`] — the busy-road bias toward people
+//!   who are actually interacting; a lone still person keeps at least
+//!   [`MOTION_FLOOR`] weight so they still win over nobody). Switches are
 //!   hysteretic: a challenger must beat the incumbent by
 //!   [`PRIMARY_SWITCH_RATIO`] for [`PRIMARY_SWITCH_HOLD`] (no flapping). The
 //!   `KeyN` debug hotkey feeds [`PrimarySelect::cycle`], which manually pins a
 //!   slot until that person leaves.
+//! - **Motion measure** ([`body_motion_measure`] + [`motion_ema_step`]): the
+//!   per-body "how much are they moving" scalar shared by primary selection
+//!   and the Radiance emission-budget subdue. Mean speed of a stable landmark
+//!   subset (nose + hips — the torso, not the flailing extremities),
+//!   normalized by `sqrt(size)` so a far-away walker's small on-screen speed
+//!   and a close dancer's large one compare fairly, then smoothed by a ~1.5 s
+//!   EMA (held per slot in the publisher) so a momentary pause mid-dance does
+//!   not read as "standing still".
 //!
 //! Everything here is allocation-free (fixed arrays sized by
 //! [`MAX_TRACKED_BODIES`]) so both the worker and the publisher can call it
@@ -26,10 +38,11 @@
 
 use std::time::Duration;
 
-use bevy::math::Vec2;
+use bevy::math::{Vec2, Vec3};
 
 use super::detector::Rect;
-use super::MAX_TRACKED_BODIES;
+use super::landmark_index::{LEFT_HIP, NOSE, RIGHT_HIP};
+use super::{BODY_LANDMARK_COUNT, MAX_TRACKED_BODIES};
 
 /// Max centre distance (square-norm units) for a detection to associate with
 /// an existing slot. Beyond this the candidate is too far to plausibly be the
@@ -44,6 +57,34 @@ pub const CROP_WEIGHT_FLOOR: f32 = 0.15;
 /// [`crop_weight`] smoothstep ceiling: at or above this visible fraction a
 /// body carries full weight. Between floor and ceiling the penalty eases in.
 pub const CROP_WEIGHT_FULL: f32 = 0.75;
+
+/// [`motion_weight`] floor for primary selection: the weight a completely
+/// still body keeps. Deliberately well above zero — a lone still person must
+/// still score (and win primary over nobody), and the crowded-venue goal is
+/// only a *bias* toward movers, not a hard gate. At 0.55, a mover at full
+/// motion out-scores an equally-sized still person by 1/0.55 ≈ 1.8× — past
+/// the 1.3 [`PRIMARY_SWITCH_RATIO`], so a dancer can take primary from a
+/// similarly-sized bystander, while a clearly-closer still person (≳ 2.4×
+/// the size) still holds it.
+pub const MOTION_FLOOR: f32 = 0.55;
+
+/// [`body_motion_measure`] value (sqrt-size-normalized screen units/s) at or
+/// below which a body reads as fully still ([`motion_weight`] = floor).
+/// Sized above landmark-jitter noise on a stationary subject. **Venue-tune
+/// candidate:** verified against synthetic fixtures only; check against live
+/// bodies on the deployment camera (see docs/runbooks/kiosk.md).
+pub const MOTION_SPEED_LO: f32 = 0.2;
+
+/// [`body_motion_measure`] value at or above which a body reads as fully in
+/// motion ([`motion_weight`] = 1). Roughly a torso sweeping its own height in
+/// a second. Venue-tune candidate, same caveat as [`MOTION_SPEED_LO`].
+pub const MOTION_SPEED_HI: f32 = 1.0;
+
+/// Time constant (seconds) of the per-slot motion EMA ([`motion_ema_step`]).
+/// ~1.5 s: long enough that a dancer pausing for a beat keeps their motion
+/// standing, short enough that someone who genuinely stops decays to the
+/// floor within a few seconds.
+pub const MOTION_EMA_TAU: f32 = 1.5;
 
 /// A challenger's [`primary_score`] must exceed the incumbent's by this ratio
 /// to start (and sustain) a takeover.
@@ -80,12 +121,57 @@ pub fn crop_weight(crop_fraction: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Instantaneous body-motion measure: mean planar speed of the stable
+/// landmark subset (nose + both hips — the torso reference points, chosen
+/// over wrists/ankles so an idle arm swing or landmark jitter on an
+/// extremity does not read as whole-body motion), normalized by
+/// `sqrt(size)`. Velocities are screen-normalized units/s, so a distant
+/// walker moves few screen units even at a brisk pace; dividing by the bbox
+/// *side* (≈ `sqrt(area)`) converts to body-heights-per-second-ish units and
+/// removes the distance bias. Raw per-frame — feed it through
+/// [`motion_ema_step`] before scoring.
+#[must_use]
+pub fn body_motion_measure(velocities: &[Vec3; BODY_LANDMARK_COUNT], size: f32) -> f32 {
+    let speed = (velocities[NOSE].truncate().length()
+        + velocities[LEFT_HIP].truncate().length()
+        + velocities[RIGHT_HIP].truncate().length())
+        / 3.0;
+    // Floor the size so a degenerate bbox cannot blow the measure up.
+    speed / size.max(1.0e-4).sqrt()
+}
+
+/// One EMA step of the per-slot motion envelope: `ema` eased toward `sample`
+/// with time constant [`MOTION_EMA_TAU`] (frame-rate-independent
+/// `1 − exp(−dt/τ)`). The EMA state lives on existing per-slot publisher
+/// state — no allocation on the poll path.
+#[must_use]
+pub fn motion_ema_step(ema: f32, sample: f32, dt: f32) -> f32 {
+    let k = 1.0 - (-dt.max(0.0) / MOTION_EMA_TAU).exp();
+    ema + (sample.max(0.0) - ema) * k
+}
+
+/// Map a (smoothed) motion measure to a multiplicative weight in
+/// `[floor, 1]`: a smoothstep over [`MOTION_SPEED_LO`]..[`MOTION_SPEED_HI`]
+/// scaled into the caller's floor. Primary selection passes
+/// [`MOTION_FLOOR`]; Radiance's background-subdue passes its own (higher)
+/// floor — one mapping, two consumers, so the two biases cannot drift in
+/// shape.
+#[must_use]
+pub fn motion_weight(motion: f32, floor: f32) -> f32 {
+    let t = ((motion - MOTION_SPEED_LO) / (MOTION_SPEED_HI - MOTION_SPEED_LO)).clamp(0.0, 1.0);
+    let s = t * t * (3.0 - 2.0 * t);
+    let floor = floor.clamp(0.0, 1.0);
+    floor + (1.0 - floor) * s
+}
+
 /// Priority score for one body: normalized bbox area (`size`, the
 /// closest-person proxy — nearer people subtend more of the frame) times the
-/// crop penalty. The largest well-framed person wins primary.
+/// crop penalty times the motion weight (`motion` is the slot's smoothed
+/// [`body_motion_measure`]). The largest well-framed *moving* person wins
+/// primary; stillness only discounts to [`MOTION_FLOOR`], never to zero.
 #[must_use]
-pub fn primary_score(size: f32, crop_fraction: f32) -> f32 {
-    size.max(0.0) * crop_weight(crop_fraction)
+pub fn primary_score(size: f32, crop_fraction: f32, motion: f32) -> f32 {
+    size.max(0.0) * crop_weight(crop_fraction) * motion_weight(motion, MOTION_FLOOR)
 }
 
 /// Match detector candidates to slots. Greedy globally-nearest matching:
@@ -296,15 +382,107 @@ mod tests {
     }
 
     /// The crop penalty demotes an edge-cropped person: a big body hanging
-    /// half off the frame loses primary-score to a smaller, fully-framed one.
+    /// half off the frame loses primary-score to a smaller, fully-framed one
+    /// (equal motion, so only the crop term differs).
     #[test]
     fn crop_penalty_demotes_cropped_person() {
-        let big_cropped = primary_score(0.30, 0.25);
-        let small_framed = primary_score(0.12, 1.0);
+        let big_cropped = primary_score(0.30, 0.25, MOTION_SPEED_HI);
+        let small_framed = primary_score(0.12, 1.0, MOTION_SPEED_HI);
         assert!(
             small_framed > big_cropped,
             "framed {small_framed} must beat cropped {big_cropped}"
         );
+    }
+
+    /// The motion weight spans exactly [MOTION_FLOOR, 1]: a still body keeps
+    /// the floor (never zero — a lone still person must still win over
+    /// nobody), a fast one carries full weight, and the ramp is monotone.
+    #[test]
+    fn motion_weight_floors_and_saturates() {
+        assert!((motion_weight(0.0, MOTION_FLOOR) - MOTION_FLOOR).abs() < 1e-6);
+        assert!((motion_weight(MOTION_SPEED_LO, MOTION_FLOOR) - MOTION_FLOOR).abs() < 1e-6);
+        assert!((motion_weight(MOTION_SPEED_HI, MOTION_FLOOR) - 1.0).abs() < 1e-6);
+        assert!(
+            (motion_weight(10.0, MOTION_FLOOR) - 1.0).abs() < 1e-6,
+            "clamps above"
+        );
+        let mid = motion_weight((MOTION_SPEED_LO + MOTION_SPEED_HI) * 0.5, MOTION_FLOOR);
+        assert!(
+            mid > MOTION_FLOOR && mid < 1.0,
+            "mid-speed partially weighted: {mid}"
+        );
+        // Alternate floors (the Radiance subdue path) rescale the same ramp.
+        assert!((motion_weight(0.0, 0.6) - 0.6).abs() < 1e-6);
+        assert!((motion_weight(MOTION_SPEED_HI, 0.6) - 1.0).abs() < 1e-6);
+    }
+
+    /// The still-close vs moving-far tradeoff the floor is tuned for: a
+    /// mover beats an equally-sized still person past the switch ratio, but
+    /// a clearly-closer (much larger) still person still wins.
+    #[test]
+    fn motion_biases_but_does_not_override_size() {
+        let still = primary_score(0.15, 1.0, 0.0);
+        let mover = primary_score(0.15, 1.0, MOTION_SPEED_HI);
+        assert!(
+            mover > still * PRIMARY_SWITCH_RATIO,
+            "same-size mover must clear the switch ratio: {mover} vs {still}"
+        );
+        // A still person at 3x the mover's size (much closer to the camera)
+        // still out-scores them: proximity remains the primary signal.
+        let close_still = primary_score(0.45, 1.0, 0.0);
+        let far_mover = primary_score(0.15, 1.0, MOTION_SPEED_HI);
+        assert!(
+            close_still > far_mover,
+            "clearly-closer still person keeps the lead: {close_still} vs {far_mover}"
+        );
+    }
+
+    /// The motion measure normalizes by sqrt(size): a small (distant) body
+    /// and a large (near) one with proportionally-scaled screen velocities
+    /// read the same.
+    #[test]
+    fn motion_measure_is_distance_normalized() {
+        let mut vel_near = [Vec3::ZERO; BODY_LANDMARK_COUNT];
+        let mut vel_far = [Vec3::ZERO; BODY_LANDMARK_COUNT];
+        for &lm in &[NOSE, LEFT_HIP, RIGHT_HIP] {
+            vel_near[lm] = Vec3::new(0.4, 0.0, 0.0); // big on-screen sweep
+            vel_far[lm] = Vec3::new(0.1, 0.0, 0.0); // same body speed, 4x area
+        }
+        let near = body_motion_measure(&vel_near, 0.16);
+        let far = body_motion_measure(&vel_far, 0.01);
+        assert!(
+            (near - far).abs() < 1e-5,
+            "sqrt-size normalization must cancel distance: {near} vs {far}"
+        );
+        // z (model depth derivative) is excluded — only planar speed counts.
+        let mut vel_z = [Vec3::ZERO; BODY_LANDMARK_COUNT];
+        vel_z[NOSE] = Vec3::new(0.0, 0.0, 5.0);
+        assert!(body_motion_measure(&vel_z, 0.16).abs() < 1e-6);
+    }
+
+    /// The EMA is frame-rate independent and stable: a constant sample
+    /// converges without overshoot, and one noisy spike barely moves it.
+    #[test]
+    fn motion_ema_is_stable() {
+        let steps = |dt: f32, total: f32| {
+            let mut ema = 0.0;
+            let mut t = 0.0;
+            while t < total {
+                ema = motion_ema_step(ema, 1.0, dt);
+                t += dt;
+            }
+            ema
+        };
+        let fine = steps(1.0 / 240.0, MOTION_EMA_TAU);
+        let coarse = steps(1.0 / 30.0, MOTION_EMA_TAU);
+        assert!((fine - 0.632).abs() < 0.02, "one tau ≈ 63%: {fine}");
+        assert!((fine - coarse).abs() < 0.02, "rate-independent");
+        // A single spiky sample at 30 Hz moves the envelope ~2%, so
+        // landmark-noise spikes cannot flip the motion weight.
+        let spiked = motion_ema_step(0.0, 1.0, 1.0 / 30.0);
+        assert!(spiked < 0.03, "one spike must barely register: {spiked}");
+        // Negative dt / samples are clamped (defensive, never NaN).
+        assert!(motion_ema_step(0.5, -1.0, -0.1) <= 0.5);
     }
 
     #[test]

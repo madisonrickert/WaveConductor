@@ -75,6 +75,10 @@ fn synthetic_tracked_body(
         timestamp,
         crop_fraction: 1.0,
         size: 0.25,
+        // The phantom dancers oscillate continuously, so pin full motion:
+        // the background-subdue grace then contributes an exact 1.0 factor
+        // and capture baselines stay byte-stable at any knob setting.
+        motion: wc_core::input::body::selection::MOTION_SPEED_HI,
     }
 }
 

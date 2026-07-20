@@ -28,6 +28,23 @@
 //! names the featured slot — the largest well-framed person, with hysteresis
 //! ([`selection::PrimarySelect`](crate::input::body::selection::PrimarySelect)).
 //!
+//! ## Crowded / roadside deployments
+//!
+//! The kiosk camera may face heavy background traffic (people walking past
+//! who never intend to interact). Two defences keep that from causing visual
+//! churn: an **admission dwell** — a new detection must persist
+//! [`envelope::ADMIT_DWELL`](crate::input::body::envelope::ADMIT_DWELL)
+//! (~0.7 s) before its fade-in begins, and a track lost before it could ever
+//! have been admitted frees its slot immediately instead of taking the
+//! multi-second reserved tail (worker-side `RESERVE_MIN_ACTIVE`) — and a
+//! **motion bias**: each body carries a smoothed, distance-normalized motion
+//! measure ([`TrackedBody::motion`](crate::input::body::TrackedBody::motion))
+//! that discounts the primary score of standing-still bodies
+//! ([`selection::MOTION_FLOOR`](crate::input::body::selection::MOTION_FLOOR))
+//! and lets the Radiance sketch subdue their share of the particle budget.
+//! People closer to the camera and moving more win; background loiterers
+//! stay tracked but recede.
+//!
 //! ## Mask channel convention (pinned)
 //!
 //! [`MaskTexture`](crate::input::body::MaskTexture) is a 256×256
@@ -185,6 +202,15 @@ pub struct TrackedBody {
     /// Normalized bbox area (square-norm units²) — the closest-person proxy
     /// used by [`selection::primary_score`].
     pub size: f32,
+    /// Smoothed, distance-normalized aggregate motion (the per-slot
+    /// [`selection::MOTION_EMA_TAU`] EMA of
+    /// [`selection::body_motion_measure`], sqrt-size-normalized screen
+    /// units/s; ~0 = standing still, ≥ [`selection::MOTION_SPEED_HI`] =
+    /// clearly dancing). Feeds the primary-selection motion weight and the
+    /// Radiance background-subdue budget scaling. Held at its last value
+    /// through the fade-out tail (velocities are zeroed there, but a
+    /// departing dancer must not read as a loiterer mid-fade).
+    pub motion: f32,
 }
 
 impl Default for TrackedBody {
@@ -200,6 +226,7 @@ impl Default for TrackedBody {
             timestamp: Duration::ZERO,
             crop_fraction: 0.0,
             size: 0.0,
+            motion: 0.0,
         }
     }
 }
