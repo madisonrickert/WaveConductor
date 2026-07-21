@@ -12,6 +12,7 @@
 //!                         was compiled; libdev.dll + w32-pthreads.dll when
 //!                         obsbot-camera-control was compiled)
 //!   assets/              (workspace assets/, recursive copy)
+//!   kiosk-watchdog.ps1   (restart-on-exit watchdog; docs/runbooks/kiosk.md)
 //!   RUN.txt              (launch notes)
 //! ```
 //!
@@ -32,6 +33,8 @@ use super::common::{self, StageReport};
 /// vendor/leapc subdirectory + runtime library for the sole supported target.
 const TARGET_DIR: &str = "windows-x86_64";
 const LEAP_LIB: &str = "LeapC.dll";
+/// Kiosk watchdog script staged beside the exe (see docs/runbooks/kiosk.md).
+const WATCHDOG_SCRIPT: &str = "kiosk-watchdog.ps1";
 
 /// Launch notes dropped next to the binary. User-facing, so no em dashes.
 const RUN_NOTES: &str = "WaveConductor (v5 alpha)\r\n\
@@ -42,6 +45,9 @@ const RUN_NOTES: &str = "WaveConductor (v5 alpha)\r\n\
     Ultraleap Gemini tracking service is the recommended input on Windows. This\r\n\
     is an unsigned pre-release build, so SmartScreen may warn on first launch\r\n\
     (click More info, then Run anyway).\r\n\
+    \r\n\
+    Unattended/kiosk use: kiosk-watchdog.ps1 (next to this file) restarts the\r\n\
+    app if it exits or hangs. See docs/runbooks/kiosk.md in the repository.\r\n\
     \r\n\
     Requires the Microsoft Visual C++ 2015-2022 x64 Redistributable (install it\r\n\
     from Microsoft if the app fails to start). The MSI installer bundles it\r\n\
@@ -95,9 +101,10 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .join(TARGET_DIR)
         .join(LEAP_LIB);
     let assets = root.join("assets");
+    let watchdog = root.join("scripts").join(WATCHDOG_SCRIPT);
     let staging_root = root.join("target").join("dist").join(TARGET_DIR);
 
-    let report = assemble(&binary, &leap_lib, &assets, &staging_root)?;
+    let report = assemble(&binary, &leap_lib, &assets, &watchdog, &staging_root)?;
     report_out(&report, args.json);
     Ok(())
 }
@@ -111,6 +118,7 @@ fn assemble(
     binary: &Path,
     leap_lib: &Path,
     assets_src: &Path,
+    watchdog_src: &Path,
     staging_root: &Path,
 ) -> Result<StageReport, Box<dyn std::error::Error>> {
     let app_dir = staging_root.join(common::APP_NAME);
@@ -179,6 +187,17 @@ fn assemble(
             "bundle-windows: cannot copy assets {} -> {}: {e}",
             assets_src.display(),
             dst_assets.display()
+        )
+    })?;
+
+    // Kiosk watchdog beside the exe (restart-on-exit + hang detection;
+    // docs/runbooks/kiosk.md). Committed in scripts/, so absence is a repo
+    // layout error, not an optional feature — fail loudly.
+    std::fs::copy(watchdog_src, app_dir.join(WATCHDOG_SCRIPT)).map_err(|e| {
+        format!(
+            "bundle-windows: cannot stage watchdog {} -> {}: {e}",
+            watchdog_src.display(),
+            app_dir.display()
         )
     })?;
 
@@ -288,9 +307,11 @@ mod tests {
         std::fs::create_dir_all(assets.join("shaders")).expect("mk assets");
         std::fs::write(assets.join("a.txt"), b"a").expect("asset a");
         std::fs::write(assets.join("shaders").join("b.wgsl"), b"b").expect("asset b");
+        let watchdog = tmp.join("kiosk-watchdog.ps1");
+        std::fs::write(&watchdog, b"# watchdog").expect("write fake watchdog");
 
         let staging_root = tmp.join("dist");
-        let report = assemble(&binary, &leap, &assets, &staging_root).expect("assemble");
+        let report = assemble(&binary, &leap, &assets, &watchdog, &staging_root).expect("assemble");
 
         let app = staging_root.join("WaveConductor");
         assert!(app.join("waveconductor.exe").is_file(), "exe staged");
@@ -299,6 +320,10 @@ mod tests {
         assert!(
             app.join("assets").join("shaders").join("b.wgsl").is_file(),
             "nested asset"
+        );
+        assert!(
+            app.join("kiosk-watchdog.ps1").is_file(),
+            "watchdog staged beside exe"
         );
         assert!(app.join("RUN.txt").is_file(), "run notes");
         assert_eq!(report.asset_count, 2, "two asset files copied");
@@ -329,9 +354,11 @@ mod tests {
         let assets = tmp.join("assets");
         std::fs::create_dir_all(&assets).expect("mk assets");
         std::fs::write(assets.join("a.txt"), b"a").expect("asset a");
+        let watchdog = tmp.join("kiosk-watchdog.ps1");
+        std::fs::write(&watchdog, b"# watchdog").expect("write fake watchdog");
 
         let staging_root = tmp.join("dist");
-        let report = assemble(&binary, &leap, &assets, &staging_root).expect("assemble");
+        let report = assemble(&binary, &leap, &assets, &watchdog, &staging_root).expect("assemble");
 
         let app = staging_root.join("WaveConductor");
         assert!(app.join("onnxruntime.dll").is_file(), "ort staged");
